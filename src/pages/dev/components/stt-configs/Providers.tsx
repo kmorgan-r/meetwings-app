@@ -63,7 +63,7 @@ export const Providers = ({
             return {
               label: provider?.isCustom
                 ? json?.url || "Custom Provider"
-                : provider?.id || "Custom Provider",
+                : provider?.name || provider?.id || "Custom Provider",
               value: provider?.id || "Custom Provider",
               isCustom: provider?.isCustom,
             };

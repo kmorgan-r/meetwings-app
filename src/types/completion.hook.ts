@@ -6,23 +6,10 @@ import {
   ChangeEvent,
   ClipboardEvent,
 } from "react";
-// import {
-//   AttachedFile,
-//   ChatMessage,
-//   ChatConversation,
-//   CompletionState,
-//   ScreenshotConfig,
-// } from "@/types";
+import { TranscriptEntry } from "./completion";
 
-/**
- * Transcript entry with optional translation
- */
-export interface TranscriptEntry {
-  original: string;
-  translation?: string;
-  translationError?: string;
-  timestamp: number;
-}
+// Re-export TranscriptEntry for convenience
+export type { TranscriptEntry };
 
 /**
  * Type definition for the useCompletion hook return value
@@ -153,6 +140,12 @@ export interface UseCompletionReturn {
   clearMeetingTranscript: () => void;
   /** Function to submit a quick action with meeting context */
   submitWithMeetingContext: (action: string) => Promise<void>;
+
+  // Speaker Diarization
+  /** Session-level speaker mapping for within-session speaker identification */
+  sessionSpeakerMap: Record<string, { label: string; profileId?: string; assignedAt: number }>;
+  /** Function to assign a speaker label to a speaker ID */
+  assignSpeaker: (speakerId: string, label: string, profileId?: string) => void;
 }
 
 /**

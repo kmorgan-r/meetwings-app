@@ -117,7 +117,9 @@ export const DEFAULT_STT_PRICING: STTPricingConfig = {
   assemblyai: {
     "best": { perMinute: 0.00617 },
     "nano": { perMinute: 0.002 },
-    "*": { perMinute: 0.00617 },
+    "universal": { perMinute: 0.0025 },
+    "universal-diarization": { perMinute: 0.00283 }, // Universal + speaker labels ($0.00033 extra)
+    "*": { perMinute: 0.00283 }, // Default assumes diarization enabled
   },
   google: {
     // Google Cloud Speech-to-Text

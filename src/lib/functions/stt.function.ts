@@ -6,9 +6,13 @@ import {
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
 
-import { TYPE_PROVIDER } from "@/types";
+import { TYPE_PROVIDER, TranscriptEntry, SpeakerInfo } from "@/types";
 import curl2Json from "@bany/curl-to-json";
 import { shouldUsePluelyAPI } from "./pluely.api";
+import {
+  fetchAssemblyAIWithDiarization,
+  AssemblyAIUtterance,
+} from "./assemblyai.function";
 
 /**
  * Estimates audio duration from a Blob.
@@ -116,6 +120,25 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     if (!provider) throw new Error("Provider not provided");
     if (!selectedProvider) throw new Error("Selected provider not provided");
     if (!audio) throw new Error("Audio file is required");
+
+    // Check if provider requires special handling (e.g., AssemblyAI with diarization)
+    if (provider.requiresSpecialHandler && provider.specialHandler === "assemblyai-diarization") {
+      // Check for API key in both cases (api_key and API_KEY)
+      const apiKey = selectedProvider.variables?.API_KEY || selectedProvider.variables?.api_key;
+      if (!apiKey) {
+        console.error("[STT] AssemblyAI variables:", selectedProvider.variables);
+        throw new Error("AssemblyAI API key is required");
+      }
+
+      console.log("[STT] Using AssemblyAI special handler for diarization");
+      const result = await fetchAssemblyAIWithDiarization(audio, {
+        apiKey,
+        language,
+      });
+
+      // Return just the transcription text for compatibility
+      return result.transcription;
+    }
 
     let curlJson: any;
     try {
@@ -302,4 +325,104 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     const msg = err instanceof Error ? err.message : String(err);
     throw new Error(msg);
   }
+}
+
+/**
+ * Result of STT with diarization support.
+ */
+export interface STTDiarizationResult {
+  /** Combined transcription text */
+  transcription: string;
+  /** Individual transcript entries with speaker info */
+  entries: TranscriptEntry[];
+  /** Whether diarization was available */
+  hasDiarization: boolean;
+}
+
+export interface STTDiarizationParams extends STTParams {
+  /** Enable speaker diarization (only works with compatible providers like AssemblyAI) */
+  enableDiarization?: boolean;
+}
+
+/**
+ * Transcribes audio with optional speaker diarization.
+ * Returns structured entries with speaker information when using a diarization-enabled provider.
+ */
+export async function fetchSTTWithDiarization(
+  params: STTDiarizationParams
+): Promise<STTDiarizationResult> {
+  const { provider, selectedProvider, audio, language = "en", enableDiarization = true } = params;
+
+  // Check if provider supports diarization
+  const isDiarizationProvider =
+    provider?.requiresSpecialHandler &&
+    provider?.specialHandler === "assemblyai-diarization";
+
+  if (isDiarizationProvider && enableDiarization) {
+    // Use AssemblyAI with diarization
+    const apiKey = selectedProvider.variables?.API_KEY;
+    if (!apiKey) {
+      throw new Error("AssemblyAI API key is required for speaker diarization");
+    }
+
+    try {
+      const result = await fetchAssemblyAIWithDiarization(audio, {
+        apiKey,
+        language,
+      });
+
+      // Convert utterances to TranscriptEntry format
+      const entries: TranscriptEntry[] = result.utterances.map(
+        (utterance: AssemblyAIUtterance, index: number) => ({
+          original: utterance.text,
+          timestamp: Date.now() - (result.utterances.length - index) * 1000, // Approximate timestamps
+          speaker: {
+            speakerId: utterance.speaker,
+            confidence: utterance.confidence,
+          } as SpeakerInfo,
+        })
+      );
+
+      // If no utterances but we have transcription, create a single entry
+      if (entries.length === 0 && result.transcription) {
+        entries.push({
+          original: result.transcription,
+          timestamp: Date.now(),
+        });
+      }
+
+      return {
+        transcription: result.transcription,
+        entries,
+        hasDiarization: entries.some((e) => e.speaker !== undefined),
+      };
+    } catch (error) {
+      console.error("[STT Diarization] AssemblyAI error:", error);
+      throw error;
+    }
+  }
+
+  // Fall back to standard STT (no diarization)
+  const transcription = await fetchSTT(params);
+
+  return {
+    transcription,
+    entries: [
+      {
+        original: transcription,
+        timestamp: Date.now(),
+      },
+    ],
+    hasDiarization: false,
+  };
+}
+
+/**
+ * Checks if a provider supports speaker diarization.
+ */
+export function providerSupportsDiarization(provider: TYPE_PROVIDER | undefined): boolean {
+  return (
+    provider?.requiresSpecialHandler === true &&
+    provider?.specialHandler === "assemblyai-diarization"
+  );
 }

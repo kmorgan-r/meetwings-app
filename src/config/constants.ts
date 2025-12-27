@@ -37,6 +37,13 @@ export const STORAGE_KEYS = {
   // STT Translation settings
   STT_TRANSLATION_ENABLED: "stt_translation_enabled",
   STT_TRANSLATION_LANGUAGE: "stt_translation_language",
+
+  // Speaker Diarization settings
+  SPEAKER_DIARIZATION_ENABLED: "speaker_diarization_enabled",
+  SPEAKER_PROFILES: "speaker_profiles",
+  USER_VOICE_ENROLLMENT: "user_voice_enrollment",
+  ASSEMBLYAI_API_KEY: "assemblyai_api_key",
+  PREVIOUS_STT_PROVIDER: "previous_stt_provider",
 } as const;
 
 // Max number of files that can be attached to a message
