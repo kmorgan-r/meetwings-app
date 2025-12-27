@@ -143,4 +143,16 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     responseContentPath: "results[0].alternatives[0].transcript",
     streaming: false,
   },
+  {
+    id: "assemblyai-diarization",
+    name: "AssemblyAI (with Speaker Diarization)",
+    curl: `curl -X POST "https://api.assemblyai.com/v2/upload" \\
+      -H "Authorization: {{API_KEY}}" \\
+      -H "Content-Type: application/octet-stream" \\
+      --data-binary {{AUDIO}}`,
+    responseContentPath: "upload_url",
+    streaming: false,
+    requiresSpecialHandler: true,
+    specialHandler: "assemblyai-diarization",
+  },
 ];

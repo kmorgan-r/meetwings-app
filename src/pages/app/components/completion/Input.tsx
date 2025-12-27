@@ -50,6 +50,7 @@ export const Input = ({
   meetingAssistMode,
   meetingTranscript,
   clearMeetingTranscript,
+  assignSpeaker,
 }: InputProps) => {
   const { sttTranslationEnabled } = useApp();
 
@@ -215,6 +216,7 @@ export const Input = ({
             <MeetingTranscriptPanel
               meetingTranscript={meetingTranscript}
               clearMeetingTranscript={clearMeetingTranscript}
+              assignSpeaker={assignSpeaker}
             />
           ) : (
             <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0">

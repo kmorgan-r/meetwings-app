@@ -1,4 +1,29 @@
 // Completion-related types
+
+/**
+ * Speaker information for diarization.
+ */
+export interface SpeakerInfo {
+  speakerId: string; // "A", "B", "C" from AssemblyAI
+  speakerLabel?: string; // "You", "Sarah - Client", or undefined
+  speakerProfileId?: string; // Reference to enrolled profile
+  confidence?: number; // 0-1 match confidence
+  needsConfirmation?: boolean; // True if medium confidence, awaiting user input
+}
+
+/**
+ * Transcript entry for meeting transcripts.
+ */
+export interface TranscriptEntry {
+  original: string;
+  translation?: string;
+  translationError?: string;
+  timestamp: number;
+  // Speaker diarization fields
+  speaker?: SpeakerInfo;
+  audioChunkId?: string; // Reference for embedding extraction
+}
+
 export interface AttachedFile {
   id: string;
   name: string;

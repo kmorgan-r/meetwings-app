@@ -22,7 +22,7 @@ import {
   summarizeConversation,
   shouldSummarize,
 } from "@/lib/functions/meeting-summarizer";
-import type { UsageData } from "@/types";
+import type { UsageData, TranscriptEntry } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -46,11 +46,19 @@ interface ChatMessage {
   translationError?: string;
 }
 
-interface TranscriptEntry {
-  original: string;
-  translation?: string;
-  translationError?: string;
-  timestamp: number;
+// TranscriptEntry is now imported from @/types
+
+/**
+ * Session-level speaker mapping for within-session speaker identification.
+ */
+interface SessionSpeakerMapping {
+  label: string; // Display name (e.g., "You", "Sarah - Client")
+  profileId?: string; // If matched to enrolled profile
+  assignedAt: number; // Timestamp of assignment
+}
+
+interface SessionSpeakerMap {
+  [speakerId: string]: SessionSpeakerMapping;
 }
 
 interface ChatConversation {
@@ -103,6 +111,9 @@ export const useCompletion = () => {
     return stored === "true";
   });
   const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
+
+  // Session-level speaker mapping (resets when meeting transcript is cleared)
+  const [sessionSpeakerMap, setSessionSpeakerMap] = useState<SessionSpeakerMap>({});
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const isProcessingScreenshotRef = useRef(false);
@@ -242,6 +253,8 @@ export const useCompletion = () => {
 
   const clearMeetingTranscript = useCallback(() => {
     setMeetingTranscript([]);
+    // Also clear session speaker mapping
+    setSessionSpeakerMap({});
     // Also reset conversation when clearing meeting transcript
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
@@ -252,6 +265,37 @@ export const useCompletion = () => {
       response: "",
     }));
   }, []);
+
+  /**
+   * Assigns a speaker label to a speaker ID and propagates to all matching entries.
+   */
+  const assignSpeaker = useCallback(
+    (speakerId: string, label: string, profileId?: string) => {
+      // Update session mapping
+      setSessionSpeakerMap((prev) => ({
+        ...prev,
+        [speakerId]: { label, profileId, assignedAt: Date.now() },
+      }));
+
+      // Update all transcript entries with this speaker ID
+      setMeetingTranscript((prev) =>
+        prev.map((entry) => {
+          if (entry.speaker?.speakerId === speakerId) {
+            return {
+              ...entry,
+              speaker: {
+                ...entry.speaker,
+                speakerLabel: label,
+                speakerProfileId: profileId,
+              },
+            };
+          }
+          return entry;
+        })
+      );
+    },
+    []
+  );
 
   const submit = useCallback(
     async (speechText?: string) => {
@@ -1365,12 +1409,9 @@ export const useCompletion = () => {
       console.log("[Cost Tracking] Event detail:", { usage, provider, model });
 
       // Use ref for conversation ID (more reliable than state during async operations)
-      const conversationId = currentConversationIdRef.current;
+      // If no conversation ID, use a system ID for tracking uncategorized usage (like translations)
+      const conversationId = currentConversationIdRef.current || "system-uncategorized";
       console.log("[Cost Tracking] Current conversation ID from ref:", conversationId);
-      if (!conversationId) {
-        console.warn("[Cost Tracking] No conversation ID available for usage tracking");
-        return;
-      }
 
       try {
         const cost = calculateCost(usage, provider, model);
@@ -1418,12 +1459,9 @@ export const useCompletion = () => {
       console.log("[Cost Tracking STT] Event detail:", { provider, model, audioSeconds });
 
       // Use ref for conversation ID (more reliable than state during async operations)
-      const conversationId = currentConversationIdRef.current;
+      // If no conversation ID, use a system ID for tracking uncategorized usage
+      const conversationId = currentConversationIdRef.current || "system-uncategorized";
       console.log("[Cost Tracking STT] Current conversation ID from ref:", conversationId);
-      if (!conversationId) {
-        console.warn("[Cost Tracking STT] No conversation ID available for STT usage tracking");
-        return;
-      }
 
       try {
         const cost = calculateSTTCost(audioSeconds, provider, model);
@@ -1517,5 +1555,8 @@ export const useCompletion = () => {
     updateTranscriptTranslation,
     clearMeetingTranscript,
     submitWithMeetingContext,
+    // Speaker Diarization
+    sessionSpeakerMap,
+    assignSpeaker,
   };
 };
