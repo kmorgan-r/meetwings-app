@@ -7,13 +7,15 @@ on:
     # paths:
     #   - "src/**/*.ts"
     #   - "src/**/*.tsx"
-    #   - "src-tauri/**/*.rs"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
     # Optional: Filter by PR author
     # if: |
     #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
     #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
 
     runs-on: ubuntu-latest
@@ -35,27 +37,21 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
             Please review this pull request and provide feedback on:
-            - Code quality and best practices for React/TypeScript/Tauri
+            - Code quality and best practices
             - Potential bugs or issues
             - Performance considerations
-            - Security concerns (especially for desktop app contexts)
-            - Type safety and proper TypeScript usage
+            - Security concerns
+            - Test coverage
 
-            Use the repository's CLAUDE.md for guidance on project structure, style conventions, and patterns.
-
-            Key areas to focus on for this Pluely codebase:
-            - Provider system patterns (AI and STT providers)
-            - React hooks and context usage
-            - Tauri integration and invoke commands
-            - State management patterns
-            - localStorage and database interactions
-
-            Be constructive and helpful in your feedback.
-
-            IMPORTANT: Do NOT run npm commands (npm install, npm run lint, npm run build, etc.) or cargo commands. Dependencies are not installed in this environment. Focus on static code review only.
+            Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
 
             Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
 
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          claude_args: '--allowed-tools "mcp_github_inline_comment__create_inline_comment, Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+
