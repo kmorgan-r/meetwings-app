@@ -7,6 +7,7 @@ import { useState, useEffect, useMemo } from "react";
 import { getResponseSettings } from "@/lib";
 import { PageLayout } from "@/layouts";
 
+// Language settings page - consolidates all language-related configuration
 const Language = () => {
   const {
     hasActiveLicense,
