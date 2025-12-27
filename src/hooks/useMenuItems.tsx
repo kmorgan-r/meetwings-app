@@ -15,6 +15,8 @@ import {
   MessageSquareTextIcon,
   DollarSignIcon,
   BrainIcon,
+  UsersIcon,
+  LanguagesIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useApp } from "@/contexts";
@@ -73,6 +75,16 @@ export const useMenuItems = () => {
       icon: AudioLinesIcon,
       label: "Audio",
       href: "/audio",
+    },
+    {
+      icon: UsersIcon,
+      label: "Speakers",
+      href: "/speakers",
+    },
+    {
+      icon: LanguagesIcon,
+      label: "Language",
+      href: "/language",
     },
     {
       icon: SquareSlashIcon,

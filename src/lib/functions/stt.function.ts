@@ -109,7 +109,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
   let warnings: string[] = [];
 
   try {
-    const { provider, selectedProvider, audio, language = "en" } = params;
+    const { provider, selectedProvider, audio, language } = params;
 
     // Check if we should use Pluely API instead
     const usePluelyAPI = await shouldUsePluelyAPI();
@@ -131,9 +131,11 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       }
 
       console.log("[STT] Using AssemblyAI special handler for diarization");
+      // Treat "auto" as undefined for AssemblyAI auto-detection
+      const effectiveLang = language === "auto" ? undefined : language;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
-        language,
+        language: effectiveLang,
       });
 
       // Return just the transcription text for compatibility
@@ -161,6 +163,8 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     // }
 
     // Build variable map
+    // Treat "auto" as auto-detect (empty language for providers to detect automatically)
+    const effectiveLanguage = language === "auto" ? "" : (language || "");
     const allVariables: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(selectedProvider.variables).map(([key, value]) => [
@@ -168,7 +172,8 @@ export async function fetchSTT(params: STTParams): Promise<string> {
           value,
         ])
       ),
-      LANGUAGE: language, // Add language to variables for template replacement
+      // Add language to variables for template replacement (empty string for auto-detect)
+      LANGUAGE: effectiveLanguage,
     };
 
     // Prepare request
@@ -351,7 +356,7 @@ export interface STTDiarizationParams extends STTParams {
 export async function fetchSTTWithDiarization(
   params: STTDiarizationParams
 ): Promise<STTDiarizationResult> {
-  const { provider, selectedProvider, audio, language = "en", enableDiarization = true } = params;
+  const { provider, selectedProvider, audio, language, enableDiarization = true } = params;
 
   // Check if provider supports diarization
   const isDiarizationProvider =
@@ -366,9 +371,11 @@ export async function fetchSTTWithDiarization(
     }
 
     try {
+      // Treat "auto" as undefined for AssemblyAI auto-detection
+      const effectiveLang = language === "auto" ? undefined : language;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
-        language,
+        language: effectiveLang,
       });
 
       // Convert utterances to TranscriptEntry format

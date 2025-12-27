@@ -1,10 +1,8 @@
-import { Button, Header, Input, Selection, TextInput, Switch } from "@/components";
+import { Button, Header, Input, Selection, TextInput } from "@/components";
 import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
 import { KeyIcon, TrashIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useApp } from "@/contexts";
-import { STT_LANGUAGES, TRANSLATION_LANGUAGES } from "@/config";
 
 export const Providers = ({
   allSttProviders,
@@ -12,14 +10,6 @@ export const Providers = ({
   onSetSelectedSttProvider,
   sttVariables,
 }: UseSettingsReturn) => {
-  const {
-    sttLanguage,
-    setSttLanguage,
-    sttTranslationEnabled,
-    setSttTranslationEnabled,
-    sttTranslationLanguage,
-    setSttTranslationLanguage,
-  } = useApp();
   const [localSelectedProvider, setLocalSelectedProvider] =
     useState<ResultJSON | null>(null);
 
@@ -76,68 +66,6 @@ export const Providers = ({
             });
           }}
         />
-      </div>
-
-      {/* Language Selection */}
-      <div className="space-y-2">
-        <Header
-          title="Speech Recognition Language"
-          description="Select the language for speech-to-text recognition. This helps improve accuracy and prevents misinterpretation of speech as other languages."
-        />
-        <Selection
-          selected={sttLanguage}
-          options={STT_LANGUAGES.map((lang) => ({
-            label: lang.name,
-            value: lang.code,
-          }))}
-          placeholder="Choose language"
-          onChange={(value) => {
-            setSttLanguage(value);
-          }}
-        />
-      </div>
-
-      {/* Translation Settings */}
-      <div className="space-y-4 pt-4 border-t">
-        <div className="space-y-2">
-          <Header
-            title="Translation"
-            description="Enable real-time translation of your speech transcriptions to a second language."
-          />
-
-          <div className="flex items-center justify-between py-2">
-            <div className="flex flex-col gap-1">
-              <span className="text-sm font-medium">Enable Translation</span>
-              <span className="text-xs text-muted-foreground">
-                Show translated version alongside original speech
-              </span>
-            </div>
-            <Switch
-              checked={sttTranslationEnabled}
-              onCheckedChange={setSttTranslationEnabled}
-            />
-          </div>
-        </div>
-
-        {sttTranslationEnabled && (
-          <div className="space-y-2">
-            <Header
-              title="Target Language"
-              description="Select the language to translate your speech into."
-            />
-            <Selection
-              selected={sttTranslationLanguage}
-              options={TRANSLATION_LANGUAGES.map((lang) => ({
-                label: lang.name,
-                value: lang.code,
-              }))}
-              placeholder="Choose target language"
-              onChange={(value) => {
-                setSttTranslationLanguage(value);
-              }}
-            />
-          </div>
-        )}
       </div>
 
       {localSelectedProvider ? (

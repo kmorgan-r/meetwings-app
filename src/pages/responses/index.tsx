@@ -1,8 +1,4 @@
-import {
-  ResponseLength,
-  LanguageSelector,
-  AutoScrollToggle,
-} from "./components";
+import { ResponseLength, AutoScrollToggle } from "./components";
 import { PageLayout } from "@/layouts";
 import { useApp } from "@/contexts";
 
@@ -20,18 +16,14 @@ const Responses = () => {
             🔒 Premium Features
           </p>
           <p className="text-[10px] lg:text-sm text-muted-foreground">
-            Response customization features (Response Length, Language
-            Selection, and Auto-Scroll Control) require an active license to
-            use.
+            Response customization features (Response Length and Auto-Scroll
+            Control) require an active license to use.
           </p>
         </div>
       )}
 
       {/* Response Length */}
       <ResponseLength />
-
-      {/* Language Selector */}
-      <LanguageSelector />
 
       {/* Auto-Scroll Toggle */}
       <AutoScrollToggle />

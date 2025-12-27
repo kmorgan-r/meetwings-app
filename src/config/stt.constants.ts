@@ -31,7 +31,7 @@ export const STT_LANGUAGES = [
   { code: "ms", name: "Malay" },
 ] as const;
 
-export const DEFAULT_STT_LANGUAGE = "en";
+export const DEFAULT_STT_LANGUAGE = "auto"; // "auto" means auto-detect
 
 // STT Translation defaults
 export const DEFAULT_TRANSLATION_ENABLED = false;
