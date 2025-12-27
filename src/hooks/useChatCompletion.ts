@@ -128,9 +128,11 @@ export const useChatCompletion = (
 
   const submit = useCallback(
     async (speechText?: string) => {
+      console.log("[Cost Tracking - ChatCompletion] submit() called");
       const input = speechText || state.input;
 
       if (!input.trim()) {
+        console.log("[Cost Tracking - ChatCompletion] Input is empty, returning");
         return;
       }
 

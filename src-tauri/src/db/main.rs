@@ -17,5 +17,33 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 3: Create API usage tracking table
+        Migration {
+            version: 3,
+            description: "create_api_usage_table",
+            sql: include_str!("migrations/api-usage.sql"),
+            kind: MigrationKind::Up,
+        },
+        // Migration 4: Add audio_seconds column for STT cost tracking
+        Migration {
+            version: 4,
+            description: "add_audio_seconds_to_api_usage",
+            sql: include_str!("migrations/api-usage-v2.sql"),
+            kind: MigrationKind::Up,
+        },
+        // Migration 5: Remove foreign key constraint (conversation may not exist yet when usage is recorded)
+        Migration {
+            version: 5,
+            description: "remove_fk_from_api_usage",
+            sql: include_str!("migrations/api-usage-v3.sql"),
+            kind: MigrationKind::Up,
+        },
+        // Migration 6: Meeting context memory tables (summaries, entities, knowledge profile)
+        Migration {
+            version: 6,
+            description: "create_meeting_context_tables",
+            sql: include_str!("migrations/meeting-context.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

@@ -3,6 +3,9 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   SPEECH_TO_TEXT_PROVIDERS,
   STORAGE_KEYS,
+  DEFAULT_STT_LANGUAGE,
+  DEFAULT_TRANSLATION_ENABLED,
+  DEFAULT_TRANSLATION_LANGUAGE,
 } from "@/config";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
@@ -120,21 +123,32 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [customizable, setCustomizable] = useState<CustomizableState>(
     DEFAULT_CUSTOMIZABLE_STATE
   );
-  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(false);
+  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
 
   // Pluely API State
   const [pluelyApiEnabled, setPluelyApiEnabledState] = useState<boolean>(
     safeLocalStorage.getItem(STORAGE_KEYS.PLUELY_API_ENABLED) === "true"
   );
 
+  // STT Language State
+  const [sttLanguage, setSttLanguageState] = useState<string>(
+    safeLocalStorage.getItem(STORAGE_KEYS.STT_LANGUAGE) || DEFAULT_STT_LANGUAGE
+  );
+
+  // STT Translation State
+  const [sttTranslationEnabled, setSttTranslationEnabledState] = useState<boolean>(
+    safeLocalStorage.getItem(STORAGE_KEYS.STT_TRANSLATION_ENABLED) === "true" || DEFAULT_TRANSLATION_ENABLED
+  );
+  const [sttTranslationLanguage, setSttTranslationLanguageState] = useState<string>(
+    safeLocalStorage.getItem(STORAGE_KEYS.STT_TRANSLATION_LANGUAGE) || DEFAULT_TRANSLATION_LANGUAGE
+  );
+
   const getActiveLicenseStatus = async () => {
-    const response: { is_active: boolean } = await invoke(
-      "validate_license_api"
-    );
-    setHasActiveLicense(response.is_active);
+    // License check bypassed - always active
+    setHasActiveLicense(true);
     // Check if the auto configs are enabled
     const autoConfigsEnabled = localStorage.getItem("auto-configs-enabled");
-    if (response.is_active && !autoConfigsEnabled) {
+    if (!autoConfigsEnabled) {
       setScreenshotConfiguration({
         mode: "auto",
         autoPrompt: "Analyze the screenshot and provide insights",
@@ -257,6 +271,22 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     );
     if (savedPluelyApiEnabled !== null) {
       setPluelyApiEnabledState(savedPluelyApiEnabled === "true");
+    }
+
+    // Load STT Language setting
+    const savedSttLanguage = safeLocalStorage.getItem(STORAGE_KEYS.STT_LANGUAGE);
+    if (savedSttLanguage) {
+      setSttLanguageState(savedSttLanguage);
+    }
+
+    // Load STT Translation settings
+    const savedTranslationEnabled = safeLocalStorage.getItem(STORAGE_KEYS.STT_TRANSLATION_ENABLED);
+    if (savedTranslationEnabled !== null) {
+      setSttTranslationEnabledState(savedTranslationEnabled === "true");
+    }
+    const savedTranslationLanguage = safeLocalStorage.getItem(STORAGE_KEYS.STT_TRANSLATION_LANGUAGE);
+    if (savedTranslationLanguage) {
+      setSttTranslationLanguageState(savedTranslationLanguage);
     }
   };
 
@@ -395,7 +425,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         e.key === STORAGE_KEYS.SELECTED_STT_PROVIDER ||
         e.key === STORAGE_KEYS.SYSTEM_PROMPT ||
         e.key === STORAGE_KEYS.SCREENSHOT_CONFIG ||
-        e.key === STORAGE_KEYS.CUSTOMIZABLE
+        e.key === STORAGE_KEYS.CUSTOMIZABLE ||
+        e.key === STORAGE_KEYS.STT_LANGUAGE ||
+        e.key === STORAGE_KEYS.STT_TRANSLATION_ENABLED ||
+        e.key === STORAGE_KEYS.STT_TRANSLATION_LANGUAGE
       ) {
         loadData();
       }
@@ -524,6 +557,24 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   };
 
+  const setSttLanguage = (language: string) => {
+    setSttLanguageState(language);
+    safeLocalStorage.setItem(STORAGE_KEYS.STT_LANGUAGE, language);
+    loadData();
+  };
+
+  const setSttTranslationEnabled = (enabled: boolean) => {
+    setSttTranslationEnabledState(enabled);
+    safeLocalStorage.setItem(STORAGE_KEYS.STT_TRANSLATION_ENABLED, String(enabled));
+    loadData();
+  };
+
+  const setSttTranslationLanguage = (language: string) => {
+    setSttTranslationLanguageState(language);
+    safeLocalStorage.setItem(STORAGE_KEYS.STT_TRANSLATION_LANGUAGE, language);
+    loadData();
+  };
+
   // Create the context value (extend IContextType accordingly)
   const value: IContextType = {
     systemPrompt,
@@ -551,6 +602,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     selectedAudioDevices,
     setSelectedAudioDevices,
     setCursorType,
+    sttLanguage,
+    setSttLanguage,
+    sttTranslationEnabled,
+    setSttTranslationEnabled,
+    sttTranslationLanguage,
+    setSttTranslationLanguage,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

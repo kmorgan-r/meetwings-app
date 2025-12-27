@@ -4,8 +4,9 @@ import {
   extractVariables,
   getByPath,
   getStreamingContent,
+  getUsageFromChunk,
 } from "./common.function";
-import { Message, TYPE_PROVIDER } from "@/types";
+import { Message, TYPE_PROVIDER, UsageData } from "@/types";
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -13,10 +14,21 @@ import curl2Json from "@bany/curl-to-json";
 import { shouldUsePluelyAPI } from "./pluely.api";
 import { CHUNK_POLL_INTERVAL_MS } from "../chat-constants";
 import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES } from "@/lib";
+import { getContextForInjection } from "./context-builder";
 
-function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
+async function buildEnhancedSystemPrompt(baseSystemPrompt?: string): Promise<string> {
   const responseSettings = getResponseSettings();
   const prompts: string[] = [];
+
+  // Inject context memory at the beginning (if enabled and available)
+  try {
+    const contextMemory = await getContextForInjection();
+    if (contextMemory) {
+      prompts.push(contextMemory);
+    }
+  } catch (error) {
+    console.error("Failed to get context memory:", error);
+  }
 
   if (baseSystemPrompt) {
     prompts.push(baseSystemPrompt);
@@ -185,11 +197,13 @@ export async function* fetchAIResponse(params: {
       return;
     }
 
-    const enhancedSystemPrompt = buildEnhancedSystemPrompt(systemPrompt);
+    const enhancedSystemPrompt = await buildEnhancedSystemPrompt(systemPrompt);
 
     // Check if we should use Pluely API instead
     const usePluelyAPI = await shouldUsePluelyAPI();
+    console.log("[Cost Tracking] fetchAIResponse called. usePluelyAPI:", usePluelyAPI);
     if (usePluelyAPI) {
+      console.log("[Cost Tracking] Using Pluely API - usage tracking not yet implemented for this path");
       yield* fetchPluelyAIResponse({
         systemPrompt: enhancedSystemPrompt,
         userMessage,
@@ -199,6 +213,7 @@ export async function* fetchAIResponse(params: {
       });
       return;
     }
+    console.log("[Cost Tracking] Using custom provider:", provider?.id);
     if (!provider) {
       throw new Error(`Provider not provided`);
     }
@@ -284,6 +299,9 @@ export async function* fetchAIResponse(params: {
         } else {
           bodyObj.stream = true;
         }
+        // Request usage data in streaming response (OpenAI-compatible APIs)
+        // This makes OpenAI include token usage in the final chunk
+        bodyObj.stream_options = { include_usage: true };
       }
     }
 
@@ -335,6 +353,21 @@ export async function* fetchAIResponse(params: {
       const content =
         getByPath(json, provider?.responseContentPath || "") || "";
       yield content;
+
+      // Extract and emit usage for non-streaming response
+      const usage = getUsageFromChunk(json);
+      if (usage && typeof window !== "undefined") {
+        const modelName = bodyObj.model || selectedProvider.variables?.MODEL || "unknown";
+        window.dispatchEvent(
+          new CustomEvent("api-usage-captured", {
+            detail: {
+              usage,
+              provider: provider?.id || selectedProvider.provider,
+              model: modelName,
+            },
+          })
+        );
+      }
       return;
     }
 
@@ -346,6 +379,10 @@ export async function* fetchAIResponse(params: {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let capturedUsage: UsageData | null = null;
+
+    // Extract model name from bodyObj
+    const modelName = bodyObj.model || selectedProvider.variables?.MODEL || "unknown";
 
     while (true) {
       // Check if aborted
@@ -386,9 +423,20 @@ export async function* fetchAIResponse(params: {
       for (const line of lines) {
         if (line.startsWith("data:")) {
           const trimmed = line.substring(5).trim();
-          if (!trimmed || trimmed === "[DONE]") continue;
+          if (!trimmed || trimmed === "[DONE]") {
+            if (trimmed === "[DONE]") {
+              console.log("[Cost Tracking] Received [DONE] signal");
+            }
+            continue;
+          }
           try {
             const parsed = JSON.parse(trimmed);
+
+            // Log the first chunk to see structure
+            if (!capturedUsage) {
+              console.log("[Cost Tracking] Sample chunk structure:", JSON.stringify(parsed).substring(0, 500));
+            }
+
             const delta = getStreamingContent(
               parsed,
               provider?.responseContentPath || ""
@@ -396,11 +444,36 @@ export async function* fetchAIResponse(params: {
             if (delta) {
               yield delta;
             }
+
+            // Try to extract usage data from this chunk
+            const usage = getUsageFromChunk(parsed);
+            if (usage) {
+              capturedUsage = usage;
+              console.log("[Cost Tracking] Captured usage from chunk:", usage);
+            }
           } catch (e) {
             // Ignore parsing errors for partial JSON chunks
           }
         }
       }
+    }
+    console.log("[Cost Tracking] Streaming loop finished. capturedUsage:", capturedUsage);
+
+    // Emit usage event if we captured any usage data
+    if (capturedUsage && typeof window !== "undefined") {
+      const eventDetail = {
+        usage: capturedUsage,
+        provider: provider?.id || selectedProvider.provider,
+        model: modelName,
+      };
+      console.log("[Cost Tracking] Emitting api-usage-captured event:", eventDetail);
+      window.dispatchEvent(
+        new CustomEvent("api-usage-captured", {
+          detail: eventDetail,
+        })
+      );
+    } else {
+      console.log("[Cost Tracking] No usage data captured for this request. capturedUsage:", capturedUsage);
     }
   } catch (error) {
     throw new Error(

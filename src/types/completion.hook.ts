@@ -15,6 +15,16 @@ import {
 // } from "@/types";
 
 /**
+ * Transcript entry with optional translation
+ */
+export interface TranscriptEntry {
+  original: string;
+  translation?: string;
+  translationError?: string;
+  timestamp: number;
+}
+
+/**
  * Type definition for the useCompletion hook return value
  * This hook manages the complete state and functionality for AI completion interactions
  */
@@ -127,6 +137,22 @@ export interface UseCompletionReturn {
   captureScreenshot: () => Promise<void>;
   /** Whether a screenshot is currently loading */
   isScreenshotLoading: boolean;
+
+  // Meeting Assist Mode
+  /** Whether Meeting Assist Mode is enabled (accumulates transcripts instead of auto-responding) */
+  meetingAssistMode: boolean;
+  /** Function to toggle Meeting Assist Mode */
+  setMeetingAssistMode: Dispatch<SetStateAction<boolean>>;
+  /** Accumulated meeting transcript segments with translations */
+  meetingTranscript: TranscriptEntry[];
+  /** Function to add a transcript segment to the meeting transcript */
+  addMeetingTranscript: (transcript: string) => number;
+  /** Function to update translation for a specific transcript entry */
+  updateTranscriptTranslation: (timestamp: number, translation?: string, error?: string) => void;
+  /** Function to clear the meeting transcript */
+  clearMeetingTranscript: () => void;
+  /** Function to submit a quick action with meeting context */
+  submitWithMeetingContext: (action: string) => Promise<void>;
 }
 
 /**

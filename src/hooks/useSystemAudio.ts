@@ -3,7 +3,7 @@ import { useWindowResize, useGlobalShortcuts } from ".";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
-import { fetchSTT, fetchAIResponse } from "@/lib/functions";
+import { fetchSTT, fetchAIResponse, summarizeConversation, shouldSummarize } from "@/lib/functions";
 import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
@@ -107,6 +107,7 @@ export function useSystemAudio() {
     allAiProviders,
     systemPrompt,
     selectedAudioDevices,
+    sttLanguage,
   } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -259,6 +260,7 @@ export function useSystemAudio() {
               provider: providerConfig,
               selectedProvider: selectedSttProvider,
               audio: audioBlob,
+              language: sttLanguage,
             });
 
             const timeoutPromise = new Promise<string>((_, reject) => {
@@ -593,6 +595,43 @@ export function useSystemAudio() {
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
 
+      // Trigger summarization if we have enough exchanges (async, non-blocking)
+      if (conversation.id && conversation.messages.length > 0) {
+        const messagesToSummarize = conversation.messages.map((msg) => ({
+          role: msg.role,
+          content: msg.content,
+        }));
+
+        if (shouldSummarize(messagesToSummarize)) {
+          // Get provider config for summarization
+          const provider = allAiProviders.find(
+            (p) => p.id === selectedAIProvider.provider
+          );
+
+          const providerConfig = provider
+            ? {
+                provider,
+                selectedProvider: selectedAIProvider,
+              }
+            : undefined;
+
+          // Run summarization async (don't await to avoid blocking UI)
+          summarizeConversation(
+            conversation.id,
+            messagesToSummarize,
+            providerConfig
+          )
+            .then((success) => {
+              if (success) {
+                console.log(`Summarized conversation ${conversation.id}`);
+              }
+            })
+            .catch((err) => {
+              console.error("Background summarization failed:", err);
+            });
+        }
+      }
+
       // Reset ALL states
       setCapturing(false);
       setIsProcessing(false);
@@ -609,7 +648,7 @@ export function useSystemAudio() {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [conversation.id, conversation.messages, selectedAIProvider, allAiProviders]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {

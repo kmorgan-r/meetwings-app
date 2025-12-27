@@ -10,6 +10,58 @@ import { TYPE_PROVIDER } from "@/types";
 import curl2Json from "@bany/curl-to-json";
 import { shouldUsePluelyAPI } from "./pluely.api";
 
+/**
+ * Estimates audio duration from a Blob.
+ * For WAV files, calculates from headers. For others, estimates from file size.
+ */
+async function estimateAudioDuration(audio: Blob): Promise<number> {
+  try {
+    // For WAV files, we can calculate duration from headers
+    if (audio.type === "audio/wav" || audio.type === "audio/wave") {
+      const buffer = await audio.arrayBuffer();
+      const view = new DataView(buffer);
+      // WAV header: bytes 28-31 contain byte rate
+      const byteRate = view.getInt32(28, true);
+      if (byteRate > 0) {
+        // Data size is approximately (file size - 44 bytes header)
+        const dataSize = buffer.byteLength - 44;
+        return dataSize / byteRate;
+      }
+    }
+
+    // Fallback: estimate based on file size (assuming ~16kbps for speech audio)
+    // This is a rough estimate, actual duration may vary
+    const bytesPerSecond = 16000 / 8; // 16kbps = 2000 bytes/sec
+    return audio.size / bytesPerSecond;
+  } catch (error) {
+    console.warn("Failed to estimate audio duration:", error);
+    // Default to a small estimate if we can't calculate
+    return audio.size / 2000;
+  }
+}
+
+/**
+ * Emits an STT usage event for cost tracking.
+ */
+function emitSTTUsage(
+  provider: string,
+  model: string,
+  audioSeconds: number
+): void {
+  console.log("[Cost Tracking STT] Emitting stt-usage-captured event:", { provider, model, audioSeconds });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("stt-usage-captured", {
+        detail: {
+          provider,
+          model,
+          audioSeconds,
+        },
+      })
+    );
+  }
+}
+
 // Pluely STT function
 async function fetchPluelySTT(audio: File | Blob): Promise<string> {
   try {
@@ -43,6 +95,7 @@ export interface STTParams {
     variables: Record<string, string>;
   };
   audio: File | Blob;
+  language?: string; // ISO 639-1 language code (e.g., "en", "es", "fr")
 }
 
 /**
@@ -52,7 +105,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
   let warnings: string[] = [];
 
   try {
-    const { provider, selectedProvider, audio } = params;
+    const { provider, selectedProvider, audio, language = "en" } = params;
 
     // Check if we should use Pluely API instead
     const usePluelyAPI = await shouldUsePluelyAPI();
@@ -85,13 +138,14 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     // }
 
     // Build variable map
-    const allVariables = {
+    const allVariables: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(selectedProvider.variables).map(([key, value]) => [
           key.toUpperCase(),
           value,
         ])
       ),
+      LANGUAGE: language, // Add language to variables for template replacement
     };
 
     // Prepare request
@@ -185,7 +239,8 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       body = JSON.stringify(deepVariableReplacer(dataObj, allVariables));
     }
 
-    const fetchFunction = url?.includes("http") ? fetch : tauriFetch;
+    // Use tauriFetch for external HTTP URLs to avoid CORS issues
+    const fetchFunction = url?.includes("http") ? tauriFetch : fetch;
 
     // Send request
     let response: Response;
@@ -229,6 +284,16 @@ export async function fetchSTT(params: STTParams): Promise<string> {
 
     if (!transcription) {
       return [...warnings, "No transcription found"].join("; ");
+    }
+
+    // Emit STT usage for cost tracking
+    try {
+      const audioSeconds = await estimateAudioDuration(audio);
+      const providerId = selectedProvider.provider || "openai";
+      const modelName = provider.id || "whisper-1";
+      emitSTTUsage(providerId, modelName, audioSeconds);
+    } catch (usageError) {
+      console.warn("Failed to emit STT usage:", usageError);
     }
 
     // Return transcription with any warnings

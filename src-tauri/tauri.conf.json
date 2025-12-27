@@ -24,7 +24,7 @@
         "skipTaskbar": true,
         "visible": true,
         "center": false,
-        "contentProtected": true,
+        "contentProtected": false,
         "focus": false,
         "acceptFirstMouse": true,
         "shadow": false
@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",

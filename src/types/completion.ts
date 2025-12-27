@@ -13,6 +13,10 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   attachedFiles?: AttachedFile[];
+  /** Optional translation of the message content (for STT messages) */
+  translation?: string;
+  /** Translation error if translation failed */
+  translationError?: string;
 }
 
 export interface ChatConversation {

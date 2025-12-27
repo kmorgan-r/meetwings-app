@@ -1,3 +1,43 @@
+// Supported STT languages (ISO 639-1 codes)
+// These are languages commonly supported by major STT providers
+export const STT_LANGUAGES = [
+  { code: "en", name: "English" },
+  { code: "es", name: "Spanish" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "it", name: "Italian" },
+  { code: "pt", name: "Portuguese" },
+  { code: "nl", name: "Dutch" },
+  { code: "pl", name: "Polish" },
+  { code: "ru", name: "Russian" },
+  { code: "ja", name: "Japanese" },
+  { code: "ko", name: "Korean" },
+  { code: "zh", name: "Chinese" },
+  { code: "ar", name: "Arabic" },
+  { code: "fa", name: "Persian (Farsi)" },
+  { code: "hi", name: "Hindi" },
+  { code: "tr", name: "Turkish" },
+  { code: "vi", name: "Vietnamese" },
+  { code: "th", name: "Thai" },
+  { code: "sv", name: "Swedish" },
+  { code: "da", name: "Danish" },
+  { code: "no", name: "Norwegian" },
+  { code: "fi", name: "Finnish" },
+  { code: "he", name: "Hebrew" },
+  { code: "uk", name: "Ukrainian" },
+  { code: "cs", name: "Czech" },
+  { code: "el", name: "Greek" },
+  { code: "id", name: "Indonesian" },
+  { code: "ms", name: "Malay" },
+] as const;
+
+export const DEFAULT_STT_LANGUAGE = "en";
+
+// STT Translation defaults
+export const DEFAULT_TRANSLATION_ENABLED = false;
+export const DEFAULT_TRANSLATION_LANGUAGE = "fa"; // Persian (Farsi) - default target
+export const TRANSLATION_LANGUAGES = STT_LANGUAGES;
+
 export const SPEECH_TO_TEXT_PROVIDERS = [
   {
     id: "openai-whisper",
@@ -5,7 +45,8 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     curl: `curl -X POST "https://api.openai.com/v1/audio/transcriptions" \\
       -H "Authorization: Bearer {{API_KEY}}" \\
       -F "file={{AUDIO}}" \\
-      -F "model={{MODEL}}"`,
+      -F "model={{MODEL}}" \\
+      -F "language={{LANGUAGE}}"`,
     responseContentPath: "text",
     streaming: false,
   },
@@ -18,7 +59,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F model={{MODEL}} \\
       -F temperature=0 \\
       -F response_format=text \\
-      -F language=en`,
+      -F language={{LANGUAGE}}`,
     responseContentPath: "text",
     streaming: false,
   },
@@ -41,9 +82,9 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -H "x-goog-user-project: {{PROJECT_ID}}" \\
       -d '{
         "config": {
-          "encoding": "LINEAR16", 
+          "encoding": "LINEAR16",
           "sampleRateHertz": 16000,
-          "languageCode": "en-US"
+          "languageCode": "{{LANGUAGE}}-US"
         },
         "audio": {
           "content": "{{AUDIO}}"
@@ -55,7 +96,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
   {
     id: "deepgram-stt",
     name: "Deepgram Speech-to-Text",
-    curl: `curl -X POST "https://api.deepgram.com/v1/listen?model={{MODEL}}" \\
+    curl: `curl -X POST "https://api.deepgram.com/v1/listen?model={{MODEL}}&language={{LANGUAGE}}" \\
       -H "Authorization: TOKEN {{API_KEY}}" \\
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
@@ -65,7 +106,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
   {
     id: "azure-stt",
     name: "Azure Speech-to-Text",
-    curl: `curl -X POST "https://{{REGION}}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language=en-US" \\
+    curl: `curl -X POST "https://{{REGION}}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1?language={{LANGUAGE}}-US" \\
       -H "Ocp-Apim-Subscription-Key: {{API_KEY}}" \\
       -H "Content-Type: audio/wav" \\
       --data-binary {{AUDIO}}`,
@@ -78,7 +119,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
     curl: `curl -X POST "https://asr.api.speechmatics.com/v2/jobs" \\
       -H "Authorization: Bearer {{API_KEY}}" \\
       -F "data_file={{AUDIO}}" \\
-      -F 'config={"type": "transcription", "transcription_config": {"language": "en"}}'`,
+      -F 'config={"type": "transcription", "transcription_config": {"language": "{{LANGUAGE}}"}}'`,
     responseContentPath: "job.id",
     streaming: false,
   },

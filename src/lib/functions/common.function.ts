@@ -1,4 +1,4 @@
-import { Message } from "@/types";
+import { Message, UsageData } from "@/types";
 
 export function getByPath(obj: any, path: string): any {
   if (!path) return obj;
@@ -232,5 +232,48 @@ export function getStreamingContent(
   }
 
   // Return null if no content is found after trying all paths.
+  return null;
+}
+
+/**
+ * Extracts usage/token data from a streaming API response chunk.
+ * Tries multiple common paths used by different providers.
+ * @param chunk The parsed JSON object from a stream line.
+ * @returns UsageData object with token counts, or null if not found.
+ */
+export function getUsageFromChunk(chunk: any): UsageData | null {
+  // Common paths where usage data appears in API responses
+  const possiblePaths = [
+    "usage", // OpenAI, Groq, Mistral, Perplexity, OpenRouter
+    "usage_metadata", // Some providers use this
+    "x_groq.usage", // Groq sometimes nests it
+  ];
+
+  for (const path of possiblePaths) {
+    const usage = getByPath(chunk, path);
+
+    if (usage && typeof usage === "object") {
+      // Handle both OpenAI format (prompt_tokens) and Anthropic format (input_tokens)
+      const inputTokens =
+        usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? 0;
+      const outputTokens =
+        usage.completion_tokens ??
+        usage.output_tokens ??
+        usage.completionTokens ??
+        0;
+      const totalTokens =
+        usage.total_tokens ?? usage.totalTokens ?? inputTokens + outputTokens;
+
+      // Only return if we have some token data
+      if (inputTokens > 0 || outputTokens > 0 || totalTokens > 0) {
+        return {
+          inputTokens,
+          outputTokens,
+          totalTokens,
+        };
+      }
+    }
+  }
+
   return null;
 }

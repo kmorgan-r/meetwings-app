@@ -86,7 +86,7 @@ export const CreateEditDialog = ({
             </label>
             <Textarea
               placeholder="You are a helpful AI assistant. Be concise, accurate, and friendly in your responses..."
-              className="min-h-[200px] resize-none"
+              className="min-h-[200px] max-h-[400px] overflow-y-auto"
               value={form.prompt}
               onChange={(e) => setForm({ ...form, prompt: e.target.value })}
               disabled={isSaving}

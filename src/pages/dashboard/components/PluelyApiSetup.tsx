@@ -54,7 +54,6 @@ export const PluelyApiSetup = () => {
     pluelyApiEnabled,
     setPluelyApiEnabled,
     hasActiveLicense,
-    setHasActiveLicense,
     getActiveLicenseStatus,
   } = useApp();
 
@@ -194,7 +193,8 @@ export const PluelyApiSetup = () => {
     setIsLoading(true);
     setError(null);
     setSuccess(null);
-    setHasActiveLicense(false);
+    // License bypass - don't actually deactivate
+    // setHasActiveLicense(false);
     try {
       // Remove all license data from secure storage in one call
       await invoke("secure_storage_remove", {

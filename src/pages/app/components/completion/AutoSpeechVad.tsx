@@ -7,12 +7,17 @@ import { Button } from "@/components";
 import { useApp } from "@/contexts";
 import { floatArrayToWav } from "@/lib/utils";
 import { shouldUsePluelyAPI } from "@/lib/functions/pluely.api";
+import { useTranslation } from "@/hooks";
 
 interface AutoSpeechVADProps {
   submit: UseCompletionReturn["submit"];
   setState: UseCompletionReturn["setState"];
   setEnableVAD: UseCompletionReturn["setEnableVAD"];
   microphoneDeviceId: string;
+  meetingAssistMode?: boolean;
+  addMeetingTranscript?: UseCompletionReturn["addMeetingTranscript"];
+  updateTranscriptTranslation?: UseCompletionReturn["updateTranscriptTranslation"];
+  sttLanguage?: string;
 }
 
 const AutoSpeechVADInternal = ({
@@ -20,9 +25,14 @@ const AutoSpeechVADInternal = ({
   setState,
   setEnableVAD,
   microphoneDeviceId,
+  meetingAssistMode = false,
+  addMeetingTranscript,
+  updateTranscriptTranslation,
+  sttLanguage = "en",
 }: AutoSpeechVADProps) => {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const { selectedSttProvider, allSttProviders } = useApp();
+  const { translate, isEnabled: translationEnabled } = useTranslation();
 
   const audioConstraints: MediaTrackConstraints = microphoneDeviceId
     ? { deviceId: { exact: microphoneDeviceId } }
@@ -72,10 +82,28 @@ const AutoSpeechVADInternal = ({
           provider: usePluelyAPI ? undefined : providerConfig,
           selectedProvider: selectedSttProvider,
           audio: audioBlob,
+          language: sttLanguage,
         });
 
         if (transcription) {
-          submit(transcription);
+          if (meetingAssistMode && addMeetingTranscript) {
+            // In Meeting Assist Mode, accumulate transcripts instead of auto-submitting
+            const timestamp = addMeetingTranscript(transcription);
+
+            // Translate in background if enabled
+            if (translationEnabled && updateTranscriptTranslation) {
+              translate(transcription).then((result) => {
+                if (result.success && result.translation) {
+                  updateTranscriptTranslation(timestamp, result.translation);
+                } else if (result.error) {
+                  updateTranscriptTranslation(timestamp, undefined, result.error);
+                }
+              });
+            }
+          } else {
+            // Normal mode: auto-submit to AI
+            submit(transcription);
+          }
         }
       } catch (error) {
         console.error("Failed to transcribe audio:", error);

@@ -118,6 +118,12 @@ export const LANGUAGES: LanguageOption[] = [
     prompt: "Respond in Turkish (Türkçe).",
   },
   {
+    id: "persian",
+    name: "Persian",
+    flag: "🇮🇷",
+    prompt: "Respond in Persian (فارسی).",
+  },
+  {
     id: "polish",
     name: "Polish",
     flag: "🇵🇱",

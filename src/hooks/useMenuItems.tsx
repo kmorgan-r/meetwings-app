@@ -13,6 +13,8 @@ import {
   GlobeIcon,
   BugIcon,
   MessageSquareTextIcon,
+  DollarSignIcon,
+  BrainIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useApp } from "@/contexts";
@@ -51,6 +53,16 @@ export const useMenuItems = () => {
       icon: MessageSquareTextIcon,
       label: "Responses",
       href: "/responses",
+    },
+    {
+      icon: DollarSignIcon,
+      label: "Cost Tracking",
+      href: "/cost-tracking",
+    },
+    {
+      icon: BrainIcon,
+      label: "Context Memory",
+      href: "/context-memory",
     },
     {
       icon: MonitorIcon,

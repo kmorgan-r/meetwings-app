@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
-import { MAX_FILES } from "@/config";
+import { MAX_FILES, STORAGE_KEYS, MEETING_ASSIST_SYSTEM_PROMPT } from "@/config";
 import { useApp } from "@/contexts";
 import {
   fetchAIResponse,
@@ -14,7 +14,15 @@ import {
   generateMessageId,
   generateRequestId,
   getResponseSettings,
+  createUsageRecord,
+  calculateCost,
+  calculateSTTCost,
 } from "@/lib";
+import {
+  summarizeConversation,
+  shouldSummarize,
+} from "@/lib/functions/meeting-summarizer";
+import type { UsageData } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -31,6 +39,17 @@ interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  timestamp: number;
+  /** Optional translation of the message content (for STT messages) */
+  translation?: string;
+  /** Translation error if translation failed */
+  translationError?: string;
+}
+
+interface TranscriptEntry {
+  original: string;
+  translation?: string;
+  translationError?: string;
   timestamp: number;
 }
 
@@ -77,6 +96,14 @@ export const useCompletion = () => {
   const [isFilesPopoverOpen, setIsFilesPopoverOpen] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
+
+  // Meeting Assist Mode state
+  const [meetingAssistMode, setMeetingAssistMode] = useState(() => {
+    const stored = localStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
+    return stored === "true";
+  });
+  const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
+
   const inputRef = useRef<HTMLInputElement | null>(null);
   const isProcessingScreenshotRef = useRef(false);
   const screenshotConfigRef = useRef(screenshotConfiguration);
@@ -89,10 +116,22 @@ export const useCompletion = () => {
     screenshotConfigRef.current = screenshotConfiguration;
   }, [screenshotConfiguration]);
 
+  // Keep conversation history ref in sync with state (for stale closure prevention)
+  useEffect(() => {
+    conversationHistoryRef.current = state.conversationHistory;
+  }, [state.conversationHistory]);
+
+  // Persist Meeting Assist Mode setting
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED, String(meetingAssistMode));
+  }, [meetingAssistMode]);
+
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const currentRequestIdRef = useRef<string | null>(null);
+  const currentConversationIdRef = useRef<string | null>(null);
+  const conversationHistoryRef = useRef<ChatMessage[]>([]);
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));
@@ -133,11 +172,94 @@ export const useCompletion = () => {
     setState((prev) => ({ ...prev, attachedFiles: [] }));
   }, []);
 
+  // Meeting Assist Mode functions
+  const addMeetingTranscript = useCallback((transcript: string): number => {
+    const timestamp = Date.now();
+    if (!transcript.trim()) return timestamp;
+
+    // Add to meeting transcript array with TranscriptEntry structure
+    const entry: TranscriptEntry = {
+      original: transcript,
+      timestamp,
+    };
+    setMeetingTranscript((prev) => [...prev, entry]);
+
+    // Also add to conversation history as a user message (for display)
+    // Use ref for conversation ID to avoid stale closure - ref is always current
+    const conversationId = currentConversationIdRef.current || generateConversationId("chat");
+    currentConversationIdRef.current = conversationId;
+
+    const userMessage: ChatMessage = {
+      id: generateMessageId("user", timestamp),
+      role: "user",
+      content: transcript,
+      timestamp,
+    };
+
+    // Update ref immediately for sync
+    conversationHistoryRef.current = [...conversationHistoryRef.current, userMessage];
+
+    setState((prev) => ({
+      ...prev,
+      currentConversationId: conversationId,
+      conversationHistory: [...prev.conversationHistory, userMessage],
+    }));
+
+    return timestamp;
+  }, []); // No dependencies - uses ref for conversation ID and functional setState for latest state
+
+  // Update translation for a specific transcript entry (updates both meetingTranscript and conversationHistory)
+  const updateTranscriptTranslation = useCallback(
+    (timestamp: number, translation?: string, error?: string) => {
+      // Update meetingTranscript
+      setMeetingTranscript((prev) =>
+        prev.map((entry) =>
+          entry.timestamp === timestamp
+            ? { ...entry, translation, translationError: error }
+            : entry
+        )
+      );
+
+      // Also update conversationHistory for the same timestamp
+      // This ensures translations persist when view switches from MeetingTranscriptPanel to conversation view
+      conversationHistoryRef.current = conversationHistoryRef.current.map((msg) =>
+        msg.timestamp === timestamp
+          ? { ...msg, translation, translationError: error }
+          : msg
+      );
+
+      setState((prev) => ({
+        ...prev,
+        conversationHistory: prev.conversationHistory.map((msg) =>
+          msg.timestamp === timestamp
+            ? { ...msg, translation, translationError: error }
+            : msg
+        ),
+      }));
+    },
+    []
+  );
+
+  const clearMeetingTranscript = useCallback(() => {
+    setMeetingTranscript([]);
+    // Also reset conversation when clearing meeting transcript
+    currentConversationIdRef.current = null;
+    conversationHistoryRef.current = []; // Update ref immediately
+    setState((prev) => ({
+      ...prev,
+      currentConversationId: null,
+      conversationHistory: [],
+      response: "",
+    }));
+  }, []);
+
   const submit = useCallback(
     async (speechText?: string) => {
+      console.log("[Cost Tracking] submit() called");
       const input = speechText || state.input;
 
       if (!input.trim()) {
+        console.log("[Cost Tracking] Input is empty, returning");
         return;
       }
 
@@ -152,6 +274,18 @@ export const useCompletion = () => {
       const requestId = generateRequestId();
       currentRequestIdRef.current = requestId;
 
+      // Generate conversation ID upfront for new conversations
+      // This ensures the ID is available when usage events are captured
+      const conversationId = state.currentConversationId || generateConversationId("chat");
+      currentConversationIdRef.current = conversationId;
+      console.log("[Cost Tracking] Set conversation ID ref to:", conversationId);
+      if (!state.currentConversationId) {
+        setState((prev) => ({
+          ...prev,
+          currentConversationId: conversationId,
+        }));
+      }
+
       // Cancel any existing request
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -161,8 +295,8 @@ export const useCompletion = () => {
       const signal = abortControllerRef.current.signal;
 
       try {
-        // Prepare message history for the AI
-        const messageHistory = state.conversationHistory.map((msg) => ({
+        // Prepare message history for the AI (use ref to avoid stale closure)
+        const messageHistory = conversationHistoryRef.current.map((msg) => ({
           role: msg.role,
           content: msg.content,
         }));
@@ -210,6 +344,7 @@ export const useCompletion = () => {
 
         try {
           // Use the fetchAIResponse function with signal
+          console.log("[Cost Tracking] About to call fetchAIResponse");
           for await (const chunk of fetchAIResponse({
             provider: usePluelyAPI ? undefined : provider,
             selectedProvider: selectedAIProvider,
@@ -290,7 +425,170 @@ export const useCompletion = () => {
       selectedAIProvider,
       allAiProviders,
       systemPrompt,
-      state.conversationHistory,
+      // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
+    ]
+  );
+
+  // Submit a quick action with meeting transcript context
+  const submitWithMeetingContext = useCallback(
+    async (action: string) => {
+      if (meetingTranscript.length === 0) {
+        // No meeting context, just submit the action as a regular message
+        setState((prev) => ({ ...prev, input: action }));
+        await submit(action);
+        return;
+      }
+
+      // Build the meeting context prompt (extract original text from each entry)
+      const meetingContext = meetingTranscript.map((entry) => entry.original).join("\n\n");
+      const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## Your Request: ${action}`;
+
+      // Generate unique request ID
+      const requestId = generateRequestId();
+      currentRequestIdRef.current = requestId;
+
+      // Generate conversation ID upfront (use "chat" type for meeting assist conversations)
+      const conversationId = state.currentConversationId || generateConversationId("chat");
+      currentConversationIdRef.current = conversationId;
+      if (!state.currentConversationId) {
+        setState((prev) => ({
+          ...prev,
+          currentConversationId: conversationId,
+        }));
+      }
+
+      // Cancel any existing request
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+
+      abortControllerRef.current = new AbortController();
+      const signal = abortControllerRef.current.signal;
+
+      try {
+        const usePluelyAPI = await shouldUsePluelyAPI();
+        if (!selectedAIProvider.provider && !usePluelyAPI) {
+          setState((prev) => ({
+            ...prev,
+            error: "Please select an AI provider in settings",
+          }));
+          return;
+        }
+
+        const provider = allAiProviders.find(
+          (p) => p.id === selectedAIProvider.provider
+        );
+        if (!provider && !usePluelyAPI) {
+          setState((prev) => ({
+            ...prev,
+            error: "Invalid provider selected",
+          }));
+          return;
+        }
+
+        // Set loading state and show the action
+        setState((prev) => ({
+          ...prev,
+          input: action,
+          isLoading: true,
+          error: null,
+          response: "",
+        }));
+
+        let fullResponse = "";
+
+        // Prepare message history (use ref to avoid stale closure)
+        const messageHistory = conversationHistoryRef.current.map((msg) => ({
+          role: msg.role,
+          content: msg.content,
+        }));
+
+        // Use Meeting Assist system prompt for better context
+        for await (const chunk of fetchAIResponse({
+          provider: usePluelyAPI ? undefined : provider,
+          selectedProvider: selectedAIProvider,
+          systemPrompt: MEETING_ASSIST_SYSTEM_PROMPT,
+          history: messageHistory,
+          userMessage: contextualPrompt,
+          signal,
+        })) {
+          if (currentRequestIdRef.current !== requestId || signal.aborted) {
+            return;
+          }
+
+          fullResponse += chunk;
+          setState((prev) => ({
+            ...prev,
+            response: prev.response + chunk,
+          }));
+        }
+
+        if (currentRequestIdRef.current !== requestId || signal.aborted) {
+          return;
+        }
+
+        setState((prev) => ({ ...prev, isLoading: false }));
+
+        // Focus input after response
+        setTimeout(() => {
+          inputRef.current?.focus();
+        }, 100);
+
+        // Save the conversation (save the action, not the full contextual prompt)
+        if (fullResponse) {
+          const timestamp = Date.now();
+          const userMsg: ChatMessage = {
+            id: generateMessageId("user", timestamp),
+            role: "user",
+            content: action,
+            timestamp,
+          };
+          const assistantMsg: ChatMessage = {
+            id: generateMessageId("assistant", timestamp + MESSAGE_ID_OFFSET),
+            role: "assistant",
+            content: fullResponse,
+            timestamp: timestamp + MESSAGE_ID_OFFSET,
+          };
+          const currentHistory = conversationHistoryRef.current;
+          const newMessages = [...currentHistory, userMsg, assistantMsg];
+
+          const conversation: ChatConversation = {
+            id: conversationId,
+            title: currentHistory.length === 0
+              ? generateConversationTitle(action)
+              : generateConversationTitle(action),
+            messages: newMessages,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+
+          await saveConversation(conversation);
+          // Update ref immediately
+          conversationHistoryRef.current = newMessages;
+          setState((prev) => ({
+            ...prev,
+            currentConversationId: conversationId,
+            conversationHistory: newMessages,
+            input: "",
+          }));
+        }
+      } catch (error) {
+        if (!signal?.aborted && currentRequestIdRef.current === requestId) {
+          setState((prev) => ({
+            ...prev,
+            error: error instanceof Error ? error.message : "An error occurred",
+            isLoading: false,
+          }));
+        }
+      }
+    },
+    [
+      meetingTranscript,
+      state.currentConversationId,
+      // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
+      selectedAIProvider,
+      allAiProviders,
+      submit,
     ]
   );
 
@@ -334,7 +632,56 @@ export const useCompletion = () => {
   // Note: saveConversation, getConversationById, and generateConversationTitle
   // are now imported from lib/database/chat-history.action.ts
 
+  // Helper function to summarize the current conversation before switching
+  const summarizeCurrentConversation = useCallback(async () => {
+    // Need at least 2 exchanges (4 messages: 2 user + 2 assistant)
+    if (!state.currentConversationId || state.conversationHistory.length < 4) {
+      return;
+    }
+
+    // Convert ChatMessage[] to Message[] format
+    const messages = state.conversationHistory.map(msg => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+
+    // Check if should summarize (has enough exchanges)
+    if (!shouldSummarize(messages)) {
+      return;
+    }
+
+    // Get provider config for AI summarization
+    const usePluelyAPI = await shouldUsePluelyAPI();
+    const provider = allAiProviders.find(p => p.id === selectedAIProvider.provider);
+
+    // Trigger summarization asynchronously (don't await - non-blocking)
+    summarizeConversation(
+      state.currentConversationId,
+      messages,
+      usePluelyAPI ? undefined : provider ? {
+        provider,
+        selectedProvider: selectedAIProvider,
+      } : undefined
+    ).then(success => {
+      if (success) {
+        console.log("[Context Memory] Conversation summarized successfully");
+      }
+    }).catch(error => {
+      console.error("[Context Memory] Failed to summarize conversation:", error);
+    });
+  }, [
+    state.currentConversationId,
+    state.conversationHistory,
+    allAiProviders,
+    selectedAIProvider
+  ]);
+
   const loadConversation = useCallback((conversation: ChatConversation) => {
+    // Summarize current conversation before switching
+    summarizeCurrentConversation();
+
+    currentConversationIdRef.current = conversation.id;
+    conversationHistoryRef.current = conversation.messages; // Update ref immediately
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
@@ -344,9 +691,14 @@ export const useCompletion = () => {
       error: null,
       isLoading: false,
     }));
-  }, []);
+  }, [summarizeCurrentConversation]);
 
   const startNewConversation = useCallback(() => {
+    // Summarize current conversation before starting new
+    summarizeCurrentConversation();
+
+    currentConversationIdRef.current = null;
+    conversationHistoryRef.current = []; // Update ref immediately
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -357,7 +709,7 @@ export const useCompletion = () => {
       isLoading: false,
       attachedFiles: [],
     }));
-  }, []);
+  }, [summarizeCurrentConversation]);
 
   const saveCurrentConversation = useCallback(
     async (
@@ -389,7 +741,9 @@ export const useCompletion = () => {
         timestamp: timestamp + MESSAGE_ID_OFFSET,
       };
 
-      const newMessages = [...state.conversationHistory, userMsg, assistantMsg];
+      // Use ref to avoid stale closure
+      const currentHistory = conversationHistoryRef.current;
+      const newMessages = [...currentHistory, userMsg, assistantMsg];
 
       // Get existing conversation if updating
       let existingConversation = null;
@@ -404,7 +758,7 @@ export const useCompletion = () => {
       }
 
       const title =
-        state.conversationHistory.length === 0
+        currentHistory.length === 0
           ? generateConversationTitle(userMessage)
           : existingConversation?.title ||
             generateConversationTitle(userMessage);
@@ -420,6 +774,8 @@ export const useCompletion = () => {
       try {
         await saveConversation(conversation);
 
+        // Update ref immediately
+        conversationHistoryRef.current = newMessages;
         setState((prev) => ({
           ...prev,
           currentConversationId: conversationId,
@@ -434,7 +790,7 @@ export const useCompletion = () => {
         }));
       }
     },
-    [state.currentConversationId, state.conversationHistory]
+    [state.currentConversationId] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
   // Listen for conversation events from the main ChatHistory component
@@ -574,8 +930,8 @@ export const useCompletion = () => {
           const signal = abortControllerRef.current.signal;
 
           try {
-            // Prepare message history for the AI
-            const messageHistory = state.conversationHistory.map((msg) => ({
+            // Prepare message history for the AI (use ref to avoid stale closure)
+            const messageHistory = conversationHistoryRef.current.map((msg) => ({
               role: msg.role,
               content: msg.content,
             }));
@@ -700,7 +1056,7 @@ export const useCompletion = () => {
     },
     [
       state.attachedFiles.length,
-      state.conversationHistory,
+      // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
       selectedAIProvider,
       allAiProviders,
       systemPrompt,
@@ -758,11 +1114,16 @@ export const useCompletion = () => {
     [state.attachedFiles.length, addFile]
   );
 
+  // Check if meeting transcript should trigger popover
+  const hasMeetingTranscript = meetingAssistMode && meetingTranscript.length > 0;
+
+  // Popover opens when there's content to show
   const isPopoverOpen =
     state.isLoading ||
     state.response !== "" ||
     state.error !== null ||
-    keepEngaged;
+    keepEngaged ||
+    hasMeetingTranscript;
 
   useEffect(() => {
     resizeWindow(
@@ -990,6 +1351,108 @@ export const useCompletion = () => {
     };
   }, []);
 
+  // Listen for API usage events and save to database
+  useEffect(() => {
+    const handleUsageCaptured = async (event: Event) => {
+      console.log("[Cost Tracking] Received api-usage-captured event");
+      const customEvent = event as CustomEvent<{
+        usage: UsageData;
+        provider: string;
+        model: string;
+      }>;
+
+      const { usage, provider, model } = customEvent.detail;
+      console.log("[Cost Tracking] Event detail:", { usage, provider, model });
+
+      // Use ref for conversation ID (more reliable than state during async operations)
+      const conversationId = currentConversationIdRef.current;
+      console.log("[Cost Tracking] Current conversation ID from ref:", conversationId);
+      if (!conversationId) {
+        console.warn("[Cost Tracking] No conversation ID available for usage tracking");
+        return;
+      }
+
+      try {
+        const cost = calculateCost(usage, provider, model);
+        console.log("[Cost Tracking] Calculated cost:", cost);
+
+        const record = {
+          id: crypto.randomUUID(),
+          conversationId,
+          provider,
+          model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          totalTokens: usage.totalTokens,
+          estimatedCost: cost,
+          timestamp: Date.now(),
+        };
+        console.log("[Cost Tracking] Creating usage record:", record);
+
+        await createUsageRecord(record);
+        console.log("[Cost Tracking] Usage record saved successfully!");
+      } catch (error) {
+        console.error("[Cost Tracking] Failed to save API usage record:", error);
+      }
+    };
+
+    console.log("[Cost Tracking] Setting up api-usage-captured event listener");
+    window.addEventListener("api-usage-captured", handleUsageCaptured);
+    return () => {
+      console.log("[Cost Tracking] Removing api-usage-captured event listener");
+      window.removeEventListener("api-usage-captured", handleUsageCaptured);
+    };
+  }, []);
+
+  // Listen for STT usage events and save to database
+  useEffect(() => {
+    const handleSTTUsageCaptured = async (event: Event) => {
+      console.log("[Cost Tracking STT] Received stt-usage-captured event");
+      const customEvent = event as CustomEvent<{
+        provider: string;
+        model: string;
+        audioSeconds: number;
+      }>;
+
+      const { provider, model, audioSeconds } = customEvent.detail;
+      console.log("[Cost Tracking STT] Event detail:", { provider, model, audioSeconds });
+
+      // Use ref for conversation ID (more reliable than state during async operations)
+      const conversationId = currentConversationIdRef.current;
+      console.log("[Cost Tracking STT] Current conversation ID from ref:", conversationId);
+      if (!conversationId) {
+        console.warn("[Cost Tracking STT] No conversation ID available for STT usage tracking");
+        return;
+      }
+
+      try {
+        const cost = calculateSTTCost(audioSeconds, provider, model);
+        console.log("[Cost Tracking STT] Calculated cost:", cost);
+
+        await createUsageRecord({
+          id: crypto.randomUUID(),
+          conversationId,
+          provider: `${provider}-stt`, // Mark as STT usage
+          model,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          audioSeconds,
+          estimatedCost: cost,
+          timestamp: Date.now(),
+        });
+        console.log("[Cost Tracking STT] STT usage record saved successfully!");
+      } catch (error) {
+        console.error("[Cost Tracking STT] Failed to save STT usage record:", error);
+      }
+    };
+
+    window.addEventListener("stt-usage-captured", handleSTTUsageCaptured);
+    return () => {
+      window.removeEventListener("stt-usage-captured", handleSTTUsageCaptured);
+    };
+  }, []);
+
   // register callbacks for global shortcuts
   useEffect(() => {
     globalShortcuts.registerAudioCallback(toggleRecording);
@@ -1046,5 +1509,13 @@ export const useCompletion = () => {
     isScreenshotLoading,
     keepEngaged,
     setKeepEngaged,
+    // Meeting Assist Mode
+    meetingAssistMode,
+    setMeetingAssistMode,
+    meetingTranscript,
+    addMeetingTranscript,
+    updateTranscriptTranslation,
+    clearMeetingTranscript,
+    submitWithMeetingContext,
   };
 };

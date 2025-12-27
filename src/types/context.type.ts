@@ -56,4 +56,13 @@ export type IContextType = {
     }>
   >;
   setCursorType: (type: CursorType) => void;
+  // STT Language setting
+  sttLanguage: string;
+  setSttLanguage: (language: string) => void;
+
+  // STT Translation settings
+  sttTranslationEnabled: boolean;
+  setSttTranslationEnabled: (enabled: boolean) => void;
+  sttTranslationLanguage: string;
+  setSttTranslationLanguage: (language: string) => void;
 };

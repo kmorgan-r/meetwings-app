@@ -8,6 +8,9 @@ import {
   Markdown,
 } from "@/components";
 import { ChatMessage } from "@/types/completion";
+import { QuickActions } from "./QuickActions";
+import { UseQuickActionsReturn } from "@/hooks/useQuickActions";
+import { useApp } from "@/contexts";
 
 interface MessageHistoryProps {
   conversationHistory: ChatMessage[];
@@ -15,6 +18,11 @@ interface MessageHistoryProps {
   onStartNewConversation: () => void;
   messageHistoryOpen: boolean;
   setMessageHistoryOpen: (open: boolean) => void;
+  // Quick actions props
+  quickActions?: UseQuickActionsReturn;
+  onQuickActionClick?: (action: string) => void;
+  enableVAD?: boolean;
+  isLoading?: boolean;
 }
 
 export const MessageHistory = ({
@@ -22,7 +30,13 @@ export const MessageHistory = ({
   onStartNewConversation,
   messageHistoryOpen,
   setMessageHistoryOpen,
+  quickActions,
+  onQuickActionClick,
+  isLoading,
 }: MessageHistoryProps) => {
+  const { sttTranslationEnabled } = useApp();
+  // Show quick actions at bottom of conversation panel
+  const showQuickActions = quickActions && onQuickActionClick;
   return (
     <Popover open={messageHistoryOpen} onOpenChange={setMessageHistoryOpen}>
       <PopoverTrigger asChild>
@@ -106,10 +120,32 @@ export const MessageHistory = ({
                     </span>
                   </div>
                   <Markdown>{message.content}</Markdown>
+                  {/* Translation display for user messages */}
+                  {sttTranslationEnabled && message.role === "user" && message.translation && (
+                    <div className="mt-2 pt-2 border-t border-primary/20">
+                      <p className="text-foreground/80 italic" dir="auto">
+                        {message.translation}
+                      </p>
+                    </div>
+                  )}
                 </div>
               ))}
           </div>
         </ScrollArea>
+
+        {/* Quick Actions - Show at bottom when in Manual mode */}
+        {showQuickActions && (
+          <div className="border-t border-input/50 p-3 bg-muted/30">
+            <QuickActions
+              {...quickActions}
+              onActionClick={(action) => {
+                onQuickActionClick(action);
+                setMessageHistoryOpen(false);
+              }}
+              disabled={isLoading}
+            />
+          </div>
+        )}
       </PopoverContent>
     </Popover>
   );
