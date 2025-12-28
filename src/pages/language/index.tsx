@@ -2,10 +2,9 @@ import { Header, Selection, Switch } from "@/components";
 import { STT_LANGUAGES, TRANSLATION_LANGUAGES } from "@/config";
 import { LANGUAGES } from "@/lib";
 import { useApp } from "@/contexts";
-import { updateLanguage } from "@/lib/storage/response-settings.storage";
-import { useState, useEffect, useMemo } from "react";
-import { getResponseSettings } from "@/lib";
+import { useMemo } from "react";
 import { PageLayout } from "@/layouts";
+import { providerSupportsAutoDetect } from "@/lib/functions/stt.function";
 
 // Language settings page - consolidates all language-related configuration
 const Language = () => {
@@ -17,22 +16,27 @@ const Language = () => {
     setSttTranslationEnabled,
     sttTranslationLanguage,
     setSttTranslationLanguage,
+    responseLanguage,
+    setResponseLanguage,
+    selectedSttProvider,
+    allSttProviders,
   } = useApp();
 
-  // Response language state
-  const [selectedLanguage, setSelectedLanguage] = useState<string>("english");
+  // Check if current STT provider supports auto-detect
+  const currentSttProvider = useMemo(() => {
+    return allSttProviders.find((p) => p.id === selectedSttProvider.provider);
+  }, [allSttProviders, selectedSttProvider.provider]);
 
-  useEffect(() => {
-    const settings = getResponseSettings();
-    setSelectedLanguage(settings.language);
-  }, []);
+  const showAutoDetectWarning = useMemo(() => {
+    const isAutoDetect = sttLanguage === "auto" || sttLanguage === "";
+    return isAutoDetect && currentSttProvider && !providerSupportsAutoDetect(currentSttProvider);
+  }, [sttLanguage, currentSttProvider]);
 
   const handleLanguageChange = (languageId: string) => {
     if (!hasActiveLicense) {
       return;
     }
-    setSelectedLanguage(languageId);
-    updateLanguage(languageId);
+    setResponseLanguage(languageId);
   };
 
   const languageOptions = useMemo(() => {
@@ -70,6 +74,16 @@ const Language = () => {
             }}
           />
         </div>
+
+        {/* Warning when auto-detect is selected with incompatible provider */}
+        {showAutoDetectWarning && (
+          <div className="p-3 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+            <p className="text-[10px] lg:text-xs text-yellow-600 dark:text-yellow-400">
+              Your current STT provider ({currentSttProvider?.name || "Unknown"}) may not fully support auto-detect.
+              Consider selecting a specific language for better accuracy, or switch to a provider like OpenAI Whisper, Groq, or AssemblyAI.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* Response Language Section */}
@@ -90,7 +104,7 @@ const Language = () => {
 
         <div className="max-w-md">
           <Selection
-            selected={selectedLanguage}
+            selected={responseLanguage}
             onChange={handleLanguageChange}
             options={languageOptions}
             placeholder="Select a language"

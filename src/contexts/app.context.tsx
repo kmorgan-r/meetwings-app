@@ -7,6 +7,8 @@ import {
   DEFAULT_TRANSLATION_ENABLED,
   DEFAULT_TRANSLATION_LANGUAGE,
 } from "@/config";
+import { getResponseSettings, updateLanguage } from "@/lib/storage/response-settings.storage";
+import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
 import {
@@ -131,6 +133,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   );
 
   // STT Language State
+  // Persistence: Loaded from localStorage on init, saved on change via setSttLanguage()
+  // This ensures settings persist across app restarts
   const [sttLanguage, setSttLanguageState] = useState<string>(
     safeLocalStorage.getItem(STORAGE_KEYS.STT_LANGUAGE) || DEFAULT_STT_LANGUAGE
   );
@@ -142,6 +146,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [sttTranslationLanguage, setSttTranslationLanguageState] = useState<string>(
     safeLocalStorage.getItem(STORAGE_KEYS.STT_TRANSLATION_LANGUAGE) || DEFAULT_TRANSLATION_LANGUAGE
   );
+
+  // Response Language State (for AI responses)
+  const [responseLanguage, setResponseLanguageState] = useState<string>(() => {
+    const settings = getResponseSettings();
+    return settings.language || DEFAULT_LANGUAGE;
+  });
 
   const getActiveLicenseStatus = async () => {
     // License check bypassed - always active
@@ -288,6 +298,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     if (savedTranslationLanguage) {
       setSttTranslationLanguageState(savedTranslationLanguage);
     }
+
+    // Load response language from response settings
+    const responseSettings = getResponseSettings();
+    setResponseLanguageState(responseSettings.language || DEFAULT_LANGUAGE);
   };
 
   const updateCursor = (type: CursorType | undefined) => {
@@ -428,7 +442,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         e.key === STORAGE_KEYS.CUSTOMIZABLE ||
         e.key === STORAGE_KEYS.STT_LANGUAGE ||
         e.key === STORAGE_KEYS.STT_TRANSLATION_ENABLED ||
-        e.key === STORAGE_KEYS.STT_TRANSLATION_LANGUAGE
+        e.key === STORAGE_KEYS.STT_TRANSLATION_LANGUAGE ||
+        e.key === STORAGE_KEYS.RESPONSE_SETTINGS
       ) {
         loadData();
       }
@@ -575,6 +590,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   };
 
+  const setResponseLanguage = (language: string) => {
+    setResponseLanguageState(language);
+    updateLanguage(language); // Persists to RESPONSE_SETTINGS in localStorage
+    loadData();
+  };
+
   // Create the context value (extend IContextType accordingly)
   const value: IContextType = {
     systemPrompt,
@@ -608,6 +629,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setSttTranslationEnabled,
     sttTranslationLanguage,
     setSttTranslationLanguage,
+    responseLanguage,
+    setResponseLanguage,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

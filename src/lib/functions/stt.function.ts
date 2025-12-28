@@ -13,6 +13,44 @@ import {
   fetchAssemblyAIWithDiarization,
   AssemblyAIUtterance,
 } from "./assemblyai.function";
+import { STT_LANGUAGES } from "@/config";
+
+/**
+ * Validates and sanitizes a language code to prevent injection attacks.
+ * Only allows "auto", empty string, or valid ISO 639-1 codes from STT_LANGUAGES.
+ *
+ * @param language - The language code to validate
+ * @returns Sanitized language code, or "en" if invalid
+ */
+function sanitizeLanguageCode(language: string | undefined): string {
+  // Allow "auto" for auto-detection
+  if (language === "auto") {
+    return "auto";
+  }
+
+  // Allow empty string for auto-detection
+  if (!language || language === "") {
+    return "";
+  }
+
+  // Validate against whitelist of known language codes
+  const validCodes: string[] = STT_LANGUAGES.map((lang) => lang.code);
+  if (validCodes.includes(language)) {
+    return language;
+  }
+
+  // Additional regex check for ISO 639-1 format as a safety net
+  // Matches: "en", "es", "zh", etc. (2 lowercase letters)
+  const iso639Pattern = /^[a-z]{2}$/;
+  if (iso639Pattern.test(language)) {
+    console.warn(`[STT] Language code "${language}" not in whitelist but matches ISO 639-1 format`);
+    return language;
+  }
+
+  // Invalid language code - log warning and fall back to English
+  console.warn(`[STT] Invalid language code "${language}" rejected, falling back to "en"`);
+  return "en";
+}
 
 /**
  * Estimates audio duration from a Blob.
@@ -147,6 +185,17 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     if (!selectedProvider) throw new Error("Selected provider not provided");
     if (!audio) throw new Error("Audio file is required");
 
+    // Validate language compatibility with provider
+    const isAutoDetect = language === "auto" || language === "" || language === undefined;
+    if (isAutoDetect && provider.supportsAutoDetect === false) {
+      const providerName = provider.name || provider.id || "This provider";
+      console.warn(
+        `[STT] Warning: ${providerName} may not support auto-detect language. ` +
+        `Consider selecting a specific language for better accuracy.`
+      );
+      warnings.push(`Language auto-detect may not be fully supported by ${providerName}`);
+    }
+
     // Check if provider requires special handling (e.g., AssemblyAI with diarization)
     if (provider.requiresSpecialHandler && provider.specialHandler === "assemblyai-diarization") {
       // Check for API key in both cases (api_key and API_KEY)
@@ -160,7 +209,9 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       // AssemblyAI uses undefined for auto-detection (omits language_code from request body)
       // This differs from template-based providers which use empty string in URL/form params
       // AssemblyAI's API: when language_code is omitted, it auto-detects the language
-      const effectiveLang = (!language || language === "auto") ? undefined : language;
+      // SECURITY: Sanitize language code before passing to API
+      const sanitizedLang = sanitizeLanguageCode(language);
+      const effectiveLang = (!sanitizedLang || sanitizedLang === "auto") ? undefined : sanitizedLang;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
         language: effectiveLang,
@@ -195,7 +246,9 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     // - "auto" → empty string: most providers auto-detect when language param is empty
     // - undefined → "en": safe fallback for providers that require a language code
     // Note: This differs from AssemblyAI which uses undefined to omit the language_code field entirely
-    const effectiveLanguage = language === "auto" ? "" : (language || "en");
+    // SECURITY: Sanitize language code to prevent injection attacks in CURL templates
+    const sanitizedLanguage = sanitizeLanguageCode(language);
+    const effectiveLanguage = sanitizedLanguage === "auto" ? "" : sanitizedLanguage;
     const allVariables: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(selectedProvider.variables).map(([key, value]) => [
@@ -359,6 +412,25 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     return [...warnings, transcription].filter(Boolean).join("; ");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    // Provide helpful error recovery guidance
+    const { provider, language } = params;
+    const isAutoDetect = language === "auto" || language === "" || language === undefined;
+
+    // If error occurred with auto-detect on a provider that may not support it
+    if (isAutoDetect && provider?.supportsAutoDetect === false) {
+      const enhancedMsg = `${msg}. Tip: Your provider may not support auto-detect. ` +
+        `Try selecting a specific language in Settings > Language.`;
+      throw new Error(enhancedMsg);
+    }
+
+    // General error with auto-detect - suggest trying specific language
+    if (isAutoDetect) {
+      const enhancedMsg = `${msg}. If this persists, try selecting a specific language ` +
+        `instead of auto-detect in Settings > Language.`;
+      throw new Error(enhancedMsg);
+    }
+
     throw new Error(msg);
   }
 }
@@ -407,6 +479,16 @@ export async function fetchSTTWithDiarization(
 ): Promise<STTDiarizationResult> {
   const { provider, selectedProvider, audio, language, enableDiarization = true } = params;
 
+  // Validate language compatibility with provider
+  const isAutoDetect = language === "auto" || language === "" || language === undefined;
+  if (isAutoDetect && provider?.supportsAutoDetect === false) {
+    const providerName = provider.name || provider.id || "This provider";
+    console.warn(
+      `[STT Diarization] Warning: ${providerName} may not support auto-detect language. ` +
+      `Consider selecting a specific language for better accuracy.`
+    );
+  }
+
   // Check if provider supports diarization
   const isDiarizationProvider =
     provider?.requiresSpecialHandler &&
@@ -422,7 +504,9 @@ export async function fetchSTTWithDiarization(
     try {
       // AssemblyAI uses undefined for auto-detection (omits language_code from request body)
       // This differs from template-based providers which use empty string in URL/form params
-      const effectiveLang = (!language || language === "auto") ? undefined : language;
+      // SECURITY: Sanitize language code before passing to API
+      const sanitizedLang = sanitizeLanguageCode(language);
+      const effectiveLang = (!sanitizedLang || sanitizedLang === "auto") ? undefined : sanitizedLang;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
         language: effectiveLang,
@@ -455,6 +539,16 @@ export async function fetchSTTWithDiarization(
       };
     } catch (error) {
       console.error("[STT Diarization] AssemblyAI error:", error);
+
+      // Provide helpful error recovery guidance for auto-detect failures
+      const isAutoDetect = language === "auto" || language === "" || language === undefined;
+      if (isAutoDetect) {
+        const msg = error instanceof Error ? error.message : String(error);
+        const enhancedMsg = `${msg}. If this persists with auto-detect, try selecting ` +
+          `a specific language in Settings > Language.`;
+        throw new Error(enhancedMsg);
+      }
+
       throw error;
     }
   }
@@ -482,4 +576,50 @@ export function providerSupportsDiarization(provider: TYPE_PROVIDER | undefined)
     provider?.requiresSpecialHandler === true &&
     provider?.specialHandler === "assemblyai-diarization"
   );
+}
+
+/**
+ * Checks if a provider supports automatic language detection.
+ * Returns true if provider explicitly supports auto-detect, false otherwise.
+ *
+ * Note: Custom providers (isCustom=true) return true by default since
+ * we can't validate their capabilities.
+ *
+ * @param provider - The STT provider to check
+ * @returns true if provider supports auto-detect, false otherwise
+ */
+export function providerSupportsAutoDetect(provider: TYPE_PROVIDER | undefined): boolean {
+  if (!provider) return false;
+
+  // Custom providers: assume they support auto-detect (user configured them)
+  if (provider.isCustom) return true;
+
+  // Check the supportsAutoDetect flag
+  return provider.supportsAutoDetect === true;
+}
+
+/**
+ * Validates that the selected language is compatible with the provider.
+ * Returns a warning message if there's a potential compatibility issue.
+ *
+ * @param provider - The STT provider
+ * @param language - The selected language code ("auto", specific code, or undefined)
+ * @returns Warning message if incompatible, undefined if compatible
+ */
+export function validateLanguageProviderCompatibility(
+  provider: TYPE_PROVIDER | undefined,
+  language: string | undefined
+): string | undefined {
+  if (!provider) return undefined;
+
+  const isAutoDetect = language === "auto" || language === "" || language === undefined;
+
+  if (isAutoDetect && !providerSupportsAutoDetect(provider)) {
+    const providerName = provider.name || provider.id || "This provider";
+    return `${providerName} may not support auto-detect. ` +
+      `Consider selecting a specific language for better accuracy. ` +
+      `Providers like Google STT and Azure require a language code.`;
+  }
+
+  return undefined;
 }
