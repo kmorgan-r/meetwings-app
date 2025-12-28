@@ -1,6 +1,5 @@
 import { PageLayout } from "@/layouts";
-import { DiarizationSettings } from "../dev/components/speaker-profiles/DiarizationSettings";
-import { SpeakerProfiles } from "../dev/components/speaker-profiles/SpeakerProfiles";
+import { DiarizationSettings, SpeakerProfiles } from "./components";
 
 const Speakers = () => {
   return (
