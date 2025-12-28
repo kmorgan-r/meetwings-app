@@ -13,6 +13,8 @@ import {
   Responses,
   CostTracking,
   ContextMemory,
+  Speakers,
+  Language,
 } from "@/pages";
 import { DashboardLayout } from "@/layouts";
 
@@ -33,6 +35,8 @@ export default function AppRoutes() {
           <Route path="/responses" element={<Responses />} />
           <Route path="/cost-tracking" element={<CostTracking />} />
           <Route path="/context-memory" element={<ContextMemory />} />
+          <Route path="/speakers" element={<Speakers />} />
+          <Route path="/language" element={<Language />} />
           <Route path="/dev-space" element={<DevSpace />} />
         </Route>
       </Routes>

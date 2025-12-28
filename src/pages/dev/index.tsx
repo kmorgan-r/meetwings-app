@@ -1,4 +1,4 @@
-import { AIProviders, STTProviders, SpeakerProfiles, DiarizationSettings } from "./components";
+import { AIProviders, STTProviders } from "./components";
 import Contribute from "@/components/Contribute";
 import { useSettings } from "@/hooks";
 import { PageLayout } from "@/layouts";
@@ -9,17 +9,11 @@ const DevSpace = () => {
   return (
     <PageLayout title="Dev Space" description="Manage your dev space">
       <Contribute />
-      {/* Provider Selection */}
+      {/* AI Provider Selection */}
       <AIProviders {...settings} />
 
       {/* STT Providers */}
       <STTProviders {...settings} />
-
-      {/* Speaker Diarization Settings */}
-      <DiarizationSettings />
-
-      {/* Speaker Profiles for Voice Enrollment */}
-      <SpeakerProfiles />
     </PageLayout>
   );
 };

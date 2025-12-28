@@ -65,4 +65,8 @@ export type IContextType = {
   setSttTranslationEnabled: (enabled: boolean) => void;
   sttTranslationLanguage: string;
   setSttTranslationLanguage: (language: string) => void;
+
+  // Response language setting (for AI responses)
+  responseLanguage: string;
+  setResponseLanguage: (language: string) => void;
 };
