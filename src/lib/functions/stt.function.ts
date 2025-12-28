@@ -92,18 +92,44 @@ async function fetchPluelySTT(audio: File | Blob): Promise<string> {
   }
 }
 
+/**
+ * Parameters for STT transcription.
+ */
 export interface STTParams {
+  /** The STT provider configuration */
   provider: TYPE_PROVIDER | undefined;
+  /** Selected provider with API credentials */
   selectedProvider: {
     provider: string;
     variables: Record<string, string>;
   };
+  /** Audio file to transcribe */
   audio: File | Blob;
-  language?: string; // ISO 639-1 language code (e.g., "en", "es", "fr")
+  /**
+   * Language code for speech recognition.
+   * - ISO 639-1 code (e.g., "en", "es", "fr") for specific language
+   * - "auto" for automatic language detection (provider-dependent)
+   * - undefined defaults to "en" for template-based providers, or auto-detect for AssemblyAI
+   *
+   * Note: Auto-detect support varies by provider. Template-based providers receive an empty
+   * string which most interpret as auto-detect. AssemblyAI omits the language_code field.
+   */
+  language?: string;
 }
 
 /**
- * Transcribes audio and returns either the transcription or an error/warning message as a single string.
+ * Transcribes audio using the configured STT provider.
+ *
+ * @param params - The STT parameters including provider, audio, and language settings
+ * @returns The transcribed text, or an error message if transcription fails
+ *
+ * @example
+ * // With specific language
+ * const text = await fetchSTT({ provider, selectedProvider, audio, language: "en" });
+ *
+ * @example
+ * // With auto-detect
+ * const text = await fetchSTT({ provider, selectedProvider, audio, language: "auto" });
  */
 export async function fetchSTT(params: STTParams): Promise<string> {
   let warnings: string[] = [];
@@ -131,8 +157,10 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       }
 
       console.log("[STT] Using AssemblyAI special handler for diarization");
-      // Treat "auto" as undefined for AssemblyAI auto-detection
-      const effectiveLang = language === "auto" ? undefined : language;
+      // AssemblyAI uses undefined for auto-detection (omits language_code from request body)
+      // This differs from template-based providers which use empty string in URL/form params
+      // AssemblyAI's API: when language_code is omitted, it auto-detects the language
+      const effectiveLang = (!language || language === "auto") ? undefined : language;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
         language: effectiveLang,
@@ -163,8 +191,11 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     // }
 
     // Build variable map
-    // Treat "auto" as auto-detect (empty language for providers to detect automatically)
-    const effectiveLanguage = language === "auto" ? "" : (language || "");
+    // Template-based providers (OpenAI, Groq, Deepgram, etc.) use CURL templates with {{LANGUAGE}}
+    // - "auto" → empty string: most providers auto-detect when language param is empty
+    // - undefined → "en": safe fallback for providers that require a language code
+    // Note: This differs from AssemblyAI which uses undefined to omit the language_code field entirely
+    const effectiveLanguage = language === "auto" ? "" : (language || "en");
     const allVariables: Record<string, string> = {
       ...Object.fromEntries(
         Object.entries(selectedProvider.variables).map(([key, value]) => [
@@ -344,6 +375,13 @@ export interface STTDiarizationResult {
   hasDiarization: boolean;
 }
 
+/**
+ * Extended parameters for STT with speaker diarization support.
+ * Inherits language handling from STTParams:
+ * - "auto" triggers auto-detection (AssemblyAI omits language_code)
+ * - undefined defaults to auto-detect for AssemblyAI
+ * - Specific language codes are passed directly to the provider
+ */
 export interface STTDiarizationParams extends STTParams {
   /** Enable speaker diarization (only works with compatible providers like AssemblyAI) */
   enableDiarization?: boolean;
@@ -352,6 +390,17 @@ export interface STTDiarizationParams extends STTParams {
 /**
  * Transcribes audio with optional speaker diarization.
  * Returns structured entries with speaker information when using a diarization-enabled provider.
+ *
+ * @param params - The STT parameters including provider, audio, language, and diarization settings
+ * @returns Object containing transcription text, individual entries with speaker info, and diarization status
+ *
+ * @example
+ * // With auto-detect language and diarization
+ * const result = await fetchSTTWithDiarization({
+ *   provider, selectedProvider, audio,
+ *   language: "auto",
+ *   enableDiarization: true
+ * });
  */
 export async function fetchSTTWithDiarization(
   params: STTDiarizationParams
@@ -371,8 +420,9 @@ export async function fetchSTTWithDiarization(
     }
 
     try {
-      // Treat "auto" as undefined for AssemblyAI auto-detection
-      const effectiveLang = language === "auto" ? undefined : language;
+      // AssemblyAI uses undefined for auto-detection (omits language_code from request body)
+      // This differs from template-based providers which use empty string in URL/form params
+      const effectiveLang = (!language || language === "auto") ? undefined : language;
       const result = await fetchAssemblyAIWithDiarization(audio, {
         apiKey,
         language: effectiveLang,

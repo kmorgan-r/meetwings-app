@@ -47,17 +47,6 @@ const Language = () => {
       title="Language"
       description="Configure language settings for responses and speech translation"
     >
-      {!hasActiveLicense && (
-        <div className="p-4 bg-primary/10 border border-primary/20 rounded-lg">
-          <p className="text-[10px] lg:text-sm text-foreground font-medium mb-2">
-            🔒 Premium Features
-          </p>
-          <p className="text-[10px] lg:text-sm text-muted-foreground">
-            Response language customization requires an active license to use.
-          </p>
-        </div>
-      )}
-
       {/* Speech Recognition Language Section */}
       <div className="space-y-4">
         <Header
@@ -90,6 +79,14 @@ const Language = () => {
           description="Select the language for AI responses. Setting applies globally to all providers and conversations. Language support may vary depending on your selected LLM provider"
           isMainTitle
         />
+
+        {!hasActiveLicense && (
+          <div className="p-3 bg-primary/10 border border-primary/20 rounded-lg">
+            <p className="text-[10px] lg:text-xs text-muted-foreground">
+              🔒 Response language customization requires an active license.
+            </p>
+          </div>
+        )}
 
         <div className="max-w-md">
           <Selection
