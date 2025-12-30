@@ -1,5 +1,5 @@
 import { fetchSTT } from "@/lib";
-import { UseCompletionReturn } from "@/types";
+import { UseCompletionReturn, SpeakerInfo } from "@/types";
 import { useMicVAD } from "@ricky0123/vad-react";
 import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
 import { useState } from "react";
@@ -77,7 +77,9 @@ const AutoSpeechVADInternal = ({
 
         setIsTranscribing(true);
 
-        // Use the fetchSTT function for all providers
+        // Microphone audio always uses standard STT (no diarization)
+        // Diarization is only for system audio (handled in useMeetingAudio.ts)
+        // This ensures microphone audio is always labeled as "You"
         transcription = await fetchSTT({
           provider: usePluelyAPI ? undefined : providerConfig,
           selectedProvider: selectedSttProvider,
@@ -88,7 +90,13 @@ const AutoSpeechVADInternal = ({
         if (transcription) {
           if (meetingAssistMode && addMeetingTranscript) {
             // In Meeting Assist Mode, accumulate transcripts instead of auto-submitting
-            const timestamp = addMeetingTranscript(transcription);
+            // Phase 1: Label all microphone audio as "You"
+            const microphoneSpeaker: SpeakerInfo = {
+              speakerId: 'user',
+              speakerLabel: 'You',
+              confirmed: true,
+            };
+            const timestamp = addMeetingTranscript(transcription, microphoneSpeaker, 'microphone');
 
             // Translate in background if enabled
             if (translationEnabled && updateTranscriptTranslation) {

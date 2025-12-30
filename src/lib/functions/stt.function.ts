@@ -496,7 +496,8 @@ export async function fetchSTTWithDiarization(
 
   if (isDiarizationProvider && enableDiarization) {
     // Use AssemblyAI with diarization
-    const apiKey = selectedProvider.variables?.API_KEY;
+    // Check for API key in both cases (api_key and API_KEY)
+    const apiKey = selectedProvider.variables?.API_KEY || selectedProvider.variables?.api_key;
     if (!apiKey) {
       throw new Error("AssemblyAI API key is required for speaker diarization");
     }

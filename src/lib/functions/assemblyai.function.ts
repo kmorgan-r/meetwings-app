@@ -228,6 +228,16 @@ export async function fetchAssemblyAIWithDiarization(
     })
   );
 
+  console.log("[AssemblyAI] Raw utterances from API:", {
+    utteranceCount: utterances.length,
+    utterances: utterances.map((u) => ({
+      speaker: u.speaker,
+      text: u.text.substring(0, 50) + (u.text.length > 50 ? "..." : ""),
+      confidence: u.confidence,
+    })),
+    fullText: result.text?.substring(0, 100),
+  });
+
   return {
     transcription: result.text || "",
     utterances,

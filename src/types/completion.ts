@@ -4,11 +4,12 @@
  * Speaker information for diarization.
  */
 export interface SpeakerInfo {
-  speakerId: string; // "A", "B", "C" from AssemblyAI
+  speakerId: string; // "A", "B", "C" from AssemblyAI, or "user" for microphone
   speakerLabel?: string; // "You", "Sarah - Client", or undefined
   speakerProfileId?: string; // Reference to enrolled profile
   confidence?: number; // 0-1 match confidence
   needsConfirmation?: boolean; // True if medium confidence, awaiting user input
+  confirmed?: boolean; // True if label is finalized (user confirmed or from reliable source)
 }
 
 /**
@@ -22,6 +23,7 @@ export interface TranscriptEntry {
   // Speaker diarization fields
   speaker?: SpeakerInfo;
   audioChunkId?: string; // Reference for embedding extraction
+  audioSource?: 'microphone' | 'system'; // Where the audio came from
 }
 
 export interface AttachedFile {
@@ -42,6 +44,10 @@ export interface ChatMessage {
   translation?: string;
   /** Translation error if translation failed */
   translationError?: string;
+  /** Speaker info for meeting transcripts (You vs Guest) */
+  speaker?: SpeakerInfo;
+  /** Audio source for meeting transcripts */
+  audioSource?: 'microphone' | 'system';
 }
 
 export interface ChatConversation {

@@ -12,4 +12,3 @@ export * from "./Empty";
 export * from "./Markdown/copy-button";
 export * from "./Icons";
 export * from "./SpeakerTaggingPopover";
-export * from "./SpeakerConfirmation";
