@@ -41,7 +41,9 @@ async function uploadAudio(audio: Blob, apiKey: string): Promise<string> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`AssemblyAI upload failed: ${response.status} - ${errorText}`);
+    // Security: Never expose full error response (may contain API key)
+    // Only expose HTTP status for debugging
+    throw new Error(`AssemblyAI upload failed: ${response.status}`);
   }
 
   const data = await response.json();
@@ -81,7 +83,9 @@ async function createTranscript(
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`AssemblyAI transcript creation failed: ${response.status} - ${errorText}`);
+    // Security: Never expose full error response (may contain API key)
+    // Only expose HTTP status for debugging
+    throw new Error(`AssemblyAI transcript creation failed: ${response.status}`);
   }
 
   const data = await response.json();
@@ -107,7 +111,9 @@ async function pollForCompletion(
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`AssemblyAI polling failed: ${response.status} - ${errorText}`);
+      // Security: Never expose full error response (may contain API key)
+      // Only expose HTTP status for debugging
+      throw new Error(`AssemblyAI polling failed: ${response.status}`);
     }
 
     const result = await response.json();
@@ -117,6 +123,7 @@ async function pollForCompletion(
     }
 
     if (result.status === "error") {
+      // Note: result.error is from transcript result, not HTTP auth error, safe to expose
       throw new Error(`AssemblyAI transcription failed: ${result.error}`);
     }
 

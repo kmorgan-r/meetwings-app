@@ -69,6 +69,16 @@ export async function analyzePitch(audioBlob: Blob): Promise<PitchAnalysisResult
     const hopSize = 512;
     const pitchSamples: number[] = [];
 
+    // Critical: Validate audio has enough samples for analysis
+    // Without this check, audio shorter than windowSize would silently produce
+    // zero pitch samples, leading to confusing "Insufficient valid pitch" errors.
+    if (samples.length < windowSize) {
+      throw new Error(
+        `Audio too short for pitch analysis: ${samples.length} samples (minimum ${windowSize} required). ` +
+        `Duration: ${(samples.length / sampleRate).toFixed(2)}s`
+      );
+    }
+
     for (let i = 0; i < samples.length - windowSize; i += hopSize) {
       const window = new Float32Array(samples.slice(i, i + windowSize));
       const pitch = detectPitch(window, sampleRate);

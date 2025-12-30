@@ -54,6 +54,10 @@ const MEETING_VAD_CONFIG = {
   max_recording_duration_secs: 180,
 };
 
+// Maximum queue size to prevent unbounded memory growth when STT is slower than audio capture
+// At ~50-200KB per segment, 50 segments = 2.5-10MB max memory usage (reasonable buffer)
+const MAX_QUEUE_SIZE = 50;
+
 export function useMeetingAudio({
   enabled,
   onSystemAudioTranscript,
@@ -74,6 +78,7 @@ export function useMeetingAudio({
   const audioBufferRef = useRef(audioBuffer);
   const onSystemAudioTranscriptRef = useRef(onSystemAudioTranscript);
   const onErrorRef = useRef(onError);
+  const droppedCountRef = useRef(0);
 
   // Keep refs in sync
   useEffect(() => {
@@ -98,6 +103,12 @@ export function useMeetingAudio({
     while (processingQueueRef.current.length > 0) {
       // Check if still enabled before processing each item
       if (!enabledRef.current) {
+        const discardedCount = processingQueueRef.current.length;
+        if (discardedCount > 0) {
+          console.warn(`[MeetingAudio] Meeting mode disabled. Discarding ${discardedCount} queued audio segment(s)`);
+          // Notify user about discarded segments
+          onErrorRef.current?.(new Error(`Meeting mode stopped. ${discardedCount} audio segment${discardedCount > 1 ? 's were' : ' was'} not transcribed.`));
+        }
         processingQueueRef.current = [];
         setHasQueuedAudio(false);
         break;
@@ -201,6 +212,21 @@ export function useMeetingAudio({
           if (!enabledRef.current) return;
 
           const base64Audio = event.payload as string;
+
+          // Prevent unbounded queue growth when STT is slower than audio capture
+          if (processingQueueRef.current.length >= MAX_QUEUE_SIZE) {
+            processingQueueRef.current.shift(); // Drop oldest segment
+            droppedCountRef.current++;
+            console.warn('[MeetingAudio] Queue full, dropping oldest segment');
+
+            // Notify user after significant drops (actionable threshold)
+            if (droppedCountRef.current === 10) {
+              onErrorRef.current?.(new Error(
+                'Meeting audio backlog detected. Consider using a faster STT provider.'
+              ));
+            }
+          }
+
           // Queue instead of dropping
           processingQueueRef.current.push(base64Audio);
           processQueue();
@@ -221,18 +247,24 @@ export function useMeetingAudio({
     return () => {
       console.log('[MeetingAudio] Cleaning up...');
 
-      // Only cleanup if setup completed
-      if (isSetupCompleteRef.current) {
-        if (unlistenSpeechStart) {
-          unlistenSpeechStart();
-        }
-        if (unlistenSpeechDetected) {
-          unlistenSpeechDetected();
-        }
-        invoke('stop_system_audio_capture').catch((err) => {
-          console.error('[MeetingAudio] Failed to stop capture:', err);
-        });
+      // Always attempt cleanup to prevent race conditions during async setup
+      // All operations below are safe to call regardless of setup completion state:
+      // - Event listener cleanup has null checks
+      // - stop_system_audio_capture has error handling (idempotent if not started)
+      // - Ref/state cleanup is always safe
+
+      // Cleanup event listeners (safe even if undefined)
+      if (unlistenSpeechStart) {
+        unlistenSpeechStart();
       }
+      if (unlistenSpeechDetected) {
+        unlistenSpeechDetected();
+      }
+
+      // Stop system audio capture (idempotent, handles "not started" gracefully)
+      invoke('stop_system_audio_capture').catch((err) => {
+        console.error('[MeetingAudio] Failed to stop capture:', err);
+      });
 
       // Phase 3: Force flush any remaining buffered audio for diarization
       // then clear the buffer (meeting ended)
@@ -241,12 +273,17 @@ export function useMeetingAudio({
         audioBufferRef.current.clear();
       }
 
-      // Clear queue on cleanup
+      // Clear queue on cleanup (log if discarding segments)
+      const queueLength = processingQueueRef.current.length;
+      if (queueLength > 0) {
+        console.log(`[MeetingAudio] Cleanup: Discarding ${queueLength} queued segment(s)`);
+      }
       processingQueueRef.current = [];
       isProcessingRef.current = false;
       setIsProcessing(false);
       setHasQueuedAudio(false);
       isSetupCompleteRef.current = false;
+      droppedCountRef.current = 0; // Reset for next session
     };
   }, [enabled, processQueue, outputDeviceId]);
 

@@ -56,7 +56,9 @@ export const Audio = ({
       console.log(`[Audio] Diarization batch ${batchId} processed with ${speakerCount} speakers`);
     },
     onError: (error) => {
-      console.error("[Audio] Diarization error:", error);
+      // Security: Sanitize error before logging (never expose API keys)
+      const sanitizedMessage = error instanceof Error ? error.message : String(error);
+      console.error("[Audio] Diarization error:", sanitizedMessage);
       // Don't show error to user - diarization is a background feature
     },
   });
