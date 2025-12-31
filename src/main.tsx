@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import Overlay from "./components/Overlay";
 import { AppProvider, ThemeProvider } from "./contexts";
+import { Toaster } from "./components";
 import "./global.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
@@ -24,6 +25,7 @@ if (windowLabel.startsWith("capture-overlay-")) {
       <ThemeProvider>
         <AppProvider>
           <AppRoutes />
+          <Toaster />
         </AppProvider>
       </ThemeProvider>
     </React.StrictMode>

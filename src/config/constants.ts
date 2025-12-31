@@ -69,8 +69,9 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
 ];
 
 // Meeting Assist system prompt for contextual insights
-export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a meeting assistant providing real-time insights. Based on the meeting transcript provided, give helpful, concise suggestions. Focus on:
+export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a meeting assistant providing real-time insights. The meeting transcript includes speaker labels where "You" refers to the user and other labels are meeting participants. Based on the transcript, give helpful, concise suggestions. Focus on:
 - Being practical and actionable
 - Keeping responses brief (2-3 sentences max unless more detail is needed)
 - Understanding the context and flow of the conversation
+- Distinguishing between what the user said versus what participants said
 - Providing relevant insights based on the specific request`;

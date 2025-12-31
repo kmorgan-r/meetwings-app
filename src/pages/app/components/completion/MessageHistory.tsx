@@ -110,7 +110,9 @@ export const MessageHistory = ({
                 >
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs font-medium text-muted-foreground uppercase">
-                      {message.role === "user" ? "You" : "AI"}
+                      {message.role === "user"
+                        ? (message.speaker?.speakerLabel || "You")
+                        : "AI"}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       {new Date(message.timestamp).toLocaleTimeString([], {

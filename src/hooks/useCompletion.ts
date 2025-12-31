@@ -22,7 +22,8 @@ import {
   summarizeConversation,
   shouldSummarize,
 } from "@/lib/functions/meeting-summarizer";
-import type { UsageData, TranscriptEntry } from "@/types";
+import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
+import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -44,6 +45,10 @@ interface ChatMessage {
   translation?: string;
   /** Translation error if translation failed */
   translationError?: string;
+  /** Speaker info for meeting transcripts (You vs Guest) */
+  speaker?: SpeakerInfo;
+  /** Audio source for meeting transcripts */
+  audioSource?: 'microphone' | 'system';
 }
 
 // TranscriptEntry is now imported from @/types
@@ -184,7 +189,11 @@ export const useCompletion = () => {
   }, []);
 
   // Meeting Assist Mode functions
-  const addMeetingTranscript = useCallback((transcript: string): number => {
+  const addMeetingTranscript = useCallback((
+    transcript: string,
+    speakerInfo?: SpeakerInfo,
+    audioSource?: 'microphone' | 'system'
+  ): number => {
     const timestamp = Date.now();
     if (!transcript.trim()) return timestamp;
 
@@ -192,6 +201,8 @@ export const useCompletion = () => {
     const entry: TranscriptEntry = {
       original: transcript,
       timestamp,
+      speaker: speakerInfo,
+      audioSource,
     };
     setMeetingTranscript((prev) => [...prev, entry]);
 
@@ -205,6 +216,8 @@ export const useCompletion = () => {
       role: "user",
       content: transcript,
       timestamp,
+      speaker: speakerInfo,
+      audioSource,
     };
 
     // Update ref immediately for sync
@@ -218,6 +231,48 @@ export const useCompletion = () => {
 
     return timestamp;
   }, []); // No dependencies - uses ref for conversation ID and functional setState for latest state
+
+  /**
+   * Adds multiple transcript entries from diarization result.
+   * Each entry may have speaker information attached.
+   */
+  const addMeetingTranscriptEntries = useCallback(
+    (entries: TranscriptEntry[]): void => {
+      if (entries.length === 0) return;
+
+      // Filter out empty entries
+      const validEntries = entries.filter((e) => e.original.trim());
+      if (validEntries.length === 0) return;
+
+      // Add all entries to meeting transcript
+      setMeetingTranscript((prev) => [...prev, ...validEntries]);
+
+      // Also add to conversation history as user messages (for display)
+      const conversationId =
+        currentConversationIdRef.current || generateConversationId("chat");
+      currentConversationIdRef.current = conversationId;
+
+      const userMessages: ChatMessage[] = validEntries.map((entry) => ({
+        id: generateMessageId("user", entry.timestamp),
+        role: "user" as const,
+        content: entry.original,
+        timestamp: entry.timestamp,
+      }));
+
+      // Update ref immediately for sync
+      conversationHistoryRef.current = [
+        ...conversationHistoryRef.current,
+        ...userMessages,
+      ];
+
+      setState((prev) => ({
+        ...prev,
+        currentConversationId: conversationId,
+        conversationHistory: [...prev.conversationHistory, ...userMessages],
+      }));
+    },
+    []
+  );
 
   // Update translation for a specific transcript entry (updates both meetingTranscript and conversationHistory)
   const updateTranscriptTranslation = useCallback(
@@ -251,6 +306,61 @@ export const useCompletion = () => {
     []
   );
 
+  /**
+   * Adds a transcript entry from system audio (other meeting participants).
+   * Labels as "Guest" with confirmed: false (can be updated by diarization later).
+   *
+   * Each entry gets a unique speakerId (guest_<timestamp>) so that diarization
+   * can update individual entries rather than all "Guest" entries at once.
+   */
+  const addSystemAudioTranscript = useCallback(
+    (text: string, timestamp: number): void => {
+      if (!text.trim()) return;
+
+      const entry: TranscriptEntry = {
+        original: text,
+        timestamp,
+        audioSource: 'system',
+        speaker: {
+          // Unique ID per entry so diarization can update individually
+          // After diarization, entries with same speaker get same speakerId
+          speakerId: SpeakerIdFactory.guest(timestamp),
+          speakerLabel: 'Guest',
+          confirmed: false, // Will be updated by diarization in Phase 3
+        },
+      };
+
+      // Just append - timestamps are monotonically increasing
+      setMeetingTranscript((prev) => [...prev, entry]);
+
+      // Also add to conversation history
+      const conversationId =
+        currentConversationIdRef.current || generateConversationId("chat");
+      currentConversationIdRef.current = conversationId;
+
+      const userMessage: ChatMessage = {
+        id: generateMessageId("user", timestamp),
+        role: "user" as const,
+        content: text,
+        timestamp,
+        speaker: entry.speaker,
+        audioSource: entry.audioSource,
+      };
+
+      conversationHistoryRef.current = [
+        ...conversationHistoryRef.current,
+        userMessage,
+      ];
+
+      setState((prev) => ({
+        ...prev,
+        currentConversationId: conversationId,
+        conversationHistory: [...prev.conversationHistory, userMessage],
+      }));
+    },
+    []
+  );
+
   const clearMeetingTranscript = useCallback(() => {
     setMeetingTranscript([]);
     // Also clear session speaker mapping
@@ -268,6 +378,7 @@ export const useCompletion = () => {
 
   /**
    * Assigns a speaker label to a speaker ID and propagates to all matching entries.
+   * Use this for manual assignment (e.g., user says "Speaker 1 is John").
    */
   const assignSpeaker = useCallback(
     (speakerId: string, label: string, profileId?: string) => {
@@ -293,6 +404,62 @@ export const useCompletion = () => {
           return entry;
         })
       );
+    },
+    []
+  );
+
+  /**
+   * Updates speaker info for a specific transcript entry by timestamp.
+   * Used by Phase 3 diarization to assign speakers to individual entries.
+   *
+   * @param timestamp - The entry's timestamp (unique identifier)
+   * @param speakerInfo - The new speaker info (speakerId, speakerLabel, etc.)
+   */
+  const updateEntrySpeaker = useCallback(
+    (timestamp: number, speakerInfo: SpeakerInfo) => {
+      // Update meeting transcript
+      setMeetingTranscript((prev) =>
+        prev.map((entry) => {
+          if (entry.timestamp === timestamp) {
+            return {
+              ...entry,
+              speaker: speakerInfo,
+            };
+          }
+          return entry;
+        })
+      );
+
+      // Update conversation history (for conversation mode display)
+      conversationHistoryRef.current = conversationHistoryRef.current.map((msg) => {
+        if (msg.role === "user" && msg.timestamp === timestamp) {
+          return {
+            ...msg,
+            speaker: speakerInfo,
+          };
+        }
+        return msg;
+      });
+
+      // Update state as well
+      setState((prev) => ({
+        ...prev,
+        conversationHistory: conversationHistoryRef.current,
+      }));
+
+      // If this speaker has a session mapping, use it; otherwise add mapping
+      // Only update if we have both speakerId and speakerLabel (required for mapping)
+      const { speakerId, speakerLabel, speakerProfileId } = speakerInfo;
+      if (speakerId && speakerLabel) {
+        setSessionSpeakerMap((prev) => ({
+          ...prev,
+          [speakerId]: {
+            label: speakerLabel, // Now guaranteed to be string
+            profileId: speakerProfileId,
+            assignedAt: Date.now(),
+          },
+        }));
+      }
     },
     []
   );
@@ -483,8 +650,20 @@ export const useCompletion = () => {
         return;
       }
 
-      // Build the meeting context prompt (extract original text from each entry)
-      const meetingContext = meetingTranscript.map((entry) => entry.original).join("\n\n");
+      // Build the meeting context prompt with speaker attribution
+      const meetingContext = meetingTranscript.map((entry) => {
+        // Extract speaker label with fallback logic
+        const speakerLabel = entry.speaker?.speakerLabel ||
+          (entry.audioSource === 'microphone' ? 'You' :
+           entry.audioSource === 'system' ? 'Guest' : null);
+
+        if (speakerLabel) {
+          return `${speakerLabel}: ${entry.original}`;
+        }
+
+        // No speaker info - return text as-is (backwards compatible)
+        return entry.original;
+      }).join("\n\n");
       const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## Your Request: ${action}`;
 
       // Generate unique request ID
@@ -1552,11 +1731,14 @@ export const useCompletion = () => {
     setMeetingAssistMode,
     meetingTranscript,
     addMeetingTranscript,
+    addMeetingTranscriptEntries,
+    addSystemAudioTranscript,
     updateTranscriptTranslation,
     clearMeetingTranscript,
     submitWithMeetingContext,
     // Speaker Diarization
     sessionSpeakerMap,
     assignSpeaker,
+    updateEntrySpeaker,
   };
 };
