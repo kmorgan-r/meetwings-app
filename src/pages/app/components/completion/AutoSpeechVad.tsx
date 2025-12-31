@@ -1,5 +1,5 @@
 import { fetchSTT } from "@/lib";
-import { UseCompletionReturn, SpeakerInfo } from "@/types";
+import { UseCompletionReturn, SpeakerInfo, SpeakerIdFactory } from "@/types";
 import { useMicVAD } from "@ricky0123/vad-react";
 import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
 import { useState } from "react";
@@ -92,7 +92,7 @@ const AutoSpeechVADInternal = ({
             // In Meeting Assist Mode, accumulate transcripts instead of auto-submitting
             // Phase 1: Label all microphone audio as "You"
             const microphoneSpeaker: SpeakerInfo = {
-              speakerId: 'user',
+              speakerId: SpeakerIdFactory.you(),
               speakerLabel: 'You',
               confirmed: true,
             };

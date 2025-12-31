@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { InfoIcon, MicIcon, LoaderCircleIcon, Users } from "lucide-react";
+import { toast } from "sonner";
 import {
   Popover,
   PopoverContent,
@@ -11,6 +12,7 @@ import { UseCompletionReturn } from "@/types";
 import { useApp } from "@/contexts";
 import { useMeetingAudio, useTranslation, useSpeakerDiarization } from "@/hooks";
 import { STORAGE_KEYS } from "@/config";
+import { secureGet, migrateFromLocalStorage } from "@/lib";
 
 export const Audio = ({
   micOpen,
@@ -36,9 +38,28 @@ export const Audio = ({
     return localStorage.getItem(STORAGE_KEYS.SPEAKER_DIARIZATION_ENABLED) === "true";
   }, []);
 
-  const assemblyAIKey = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "";
+  // Load API key from secure storage (with migration from localStorage)
+  const [assemblyAIKey, setAssemblyAIKey] = useState("");
+
+  useEffect(() => {
+    const loadApiKey = async () => {
+      try {
+        // Migrate from localStorage if exists (one-time migration)
+        await migrateFromLocalStorage(STORAGE_KEYS.ASSEMBLYAI_API_KEY, true);
+
+        // Load from secure storage
+        const key = await secureGet(STORAGE_KEYS.ASSEMBLYAI_API_KEY);
+        setAssemblyAIKey(key || "");
+      } catch (error) {
+        console.error("[Audio] Failed to load API key from secure storage:", error);
+        // Fallback to localStorage if secure storage fails
+        if (typeof window !== "undefined") {
+          setAssemblyAIKey(localStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "");
+        }
+      }
+    };
+
+    loadApiKey();
   }, []);
 
   // Keep meetingTranscript in a ref for the getTranscriptEntries callback
@@ -102,10 +123,12 @@ export const Audio = ({
     enabled: meetingAssistMode && enableVAD,
     onSystemAudioTranscript: handleSystemAudioTranscript,
     onError: (error) => {
-      // Log but don't show error to user - system audio capture is optional
-      // It requires special setup (Virtual Audio Cable or Windows loopback support)
-      console.warn('[Audio] System audio capture unavailable:', error.message);
-      console.info('[Audio] Tip: Install VB-Cable for system audio capture, or use microphone-only mode');
+      // Show toast notification for audio capture failures
+      console.error('[Audio] System audio capture error:', error.message);
+      toast.error("Audio Capture Failed", {
+        description: error.message,
+        duration: 5000,
+      });
     },
     sttProvider: sttProviderConfig,
     selectedSttProvider,

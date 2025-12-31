@@ -1,4 +1,4 @@
-import { UseCompletionReturn, SpeakerInfo } from "@/types";
+import { UseCompletionReturn, SpeakerInfo, SpeakerId, SpeakerIdParser } from "@/types";
 import { Button, ScrollArea, SpeakerTaggingPopover } from "@/components";
 import { TrashIcon, UsersIcon, Loader2 } from "lucide-react";
 import { useEffect, useRef } from "react";
@@ -15,8 +15,34 @@ const SPEAKER_COLORS: Record<string, string> = {
   user: "bg-primary/20 text-primary border-primary/30",
 };
 
+/**
+ * Get speaker color based on speaker ID.
+ * Handles both new prefixed IDs and legacy IDs.
+ */
 function getSpeakerColor(speakerId: string): string {
-  // Check for "You" or user profile
+  // Handle new prefixed speaker IDs
+  const idType = SpeakerIdParser.getType(speakerId as SpeakerId);
+
+  if (idType === "source") {
+    if (SpeakerIdParser.isYou(speakerId as SpeakerId)) {
+      return SPEAKER_COLORS.user;
+    }
+    // Guest - use default color
+    return SPEAKER_COLORS.A;
+  }
+
+  if (idType === "diarization") {
+    const label = SpeakerIdParser.getDiarizationLabel(speakerId as SpeakerId);
+    return SPEAKER_COLORS[label || "A"] || SPEAKER_COLORS.A;
+  }
+
+  if (idType === "profile") {
+    // For profiles, we could maintain consistent colors per profile
+    // For now, use a default color
+    return SPEAKER_COLORS.A;
+  }
+
+  // Legacy format fallback
   if (speakerId === "user" || speakerId === "You") {
     return SPEAKER_COLORS.user;
   }
@@ -97,7 +123,7 @@ export const MeetingTranscriptPanel = ({
         <div className="p-4 space-y-3">
           {meetingTranscript.map((entry, index) => {
             const speakerLabel = getSpeakerLabel(entry.speaker);
-            const speakerId = entry.speaker?.speakerId || "A";
+            const speakerId = entry.speaker?.speakerId || "diarization_A";
             const hasSpeaker = !!entry.speaker;
 
             return (

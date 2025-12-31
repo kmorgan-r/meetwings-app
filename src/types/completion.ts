@@ -1,10 +1,19 @@
 // Completion-related types
+import type { SpeakerId } from "./speaker-id";
 
 /**
  * Speaker information for diarization.
  */
 export interface SpeakerInfo {
-  speakerId: string; // "A", "B", "C" from AssemblyAI, or "user" for microphone
+  /**
+   * Unique speaker identifier with type-safe prefix.
+   * Format examples:
+   * - `diarization_A` - AssemblyAI diarization label
+   * - `source_you` - User's microphone
+   * - `source_guest_1234567890` - System audio before diarization
+   * - `profile_uuid` - Matched speaker profile
+   */
+  speakerId: SpeakerId;
   speakerLabel?: string; // "You", "Sarah - Client", or undefined
   speakerProfileId?: string; // Reference to enrolled profile
   confidence?: number; // 0-1 match confidence

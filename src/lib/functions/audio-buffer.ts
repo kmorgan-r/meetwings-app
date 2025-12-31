@@ -51,7 +51,9 @@ export class DiarizationAudioBuffer {
   addSegment(audio: Blob, timestamp: number, entryId: string): void {
     this.segments.push({ audio, timestamp, transcriptEntryId: entryId });
 
-    if (this.firstSegmentTime === null) {
+    // Check BOTH firstSegmentTime AND batchTimer to prevent race condition
+    // where multiple rapid calls could each start a timer
+    if (this.firstSegmentTime === null && this.batchTimer === null) {
       this.firstSegmentTime = timestamp;
       this.startBatchTimer();
     }

@@ -5,16 +5,37 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { InfoIcon, UsersIcon, DollarSignIcon, KeyIcon } from "lucide-react";
 import { STORAGE_KEYS } from "@/config";
-import { safeLocalStorage } from "@/lib";
+import { safeLocalStorage, secureGet, secureSet, migrateFromLocalStorage } from "@/lib";
 
 export function DiarizationSettings() {
   const [diarizationEnabled, setDiarizationEnabled] = useState(() => {
     return safeLocalStorage.getItem(STORAGE_KEYS.SPEAKER_DIARIZATION_ENABLED) === "true";
   });
 
-  const [assemblyAIKey, setAssemblyAIKey] = useState(() => {
-    return safeLocalStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "";
-  });
+  const [assemblyAIKey, setAssemblyAIKey] = useState("");
+  const [isLoadingKey, setIsLoadingKey] = useState(true);
+
+  // Load API key from secure storage on mount
+  useEffect(() => {
+    const loadApiKey = async () => {
+      try {
+        // Migrate from localStorage if exists
+        await migrateFromLocalStorage(STORAGE_KEYS.ASSEMBLYAI_API_KEY, true);
+
+        // Load from secure storage
+        const key = await secureGet(STORAGE_KEYS.ASSEMBLYAI_API_KEY);
+        setAssemblyAIKey(key || "");
+      } catch (error) {
+        console.error("[DiarizationSettings] Failed to load API key:", error);
+        // Fallback to localStorage if secure storage fails
+        setAssemblyAIKey(safeLocalStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "");
+      } finally {
+        setIsLoadingKey(false);
+      }
+    };
+
+    loadApiKey();
+  }, []);
 
   useEffect(() => {
     safeLocalStorage.setItem(
@@ -23,12 +44,27 @@ export function DiarizationSettings() {
     );
   }, [diarizationEnabled]);
 
+  // Save API key to secure storage (not localStorage!)
   useEffect(() => {
-    safeLocalStorage.setItem(
-      STORAGE_KEYS.ASSEMBLYAI_API_KEY,
-      assemblyAIKey
-    );
-  }, [assemblyAIKey]);
+    if (isLoadingKey) return; // Skip initial load
+
+    const saveApiKey = async () => {
+      try {
+        if (assemblyAIKey) {
+          await secureSet(STORAGE_KEYS.ASSEMBLYAI_API_KEY, assemblyAIKey);
+        } else {
+          // Clear if empty
+          await secureSet(STORAGE_KEYS.ASSEMBLYAI_API_KEY, "");
+        }
+      } catch (error) {
+        console.error("[DiarizationSettings] Failed to save API key to secure storage:", error);
+        // Fallback to localStorage only if secure storage fails
+        safeLocalStorage.setItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY, assemblyAIKey);
+      }
+    };
+
+    saveApiKey();
+  }, [assemblyAIKey, isLoadingKey]);
 
   return (
     <div className="space-y-4">

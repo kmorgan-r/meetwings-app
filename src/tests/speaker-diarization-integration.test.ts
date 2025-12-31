@@ -196,7 +196,7 @@ describe('Speaker Diarization Integration Tests', () => {
       expect(mockUpdateEntrySpeaker).toHaveBeenCalledWith(
         batchStartTime + 500,
         expect.objectContaining({
-          speakerId: 'john-id',
+          speakerId: 'profile_john-id',
           speakerLabel: 'John Doe',
           confirmed: true,
         })
@@ -206,7 +206,7 @@ describe('Speaker Diarization Integration Tests', () => {
       expect(mockUpdateEntrySpeaker).toHaveBeenCalledWith(
         batchStartTime + 2000,
         expect.objectContaining({
-          speakerId: 'sarah-id',
+          speakerId: 'profile_sarah-id',
           speakerLabel: 'Sarah Smith',
           confirmed: true,
         })
@@ -216,7 +216,7 @@ describe('Speaker Diarization Integration Tests', () => {
       expect(mockUpdateEntrySpeaker).toHaveBeenCalledWith(
         batchStartTime + 4000,
         expect.objectContaining({
-          speakerId: 'auto-speaker-1',
+          speakerId: 'profile_auto-speaker-1',
           speakerLabel: 'Speaker 1',
           confirmed: false,
         })
@@ -320,8 +320,8 @@ describe('Speaker Diarization Integration Tests', () => {
 
       // Both batches should use same speaker ID
       const calls = mockUpdateEntrySpeaker.mock.calls;
-      expect(calls[0][1].speakerId).toBe('consistent-speaker');
-      expect(calls[1][1].speakerId).toBe('consistent-speaker');
+      expect(calls[0][1].speakerId).toBe('profile_consistent-speaker');
+      expect(calls[1][1].speakerId).toBe('profile_consistent-speaker');
     });
 
     it('should handle long meeting with performance optimization', async () => {

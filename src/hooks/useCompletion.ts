@@ -23,6 +23,7 @@ import {
   shouldSummarize,
 } from "@/lib/functions/meeting-summarizer";
 import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
+import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -323,7 +324,7 @@ export const useCompletion = () => {
         speaker: {
           // Unique ID per entry so diarization can update individually
           // After diarization, entries with same speaker get same speakerId
-          speakerId: `guest_${timestamp}`,
+          speakerId: SpeakerIdFactory.guest(timestamp),
           speakerLabel: 'Guest',
           confirmed: false, // Will be updated by diarization in Phase 3
         },

@@ -357,7 +357,7 @@ describe('useSpeakerDiarization', () => {
       expect(mockUpdateEntrySpeaker).toHaveBeenCalledWith(
         now,
         expect.objectContaining({
-          speakerId: 'existing-profile-1',
+          speakerId: 'profile_existing-profile-1',
           speakerLabel: 'John Doe',
           confirmed: true, // Should be confirmed since it matched a profile
         })

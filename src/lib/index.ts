@@ -1,4 +1,5 @@
 export * from "./storage";
+export * from "./secure-storage";
 export * from "./version";
 export * from "./functions";
 export * from "./curl-validator";
