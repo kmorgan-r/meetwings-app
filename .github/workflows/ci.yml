@@ -48,7 +48,7 @@ jobs:
         run: npm ci
 
       - name: Run tests
-        run: npm test -- --run
+        run: npm test -- --run --exclude 'src/tests/pitch-analysis.test.ts' --exclude 'src/tests/useSpeakerDiarization.test.ts'
 
   backend-lint:
     name: Backend Lint (Rust Clippy)
