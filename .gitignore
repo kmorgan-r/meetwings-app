@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Personal development scripts
+run-dev.ps1
+run-dev.bat
+create-shortcut.ps1
+
+# Documentation (private notes)
+docs/
