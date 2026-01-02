@@ -8,7 +8,7 @@ import {
   saveConversation,
   getConversationById,
   generateConversationTitle,
-  shouldUsePluelyAPI,
+  shouldUseMeetwingsAPI,
   MESSAGE_ID_OFFSET,
   generateConversationId,
   generateMessageId,
@@ -524,9 +524,9 @@ export const useCompletion = () => {
 
         let fullResponse = "";
 
-        const usePluelyAPI = await shouldUsePluelyAPI();
+        const useMeetwingsAPI = await shouldUseMeetwingsAPI();
         // Check if AI provider is configured
-        if (!selectedAIProvider.provider && !usePluelyAPI) {
+        if (!selectedAIProvider.provider && !useMeetwingsAPI) {
           setState((prev) => ({
             ...prev,
             error: "Please select an AI provider in settings",
@@ -537,7 +537,7 @@ export const useCompletion = () => {
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
-        if (!provider && !usePluelyAPI) {
+        if (!provider && !useMeetwingsAPI) {
           setState((prev) => ({
             ...prev,
             error: "Invalid provider selected",
@@ -557,7 +557,7 @@ export const useCompletion = () => {
           // Use the fetchAIResponse function with signal
           console.log("[Cost Tracking] About to call fetchAIResponse");
           for await (const chunk of fetchAIResponse({
-            provider: usePluelyAPI ? undefined : provider,
+            provider: useMeetwingsAPI ? undefined : provider,
             selectedProvider: selectedAIProvider,
             systemPrompt: systemPrompt || undefined,
             history: messageHistory,
@@ -689,8 +689,8 @@ export const useCompletion = () => {
       const signal = abortControllerRef.current.signal;
 
       try {
-        const usePluelyAPI = await shouldUsePluelyAPI();
-        if (!selectedAIProvider.provider && !usePluelyAPI) {
+        const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+        if (!selectedAIProvider.provider && !useMeetwingsAPI) {
           setState((prev) => ({
             ...prev,
             error: "Please select an AI provider in settings",
@@ -701,7 +701,7 @@ export const useCompletion = () => {
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
-        if (!provider && !usePluelyAPI) {
+        if (!provider && !useMeetwingsAPI) {
           setState((prev) => ({
             ...prev,
             error: "Invalid provider selected",
@@ -728,7 +728,7 @@ export const useCompletion = () => {
 
         // Use Meeting Assist system prompt for better context
         for await (const chunk of fetchAIResponse({
-          provider: usePluelyAPI ? undefined : provider,
+          provider: useMeetwingsAPI ? undefined : provider,
           selectedProvider: selectedAIProvider,
           systemPrompt: MEETING_ASSIST_SYSTEM_PROMPT,
           history: messageHistory,
@@ -874,14 +874,14 @@ export const useCompletion = () => {
     }
 
     // Get provider config for AI summarization
-    const usePluelyAPI = await shouldUsePluelyAPI();
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
     const provider = allAiProviders.find(p => p.id === selectedAIProvider.provider);
 
     // Trigger summarization asynchronously (don't await - non-blocking)
     summarizeConversation(
       state.currentConversationId,
       messages,
-      usePluelyAPI ? undefined : provider ? {
+      useMeetwingsAPI ? undefined : provider ? {
         provider,
         selectedProvider: selectedAIProvider,
       } : undefined
@@ -1067,7 +1067,7 @@ export const useCompletion = () => {
     };
 
     const handleStorageChange = async (e: StorageEvent) => {
-      if (e.key === "pluely-conversation-selected" && e.newValue) {
+      if (e.key === "meetwings-conversation-selected" && e.newValue) {
         try {
           const data = JSON.parse(e.newValue);
           const { id } = data;
@@ -1161,9 +1161,9 @@ export const useCompletion = () => {
 
             let fullResponse = "";
 
-            const usePluelyAPI = await shouldUsePluelyAPI();
+            const useMeetwingsAPI = await shouldUseMeetwingsAPI();
             // Check if AI provider is configured
-            if (!selectedAIProvider.provider && !usePluelyAPI) {
+            if (!selectedAIProvider.provider && !useMeetwingsAPI) {
               setState((prev) => ({
                 ...prev,
                 error: "Please select an AI provider in settings",
@@ -1174,7 +1174,7 @@ export const useCompletion = () => {
             const provider = allAiProviders.find(
               (p) => p.id === selectedAIProvider.provider
             );
-            if (!provider && !usePluelyAPI) {
+            if (!provider && !useMeetwingsAPI) {
               setState((prev) => ({
                 ...prev,
                 error: "Invalid provider selected",
@@ -1193,7 +1193,7 @@ export const useCompletion = () => {
 
             // Use the fetchAIResponse function with image and signal
             for await (const chunk of fetchAIResponse({
-              provider: usePluelyAPI ? undefined : provider,
+              provider: useMeetwingsAPI ? undefined : provider,
               selectedProvider: selectedAIProvider,
               systemPrompt: systemPrompt || undefined,
               history: messageHistory,
@@ -1460,7 +1460,7 @@ export const useCompletion = () => {
             setState((prev) => ({
               ...prev,
               error:
-                "Screen Recording permission required. Please enable it by going to System Settings > Privacy & Security > Screen & System Audio Recording. If you don't see Pluely in the list, click the '+' button to add it. If it's already listed, make sure it's enabled. Then restart the app.",
+                "Screen Recording permission required. Please enable it by going to System Settings > Privacy & Security > Screen & System Audio Recording. If you don't see Meetwings in the list, click the '+' button to add it. If it's already listed, make sure it's enabled. Then restart the app.",
             }));
             setIsScreenshotLoading(false);
             screenshotInitiatedByThisContext.current = false;

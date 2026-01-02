@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document outlines a **phased implementation plan** for reliable speaker identification in Pluely's Meeting Assist Mode. The approach prioritizes **shipping value incrementally** while building toward the full solution.
+This document outlines a **phased implementation plan** for reliable speaker identification in Meetwings's Meeting Assist Mode. The approach prioritizes **shipping value incrementally** while building toward the full solution.
 
 **Core Strategy:**
 1. **Phase 1:** Microphone audio = "You" (immediate value, zero risk)
@@ -1266,4 +1266,4 @@ const SPEAKER_COLORS = [
 
 - [AssemblyAI Speaker Diarization Docs](https://www.assemblyai.com/docs/speech-to-text/speaker-diarization)
 - [AssemblyAI Streaming FAQ](https://www.assemblyai.com/docs/faq/can-i-use-speaker-diarization-with-live-audio-transcription)
-- [Pluely Meeting Context Memory Plan](./MEETING_CONTEXT_MEMORY_PLAN.md)
+- [Meetwings Meeting Context Memory Plan](./MEETING_CONTEXT_MEMORY_PLAN.md)

@@ -1,4 +1,4 @@
-// Pluely macos speaker input and stream
+// Meetwings macos speaker input and stream
 use anyhow::Result;
 use futures_util::Stream;
 use ringbuf::{

@@ -28,7 +28,7 @@ export const Audio = ({
   updateEntrySpeaker,
   meetingTranscript,
 }: UseCompletionReturn) => {
-  const { selectedSttProvider, allSttProviders, pluelyApiEnabled, selectedAudioDevices, sttLanguage } =
+  const { selectedSttProvider, allSttProviders, meetwingsApiEnabled, selectedAudioDevices, sttLanguage } =
     useApp();
   const { translate, isEnabled: translationEnabled } = useTranslation();
 
@@ -138,7 +138,7 @@ export const Audio = ({
   });
 
   const speechProviderStatus = selectedSttProvider.provider;
-  const canUseVoice = pluelyApiEnabled || speechProviderStatus;
+  const canUseVoice = meetwingsApiEnabled || speechProviderStatus;
 
   return (
     <div className="flex items-center gap-1">

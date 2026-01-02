@@ -175,7 +175,9 @@ export const Providers = ({
       <div className="space-y-4 mt-2">
         {sttVariables
           ?.filter(
-            (variable) => variable?.key !== findKeyAndValue("api_key")?.key
+            (variable) =>
+              variable?.key !== findKeyAndValue("api_key")?.key &&
+              variable?.key !== "language" // Language is configured on the Language page
           )
           .map((variable) => {
             const getVariableValue = () => {

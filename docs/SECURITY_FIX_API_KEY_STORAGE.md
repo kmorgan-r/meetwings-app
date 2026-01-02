@@ -80,9 +80,9 @@ The encrypted data is stored in:
 
 ### Platform-Specific Paths
 
-- **Windows**: `C:\Users\<username>\AppData\Roaming\com.pluely.dev\`
-- **macOS**: `~/Library/Application Support/com.pluely.dev/`
-- **Linux**: `~/.local/share/com.pluely.dev/`
+- **Windows**: `C:\Users\<username>\AppData\Roaming\com.meetwings.dev\`
+- **macOS**: `~/Library/Application Support/com.meetwings.dev/`
+- **Linux**: `~/.local/share/com.meetwings.dev/`
 
 ## Migration Strategy
 

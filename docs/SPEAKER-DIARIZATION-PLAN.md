@@ -1,6 +1,6 @@
 # Speaker Diarization with AssemblyAI
 
-## Implementation Plan for Pluely
+## Implementation Plan for Meetwings
 
 **Created:** December 27, 2025
 **Status:** Planning Complete - Ready for Implementation
