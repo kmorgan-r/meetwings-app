@@ -44,9 +44,6 @@ pub fn run() {
         )
         .manage(AudioState::default())
         .manage(CaptureState::default())
-        .manage(shortcuts::WindowVisibility {
-            is_hidden: Mutex::new(false),
-        })
         .manage(shortcuts::RegisteredShortcuts::default())
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
@@ -73,6 +70,12 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     {
         builder = builder.plugin(tauri_nspanel::init());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        builder = builder.manage(shortcuts::WindowVisibility {
+            is_hidden: Mutex::new(false),
+        });
     }
     let builder = builder
         .invoke_handler(tauri::generate_handler![
