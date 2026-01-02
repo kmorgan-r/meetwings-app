@@ -77,7 +77,7 @@ pub fn run() {
             is_hidden: Mutex::new(false),
         });
     }
-    let builder = builder
+    let mut builder = builder
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             window::set_window_height,
