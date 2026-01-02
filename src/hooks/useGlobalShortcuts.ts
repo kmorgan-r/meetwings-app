@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef } from "react";
 import { getShortcutsConfig } from "@/lib";
 
 // Global singleton to prevent multiple event listeners in StrictMode
-let globalEventListeners: {
+const globalEventListeners: {
   focus?: UnlistenFn;
   audio?: UnlistenFn;
   screenshot?: UnlistenFn;

@@ -11,8 +11,6 @@ const STORAGE_KEY = "meetwings-promote-card-dismissed";
 const Promote = () => {
   const { hasActiveLicense } = useApp();
 
-  if (hasActiveLicense) return null;
-
   const [isDismissed, setIsDismissed] = useState(
     () => safeLocalStorage.getItem(STORAGE_KEY) === "true"
   );
@@ -22,6 +20,7 @@ const Promote = () => {
     setIsDismissed(true);
   }, []);
 
+  if (hasActiveLicense) return null;
   if (isDismissed) return null;
 
   return (

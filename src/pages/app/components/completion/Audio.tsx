@@ -52,10 +52,11 @@ export const Audio = ({
         setAssemblyAIKey(key || "");
       } catch (error) {
         console.error("[Audio] Failed to load API key from secure storage:", error);
-        // Fallback to localStorage if secure storage fails
-        if (typeof window !== "undefined") {
-          setAssemblyAIKey(localStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "");
-        }
+        toast.error("Failed to load AssemblyAI API key", {
+          description: "Secure storage error. Speaker diarization may not work. Please restart the application.",
+        });
+        // DO NOT fallback to localStorage - this would defeat the security purpose
+        setAssemblyAIKey("");
       }
     };
 

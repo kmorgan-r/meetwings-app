@@ -4,6 +4,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { InfoIcon, UsersIcon, DollarSignIcon, KeyIcon } from "lucide-react";
+import { toast } from "sonner";
 import { STORAGE_KEYS } from "@/config";
 import { safeLocalStorage, secureGet, secureSet, migrateFromLocalStorage } from "@/lib";
 
@@ -26,9 +27,12 @@ export function DiarizationSettings() {
         const key = await secureGet(STORAGE_KEYS.ASSEMBLYAI_API_KEY);
         setAssemblyAIKey(key || "");
       } catch (error) {
-        console.error("[DiarizationSettings] Failed to load API key:", error);
-        // Fallback to localStorage if secure storage fails
-        setAssemblyAIKey(safeLocalStorage.getItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY) || "");
+        console.error("[DiarizationSettings] Failed to load API key from secure storage:", error);
+        toast.error("Failed to load API key", {
+          description: "Secure storage error. Please restart the application.",
+        });
+        // DO NOT fallback to localStorage - this would defeat the security purpose
+        setAssemblyAIKey("");
       } finally {
         setIsLoadingKey(false);
       }
@@ -57,9 +61,12 @@ export function DiarizationSettings() {
           await secureSet(STORAGE_KEYS.ASSEMBLYAI_API_KEY, "");
         }
       } catch (error) {
-        console.error("[DiarizationSettings] Failed to save API key to secure storage:", error);
-        // Fallback to localStorage only if secure storage fails
-        safeLocalStorage.setItem(STORAGE_KEYS.ASSEMBLYAI_API_KEY, assemblyAIKey);
+        console.error("[DiarizationSettings] CRITICAL: Failed to save API key to secure storage:", error);
+        toast.error("Failed to save API key", {
+          description: "Secure storage error. Your API key was not saved. Please try again or restart the application.",
+        });
+        // DO NOT fallback to localStorage - this would defeat the security purpose
+        // User will need to re-enter the key or restart the application
       }
     };
 
