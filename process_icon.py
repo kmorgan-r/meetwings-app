@@ -7,7 +7,7 @@ import os
 
 # Input and output paths
 input_path = r"C:\Users\kmorg\Downloads\ChatGPT Image Dec 31, 2025, 02_47_17 PM.png"
-output_dir = r"C:\Users\kmorg\pluely\src-tauri\icons"
+output_dir = r"C:\Users\kmorg\meetwings\src-tauri\icons"
 
 # Create output directory if it doesn't exist
 os.makedirs(output_dir, exist_ok=True)

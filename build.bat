@@ -1,6 +1,6 @@
 @echo off
 echo ========================================
-echo   Building Pluely for Distribution
+echo   Building Meetwings for Distribution
 echo ========================================
 echo.
 

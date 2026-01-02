@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes how to add context memory (auto-summarization) to Conversation Mode in Pluely. Currently, context memory only works with System Audio mode.
+This document describes how to add context memory (auto-summarization) to Conversation Mode in Meetwings. Currently, context memory only works with System Audio mode.
 
 ## Current State
 
@@ -95,14 +95,14 @@ const summarizeCurrentConversation = useCallback(async () => {
   }
 
   // Get provider config for AI summarization
-  const usePluelyAPI = await shouldUsePluelyAPI();
+  const useMeetwingsAPI = await shouldUseMeetwingsAPI();
   const provider = allAiProviders.find(p => p.id === selectedAIProvider.provider);
 
   // Trigger summarization asynchronously (don't await - non-blocking)
   summarizeConversation(
     state.currentConversationId,
     messages,
-    usePluelyAPI ? undefined : provider ? {
+    useMeetwingsAPI ? undefined : provider ? {
       provider,
       selectedProvider: selectedAIProvider,
     } : undefined
