@@ -257,7 +257,14 @@ pub async fn transcribe_audio(
                     primary_error.clone()
                 };
                 async move {
-                    report_api_error(app, error_msg, "/api/transcribe".to_string(), error_model, error_provider).await;
+                    report_api_error(
+                        app,
+                        error_msg,
+                        "/api/transcribe".to_string(),
+                        error_model,
+                        error_provider,
+                    )
+                    .await;
                 }
             });
             Err("Transcription failed. Please try again.".to_string())
@@ -577,7 +584,8 @@ pub async fn chat_stream_response(
                 let model = model.clone();
                 let error_msg = e.to_string();
                 async move {
-                    report_api_error(app, error_msg, "/api/chat".to_string(), model, provider).await;
+                    report_api_error(app, error_msg, "/api/chat".to_string(), model, provider)
+                        .await;
                 }
             });
             return Err(final_message);
@@ -689,7 +697,8 @@ pub async fn chat_stream_response(
                     let model = model.clone();
                     let error_msg = e.to_string();
                     async move {
-                        report_api_error(app, error_msg, "/api/chat".to_string(), model, provider).await;
+                        report_api_error(app, error_msg, "/api/chat".to_string(), model, provider)
+                            .await;
                     }
                 });
                 return Err(final_message);
