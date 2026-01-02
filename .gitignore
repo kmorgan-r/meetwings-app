@@ -28,7 +28,5 @@ run-dev.ps1
 run-dev.bat
 create-shortcut.ps1
 
-# Documentation - Ignore personal notes but keep official security/technical docs
+# Documentation - Ignore all documentation files
 docs/*
-!docs/SECURITY_*.md
-!docs/SPEAKER_*.md
