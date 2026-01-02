@@ -32,7 +32,7 @@ interface ActivationResponse {
 interface StorageResult {
   license_key?: string;
   instance_id?: string;
-  selected_pluely_model?: string;
+  selected_meetwings_model?: string;
 }
 
 interface Model {
@@ -45,14 +45,14 @@ interface Model {
   isAvailable: boolean;
 }
 
-const LICENSE_KEY_STORAGE_KEY = "pluely_license_key";
-const INSTANCE_ID_STORAGE_KEY = "pluely_instance_id";
-const SELECTED_PLUELY_MODEL_STORAGE_KEY = "selected_pluely_model";
+const LICENSE_KEY_STORAGE_KEY = "meetwings_license_key";
+const INSTANCE_ID_STORAGE_KEY = "meetwings_instance_id";
+const SELECTED_MEETWINGS_MODEL_STORAGE_KEY = "selected_meetwings_model";
 
-export const PluelyApiSetup = () => {
+export const MeetwingsApiSetup = () => {
   const {
-    pluelyApiEnabled,
-    setPluelyApiEnabled,
+    meetwingsApiEnabled,
+    setMeetwingsApiEnabled,
     hasActiveLicense,
     getActiveLicenseStatus,
   } = useApp();
@@ -117,9 +117,9 @@ export const PluelyApiSetup = () => {
         setMaskedLicenseKey(null);
       }
 
-      if (storage.selected_pluely_model) {
+      if (storage.selected_meetwings_model) {
         try {
-          const storedModel = JSON.parse(storage.selected_pluely_model);
+          const storedModel = JSON.parse(storage.selected_meetwings_model);
           setSelectedModel(storedModel);
         } catch (e) {
           console.error("Failed to parse stored model:", e);
@@ -173,8 +173,8 @@ export const PluelyApiSetup = () => {
         setSuccess("License activated successfully!");
         setLicenseKey(""); // Clear the input
 
-        // Auto-enable Pluely API when license is activated
-        setPluelyApiEnabled(true);
+        // Auto-enable Meetwings API when license is activated
+        setMeetwingsApiEnabled(true);
 
         await loadLicenseStatus(); // Reload status
         await getActiveLicenseStatus();
@@ -201,14 +201,14 @@ export const PluelyApiSetup = () => {
         keys: [
           LICENSE_KEY_STORAGE_KEY,
           INSTANCE_ID_STORAGE_KEY,
-          SELECTED_PLUELY_MODEL_STORAGE_KEY,
+          SELECTED_MEETWINGS_MODEL_STORAGE_KEY,
         ],
       });
 
       setSuccess("License removed successfully!");
 
-      // Disable Pluely API when license is removed
-      setPluelyApiEnabled(false);
+      // Disable Meetwings API when license is removed
+      setMeetwingsApiEnabled(false);
 
       await loadLicenseStatus(); // Reload status
     } catch (err) {
@@ -228,7 +228,7 @@ export const PluelyApiSetup = () => {
       await invoke("secure_storage_save", {
         items: [
           {
-            key: SELECTED_PLUELY_MODEL_STORAGE_KEY,
+            key: SELECTED_MEETWINGS_MODEL_STORAGE_KEY,
             value: JSON.stringify(model),
           },
         ],
@@ -271,7 +271,7 @@ export const PluelyApiSetup = () => {
 
   const title = isModelsLoading
     ? "Loading Models..."
-    : `Pluely supports ${models?.length} model${
+    : `Meetwings supports ${models?.length} model${
         models?.length !== 1 ? "s" : ""
       }`;
 
@@ -279,10 +279,10 @@ export const PluelyApiSetup = () => {
     ? "Fetching the list of supported models..."
     : providerList
     ? `Access top models from providers like ${providerList}. and select smaller models for faster responses.`
-    : "Explore all the models Pluely supports.";
+    : "Explore all the models Meetwings supports.";
 
   return (
-    <div id="pluely-api" className="space-y-3 -mt-2">
+    <div id="meetwings-api" className="space-y-3 -mt-2">
       <div className="space-y-2 pt-2">
         {/* Error Message */}
         {error && (
@@ -455,7 +455,7 @@ export const PluelyApiSetup = () => {
                 <div className="-mt-1">
                   <p className="text-sm font-medium text-muted-foreground select-auto">
                     If you need any help or any assistance, contact
-                    support@pluely.com
+                    support@meetwings.com
                   </p>
                 </div>
               ) : null}
@@ -465,18 +465,18 @@ export const PluelyApiSetup = () => {
       </div>
       <div className="flex justify-between items-center">
         <Header
-          title={`${pluelyApiEnabled ? "Disable" : "Enable"} Pluely API`}
+          title={`${meetwingsApiEnabled ? "Disable" : "Enable"} Meetwings API`}
           description={
             storedLicenseKey
-              ? pluelyApiEnabled
-                ? "Using all pluely APIs for audio, and chat."
+              ? meetwingsApiEnabled
+                ? "Using all Meetwings APIs for audio, and chat."
                 : "Using all your own AI Providers for audio, and chat."
-              : "A valid license is required to enable Pluely API or you can use your own AI Providers and STT Providers."
+              : "A valid license is required to enable Meetwings API or you can use your own AI Providers and STT Providers."
           }
         />
         <Switch
-          checked={pluelyApiEnabled}
-          onCheckedChange={setPluelyApiEnabled}
+          checked={meetwingsApiEnabled}
+          onCheckedChange={setMeetwingsApiEnabled}
           disabled={!storedLicenseKey || !hasActiveLicense} // Disable if no license is stored
         />
       </div>

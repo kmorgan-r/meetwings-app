@@ -1,5 +1,4 @@
-import { SparklesIcon } from "lucide-react";
-import { Button } from "@/components";
+import { Button, WingIcon } from "@/components";
 import { cn } from "@/lib/utils";
 import { useLocation, useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -19,11 +18,11 @@ export const Sidebar = () => {
         className="flex h-16 items-center px-4 pt-10 gap-1.5"
       >
         <div className="flex size-6 lg:size-7 items-center justify-center rounded-lg bg-primary">
-          <SparklesIcon className="size-4 lg:size-5 text-primary-foreground transition-all duration-300" />
+          <WingIcon className="size-4 lg:size-5 text-primary-foreground transition-all duration-300" />
         </div>
         <div className="flex flex-col">
           <h1 className="text-xs lg:text-md font-semibold text-foreground transition-all duration-300">
-            Pluely
+            Meetwings
           </h1>
           <span className="text-[8px] lg:text-[10px] text-muted-foreground -mt-1 block">
             {isLoading ? "Loading..." : `(v${version})`}
@@ -72,23 +71,45 @@ export const Sidebar = () => {
           ))}
         </div>
 
-        {footerItems.map((item, index) => (
-          <a
-            href={item.href}
-            onClick={item.action}
-            target="_blank"
-            rel="noopener noreferrer"
-            key={`${item.label}-${index}`}
-            className={cn(
-              "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 transition-all duration-300 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-            )}
-          >
-            <div className="flex items-center gap-3">
-              <item.icon className="size-3 lg:size-4 transition-all duration-300" />
-              {item.label}
-            </div>
-          </a>
-        ))}
+        {footerItems.map((item, index) => {
+          const handleClick = (e: React.MouseEvent) => {
+            if (item.action) {
+              e.preventDefault();
+              item.action();
+            }
+          };
+
+          return item.href ? (
+            <a
+              href={item.href}
+              onClick={handleClick}
+              target="_blank"
+              rel="noopener noreferrer"
+              key={`${item.label}-${index}`}
+              className={cn(
+                "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 transition-all duration-300 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <item.icon className="size-3 lg:size-4 transition-all duration-300" />
+                {item.label}
+              </div>
+            </a>
+          ) : (
+            <button
+              onClick={handleClick}
+              key={`${item.label}-${index}`}
+              className={cn(
+                "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 transition-all duration-300 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground cursor-pointer"
+              )}
+            >
+              <div className="flex items-center gap-3">
+                <item.icon className="size-3 lg:size-4 transition-all duration-300" />
+                {item.label}
+              </div>
+            </button>
+          );
+        })}
       </div>
     </aside>
   );

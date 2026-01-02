@@ -13,7 +13,7 @@ import {
   getUncompactedSummaryCount,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
-import { shouldUsePluelyAPI } from "./pluely.api";
+import { shouldUseMeetwingsAPI } from "./meetwings.api";
 
 // Compaction thresholds
 const COMPACTION_DAYS_THRESHOLD = 30; // Compact if last compaction was > 30 days ago
@@ -280,9 +280,9 @@ ${summariesText}
 Create the updated knowledge profile JSON:`;
 
     // Use AI to generate compacted profile
-    const usePluelyAPI = await shouldUsePluelyAPI();
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
 
-    if (!usePluelyAPI && !providerConfig) {
+    if (!useMeetwingsAPI && !providerConfig) {
       console.log("No AI provider configured for compaction");
       return null;
     }
@@ -290,7 +290,7 @@ Create the updated knowledge profile JSON:`;
     let fullResponse = "";
 
     for await (const chunk of fetchAIResponse({
-      provider: usePluelyAPI ? undefined : providerConfig?.provider,
+      provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
       selectedProvider: providerConfig?.selectedProvider || {
         provider: "",
         variables: {},

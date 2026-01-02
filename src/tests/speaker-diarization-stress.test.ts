@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { renderHook, act } from "@testing-library/react";
 import { useSpeakerDiarization } from "@/hooks/useSpeakerDiarization";
 import * as assemblyAIModule from "@/lib/functions/assemblyai.function";
 import * as pitchAnalysisModule from "@/lib/functions/pitch-analysis";
@@ -27,25 +27,28 @@ describe("useSpeakerDiarization - Stress Tests", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    mockUpdateEntrySpeaker = vi.fn();
-    mockGetTranscriptEntries = vi.fn(() => []);
-    mockOnBatchProcessed = vi.fn();
-    mockOnError = vi.fn();
+    mockUpdateEntrySpeaker = vi.fn() as any;
+    mockGetTranscriptEntries = vi.fn(() => []) as any;
+    mockOnBatchProcessed = vi.fn() as any;
+    mockOnError = vi.fn() as any;
 
     // Default mocks
     vi.mocked(speakerProfilesStorage.findProfileByPitch).mockResolvedValue(null);
     vi.mocked(speakerProfilesStorage.createAutoProfile).mockImplementation(
-      async (pitchData, batchId) => ({
+      async (pitchData, _batchId) => ({
         id: `stress-speaker-${Math.random()}`,
         name: `Speaker ${Math.floor(Math.random() * 100)}`,
+        type: 'other',
         color: "#3b82f6",
+        createdAt: Date.now(),
+        lastSeenAt: Date.now(),
         pitchProfile: {
           ...pitchData,
           sampleCount: 1,
           lastUpdated: Date.now(),
           confidence: 0.75,
         },
-        lastUsed: Date.now(),
+        isConfirmed: false,
       })
     );
     vi.mocked(speakerProfilesStorage.updateProfilePitch).mockResolvedValue(undefined);
@@ -565,7 +568,10 @@ describe("useSpeakerDiarization - Stress Tests", () => {
       const stableProfile = {
         id: "stable-speaker-id",
         name: "Stable Speaker",
+        type: 'colleague' as const,
         color: "#3b82f6",
+        createdAt: Date.now(),
+        lastSeenAt: Date.now(),
         pitchProfile: {
           minHz: 100,
           maxHz: 200,
@@ -576,7 +582,7 @@ describe("useSpeakerDiarization - Stress Tests", () => {
           lastUpdated: Date.now(),
           confidence: 0.95, // High confidence
         },
-        lastUsed: Date.now(),
+        isConfirmed: true,
       };
 
       vi.mocked(speakerProfilesStorage.getSpeakerProfile).mockResolvedValue(

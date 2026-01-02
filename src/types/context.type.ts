@@ -40,8 +40,8 @@ export type IContextType = {
   toggleAlwaysOnTop: (isEnabled: boolean) => Promise<void>;
   toggleAutostart: (isEnabled: boolean) => Promise<void>;
   loadData: () => void;
-  pluelyApiEnabled: boolean;
-  setPluelyApiEnabled: (enabled: boolean) => void;
+  meetwingsApiEnabled: boolean;
+  setMeetwingsApiEnabled: (enabled: boolean) => void;
   hasActiveLicense: boolean;
   setHasActiveLicense: Dispatch<SetStateAction<boolean>>;
   getActiveLicenseStatus: () => Promise<void>;

@@ -1,14 +1,16 @@
-# CLAUDE.md - Pluely Project Guide
+# CLAUDE.md - Meetwings Project Guide
 
-This file provides context for AI assistants (like Claude) when working on the Pluely codebase.
+This file provides context for AI assistants (like Claude) when working on the Meetwings codebase.
 
 ## Project Overview
 
-**Pluely** is an open-source alternative to Cluely - a lightning-fast, privacy-first AI assistant desktop application built with Tauri. It works seamlessly during meetings, interviews, and conversations with features like speech-to-text, AI chat, screenshot analysis, and real-time translation.
+**Meetwings** is an open-source, privacy-first AI assistant desktop application built with Tauri. It works seamlessly during meetings, interviews, and conversations with features like speech-to-text, AI chat, screenshot analysis, and real-time translation.
+
+Meetwings is based on [Pluely](https://github.com/iamsrikanthnani/pluely) by [Srikanth Nani](https://www.srikanthnani.com/), providing your invisible AI wingman for every meeting.
 
 - **Version**: 0.1.8
 - **License**: GPL-3.0
-- **Size**: ~10MB (27x smaller than original Cluely)
+- **Size**: ~10MB (27x smaller than commercial alternatives)
 - **Platforms**: Windows, macOS, Linux
 
 ## Tech Stack
@@ -35,7 +37,7 @@ This file provides context for AI assistants (like Claude) when working on the P
 ## Project Structure
 
 ```
-pluely/
+meetwings/
 ├── src/                          # Frontend source code
 │   ├── main.tsx                  # App entry point
 │   ├── global.css                # Global Tailwind styles
@@ -93,7 +95,7 @@ pluely/
 5. **SQLite** - Structured data (chats, usage, prompts)
 
 ### Provider System
-Pluely uses a flexible provider system for AI and STT:
+Meetwings uses a flexible provider system for AI and STT:
 - Built-in providers defined in `config/ai-providers.constants.ts` and `config/stt.constants.ts`
 - Custom providers via CURL templates
 - Provider interface: `TYPE_PROVIDER` in `types/provider.type.ts`
@@ -133,7 +135,7 @@ import { fetchSTT } from "@/lib";
 - `src/lib/functions/ai-response.function.ts` - AI API calls
 - `src/lib/functions/stt.function.ts` - Speech-to-text processing
 - `src/lib/functions/translation.function.ts` - Translation service
-- `src/lib/functions/pluely.api.ts` - Pluely cloud API client
+- `src/lib/functions/meetwings.api.ts` - Meetwings cloud API client
 
 ### Database
 - `src/lib/database/chat-history.action.ts` - Conversation storage
@@ -298,3 +300,7 @@ Currently no automated tests. When adding tests:
 - [Tauri Documentation](https://tauri.app/v2/)
 - [shadcn/ui Documentation](https://ui.shadcn.com/)
 - [React 19 Documentation](https://react.dev/)
+
+## Project History
+
+Meetwings is based on the excellent open-source foundation of [Pluely](https://github.com/iamsrikanthnani/pluely) by [Srikanth Nani](https://www.srikanthnani.com/). This fork maintains the GPL-3.0 license and builds upon the original work with a new brand identity focused on being "your invisible AI wingman."

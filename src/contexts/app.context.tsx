@@ -127,9 +127,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   );
   const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
 
-  // Pluely API State
-  const [pluelyApiEnabled, setPluelyApiEnabledState] = useState<boolean>(
-    safeLocalStorage.getItem(STORAGE_KEYS.PLUELY_API_ENABLED) === "true"
+  // Meetwings API State
+  const [meetwingsApiEnabled, setMeetwingsApiEnabledState] = useState<boolean>(
+    safeLocalStorage.getItem(STORAGE_KEYS.MEETWINGS_API_ENABLED) === "true"
   );
 
   // STT Language State
@@ -275,12 +275,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }
     }
 
-    // Load Pluely API enabled state
-    const savedPluelyApiEnabled = safeLocalStorage.getItem(
-      STORAGE_KEYS.PLUELY_API_ENABLED
+    // Load Meetwings API enabled state
+    const savedMeetwingsApiEnabled = safeLocalStorage.getItem(
+      STORAGE_KEYS.MEETWINGS_API_ENABLED
     );
-    if (savedPluelyApiEnabled !== null) {
-      setPluelyApiEnabledState(savedPluelyApiEnabled === "true");
+    if (savedMeetwingsApiEnabled !== null) {
+      setMeetwingsApiEnabledState(savedMeetwingsApiEnabled === "true");
     }
 
     // Load STT Language setting
@@ -566,9 +566,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   };
 
-  const setPluelyApiEnabled = (enabled: boolean) => {
-    setPluelyApiEnabledState(enabled);
-    safeLocalStorage.setItem(STORAGE_KEYS.PLUELY_API_ENABLED, String(enabled));
+  const setMeetwingsApiEnabled = (enabled: boolean) => {
+    setMeetwingsApiEnabledState(enabled);
+    safeLocalStorage.setItem(STORAGE_KEYS.MEETWINGS_API_ENABLED, String(enabled));
     loadData();
   };
 
@@ -615,8 +615,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     toggleAlwaysOnTop,
     toggleAutostart,
     loadData,
-    pluelyApiEnabled,
-    setPluelyApiEnabled,
+    meetwingsApiEnabled,
+    setMeetwingsApiEnabled,
     hasActiveLicense,
     setHasActiveLicense,
     getActiveLicenseStatus,

@@ -39,7 +39,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_sql::Builder::default()
-                .add_migrations("sqlite:pluely.db", db::migrations())
+                .add_migrations("sqlite:meetwings.db", db::migrations())
                 .build(),
         )
         .manage(AudioState::default())

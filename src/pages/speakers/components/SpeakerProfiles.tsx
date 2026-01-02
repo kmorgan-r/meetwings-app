@@ -100,10 +100,6 @@ export function SpeakerProfiles() {
     setEditType("colleague");
   }
 
-  async function handleConfirmProfile(profile: SpeakerProfile, name: string, type: "colleague" | "client" | "other") {
-    await confirmProfile(profile.id, name, type);
-    await loadProfiles();
-  }
 
   async function ensureUserProfile() {
     if (userProfile) return;

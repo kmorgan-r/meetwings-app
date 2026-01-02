@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { TYPE_PROVIDER, TranscriptEntry, SpeakerInfo } from "@/types";
 import curl2Json from "@bany/curl-to-json";
-import { shouldUsePluelyAPI } from "./pluely.api";
+import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import {
   fetchAssemblyAIWithDiarization,
   AssemblyAIUtterance,
@@ -104,8 +104,8 @@ function emitSTTUsage(
   }
 }
 
-// Pluely STT function
-async function fetchPluelySTT(audio: File | Blob): Promise<string> {
+// Meetwings STT function
+async function fetchMeetwingsSTT(audio: File | Blob): Promise<string> {
   try {
     // Convert audio to base64
     const audioBase64 = await blobToBase64(audio);
@@ -126,7 +126,7 @@ async function fetchPluelySTT(audio: File | Blob): Promise<string> {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    return `Pluely STT Error: ${errorMessage}`;
+    return `Meetwings STT Error: ${errorMessage}`;
   }
 }
 
@@ -175,10 +175,10 @@ export async function fetchSTT(params: STTParams): Promise<string> {
   try {
     const { provider, selectedProvider, audio, language } = params;
 
-    // Check if we should use Pluely API instead
-    const usePluelyAPI = await shouldUsePluelyAPI();
-    if (usePluelyAPI) {
-      return await fetchPluelySTT(audio);
+    // Check if we should use Meetwings API instead
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+    if (useMeetwingsAPI) {
+      return await fetchMeetwingsSTT(audio);
     }
 
     if (!provider) throw new Error("Provider not provided");

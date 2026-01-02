@@ -5,6 +5,36 @@ Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
 Everyone is permitted to copy and distribute verbatim copies
 of this license document, but changing it is not allowed.
 
+================================================================================
+NOTICE OF MODIFICATION (per GPL-3.0 Section 5a)
+================================================================================
+
+This software is a modified version of Pluely, originally created by
+Srikanth Nani. This modified version, "Meetwings", was created by Kevin
+Morgan-Rothschild in January 2025 and includes the following modifications:
+
+- Complete rebranding from "Pluely" to "Meetwings"
+- Updated project name, descriptions, and branding elements
+- Updated contact information and project links
+- [Additional functional modifications will be listed here as they are made]
+
+ORIGINAL SOFTWARE:
+  Project: Pluely
+  Author: Srikanth Nani <srikanthnani1202@gmail.com>
+  Website: https://pluely.com
+  Repository: https://github.com/iamsrikanthnani/pluely
+
+MODIFIED VERSION:
+  Project: Meetwings
+  Author: Kevin Morgan-Rothschild <kmorganr@gmail.com>
+  Website: https://meetwings.com
+  Repository: https://github.com/kmorgan-r/meetwings-app
+
+Both the original work and this modified version are licensed under the
+GNU General Public License v3.0. See the full license text below.
+
+================================================================================
+
 Preamble
 
 The GNU General Public License is a free, copyleft license for
@@ -631,8 +661,9 @@ to attach them to the start of each source file to most effectively
 state the exclusion of warranty; and each file should have at least
 the "copyright" line and a pointer to where the full notice is found.
 
-    Pluely - Invisible AI Assistant.
-    Copyright (C) 2025  Srikanth Nani <srikanthnani1202@gmail.com>
+    Meetwings - Your Invisible AI Wingman.
+    Original work Copyright (C) 2025  Srikanth Nani <srikanthnani1202@gmail.com>
+    Modifications Copyright (C) 2025  Kevin Morgan-Rothschild <kmorganr@gmail.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -649,14 +680,18 @@ the "copyright" line and a pointer to where the full notice is found.
 
 Also add information on how to contact you by electronic and paper mail.
 
-You can contact the author at: Srikanth Nani <srikanthnani1202@gmail.com>
-Project website: https://pluely.com
-Author website: https://www.srikanthnani.com
+Original author: Srikanth Nani <srikanthnani1202@gmail.com>
+Original project: https://pluely.com | https://www.srikanthnani.com
+
+Current maintainer: Kevin Morgan-Rothschild <kmorganr@gmail.com>
+Project website: https://meetwings.com
+Repository: https://github.com/kmorgan-r/meetwings-app
 
 If the program does terminal interaction, make it output a short
 notice like this when it starts in an interactive mode:
 
-    Pluely  Copyright (C) 2025  Srikanth Nani <srikanthnani1202@gmail.com>
+    Meetwings  Copyright (C) 2025  Kevin Morgan-Rothschild <kmorganr@gmail.com>
+    Based on Pluely by Srikanth Nani
     This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
     This is free software, and you are welcome to redistribute it
     under certain conditions; type `show c' for details.
