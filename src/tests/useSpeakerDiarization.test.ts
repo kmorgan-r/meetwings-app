@@ -11,12 +11,13 @@ vi.mock('@/lib/functions/assemblyai.function');
 vi.mock('@/lib/functions/pitch-analysis');
 vi.mock('@/lib/storage/speaker-profiles.storage');
 vi.mock('@/lib/functions/audio-buffer', () => ({
-  DiarizationAudioBuffer: vi.fn().mockImplementation((_duration, callback) => ({
-    addSegment: vi.fn(),
-    forceFlush: vi.fn(),
-    getSegmentCount: vi.fn(() => 0),
-    _callback: callback,
-  })),
+  DiarizationAudioBuffer: vi.fn(function(this: any, _duration: number, callback: Function) {
+    this.addSegment = vi.fn();
+    this.forceFlush = vi.fn();
+    this.getSegmentCount = vi.fn(() => 0);
+    this._callback = callback;
+    return this;
+  }),
   concatenateAudioBlobs: vi.fn().mockResolvedValue(new Blob()),
 }));
 
