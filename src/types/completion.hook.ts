@@ -6,23 +6,10 @@ import {
   ChangeEvent,
   ClipboardEvent,
 } from "react";
-// import {
-//   AttachedFile,
-//   ChatMessage,
-//   ChatConversation,
-//   CompletionState,
-//   ScreenshotConfig,
-// } from "@/types";
+import { TranscriptEntry, SpeakerInfo } from "./completion";
 
-/**
- * Transcript entry with optional translation
- */
-export interface TranscriptEntry {
-  original: string;
-  translation?: string;
-  translationError?: string;
-  timestamp: number;
-}
+// Re-export TranscriptEntry and SpeakerInfo for convenience
+export type { TranscriptEntry, SpeakerInfo };
 
 /**
  * Type definition for the useCompletion hook return value
@@ -145,14 +132,30 @@ export interface UseCompletionReturn {
   setMeetingAssistMode: Dispatch<SetStateAction<boolean>>;
   /** Accumulated meeting transcript segments with translations */
   meetingTranscript: TranscriptEntry[];
-  /** Function to add a transcript segment to the meeting transcript */
-  addMeetingTranscript: (transcript: string) => number;
+  /** Function to add a transcript segment to the meeting transcript with optional speaker info */
+  addMeetingTranscript: (
+    transcript: string,
+    speakerInfo?: SpeakerInfo,
+    audioSource?: 'microphone' | 'system'
+  ) => number;
+  /** Function to add multiple transcript entries with speaker info from diarization */
+  addMeetingTranscriptEntries: (entries: TranscriptEntry[]) => void;
+  /** Function to add a transcript entry from system audio (labeled as "Guest") */
+  addSystemAudioTranscript: (text: string, timestamp: number) => void;
   /** Function to update translation for a specific transcript entry */
   updateTranscriptTranslation: (timestamp: number, translation?: string, error?: string) => void;
   /** Function to clear the meeting transcript */
   clearMeetingTranscript: () => void;
   /** Function to submit a quick action with meeting context */
   submitWithMeetingContext: (action: string) => Promise<void>;
+
+  // Speaker Diarization
+  /** Session-level speaker mapping for within-session speaker identification */
+  sessionSpeakerMap: Record<string, { label: string; profileId?: string; assignedAt: number }>;
+  /** Function to assign a speaker label to a speaker ID (propagates to all matching entries) */
+  assignSpeaker: (speakerId: string, label: string, profileId?: string) => void;
+  /** Function to update speaker info for a specific entry by timestamp (used by diarization) */
+  updateEntrySpeaker: (timestamp: number, speakerInfo: SpeakerInfo) => void;
 }
 
 /**

@@ -12,7 +12,7 @@ import {
   getMeetingSummaryByConversation,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
-import { shouldUsePluelyAPI } from "./pluely.api";
+import { shouldUseMeetwingsAPI } from "./meetwings.api";
 
 // Minimum number of exchanges (user+assistant pairs) required to trigger summarization
 const MIN_EXCHANGES_FOR_SUMMARY = 2;
@@ -158,17 +158,17 @@ export async function generateConversationSummary(
   try {
     let fullResponse = "";
 
-    // Use Pluely API or custom provider
-    const usePluelyAPI = await shouldUsePluelyAPI();
+    // Use Meetwings API or custom provider
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
 
-    if (!usePluelyAPI && !providerConfig) {
+    if (!useMeetwingsAPI && !providerConfig) {
       console.log("No AI provider configured for summarization");
       return null;
     }
 
     // Collect the full response
     for await (const chunk of fetchAIResponse({
-      provider: usePluelyAPI ? undefined : providerConfig?.provider,
+      provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
       selectedProvider: providerConfig?.selectedProvider || {
         provider: "",
         variables: {},

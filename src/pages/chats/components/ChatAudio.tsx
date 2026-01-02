@@ -17,8 +17,8 @@ export const ChatAudio = ({
   setIsRecording,
   disabled,
 }: ChatAudioProps) => {
-  const { selectedSttProvider, pluelyApiEnabled } = useApp();
-  const isProviderConfigured = pluelyApiEnabled || selectedSttProvider.provider;
+  const { selectedSttProvider, meetwingsApiEnabled } = useApp();
+  const isProviderConfigured = meetwingsApiEnabled || selectedSttProvider.provider;
 
   const handleMicClick = () => {
     if (!isProviderConfigured) {

@@ -48,7 +48,7 @@ fn get_secure_storage_path(app: &AppHandle) -> Result<PathBuf, String> {
 struct SecureStorage {
     license_key: Option<String>,
     instance_id: Option<String>,
-    selected_pluely_model: Option<String>,
+    selected_meetwings_model: Option<String>,
 }
 
 pub async fn get_stored_credentials(
@@ -74,7 +74,7 @@ pub async fn get_stored_credentials(
         .ok_or("Instance ID not found".to_string())?;
 
     let selected_model: Option<Model> = storage
-        .selected_pluely_model
+        .selected_meetwings_model
         .and_then(|json_str| serde_json::from_str(&json_str).ok());
 
     Ok((license_key, instance_id, selected_model))
@@ -257,7 +257,14 @@ pub async fn transcribe_audio(
                     primary_error.clone()
                 };
                 async move {
-                    report_api_error(app, error_msg, "/api/transcribe".to_string(), error_model, error_provider).await;
+                    report_api_error(
+                        app,
+                        error_msg,
+                        "/api/transcribe".to_string(),
+                        error_model,
+                        error_provider,
+                    )
+                    .await;
                 }
             });
             Err("Transcription failed. Please try again.".to_string())
@@ -577,7 +584,8 @@ pub async fn chat_stream_response(
                 let model = model.clone();
                 let error_msg = e.to_string();
                 async move {
-                    report_api_error(app, error_msg, "/api/chat".to_string(), model, provider).await;
+                    report_api_error(app, error_msg, "/api/chat".to_string(), model, provider)
+                        .await;
                 }
             });
             return Err(final_message);
@@ -689,7 +697,8 @@ pub async fn chat_stream_response(
                     let model = model.clone();
                     let error_msg = e.to_string();
                     async move {
-                        report_api_error(app, error_msg, "/api/chat".to_string(), model, provider).await;
+                        report_api_error(app, error_msg, "/api/chat".to_string(), model, provider)
+                            .await;
                     }
                 });
                 return Err(final_message);

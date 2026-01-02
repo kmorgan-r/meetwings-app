@@ -9,7 +9,7 @@ const DevSpace = () => {
   return (
     <PageLayout title="Dev Space" description="Manage your dev space">
       <Contribute />
-      {/* Provider Selection */}
+      {/* AI Provider Selection */}
       <AIProviders {...settings} />
 
       {/* STT Providers */}

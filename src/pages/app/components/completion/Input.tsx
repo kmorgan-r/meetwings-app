@@ -50,6 +50,7 @@ export const Input = ({
   meetingAssistMode,
   meetingTranscript,
   clearMeetingTranscript,
+  assignSpeaker,
 }: InputProps) => {
   const { sttTranslationEnabled } = useApp();
 
@@ -62,7 +63,7 @@ export const Input = ({
   // - Meeting mode is ON
   // - Has transcripts
   // - No AI response yet (once response comes, show normal view)
-  // - Conversation mode is OFF
+  // - Conversation mode is OFF (when ON, show conversation history instead)
   const showMeetingPanel =
     meetingAssistMode &&
     meetingTranscript.length > 0 &&
@@ -212,10 +213,13 @@ export const Input = ({
 
           {/* Show Meeting Transcript Panel when in meeting mode without response */}
           {showMeetingPanel ? (
-            <MeetingTranscriptPanel
-              meetingTranscript={meetingTranscript}
-              clearMeetingTranscript={clearMeetingTranscript}
-            />
+            <div className="flex-1 min-h-0 flex flex-col">
+              <MeetingTranscriptPanel
+                meetingTranscript={meetingTranscript}
+                clearMeetingTranscript={clearMeetingTranscript}
+                assignSpeaker={assignSpeaker}
+              />
+            </div>
           ) : (
             <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0">
               <div className="p-4">
@@ -279,7 +283,9 @@ export const Input = ({
                           >
                             <div className="flex items-center gap-2 mb-2">
                               <span className="text-xs font-medium text-muted-foreground uppercase">
-                                {message.role === "user" ? "You" : "AI"}
+                                {message.role === "user"
+                                  ? (message.speaker?.speakerLabel || "You")
+                                  : "AI"}
                               </span>
                               <span className="text-xs text-muted-foreground">
                                 {new Date(message.timestamp).toLocaleTimeString(

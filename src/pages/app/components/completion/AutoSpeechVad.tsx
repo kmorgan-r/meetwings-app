@@ -1,12 +1,12 @@
 import { fetchSTT } from "@/lib";
-import { UseCompletionReturn } from "@/types";
+import { UseCompletionReturn, SpeakerInfo, SpeakerIdFactory } from "@/types";
 import { useMicVAD } from "@ricky0123/vad-react";
 import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components";
 import { useApp } from "@/contexts";
 import { floatArrayToWav } from "@/lib/utils";
-import { shouldUsePluelyAPI } from "@/lib/functions/pluely.api";
+import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
 import { useTranslation } from "@/hooks";
 
 interface AutoSpeechVADProps {
@@ -48,10 +48,10 @@ const AutoSpeechVADInternal = ({
         const audioBlob = floatArrayToWav(audio, 16000, "wav");
 
         let transcription: string;
-        const usePluelyAPI = await shouldUsePluelyAPI();
+        const useMeetwingsAPI = await shouldUseMeetwingsAPI();
 
         // Check if we have a configured speech provider
-        if (!selectedSttProvider.provider && !usePluelyAPI) {
+        if (!selectedSttProvider.provider && !useMeetwingsAPI) {
           console.warn("No speech provider selected");
           setState((prev: any) => ({
             ...prev,
@@ -65,7 +65,7 @@ const AutoSpeechVADInternal = ({
           (p) => p.id === selectedSttProvider.provider
         );
 
-        if (!providerConfig && !usePluelyAPI) {
+        if (!providerConfig && !useMeetwingsAPI) {
           console.warn("Selected speech provider configuration not found");
           setState((prev: any) => ({
             ...prev,
@@ -77,9 +77,11 @@ const AutoSpeechVADInternal = ({
 
         setIsTranscribing(true);
 
-        // Use the fetchSTT function for all providers
+        // Microphone audio always uses standard STT (no diarization)
+        // Diarization is only for system audio (handled in useMeetingAudio.ts)
+        // This ensures microphone audio is always labeled as "You"
         transcription = await fetchSTT({
-          provider: usePluelyAPI ? undefined : providerConfig,
+          provider: useMeetwingsAPI ? undefined : providerConfig,
           selectedProvider: selectedSttProvider,
           audio: audioBlob,
           language: sttLanguage,
@@ -88,7 +90,13 @@ const AutoSpeechVADInternal = ({
         if (transcription) {
           if (meetingAssistMode && addMeetingTranscript) {
             // In Meeting Assist Mode, accumulate transcripts instead of auto-submitting
-            const timestamp = addMeetingTranscript(transcription);
+            // Phase 1: Label all microphone audio as "You"
+            const microphoneSpeaker: SpeakerInfo = {
+              speakerId: SpeakerIdFactory.you(),
+              speakerLabel: 'You',
+              confirmed: true,
+            };
+            const timestamp = addMeetingTranscript(transcription, microphoneSpeaker, 'microphone');
 
             // Translate in background if enabled
             if (translationEnabled && updateTranscriptTranslation) {

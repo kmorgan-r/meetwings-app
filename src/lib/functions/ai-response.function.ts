@@ -11,7 +11,7 @@ import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import curl2Json from "@bany/curl-to-json";
-import { shouldUsePluelyAPI } from "./pluely.api";
+import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { CHUNK_POLL_INTERVAL_MS } from "../chat-constants";
 import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES } from "@/lib";
 import { getContextForInjection } from "./context-builder";
@@ -51,8 +51,8 @@ async function buildEnhancedSystemPrompt(baseSystemPrompt?: string): Promise<str
   return prompts.join(" ");
 }
 
-// Pluely AI streaming function
-async function* fetchPluelyAIResponse(params: {
+// Meetwings AI streaming function
+async function* fetchMeetwingsAIResponse(params: {
   systemPrompt?: string;
   userMessage: string;
   imagesBase64?: string[];
@@ -165,7 +165,7 @@ async function* fetchPluelyAIResponse(params: {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    yield `Pluely API Error: ${errorMessage}`;
+    yield `Meetwings API Error: ${errorMessage}`;
   }
 }
 
@@ -199,12 +199,12 @@ export async function* fetchAIResponse(params: {
 
     const enhancedSystemPrompt = await buildEnhancedSystemPrompt(systemPrompt);
 
-    // Check if we should use Pluely API instead
-    const usePluelyAPI = await shouldUsePluelyAPI();
-    console.log("[Cost Tracking] fetchAIResponse called. usePluelyAPI:", usePluelyAPI);
-    if (usePluelyAPI) {
-      console.log("[Cost Tracking] Using Pluely API - usage tracking not yet implemented for this path");
-      yield* fetchPluelyAIResponse({
+    // Check if we should use Meetwings API instead
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+    console.log("[Cost Tracking] fetchAIResponse called. useMeetwingsAPI:", useMeetwingsAPI);
+    if (useMeetwingsAPI) {
+      console.log("[Cost Tracking] Using Meetwings API - usage tracking not yet implemented for this path");
+      yield* fetchMeetwingsAIResponse({
         systemPrompt: enhancedSystemPrompt,
         userMessage,
         imagesBase64,

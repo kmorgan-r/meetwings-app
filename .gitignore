@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Personal development scripts
+run-dev.ps1
+run-dev.bat
+create-shortcut.ps1
+
+# Documentation - Ignore personal notes but keep official security/technical docs
+docs/*
+!docs/SECURITY_*.md
+!docs/SPEAKER_*.md

@@ -11,9 +11,9 @@ use tokio::time::{sleep, Duration};
 use tauri_nspanel::ManagerExt;
 
 use crate::window::create_dashboard_window;
-// State for window visibility
+// State for window visibility (Windows only)
+#[cfg(target_os = "windows")]
 pub struct WindowVisibility {
-    #[allow(dead_code)]
     pub is_hidden: Mutex<bool>,
 }
 
@@ -213,7 +213,6 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
                 eprintln!("Failed to emit focus-text-input event: {}", e);
             }
         }
-        return;
     }
 
     #[cfg(not(target_os = "windows"))]

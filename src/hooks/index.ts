@@ -16,3 +16,5 @@ export * from "./useApp";
 export * from "./useMenuItems";
 export * from "./useQuickActions";
 export * from "./useTranslation";
+export * from "./useMeetingAudio";
+export * from "./useSpeakerDiarization";

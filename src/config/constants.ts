@@ -13,7 +13,7 @@ export const STORAGE_KEYS = {
   SYSTEM_AUDIO_CONTEXT: "system_audio_context",
   SYSTEM_AUDIO_QUICK_ACTIONS: "system_audio_quick_actions",
   CUSTOMIZABLE: "customizable",
-  PLUELY_API_ENABLED: "pluely_api_enabled",
+  MEETWINGS_API_ENABLED: "meetwings_api_enabled",
   SHORTCUTS: "shortcuts",
   AUTOSTART_INITIALIZED: "autostart_initialized",
 
@@ -37,6 +37,13 @@ export const STORAGE_KEYS = {
   // STT Translation settings
   STT_TRANSLATION_ENABLED: "stt_translation_enabled",
   STT_TRANSLATION_LANGUAGE: "stt_translation_language",
+
+  // Speaker Diarization settings
+  SPEAKER_DIARIZATION_ENABLED: "speaker_diarization_enabled",
+  SPEAKER_PROFILES: "speaker_profiles",
+  USER_VOICE_ENROLLMENT: "user_voice_enrollment",
+  ASSEMBLYAI_API_KEY: "assemblyai_api_key",
+  PREVIOUS_STT_PROVIDER: "previous_stt_provider",
 } as const;
 
 // Max number of files that can be attached to a message
@@ -62,8 +69,9 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
 ];
 
 // Meeting Assist system prompt for contextual insights
-export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a meeting assistant providing real-time insights. Based on the meeting transcript provided, give helpful, concise suggestions. Focus on:
+export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a meeting assistant providing real-time insights. The meeting transcript includes speaker labels where "You" refers to the user and other labels are meeting participants. Based on the transcript, give helpful, concise suggestions. Focus on:
 - Being practical and actionable
 - Keeping responses brief (2-3 sentences max unless more detail is needed)
 - Understanding the context and flow of the conversation
+- Distinguishing between what the user said versus what participants said
 - Providing relevant insights based on the specific request`;

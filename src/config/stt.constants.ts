@@ -31,7 +31,16 @@ export const STT_LANGUAGES = [
   { code: "ms", name: "Malay" },
 ] as const;
 
-export const DEFAULT_STT_LANGUAGE = "en";
+/**
+ * Default STT language setting for new users.
+ * - "auto" enables automatic language detection by the STT provider
+ * - Existing users who have a language saved in localStorage will continue using their saved setting
+ * - This default only applies to new installations or users who haven't set a preference
+ *
+ * Migration note: Changed from "en" to "auto" in v0.2.0. Existing users with "en" saved
+ * will retain their setting - we don't override user preferences on upgrade.
+ */
+export const DEFAULT_STT_LANGUAGE = "auto";
 
 // STT Translation defaults
 export const DEFAULT_TRANSLATION_ENABLED = false;
@@ -49,6 +58,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "language={{LANGUAGE}}"`,
     responseContentPath: "text",
     streaming: false,
+    supportsAutoDetect: true, // Language param is optional
   },
   {
     id: "groq",
@@ -62,6 +72,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F language={{LANGUAGE}}`,
     responseContentPath: "text",
     streaming: false,
+    supportsAutoDetect: true, // Follows OpenAI API, language is optional
   },
   {
     id: "elevenlabs-stt",
@@ -72,6 +83,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "model_id={{MODEL}}"`,
     responseContentPath: "text",
     streaming: false,
+    supportsAutoDetect: true, // No language param - auto-detect only
   },
   {
     id: "google-stt",
@@ -92,6 +104,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       }'`,
     responseContentPath: "results[0].alternatives[0].transcript",
     streaming: false,
+    supportsAutoDetect: false, // Requires languageCode in format "en-US"
   },
   {
     id: "deepgram-stt",
@@ -102,6 +115,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       --data-binary {{AUDIO}}`,
     responseContentPath: "results.channels[0].alternatives[0].transcript",
     streaming: false,
+    supportsAutoDetect: true, // Language param is optional
   },
   {
     id: "azure-stt",
@@ -112,6 +126,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       --data-binary {{AUDIO}}`,
     responseContentPath: "DisplayText",
     streaming: false,
+    supportsAutoDetect: false, // Requires language in URL path
   },
   {
     id: "speechmatics-stt",
@@ -122,6 +137,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F 'config={"type": "transcription", "transcription_config": {"language": "{{LANGUAGE}}"}}'`,
     responseContentPath: "job.id",
     streaming: false,
+    supportsAutoDetect: false, // Requires language in config JSON
   },
   {
     id: "rev-ai-stt",
@@ -132,6 +148,7 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       -F "options={{OPTIONS}}"`,
     responseContentPath: "id",
     streaming: false,
+    supportsAutoDetect: true, // Supports auto-detection via options
   },
   {
     id: "ibm-watson-stt",
@@ -142,5 +159,19 @@ export const SPEECH_TO_TEXT_PROVIDERS = [
       --data-binary {{AUDIO}}`,
     responseContentPath: "results[0].alternatives[0].transcript",
     streaming: false,
+    supportsAutoDetect: true, // Defaults to en-US but supports multiple languages
+  },
+  {
+    id: "assemblyai-diarization",
+    name: "AssemblyAI (with Speaker Diarization)",
+    curl: `curl -X POST "https://api.assemblyai.com/v2/upload" \\
+      -H "Authorization: {{API_KEY}}" \\
+      -H "Content-Type: application/octet-stream" \\
+      --data-binary {{AUDIO}}`,
+    responseContentPath: "upload_url",
+    streaming: false,
+    requiresSpecialHandler: true,
+    specialHandler: "assemblyai-diarization",
+    supportsAutoDetect: true, // Language_code is optional, auto-detects when omitted
   },
 ];
