@@ -63,8 +63,14 @@ async function createTranscript(
     speaker_labels: true,
   };
 
-  if (language) {
+  // Handle language parameter:
+  // - "auto" or empty: use AssemblyAI's automatic language detection
+  // - specific code (en, es, fr, etc.): use that language
+  if (language && language !== "auto") {
     body.language_code = language;
+  } else {
+    // Enable automatic language detection when "auto" or not specified
+    body.language_detection = true;
   }
 
   if (speakersExpected && speakersExpected > 0) {
