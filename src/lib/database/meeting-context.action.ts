@@ -1,4 +1,5 @@
 import { getDatabase } from "./config";
+import { invalidateContextCache } from "@/lib/functions/context-builder";
 import type {
   MeetingSummary,
   DbMeetingSummary,
@@ -41,11 +42,16 @@ function dbRowToMeetingSummary(row: DbMeetingSummary): MeetingSummary {
     id: row.id,
     conversationId: row.conversation_id,
     summary: row.summary,
+    title: row.title || null,
     topics: safeJsonParse<string[]>(row.topics, []),
+    goals: safeJsonParse<string[]>(row.goals, []),
     actionItems: safeJsonParse<string[]>(row.action_items, []),
+    nextSteps: safeJsonParse<string[]>(row.next_steps, []),
     decisions: safeJsonParse<string[]>(row.decisions, []),
+    teamUpdates: safeJsonParse<string[]>(row.team_updates, []),
     participants: safeJsonParse<string[]>(row.participants, []),
     exchangeCount: row.exchange_count || 0,
+    durationSeconds: row.duration_seconds || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -66,11 +72,16 @@ export async function createMeetingSummary(
     id,
     conversationId: input.conversationId,
     summary: input.summary,
+    title: input.title || null,
     topics: input.topics || [],
+    goals: input.goals || [],
     actionItems: input.actionItems || [],
+    nextSteps: input.nextSteps || [],
     decisions: input.decisions || [],
+    teamUpdates: input.teamUpdates || [],
     participants: input.participants || [],
     exchangeCount: input.exchangeCount || 0,
+    durationSeconds: input.durationSeconds || null,
     createdAt: now,
     updatedAt: now,
   };
@@ -78,22 +89,29 @@ export async function createMeetingSummary(
   try {
     await db.execute(
       `INSERT INTO meeting_summaries (
-        id, conversation_id, summary, topics, action_items,
-        decisions, participants, exchange_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, conversation_id, summary, title, topics, goals, action_items,
+        next_steps, decisions, team_updates, participants, exchange_count,
+        duration_seconds, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.conversationId,
         record.summary,
+        record.title,
         JSON.stringify(record.topics),
+        JSON.stringify(record.goals),
         JSON.stringify(record.actionItems),
+        JSON.stringify(record.nextSteps),
         JSON.stringify(record.decisions),
+        JSON.stringify(record.teamUpdates),
         JSON.stringify(record.participants),
         record.exchangeCount,
+        record.durationSeconds,
         record.createdAt,
         record.updatedAt,
       ]
     );
+    invalidateContextCache(); // Invalidate AI context cache
     return record;
   } catch (error) {
     console.error("Failed to create meeting summary:", error);
@@ -189,30 +207,42 @@ export async function updateMeetingSummary(
     const updated: MeetingSummary = {
       ...existing,
       ...updates,
+      title: updates.title ?? existing.title,
       topics: updates.topics ?? existing.topics,
+      goals: updates.goals ?? existing.goals,
       actionItems: updates.actionItems ?? existing.actionItems,
+      nextSteps: updates.nextSteps ?? existing.nextSteps,
       decisions: updates.decisions ?? existing.decisions,
+      teamUpdates: updates.teamUpdates ?? existing.teamUpdates,
       participants: updates.participants ?? existing.participants,
+      durationSeconds: updates.durationSeconds ?? existing.durationSeconds,
       updatedAt: now,
     };
 
     await db.execute(
       `UPDATE meeting_summaries SET
-        summary = ?, topics = ?, action_items = ?, decisions = ?,
-        participants = ?, exchange_count = ?, updated_at = ?
+        summary = ?, title = ?, topics = ?, goals = ?, action_items = ?,
+        next_steps = ?, decisions = ?, team_updates = ?, participants = ?,
+        exchange_count = ?, duration_seconds = ?, updated_at = ?
       WHERE id = ?`,
       [
         updated.summary,
+        updated.title,
         JSON.stringify(updated.topics),
+        JSON.stringify(updated.goals),
         JSON.stringify(updated.actionItems),
+        JSON.stringify(updated.nextSteps),
         JSON.stringify(updated.decisions),
+        JSON.stringify(updated.teamUpdates),
         JSON.stringify(updated.participants),
         updated.exchangeCount,
+        updated.durationSeconds,
         updated.updatedAt,
         id,
       ]
     );
 
+    invalidateContextCache(); // Invalidate AI context cache
     return updated;
   } catch (error) {
     console.error("Failed to update meeting summary:", error);
@@ -225,6 +255,7 @@ export async function deleteMeetingSummary(id: string): Promise<boolean> {
 
   try {
     await db.execute(`DELETE FROM meeting_summaries WHERE id = ?`, [id]);
+    invalidateContextCache(); // Invalidate AI context cache
     return true;
   } catch (error) {
     console.error("Failed to delete meeting summary:", error);
@@ -493,6 +524,9 @@ function dbRowToKnowledgeProfile(row: DbKnowledgeProfile): KnowledgeProfile {
     keyPeople: safeJsonParse<KeyPerson[]>(row.key_people, []),
     keyProjects: safeJsonParse<KeyProject[]>(row.key_projects, []),
     terminology: safeJsonParse<Terminology[]>(row.terminology, []),
+    recentGoals: safeJsonParse<string[]>(row.recent_goals, []),
+    recentDecisions: safeJsonParse<string[]>(row.recent_decisions, []),
+    recentTeamUpdates: safeJsonParse<string[]>(row.recent_team_updates, []),
     lastCompacted: row.last_compacted,
     sourceCount: row.source_count || 0,
   };
@@ -537,6 +571,9 @@ export async function updateKnowledgeProfile(
       keyPeople: updates.keyPeople ?? existing?.keyPeople ?? [],
       keyProjects: updates.keyProjects ?? existing?.keyProjects ?? [],
       terminology: updates.terminology ?? existing?.terminology ?? [],
+      recentGoals: updates.recentGoals ?? existing?.recentGoals ?? [],
+      recentDecisions: updates.recentDecisions ?? existing?.recentDecisions ?? [],
+      recentTeamUpdates: updates.recentTeamUpdates ?? existing?.recentTeamUpdates ?? [],
       lastCompacted: now,
       sourceCount: updates.sourceCount ?? existing?.sourceCount ?? 0,
     };
@@ -547,6 +584,9 @@ export async function updateKnowledgeProfile(
         key_people = ?,
         key_projects = ?,
         terminology = ?,
+        recent_goals = ?,
+        recent_decisions = ?,
+        recent_team_updates = ?,
         last_compacted = ?,
         source_count = ?
       WHERE id = 'profile'`,
@@ -555,11 +595,15 @@ export async function updateKnowledgeProfile(
         JSON.stringify(updated.keyPeople),
         JSON.stringify(updated.keyProjects),
         JSON.stringify(updated.terminology),
+        JSON.stringify(updated.recentGoals),
+        JSON.stringify(updated.recentDecisions),
+        JSON.stringify(updated.recentTeamUpdates),
         updated.lastCompacted,
         updated.sourceCount,
       ]
     );
 
+    invalidateContextCache(); // Invalidate AI context cache
     return updated;
   } catch (error) {
     console.error("Failed to update knowledge profile:", error);
@@ -577,10 +621,14 @@ export async function clearKnowledgeProfile(): Promise<boolean> {
         key_people = NULL,
         key_projects = NULL,
         terminology = NULL,
+        recent_goals = NULL,
+        recent_decisions = NULL,
+        recent_team_updates = NULL,
         last_compacted = NULL,
         source_count = 0
       WHERE id = 'profile'`
     );
+    invalidateContextCache(); // Invalidate AI context cache
     return true;
   } catch (error) {
     console.error("Failed to clear knowledge profile:", error);
@@ -625,5 +673,57 @@ export async function getUncompactedSummaryCount(
   } catch (error) {
     console.error("Failed to get uncompacted summary count:", error);
     return 0;
+  }
+}
+
+// ============================================================================
+// User Identity Cleanup (Retroactive Data Cleanup)
+// ============================================================================
+
+/**
+ * Removes the user's name from all historical meeting summary participants.
+ * Called when user first sets their identity to clean up historical data.
+ * Uses case-insensitive matching.
+ */
+export async function cleanupUserFromParticipants(
+  userName: string
+): Promise<void> {
+  if (!userName?.trim()) {
+    return;
+  }
+
+  const db = await getDatabase();
+  const userNameLower = userName.trim().toLowerCase();
+
+  try {
+    // Get all summaries
+    const summaries = await getAllMeetingSummaries();
+    let updatedCount = 0;
+
+    for (const summary of summaries) {
+      // Filter out the user's name (case-insensitive)
+      const filteredParticipants = summary.participants.filter(
+        (p) => p.toLowerCase() !== userNameLower
+      );
+
+      // Only update if participants changed
+      if (filteredParticipants.length !== summary.participants.length) {
+        await db.execute(
+          `UPDATE meeting_summaries SET participants = ?, updated_at = ? WHERE id = ?`,
+          [JSON.stringify(filteredParticipants), Date.now(), summary.id]
+        );
+        updatedCount++;
+      }
+    }
+
+    if (updatedCount > 0) {
+      console.log(
+        `Cleaned up user "${userName}" from ${updatedCount} meeting summary participant lists`
+      );
+      invalidateContextCache();
+    }
+  } catch (error) {
+    console.error("Failed to cleanup user from participants:", error);
+    throw error;
   }
 }

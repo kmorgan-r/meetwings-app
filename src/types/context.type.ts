@@ -1,5 +1,5 @@
 import { Dispatch, SetStateAction } from "react";
-import { ScreenshotConfig, TYPE_PROVIDER } from "@/types";
+import { ScreenshotConfig, TYPE_PROVIDER, UserIdentity } from "@/types";
 import { CursorType, CustomizableState } from "@/lib/storage";
 
 export type IContextType = {
@@ -69,4 +69,8 @@ export type IContextType = {
   // Response language setting (for AI responses)
   responseLanguage: string;
   setResponseLanguage: (language: string) => void;
+
+  // User Identity settings
+  userIdentity: UserIdentity | null;
+  setUserIdentity: (identity: UserIdentity) => Promise<void>;
 };

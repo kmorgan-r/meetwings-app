@@ -8,7 +8,7 @@ import {
   getRecentMeetingSummaries,
   getTopKnowledgeEntities,
 } from "@/lib/database";
-import { safeLocalStorage } from "@/lib";
+import { safeLocalStorage, getUserIdentity, hasUserIdentity } from "@/lib";
 import { STORAGE_KEYS } from "@/config";
 
 // Token budget constants (approximate - 1 token ≈ 4 chars)
@@ -132,6 +132,30 @@ function formatProfileSection(profile: KnowledgeProfile): string {
     parts.push(`**Domain Terms:**\n${terms}`);
   }
 
+  if (profile.recentGoals && profile.recentGoals.length > 0) {
+    const goals = profile.recentGoals
+      .slice(0, 5) // Limit to top 5
+      .map((g) => `- ${g}`)
+      .join("\n");
+    parts.push(`**Recent Goals:**\n${goals}`);
+  }
+
+  if (profile.recentDecisions && profile.recentDecisions.length > 0) {
+    const decisions = profile.recentDecisions
+      .slice(0, 5)
+      .map((d) => `- ${d}`)
+      .join("\n");
+    parts.push(`**Recent Decisions:**\n${decisions}`);
+  }
+
+  if (profile.recentTeamUpdates && profile.recentTeamUpdates.length > 0) {
+    const updates = profile.recentTeamUpdates
+      .slice(0, 5)
+      .map((u) => `- ${u}`)
+      .join("\n");
+    parts.push(`**Recent Team Updates:**\n${updates}`);
+  }
+
   return parts.join("\n\n");
 }
 
@@ -151,9 +175,25 @@ function formatRecentSummaries(
 
   for (const summary of summaries) {
     const date = new Date(summary.createdAt).toLocaleDateString();
-    let text = `[${date}] ${summary.summary}`;
 
-    // Add topics if they exist and fit
+    // Start with date and optional title
+    let text = `[${date}]`;
+    if (summary.title) {
+      text += ` ${summary.title}:`;
+    }
+    text += ` ${summary.summary}`;
+
+    // Add goals if they exist
+    if (summary.goals && summary.goals.length > 0) {
+      text += ` (Goals: ${summary.goals.slice(0, 2).join(", ")})`;
+    }
+
+    // Add next steps if they exist
+    if (summary.nextSteps && summary.nextSteps.length > 0) {
+      text += ` (Next: ${summary.nextSteps.slice(0, 2).join(", ")})`;
+    }
+
+    // Add topics if they exist
     if (summary.topics.length > 0) {
       text += ` (Topics: ${summary.topics.slice(0, 3).join(", ")})`;
     }
@@ -287,13 +327,27 @@ export async function buildContextString(): Promise<string> {
     }
 
     // Build final context
-    if (sections.length === 0) {
+    if (sections.length === 0 && !hasUserIdentity()) {
       cachedContext = "";
       cacheTimestamp = now;
       return "";
     }
 
-    const context = `## Context About the User
+    // Build user identity section if configured
+    let userIdentitySection = "";
+    if (hasUserIdentity()) {
+      const identity = getUserIdentity();
+      if (identity) {
+        userIdentitySection = `## About You (The User)
+
+Your name is: ${identity.name}
+Your role: ${identity.role}
+
+`;
+      }
+    }
+
+    const context = `${userIdentitySection}## Context About the User
 
 ${sections.join("\n\n")}
 

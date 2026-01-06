@@ -44,6 +44,9 @@ export const STORAGE_KEYS = {
   USER_VOICE_ENROLLMENT: "user_voice_enrollment",
   ASSEMBLYAI_API_KEY: "assemblyai_api_key",
   PREVIOUS_STT_PROVIDER: "previous_stt_provider",
+
+  // User Identity settings
+  USER_IDENTITY: "user_identity",
 } as const;
 
 // Max number of files that can be attached to a message

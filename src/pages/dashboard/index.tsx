@@ -1,66 +1,69 @@
-import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { GetLicense } from "@/components";
-import { MeetwingsApiSetup, Usage } from "./components";
+import { useState, useCallback } from "react";
 import { PageLayout } from "@/layouts";
+import { Button } from "@/components/ui/button";
+import { RefreshCcw, Sparkles } from "lucide-react";
+import { compactKnowledge } from "@/lib/functions/knowledge-compactor";
 import { useApp } from "@/contexts";
+import { RecentGoals, RecentDecisions, RecentTeamUpdates } from "./components";
 
 const Dashboard = () => {
-  const { hasActiveLicense } = useApp();
-  const [activity, setActivity] = useState<any>(null);
-  const [loadingActivity, setLoadingActivity] = useState(false);
+  const { selectedAIProvider, allAiProviders } = useApp();
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isCompacting, setIsCompacting] = useState(false);
 
-  const fetchActivity = useCallback(async () => {
-    if (!hasActiveLicense) {
-      setActivity({ data: [], total_tokens_used: 0 });
-      return;
-    }
-    setLoadingActivity(true);
+  const handleRefresh = useCallback(() => {
+    setRefreshTrigger((prev) => prev + 1);
+  }, []);
+
+  const handleCompactKnowledge = useCallback(async () => {
+    setIsCompacting(true);
     try {
-      const response = await invoke("get_activity");
-      const responseData: any = response;
-      if (responseData && responseData.success) {
-        setActivity(responseData);
-      } else {
-        setActivity({ data: [], total_tokens_used: 0 });
-      }
+      const provider = allAiProviders.find(
+        (p) => p.id === selectedAIProvider.provider
+      );
+      await compactKnowledge({
+        provider,
+        selectedProvider: selectedAIProvider,
+      });
+      handleRefresh();
     } catch (error) {
-      setActivity({ data: [], total_tokens_used: 0 });
+      console.error("Failed to compact knowledge:", error);
     } finally {
-      setLoadingActivity(false);
+      setIsCompacting(false);
     }
-  }, [hasActiveLicense]);
-
-  useEffect(() => {
-    if (hasActiveLicense) {
-      fetchActivity();
-    } else {
-      setActivity(null);
-    }
-  }, [fetchActivity, hasActiveLicense]);
-
-  const activityData =
-    activity && Array.isArray(activity.data) ? activity.data : [];
-  const totalTokens =
-    activity && typeof activity.total_tokens_used === "number"
-      ? activity.total_tokens_used
-      : 0;
+  }, [handleRefresh, allAiProviders, selectedAIProvider]);
 
   return (
     <PageLayout
       title="Dashboard"
-      description="Meetwings license to unlock faster responses, quicker support and premium features."
-      rightSlot={!hasActiveLicense ? <GetLicense /> : null}
+      description="Your current focus areas from recent meetings"
+      rightSlot={
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleCompactKnowledge}
+            disabled={isCompacting}
+            className="flex items-center gap-1"
+          >
+            <Sparkles className="h-3 w-3" />
+            {isCompacting ? "Updating..." : "Update Knowledge"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={handleRefresh}
+          >
+            <RefreshCcw className="h-4 w-4" />
+          </Button>
+        </div>
+      }
     >
-      {/* Meetwings API Setup */}
-      <MeetwingsApiSetup />
-
-      <Usage
-        loading={!hasActiveLicense || loadingActivity}
-        onRefresh={fetchActivity}
-        data={activityData}
-        totalTokens={totalTokens}
-      />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <RecentGoals refreshTrigger={refreshTrigger} />
+        <RecentDecisions refreshTrigger={refreshTrigger} />
+        <RecentTeamUpdates refreshTrigger={refreshTrigger} />
+      </div>
     </PageLayout>
   );
 };

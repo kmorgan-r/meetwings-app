@@ -21,8 +21,10 @@ import {
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
   updateCursorType,
+  getUserIdentity,
+  setUserIdentity as saveUserIdentity,
 } from "@/lib/storage";
-import { IContextType, ScreenshotConfig, TYPE_PROVIDER } from "@/types";
+import { IContextType, ScreenshotConfig, TYPE_PROVIDER, UserIdentity } from "@/types";
 import curl2Json from "@bany/curl-to-json";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -152,6 +154,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const settings = getResponseSettings();
     return settings.language || DEFAULT_LANGUAGE;
   });
+
+  // User Identity State
+  const [userIdentity, setUserIdentityState] = useState<UserIdentity | null>(
+    () => getUserIdentity()
+  );
 
   const getActiveLicenseStatus = async () => {
     // License check bypassed - always active
@@ -302,6 +309,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     // Load response language from response settings
     const responseSettings = getResponseSettings();
     setResponseLanguageState(responseSettings.language || DEFAULT_LANGUAGE);
+
+    // Load user identity
+    const savedUserIdentity = getUserIdentity();
+    setUserIdentityState(savedUserIdentity);
   };
 
   const updateCursor = (type: CursorType | undefined) => {
@@ -443,7 +454,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         e.key === STORAGE_KEYS.STT_LANGUAGE ||
         e.key === STORAGE_KEYS.STT_TRANSLATION_ENABLED ||
         e.key === STORAGE_KEYS.STT_TRANSLATION_LANGUAGE ||
-        e.key === STORAGE_KEYS.RESPONSE_SETTINGS
+        e.key === STORAGE_KEYS.RESPONSE_SETTINGS ||
+        e.key === STORAGE_KEYS.USER_IDENTITY
       ) {
         loadData();
       }
@@ -596,6 +608,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   };
 
+  const setUserIdentity = async (identity: UserIdentity) => {
+    setUserIdentityState(identity);
+    saveUserIdentity(identity);
+    // Invalidate AI context cache so new identity is picked up immediately
+    const { invalidateContextCache } = await import("@/lib/functions/context-builder");
+    invalidateContextCache();
+    loadData();
+  };
+
   // Create the context value (extend IContextType accordingly)
   const value: IContextType = {
     systemPrompt,
@@ -631,6 +652,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setSttTranslationLanguage,
     responseLanguage,
     setResponseLanguage,
+    userIdentity,
+    setUserIdentity,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
