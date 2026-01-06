@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Trash2, Check, X, User } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { INPUT_LIMITS } from "@/config";
 import type { ActionItem } from "@/types";
 
 interface ActionItemInput {
@@ -151,6 +152,7 @@ export const ActionItemEditor = ({
                   )}
                   disabled={isSaving}
                   placeholder="Action item description..."
+                  maxLength={INPUT_LIMITS.MAX_ACTION_ITEM_LENGTH}
                 />
                 <div className="flex items-center gap-2">
                   <User className="h-3.5 w-3.5 text-muted-foreground" />
@@ -162,6 +164,7 @@ export const ActionItemEditor = ({
                     className="text-xs h-7"
                     disabled={isSaving}
                     placeholder="Assignee (optional)"
+                    maxLength={INPUT_LIMITS.MAX_ASSIGNEE_LENGTH}
                   />
                   <Badge
                     variant={
@@ -196,6 +199,7 @@ export const ActionItemEditor = ({
           onKeyDown={handleKeyDown}
           placeholder="New action item..."
           disabled={isSaving}
+          maxLength={INPUT_LIMITS.MAX_ACTION_ITEM_LENGTH}
         />
         <div className="flex items-center gap-2">
           <User className="h-3.5 w-3.5 text-muted-foreground" />
@@ -207,6 +211,7 @@ export const ActionItemEditor = ({
             className="text-xs h-7 flex-1"
             disabled={isSaving}
             placeholder="Assignee (optional)"
+            maxLength={INPUT_LIMITS.MAX_ASSIGNEE_LENGTH}
           />
           <Button
             size="sm"

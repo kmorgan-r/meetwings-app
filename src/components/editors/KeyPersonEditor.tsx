@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Plus, Trash2, Check, X, User, Briefcase, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { INPUT_LIMITS } from "@/config";
 import type { KeyPerson } from "@/types";
 
 interface KeyPersonEditorProps {
@@ -105,6 +106,7 @@ export const KeyPersonEditor = ({
                     className="font-medium"
                     disabled={isSaving}
                     placeholder="Person name..."
+                    maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
                   />
                   {person.role && (
                     <Badge variant="secondary" className="text-xs flex-shrink-0">
@@ -122,6 +124,7 @@ export const KeyPersonEditor = ({
                     className="text-sm h-8"
                     disabled={isSaving}
                     placeholder="Role/title..."
+                    maxLength={INPUT_LIMITS.MAX_ROLE_LENGTH}
                   />
                 </div>
                 <div className="flex items-center gap-2">
@@ -134,6 +137,7 @@ export const KeyPersonEditor = ({
                     className="text-sm h-8"
                     disabled={isSaving}
                     placeholder="Relationship/context..."
+                    maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
                   />
                 </div>
               </div>
@@ -162,6 +166,7 @@ export const KeyPersonEditor = ({
             onKeyDown={handleKeyDown}
             placeholder="Person name..."
             disabled={isSaving}
+            maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
           />
         </div>
         <div className="flex items-center gap-2">
@@ -172,6 +177,7 @@ export const KeyPersonEditor = ({
             className="text-sm h-8"
             disabled={isSaving}
             placeholder="Role/title..."
+            maxLength={INPUT_LIMITS.MAX_ROLE_LENGTH}
           />
         </div>
         <div className="flex items-center gap-2">
@@ -184,6 +190,7 @@ export const KeyPersonEditor = ({
             className="text-sm h-8"
             disabled={isSaving}
             placeholder="Relationship/context..."
+            maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
           />
         </div>
         <Button

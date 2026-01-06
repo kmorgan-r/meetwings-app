@@ -4,6 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, Check, X, BookOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { INPUT_LIMITS } from "@/config";
 import type { Terminology } from "@/types";
 
 interface TerminologyEditorProps {
@@ -103,6 +104,7 @@ export const TerminologyEditor = ({
                     className="font-medium"
                     disabled={isSaving}
                     placeholder="Term..."
+                    maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
                   />
                 </div>
                 <Textarea
@@ -113,6 +115,7 @@ export const TerminologyEditor = ({
                   className="text-sm resize-none h-16"
                   disabled={isSaving}
                   placeholder="Definition or meaning..."
+                  maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
                 />
               </div>
               <Button
@@ -140,6 +143,7 @@ export const TerminologyEditor = ({
             onKeyDown={handleKeyDown}
             placeholder="Term..."
             disabled={isSaving}
+            maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
           />
         </div>
         <Textarea
@@ -148,6 +152,7 @@ export const TerminologyEditor = ({
           className="text-sm resize-none h-16"
           disabled={isSaving}
           placeholder="Definition or meaning..."
+          maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
         />
         <Button
           size="sm"

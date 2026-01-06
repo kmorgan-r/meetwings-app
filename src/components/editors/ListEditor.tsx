@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus, Trash2, GripVertical, Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { INPUT_LIMITS } from "@/config";
 
 interface ListEditorProps {
   items: string[];
@@ -88,6 +89,7 @@ export const ListEditor = ({
                 onChange={(e) => handleUpdateItem(index, e.target.value)}
                 className="flex-1"
                 disabled={isSaving}
+                maxLength={INPUT_LIMITS.MAX_LIST_ITEM_LENGTH}
               />
               <Button
                 size="icon"
@@ -114,6 +116,7 @@ export const ListEditor = ({
             placeholder={placeholder}
             disabled={isSaving}
             className="flex-1"
+            maxLength={INPUT_LIMITS.MAX_LIST_ITEM_LENGTH}
           />
           <Button
             size="icon"

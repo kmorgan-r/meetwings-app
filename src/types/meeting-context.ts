@@ -56,7 +56,7 @@ export interface Terminology {
 
 export interface ActionItem {
   text: string;
-  assignee: string;
+  assignee?: string;
   status: "pending" | "completed";
 }
 

@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Plus, Trash2, Check, X, FolderKanban } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { INPUT_LIMITS } from "@/config";
 import type { KeyProject } from "@/types";
 
 interface KeyProjectEditorProps {
@@ -130,6 +131,7 @@ export const KeyProjectEditor = ({
                     className="font-medium"
                     disabled={isSaving}
                     placeholder="Project name..."
+                    maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
                   />
                   <Select
                     value={project.status}
@@ -160,6 +162,7 @@ export const KeyProjectEditor = ({
                   className="text-sm resize-none h-16"
                   disabled={isSaving}
                   placeholder="Project description..."
+                  maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
                 />
               </div>
               <Button
@@ -187,6 +190,7 @@ export const KeyProjectEditor = ({
             onKeyDown={handleKeyDown}
             placeholder="Project name..."
             disabled={isSaving}
+            maxLength={INPUT_LIMITS.MAX_NAME_LENGTH}
           />
           <Select
             value={newProject.status}
@@ -217,6 +221,7 @@ export const KeyProjectEditor = ({
           className="text-sm resize-none h-16"
           disabled={isSaving}
           placeholder="Project description..."
+          maxLength={INPUT_LIMITS.MAX_DESCRIPTION_LENGTH}
         />
         <Button
           size="sm"
