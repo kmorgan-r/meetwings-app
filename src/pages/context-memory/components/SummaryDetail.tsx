@@ -21,6 +21,9 @@ import {
   Tag,
   Copy,
   Check,
+  Target,
+  ArrowRight,
+  MessageSquare,
 } from "lucide-react";
 import { updateMeetingSummary, getEntitiesForSummary } from "@/lib/database";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
@@ -328,6 +331,27 @@ export const SummaryDetail = ({
           </div>
         )}
 
+        {/* Goals */}
+        {summary.goals && summary.goals.length > 0 && (
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <Target className="h-3.5 w-3.5" />
+              Goals
+            </Label>
+            <ul className="space-y-1">
+              {summary.goals.map((goal, i) => (
+                <li
+                  key={i}
+                  className="text-sm text-muted-foreground flex items-start gap-2"
+                >
+                  <span className="text-muted-foreground/50">-</span>
+                  {goal}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Action Items */}
         {summary.actionItems.length > 0 && (
           <div className="space-y-2">
@@ -349,6 +373,27 @@ export const SummaryDetail = ({
           </div>
         )}
 
+        {/* Next Steps */}
+        {summary.nextSteps && summary.nextSteps.length > 0 && (
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <ArrowRight className="h-3.5 w-3.5" />
+              Next Steps
+            </Label>
+            <ul className="space-y-1">
+              {summary.nextSteps.map((step, i) => (
+                <li
+                  key={i}
+                  className="text-sm text-muted-foreground flex items-start gap-2"
+                >
+                  <span className="text-muted-foreground/50">-</span>
+                  {step}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Decisions */}
         {summary.decisions.length > 0 && (
           <div className="space-y-2">
@@ -364,6 +409,27 @@ export const SummaryDetail = ({
                 >
                   <span className="text-muted-foreground/50">-</span>
                   {decision}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Team Updates */}
+        {summary.teamUpdates && summary.teamUpdates.length > 0 && (
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <MessageSquare className="h-3.5 w-3.5" />
+              Team Updates
+            </Label>
+            <ul className="space-y-1">
+              {summary.teamUpdates.map((update, i) => (
+                <li
+                  key={i}
+                  className="text-sm text-muted-foreground flex items-start gap-2"
+                >
+                  <span className="text-muted-foreground/50">-</span>
+                  {update}
                 </li>
               ))}
             </ul>
