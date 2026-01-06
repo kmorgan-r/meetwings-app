@@ -45,5 +45,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-context.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 7: Add enhanced fields to meeting context tables
+        Migration {
+            version: 7,
+            description: "add_enhanced_meeting_context_fields",
+            sql: include_str!("migrations/meeting-context-v7.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

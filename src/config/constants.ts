@@ -44,10 +44,23 @@ export const STORAGE_KEYS = {
   USER_VOICE_ENROLLMENT: "user_voice_enrollment",
   ASSEMBLYAI_API_KEY: "assemblyai_api_key",
   PREVIOUS_STT_PROVIDER: "previous_stt_provider",
+
+  // User Identity settings
+  USER_IDENTITY: "user_identity",
 } as const;
 
 // Max number of files that can be attached to a message
 export const MAX_FILES = 6;
+
+// Input validation limits for editor components
+export const INPUT_LIMITS = {
+  MAX_NAME_LENGTH: 100, // Names (people, projects, terms)
+  MAX_ROLE_LENGTH: 50, // Role/title fields
+  MAX_DESCRIPTION_LENGTH: 500, // Descriptions, meanings, relationships
+  MAX_LIST_ITEM_LENGTH: 200, // Simple list items
+  MAX_ACTION_ITEM_LENGTH: 300, // Action item text
+  MAX_ASSIGNEE_LENGTH: 50, // Assignee names
+} as const;
 
 // Default settings
 export const DEFAULT_SYSTEM_PROMPT =

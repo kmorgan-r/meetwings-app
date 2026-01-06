@@ -8,11 +8,16 @@ export interface MeetingSummary {
   id: string;
   conversationId: string;
   summary: string;
+  title: string | null;
   topics: string[];
+  goals: string[];
   actionItems: string[];
+  nextSteps: string[];
   decisions: string[];
+  teamUpdates: string[];
   participants: string[];
   exchangeCount: number;
+  durationSeconds: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -49,22 +54,35 @@ export interface Terminology {
   meaning: string;
 }
 
+export interface ActionItem {
+  text: string;
+  assignee?: string;
+  status: "pending" | "completed";
+}
+
 export interface KnowledgeProfile {
   id: string;
   summary: string | null;
   keyPeople: KeyPerson[];
   keyProjects: KeyProject[];
   terminology: Terminology[];
+  recentGoals: string[];
+  recentDecisions: string[];
+  recentTeamUpdates: string[];
   lastCompacted: number | null;
   sourceCount: number;
 }
 
 // AI summarization response structure
 export interface SummarizationResult {
+  title: string | null;
   summary: string;
   topics: string[];
+  goals: string[];
   actionItems: string[];
+  nextSteps: string[];
   decisions: string[];
+  teamUpdates: string[];
   participants: string[];
   entities: ExtractedEntity[];
 }
@@ -80,11 +98,16 @@ export interface DbMeetingSummary {
   id: string;
   conversation_id: string;
   summary: string;
+  title: string | null;
   topics: string | null;
+  goals: string | null;
   action_items: string | null;
+  next_steps: string | null;
   decisions: string | null;
+  team_updates: string | null;
   participants: string | null;
   exchange_count: number | null;
+  duration_seconds: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -110,6 +133,9 @@ export interface DbKnowledgeProfile {
   key_people: string | null;
   key_projects: string | null;
   terminology: string | null;
+  recent_goals: string | null;
+  recent_decisions: string | null;
+  recent_team_updates: string | null;
   last_compacted: number | null;
   source_count: number | null;
 }
@@ -118,11 +144,16 @@ export interface DbKnowledgeProfile {
 export interface CreateMeetingSummaryInput {
   conversationId: string;
   summary: string;
+  title?: string;
   topics?: string[];
+  goals?: string[];
   actionItems?: string[];
+  nextSteps?: string[];
   decisions?: string[];
+  teamUpdates?: string[];
   participants?: string[];
   exchangeCount?: number;
+  durationSeconds?: number;
 }
 
 export interface CreateKnowledgeEntityInput {
@@ -136,5 +167,8 @@ export interface UpdateKnowledgeProfileInput {
   keyPeople?: KeyPerson[];
   keyProjects?: KeyProject[];
   terminology?: Terminology[];
+  recentGoals?: string[];
+  recentDecisions?: string[];
+  recentTeamUpdates?: string[];
   sourceCount?: number;
 }

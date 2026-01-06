@@ -19,6 +19,8 @@ import {
   ListTodo,
   Loader2,
   Tag,
+  Copy,
+  Check,
 } from "lucide-react";
 import { updateMeetingSummary, getEntitiesForSummary } from "@/lib/database";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
@@ -38,6 +40,7 @@ export const SummaryDetail = ({
   const [editedSummary, setEditedSummary] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [entities, setEntities] = useState<KnowledgeEntity[]>([]);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (summary) {
@@ -75,6 +78,99 @@ export const SummaryDetail = ({
   const handleCancel = () => {
     setEditedSummary(summary?.summary || "");
     setIsEditing(false);
+  };
+
+  const handleCopyAsMarkdown = async () => {
+    if (!summary) return;
+
+    let markdown = `# Meeting Summary\n\n`;
+    markdown += `**Date:** ${formatDate(summary.createdAt)} at ${formatTime(summary.createdAt)}\n\n`;
+
+    if (summary.title) {
+      markdown += `**Title:** ${summary.title}\n\n`;
+    }
+
+    markdown += `## Summary\n\n${summary.summary}\n\n`;
+
+    if (summary.topics.length > 0) {
+      markdown += `## Topics\n\n`;
+      summary.topics.forEach((topic) => {
+        markdown += `- ${topic}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.participants.length > 0) {
+      markdown += `## Participants\n\n`;
+      summary.participants.forEach((person) => {
+        markdown += `- ${person}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.goals && summary.goals.length > 0) {
+      markdown += `## Goals\n\n`;
+      summary.goals.forEach((goal) => {
+        markdown += `- ${goal}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.actionItems.length > 0) {
+      markdown += `## Action Items\n\n`;
+      summary.actionItems.forEach((item) => {
+        markdown += `- ${item}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.nextSteps && summary.nextSteps.length > 0) {
+      markdown += `## Next Steps\n\n`;
+      summary.nextSteps.forEach((step) => {
+        markdown += `- ${step}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.decisions.length > 0) {
+      markdown += `## Decisions\n\n`;
+      summary.decisions.forEach((decision) => {
+        markdown += `- ${decision}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (summary.teamUpdates && summary.teamUpdates.length > 0) {
+      markdown += `## Team Updates\n\n`;
+      summary.teamUpdates.forEach((update) => {
+        markdown += `- ${update}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    if (entities.length > 0) {
+      markdown += `## Extracted Entities\n\n`;
+      entities.forEach((entity) => {
+        markdown += `- **${entity.entityType}:** ${entity.name}\n`;
+      });
+      markdown += `\n`;
+    }
+
+    markdown += `---\n\n`;
+    markdown += `*${summary.exchangeCount} exchanges*`;
+
+    if (summary.durationSeconds) {
+      const minutes = Math.floor(summary.durationSeconds / 60);
+      markdown += ` | *Duration: ${minutes} minutes*`;
+    }
+
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error("Failed to copy to clipboard:", error);
+    }
   };
 
   if (!summary) {
@@ -146,6 +242,19 @@ export const SummaryDetail = ({
               </>
             ) : (
               <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={handleCopyAsMarkdown}
+                  title="Copy as Markdown"
+                >
+                  {copied ? (
+                    <Check className="h-4 w-4 text-green-500" />
+                  ) : (
+                    <Copy className="h-4 w-4" />
+                  )}
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"

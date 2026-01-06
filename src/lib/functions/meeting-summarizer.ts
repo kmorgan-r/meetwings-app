@@ -13,19 +13,57 @@ import {
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
+import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
 
 // Minimum number of exchanges (user+assistant pairs) required to trigger summarization
 const MIN_EXCHANGES_FOR_SUMMARY = 2;
+
+/**
+ * Filters the user's name from a list of participants (case-insensitive).
+ */
+function filterUserFromParticipants(participants: string[]): string[] {
+  if (!hasUserIdentity()) {
+    return participants;
+  }
+
+  const identity = getUserIdentity();
+  if (!identity?.name) {
+    return participants;
+  }
+
+  const userNameLower = identity.name.toLowerCase();
+  return participants.filter((p) => p.toLowerCase() !== userNameLower);
+}
+
+/**
+ * Gets the user identity instruction for AI prompts.
+ */
+function getUserIdentityInstruction(): string {
+  if (!hasUserIdentity()) {
+    return "";
+  }
+
+  const identity = getUserIdentity();
+  if (!identity?.name) {
+    return "";
+  }
+
+  return `\n- IMPORTANT: The user's name is "${identity.name}". Do NOT include "${identity.name}" in the participants list - they are the user, not a participant.`;
+}
 
 // Summarization prompt template
 const SUMMARIZATION_PROMPT = `You are a meeting/conversation summarizer. Analyze the conversation and extract key information.
 
 Respond ONLY with a valid JSON object in this exact format (no markdown, no code blocks, just raw JSON):
 {
+  "title": "Brief descriptive title for this conversation",
   "summary": "2-3 sentence summary of what was discussed",
   "topics": ["topic1", "topic2"],
+  "goals": ["goal1", "goal2"],
   "action_items": ["action1", "action2"],
+  "next_steps": ["step1", "step2"],
   "decisions": ["decision1"],
+  "team_updates": ["update1", "update2"],
   "participants": ["person1", "person2"],
   "entities": [
     {"type": "person", "name": "John", "description": "Project manager"},
@@ -36,10 +74,14 @@ Respond ONLY with a valid JSON object in this exact format (no markdown, no code
 }
 
 Rules:
+- "title": Short, descriptive title summarizing the conversation (5-8 words max)
 - "summary": Brief overview of the conversation's main points
 - "topics": Main subjects discussed (2-5 topics)
+- "goals": Objectives or goals mentioned or discussed (can be empty array)
 - "action_items": Tasks or follow-ups mentioned (can be empty array)
+- "next_steps": Planned next steps or future actions (can be empty array)
 - "decisions": Key decisions made (can be empty array)
+- "team_updates": Status updates about team members or projects (can be empty array)
 - "participants": Names of people mentioned (can be empty array)
 - "entities": Important entities to remember. Types: "person", "project", "company", "term"
   - Only include entities that are significant and likely to be referenced again
@@ -91,11 +133,17 @@ function parseSummarizationResponse(response: string): SummarizationResult | nul
 
     // Validate and normalize the response
     const result: SummarizationResult = {
+      title: typeof parsed.title === "string" ? parsed.title : null,
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       topics: Array.isArray(parsed.topics) ? parsed.topics.filter((t: any) => typeof t === "string") : [],
+      goals: Array.isArray(parsed.goals) ? parsed.goals.filter((g: any) => typeof g === "string") : [],
       actionItems: Array.isArray(parsed.action_items) ? parsed.action_items.filter((a: any) => typeof a === "string") : [],
+      nextSteps: Array.isArray(parsed.next_steps) ? parsed.next_steps.filter((n: any) => typeof n === "string") : [],
       decisions: Array.isArray(parsed.decisions) ? parsed.decisions.filter((d: any) => typeof d === "string") : [],
-      participants: Array.isArray(parsed.participants) ? parsed.participants.filter((p: any) => typeof p === "string") : [],
+      teamUpdates: Array.isArray(parsed.team_updates) ? parsed.team_updates.filter((u: any) => typeof u === "string") : [],
+      participants: filterUserFromParticipants(
+        Array.isArray(parsed.participants) ? parsed.participants.filter((p: any) => typeof p === "string") : []
+      ),
       entities: [],
     };
 
@@ -173,7 +221,7 @@ export async function generateConversationSummary(
         provider: "",
         variables: {},
       },
-      systemPrompt: SUMMARIZATION_PROMPT,
+      systemPrompt: SUMMARIZATION_PROMPT + getUserIdentityInstruction(),
       history: [],
       userMessage,
       imagesBase64: [],
@@ -208,10 +256,14 @@ export async function saveSummarizationResult(
     // Create the meeting summary
     const summaryInput: CreateMeetingSummaryInput = {
       conversationId,
+      title: result.title || undefined,
       summary: result.summary,
       topics: result.topics,
+      goals: result.goals,
       actionItems: result.actionItems,
+      nextSteps: result.nextSteps,
       decisions: result.decisions,
+      teamUpdates: result.teamUpdates,
       participants: result.participants,
       exchangeCount,
     };

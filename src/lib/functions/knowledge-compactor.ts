@@ -14,6 +14,7 @@ import {
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
+import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
 
 // Compaction thresholds
 const COMPACTION_DAYS_THRESHOLD = 30; // Compact if last compaction was > 30 days ago
@@ -34,7 +35,10 @@ Respond ONLY with a valid JSON object in this exact format (no markdown, no code
   ],
   "terminology": [
     {"term": "Technical Term", "meaning": "What it means in this context"}
-  ]
+  ],
+  "recent_goals": ["goal1", "goal2"],
+  "recent_decisions": ["decision1", "decision2"],
+  "recent_team_updates": ["update1", "update2"]
 }
 
 Rules:
@@ -42,10 +46,46 @@ Rules:
 - "key_people": Include only people mentioned multiple times or who seem important. Max 10 people.
 - "key_projects": Include active and recent projects. Max 8 projects.
 - "terminology": Include domain-specific terms, acronyms, or jargon used. Max 10 terms.
+- "recent_goals": Important goals or objectives mentioned across recent meetings (max 10)
+- "recent_decisions": Key decisions made in recent meetings (max 10)
+- "recent_team_updates": Status updates about team members or projects from recent meetings (max 10)
 - Prioritize information that would help an AI assistant provide more relevant responses
 - Keep the entire profile concise (aim for ~500 tokens total)
 - Merge similar entries and remove outdated information
 - If existing profile has good information, preserve and update it rather than replacing`;
+
+/**
+ * Filters the user's name from key_people (case-insensitive).
+ */
+function filterUserFromKeyPeople(keyPeople: KeyPerson[]): KeyPerson[] {
+  if (!hasUserIdentity()) {
+    return keyPeople;
+  }
+
+  const identity = getUserIdentity();
+  if (!identity?.name) {
+    return keyPeople;
+  }
+
+  const userNameLower = identity.name.toLowerCase();
+  return keyPeople.filter((p) => p.name.toLowerCase() !== userNameLower);
+}
+
+/**
+ * Gets the user identity instruction for compaction prompts.
+ */
+function getUserIdentityCompactionInstruction(): string {
+  if (!hasUserIdentity()) {
+    return "";
+  }
+
+  const identity = getUserIdentity();
+  if (!identity?.name) {
+    return "";
+  }
+
+  return `\n- IMPORTANT: The user's name is "${identity.name}". Do NOT include "${identity.name}" in key_people - they are the user, not a contact.`;
+}
 
 /**
  * Formats summaries for compaction
@@ -55,15 +95,27 @@ function formatSummariesForCompaction(summaries: MeetingSummary[]): string {
     .map((s, i) => {
       const date = new Date(s.createdAt).toLocaleDateString();
       let text = `[${i + 1}] ${date}\n`;
+      if (s.title) {
+        text += `Title: ${s.title}\n`;
+      }
       text += `Summary: ${s.summary}\n`;
       if (s.topics.length > 0) {
         text += `Topics: ${s.topics.join(", ")}\n`;
       }
+      if (s.goals.length > 0) {
+        text += `Goals: ${s.goals.join("; ")}\n`;
+      }
       if (s.actionItems.length > 0) {
         text += `Action Items: ${s.actionItems.join("; ")}\n`;
       }
+      if (s.nextSteps.length > 0) {
+        text += `Next Steps: ${s.nextSteps.join("; ")}\n`;
+      }
       if (s.decisions.length > 0) {
         text += `Decisions: ${s.decisions.join("; ")}\n`;
+      }
+      if (s.teamUpdates.length > 0) {
+        text += `Team Updates: ${s.teamUpdates.join("; ")}\n`;
       }
       if (s.participants.length > 0) {
         text += `Participants: ${s.participants.join(", ")}\n`;
@@ -131,6 +183,9 @@ function parseCompactionResponse(response: string): UpdateKnowledgeProfileInput 
       keyPeople: [],
       keyProjects: [],
       terminology: [],
+      recentGoals: [],
+      recentDecisions: [],
+      recentTeamUpdates: [],
     };
 
     // Parse key_people
@@ -190,6 +245,27 @@ function parseCompactionResponse(response: string): UpdateKnowledgeProfileInput 
             meaning: typeof t.meaning === "string" ? t.meaning : "",
           })
         );
+    }
+
+    // Parse recent_goals
+    if (Array.isArray(parsed.recent_goals)) {
+      result.recentGoals = parsed.recent_goals
+        .filter((g: any) => typeof g === "string" && g.trim())
+        .slice(0, 10);
+    }
+
+    // Parse recent_decisions
+    if (Array.isArray(parsed.recent_decisions)) {
+      result.recentDecisions = parsed.recent_decisions
+        .filter((d: any) => typeof d === "string" && d.trim())
+        .slice(0, 10);
+    }
+
+    // Parse recent_team_updates
+    if (Array.isArray(parsed.recent_team_updates)) {
+      result.recentTeamUpdates = parsed.recent_team_updates
+        .filter((u: any) => typeof u === "string" && u.trim())
+        .slice(0, 10);
     }
 
     return result;
@@ -295,7 +371,7 @@ Create the updated knowledge profile JSON:`;
         provider: "",
         variables: {},
       },
-      systemPrompt: COMPACTION_PROMPT,
+      systemPrompt: COMPACTION_PROMPT + getUserIdentityCompactionInstruction(),
       history: [],
       userMessage,
       imagesBase64: [],
@@ -309,6 +385,11 @@ Create the updated knowledge profile JSON:`;
     if (!updates || !updates.summary) {
       console.error("Failed to generate valid compacted profile");
       return null;
+    }
+
+    // Filter user from key_people (in case AI included them despite instruction)
+    if (updates.keyPeople) {
+      updates.keyPeople = filterUserFromKeyPeople(updates.keyPeople);
     }
 
     // Update source count
