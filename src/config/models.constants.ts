@@ -175,8 +175,7 @@ export const AI_MODELS: Record<string, ModelOption[]> = {
     { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "Fast, cost-effective" },
   ],
   claude: [
-    { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4", recommended: true, description: "Latest and most capable" },
-    { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", description: "Excellent balance of speed and quality" },
+    { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", recommended: true, description: "Latest, excellent balance of speed and quality" },
     { id: "claude-3-opus-20240229", name: "Claude 3 Opus", description: "Highest capability" },
     { id: "claude-3-sonnet-20240229", name: "Claude 3 Sonnet", description: "Good balance" },
     { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku", description: "Fastest, most affordable" },

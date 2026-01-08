@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Select,
   SelectContent,
@@ -18,8 +18,10 @@ import {
   getModelPricing,
   getSTTModelPricing,
   formatCost,
+  getPricingConfig,
+  getSTTPricingConfig,
 } from "@/lib/storage/pricing.storage";
-import { Star, Pencil } from "lucide-react";
+import { Star, Pencil, AlertCircle } from "lucide-react";
 
 interface ModelSelectorProps {
   providerId: string;
@@ -32,25 +34,65 @@ interface ModelSelectorProps {
 const CUSTOM_MODEL_VALUE = "__custom__";
 
 /**
- * Format pricing for display in dropdown
+ * Check if pricing for a model is using fallback/estimated values.
+ * Returns true if using wildcard (*) pricing instead of exact model pricing.
  */
-function formatAIPricing(providerId: string, modelId: string): string {
-  const pricing = getModelPricing(providerId, modelId);
-  if (pricing.inputPer1k === 0 && pricing.outputPer1k === 0) {
-    return "Free";
+function isUsingFallbackPricing(
+  providerId: string,
+  modelId: string,
+  type: "ai" | "stt"
+): boolean {
+  if (type === "ai") {
+    const config = getPricingConfig();
+    const providerPricing = config[providerId];
+    if (!providerPricing) return true; // Using provider wildcard
+    if (providerPricing[modelId]) return false; // Exact match found
+    // Check if any pattern matches
+    for (const pattern of Object.keys(providerPricing)) {
+      if (pattern !== "*" && modelId.toLowerCase().includes(pattern.toLowerCase())) {
+        return false; // Pattern match found
+      }
+    }
+    return true; // Using wildcard
+  } else {
+    const config = getSTTPricingConfig();
+    const providerPricing = config[providerId];
+    if (!providerPricing) return true;
+    if (providerPricing[modelId]) return false;
+    for (const pattern of Object.keys(providerPricing)) {
+      if (pattern !== "*" && modelId.toLowerCase().includes(pattern.toLowerCase())) {
+        return false;
+      }
+    }
+    return true;
   }
-  return `$${pricing.inputPer1k}/$${pricing.outputPer1k} per 1K`;
 }
 
-function formatSTTPricing(providerId: string, modelId: string): string {
+/**
+ * Format pricing for display in dropdown
+ */
+function formatAIPricing(providerId: string, modelId: string): { text: string; isEstimate: boolean } {
+  const pricing = getModelPricing(providerId, modelId);
+  const isEstimate = isUsingFallbackPricing(providerId, modelId, "ai");
+  if (pricing.inputPer1k === 0 && pricing.outputPer1k === 0) {
+    return { text: "Free", isEstimate: false };
+  }
+  return {
+    text: `$${pricing.inputPer1k}/$${pricing.outputPer1k} per 1K`,
+    isEstimate
+  };
+}
+
+function formatSTTPricing(providerId: string, modelId: string): { text: string; isEstimate: boolean } {
   const pricing = getSTTModelPricing(providerId, modelId);
+  const isEstimate = isUsingFallbackPricing(providerId, modelId, "stt");
   if (pricing.perMinute === 0) {
-    return "Free";
+    return { text: "Free", isEstimate: false };
   }
-  if (pricing.perMinute < 0.001) {
-    return `$${pricing.perMinute.toFixed(5)}/min`;
-  }
-  return `$${pricing.perMinute.toFixed(4)}/min`;
+  const text = pricing.perMinute < 0.001
+    ? `$${pricing.perMinute.toFixed(5)}/min`
+    : `$${pricing.perMinute.toFixed(4)}/min`;
+  return { text, isEstimate };
 }
 
 /**
@@ -60,23 +102,31 @@ function getEstimatedCost(
   providerId: string,
   modelId: string,
   type: "ai" | "stt"
-): string {
+): { text: string; isEstimate: boolean } {
+  const isEstimate = isUsingFallbackPricing(providerId, modelId, type);
+
   if (type === "ai") {
     const pricing = getModelPricing(providerId, modelId);
     if (pricing.inputPer1k === 0 && pricing.outputPer1k === 0) {
-      return "Free (local model)";
+      return { text: "Free (local model)", isEstimate: false };
     }
     // Estimate based on 500 input + 500 output tokens (typical request)
     const inputCost = (500 / 1000) * pricing.inputPer1k;
     const outputCost = (500 / 1000) * pricing.outputPer1k;
     const totalCost = inputCost + outputCost;
-    return `~${formatCost(totalCost)} per typical request (500 in/out tokens)`;
+    return {
+      text: `~${formatCost(totalCost)} per typical request (500 in/out tokens)`,
+      isEstimate
+    };
   } else {
     const pricing = getSTTModelPricing(providerId, modelId);
     if (pricing.perMinute === 0) {
-      return "Free (local model)";
+      return { text: "Free (local model)", isEstimate: false };
     }
-    return `~${formatCost(pricing.perMinute)} per minute of audio`;
+    return {
+      text: `~${formatCost(pricing.perMinute)} per minute of audio`,
+      isEstimate
+    };
   }
 }
 
@@ -88,21 +138,36 @@ export const ModelSelector = ({
   providerDisplayName,
 }: ModelSelectorProps) => {
   const [isCustomMode, setIsCustomMode] = useState(false);
-  const [customModelInput, setCustomModelInput] = useState("");
 
-  const models =
-    type === "ai"
-      ? getAIModelsForProvider(providerId)
-      : getSTTModelsForProvider(providerId);
+  const models = useMemo(
+    () =>
+      type === "ai"
+        ? getAIModelsForProvider(providerId)
+        : getSTTModelsForProvider(providerId),
+    [providerId, type]
+  );
 
   const hasModels = hasModelsForProvider(providerId, type);
 
   // Check if the current selected model is in the predefined list
-  const isSelectedModelPredefined =
-    hasModels && models.some((m) => m.id === selectedModel);
+  const isSelectedModelPredefined = useMemo(
+    () => hasModels && models.some((m) => m.id === selectedModel),
+    [hasModels, models, selectedModel]
+  );
+
+  // Sync custom mode state: exit custom mode if user selects a predefined model
+  useEffect(() => {
+    if (isSelectedModelPredefined && isCustomMode) {
+      setIsCustomMode(false);
+    }
+  }, [isSelectedModelPredefined, isCustomMode]);
 
   // If no predefined models, or we're in custom mode, show text input
   if (!hasModels || isCustomMode) {
+    const costInfo = selectedModel
+      ? getEstimatedCost(providerId, selectedModel, type)
+      : null;
+
     return (
       <div className="space-y-2">
         <Header
@@ -117,23 +182,17 @@ export const ModelSelector = ({
             placeholder={`Enter model name (e.g., ${
               type === "ai" ? "gpt-4o" : "whisper-1"
             })`}
-            value={isCustomMode ? customModelInput : selectedModel}
+            value={selectedModel}
             onChange={(value) => {
               const newValue =
                 typeof value === "string" ? value : value.target.value;
-              if (isCustomMode) {
-                setCustomModelInput(newValue);
-              }
               onModelChange(newValue);
             }}
             className="flex-1 h-11 border-1 border-input/50 focus:border-primary/50 transition-colors"
           />
           {hasModels && isCustomMode && (
             <button
-              onClick={() => {
-                setIsCustomMode(false);
-                setCustomModelInput("");
-              }}
+              onClick={() => setIsCustomMode(false)}
               className="px-3 h-11 text-sm bg-secondary hover:bg-secondary/80 rounded-md transition-colors"
               title="Back to model list"
             >
@@ -141,9 +200,15 @@ export const ModelSelector = ({
             </button>
           )}
         </div>
-        {selectedModel && (
-          <div className="text-xs text-muted-foreground mt-1">
-            Estimated: {getEstimatedCost(providerId, selectedModel, type)}
+        {costInfo && (
+          <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+            <span>Estimated: {costInfo.text}</span>
+            {costInfo.isEstimate && (
+              <span className="inline-flex items-center gap-0.5 text-yellow-600 dark:text-yellow-500" title="Using estimated pricing - actual cost may vary">
+                <AlertCircle className="h-3 w-3" />
+                <span className="text-[10px]">(est.)</span>
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -184,6 +249,11 @@ export const ModelSelector = ({
     return selectedModel;
   };
 
+  // Get cost info for the footer
+  const costInfo = selectedModel
+    ? getEstimatedCost(providerId, selectedModel, type)
+    : null;
+
   return (
     <div className="space-y-2">
       <Header
@@ -197,7 +267,6 @@ export const ModelSelector = ({
         onValueChange={(value) => {
           if (value === CUSTOM_MODEL_VALUE) {
             setIsCustomMode(true);
-            setCustomModelInput(selectedModel || "");
           } else {
             onModelChange(value);
           }
@@ -266,9 +335,15 @@ export const ModelSelector = ({
       </Select>
 
       {/* Cost estimation */}
-      {selectedModel && (
-        <div className="text-xs text-muted-foreground mt-1">
-          Estimated: {getEstimatedCost(providerId, selectedModel, type)}
+      {costInfo && (
+        <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+          <span>Estimated: {costInfo.text}</span>
+          {costInfo.isEstimate && (
+            <span className="inline-flex items-center gap-0.5 text-yellow-600 dark:text-yellow-500" title="Using estimated pricing - actual cost may vary">
+              <AlertCircle className="h-3 w-3" />
+              <span className="text-[10px]">(est.)</span>
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -304,8 +379,11 @@ function ModelSelectItem({
           {showStar && <Star className="h-3 w-3 text-yellow-500 flex-shrink-0" />}
           <span className="font-medium truncate">{model.name}</span>
         </div>
-        <span className="text-xs text-muted-foreground flex-shrink-0">
-          {pricing}
+        <span className="text-xs text-muted-foreground flex-shrink-0 flex items-center gap-1">
+          {pricing.text}
+          {pricing.isEstimate && (
+            <AlertCircle className="h-3 w-3 text-yellow-600 dark:text-yellow-500" />
+          )}
         </span>
       </div>
     </SelectItem>
