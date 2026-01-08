@@ -1,4 +1,11 @@
-import { AIProviders, STTProviders, MeetwingsApiSetup, SetupProgressHeader } from "./components";
+import {
+  AIProviders,
+  STTProviders,
+  MeetwingsApiSetup,
+  SetupProgressHeader,
+  AICustomProviders,
+  STTCustomProviders,
+} from "./components";
 import Contribute from "@/components/Contribute";
 import { useSettings } from "@/hooks";
 import { PageLayout } from "@/layouts";
@@ -35,12 +42,20 @@ const DevSpace = () => {
         <div className="flex items-center gap-2 mb-4">
           <h2 className="text-sm font-semibold text-foreground">Optional</h2>
           <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-            Premium features
+            Advanced features
           </span>
         </div>
 
-        {/* Meetwings API Setup */}
-        <MeetwingsApiSetup />
+        <div className="space-y-6">
+          {/* Meetwings API Setup */}
+          <MeetwingsApiSetup />
+
+          {/* Custom AI Providers */}
+          <AICustomProviders {...settings} />
+
+          {/* Custom STT Providers */}
+          <STTCustomProviders {...settings} />
+        </div>
       </div>
 
       {/* Contribute Banner (moved to bottom) */}
