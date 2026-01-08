@@ -5,6 +5,18 @@ import { KeyIcon, TrashIcon, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getAIProviderInfo } from "@/config/models.constants";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
+
+const handleOpenUrl = async (url: string) => {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error("Failed to open URL:", error);
+    toast.error("Failed to open link", {
+      description: "Please try again or copy the URL manually.",
+    });
+  }
+};
 
 export const Providers = ({
   allAiProviders,
@@ -83,18 +95,19 @@ export const Providers = ({
       {selectedAIProvider?.provider && !allAiProviders?.find(p => p?.id === selectedAIProvider?.provider)?.isCustom && (() => {
         const providerInfo = getAIProviderInfo(selectedAIProvider.provider);
         if (!providerInfo) return null;
+        const { pricingUrl } = providerInfo;
         return (
           <div className="flex flex-wrap gap-2 py-2">
             <button
-              onClick={() => openUrl(providerInfo.signupUrl)}
+              onClick={() => handleOpenUrl(providerInfo.signupUrl)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary/10 hover:bg-primary/20 text-primary rounded-md transition-colors"
             >
               <ExternalLink className="h-3.5 w-3.5" />
               Get API Key from {providerInfo.name}
             </button>
-            {providerInfo.pricingUrl && (
+            {pricingUrl && (
               <button
-                onClick={() => openUrl(providerInfo.pricingUrl!)}
+                onClick={() => handleOpenUrl(pricingUrl)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 text-secondary-foreground rounded-md transition-colors"
               >
                 <ExternalLink className="h-3.5 w-3.5" />

@@ -183,11 +183,7 @@ export const ModelSelector = ({
               type === "ai" ? "gpt-4o" : "whisper-1"
             })`}
             value={selectedModel}
-            onChange={(value) => {
-              const newValue =
-                typeof value === "string" ? value : value.target.value;
-              onModelChange(newValue);
-            }}
+            onChange={(e) => onModelChange(e.target.value)}
             className="flex-1 h-11 border-1 border-input/50 focus:border-primary/50 transition-colors"
           />
           {hasModels && isCustomMode && (
