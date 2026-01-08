@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import {
   Dashboard,
   App,
@@ -37,7 +37,9 @@ export default function AppRoutes() {
           <Route path="/context-memory" element={<ContextMemory />} />
           <Route path="/speakers" element={<Speakers />} />
           <Route path="/language" element={<Language />} />
-          <Route path="/dev-space" element={<DevSpace />} />
+          <Route path="/api-setup" element={<DevSpace />} />
+          {/* Redirect old route for backward compatibility */}
+          <Route path="/dev-space" element={<Navigate to="/api-setup" replace />} />
         </Route>
       </Routes>
     </Router>

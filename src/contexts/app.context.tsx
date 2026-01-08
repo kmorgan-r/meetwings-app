@@ -508,11 +508,40 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    setSelectedAIProvider((prev) => ({
-      ...prev,
-      provider,
-      variables,
-    }));
+    setSelectedAIProvider((prev) => {
+      // If provider is changing, save the old provider's config and load any saved config for the new provider
+      if (provider !== prev.provider) {
+        // Save current provider's variables to per-provider storage (if we have a provider selected)
+        if (prev.provider && Object.keys(prev.variables).length > 0) {
+          const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS) || '{}');
+          savedConfigs[prev.provider] = prev.variables;
+          safeLocalStorage.setItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS, JSON.stringify(savedConfigs));
+        }
+
+        // Load saved config for the new provider (if any)
+        const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS) || '{}');
+        const savedVariables = savedConfigs[provider] || {};
+
+        // Merge: saved config as base, then overlay with any passed variables
+        return {
+          provider,
+          variables: {
+            ...savedVariables,
+            ...variables,
+          }
+        };
+      }
+      // If provider is the same, merge variables to prevent stale closure issues
+      // This ensures that updating one variable (e.g., model) doesn't wipe out
+      // another variable (e.g., api_key) due to stale closure captures
+      return {
+        provider,
+        variables: {
+          ...prev.variables,
+          ...variables,
+        },
+      };
+    });
   };
 
   // Setter for selected STT with validation
@@ -528,7 +557,40 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    setSelectedSttProvider((prev) => ({ ...prev, provider, variables }));
+    setSelectedSttProvider((prev) => {
+      // If provider is changing, save the old provider's config and load any saved config for the new provider
+      if (provider !== prev.provider) {
+        // Save current provider's variables to per-provider storage (if we have a provider selected)
+        if (prev.provider && Object.keys(prev.variables).length > 0) {
+          const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS) || '{}');
+          savedConfigs[prev.provider] = prev.variables;
+          safeLocalStorage.setItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS, JSON.stringify(savedConfigs));
+        }
+
+        // Load saved config for the new provider (if any)
+        const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS) || '{}');
+        const savedVariables = savedConfigs[provider] || {};
+
+        // Merge: saved config as base, then overlay with any passed variables
+        return {
+          provider,
+          variables: {
+            ...savedVariables,
+            ...variables,
+          }
+        };
+      }
+      // If provider is the same, merge variables to prevent stale closure issues
+      // This ensures that updating one variable (e.g., model) doesn't wipe out
+      // another variable (e.g., api_key) due to stale closure captures
+      return {
+        provider,
+        variables: {
+          ...prev.variables,
+          ...variables,
+        },
+      };
+    });
   };
 
   // Toggle handlers
