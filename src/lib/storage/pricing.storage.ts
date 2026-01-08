@@ -18,6 +18,12 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.002, outputPer1k: 0.008 }, // Default for unknown OpenAI models
   },
   claude: {
+    // Exact model IDs used in API
+    "claude-3-5-sonnet-20241022": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "claude-3-opus-20240229": { inputPer1k: 0.015, outputPer1k: 0.075 },
+    "claude-3-sonnet-20240229": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "claude-3-haiku-20240307": { inputPer1k: 0.00025, outputPer1k: 0.00125 },
+    // Pattern matches for partial names
     "claude-3-5-sonnet": { inputPer1k: 0.003, outputPer1k: 0.015 },
     "claude-3-opus": { inputPer1k: 0.015, outputPer1k: 0.075 },
     "claude-3-sonnet": { inputPer1k: 0.003, outputPer1k: 0.015 },
@@ -53,17 +59,38 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.0001, outputPer1k: 0.0001 },
   },
   mistral: {
+    // Exact model IDs with -latest suffix
+    "mistral-large-latest": { inputPer1k: 0.004, outputPer1k: 0.012 },
+    "mistral-medium-latest": { inputPer1k: 0.0027, outputPer1k: 0.0081 },
+    "mistral-small-latest": { inputPer1k: 0.001, outputPer1k: 0.003 },
+    // Mixtral MoE models
+    "open-mixtral-8x22b": { inputPer1k: 0.002, outputPer1k: 0.006 },
+    "open-mixtral-8x7b": { inputPer1k: 0.0007, outputPer1k: 0.0007 },
+    // Pattern matches for partial names
     "mistral-large": { inputPer1k: 0.004, outputPer1k: 0.012 },
     "mistral-medium": { inputPer1k: 0.0027, outputPer1k: 0.0081 },
     "mistral-small": { inputPer1k: 0.001, outputPer1k: 0.003 },
     "*": { inputPer1k: 0.0004, outputPer1k: 0.0012 },
   },
   perplexity: {
+    // Online models (with web search)
+    "llama-3.1-sonar-large-128k-online": { inputPer1k: 0.001, outputPer1k: 0.001 },
+    "llama-3.1-sonar-small-128k-online": { inputPer1k: 0.0002, outputPer1k: 0.0002 },
+    // Chat models (no web search)
+    "llama-3.1-sonar-large-128k-chat": { inputPer1k: 0.001, outputPer1k: 0.001 },
+    "llama-3.1-sonar-small-128k-chat": { inputPer1k: 0.0002, outputPer1k: 0.0002 },
+    // Pattern matches
     "llama-3.1-sonar-large": { inputPer1k: 0.001, outputPer1k: 0.001 },
     "llama-3.1-sonar-small": { inputPer1k: 0.0002, outputPer1k: 0.0002 },
     "*": { inputPer1k: 0.001, outputPer1k: 0.001 },
   },
   openrouter: {
+    // Popular models via OpenRouter (pricing varies, these are estimates)
+    "openai/gpt-4o": { inputPer1k: 0.0025, outputPer1k: 0.01 },
+    "anthropic/claude-3.5-sonnet": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "meta-llama/llama-3.1-70b-instruct": { inputPer1k: 0.00059, outputPer1k: 0.00079 },
+    "google/gemini-pro-1.5": { inputPer1k: 0.00125, outputPer1k: 0.005 },
+    "mistralai/mistral-large": { inputPer1k: 0.004, outputPer1k: 0.012 },
     // OpenRouter has variable pricing, use a reasonable default
     "*": { inputPer1k: 0.001, outputPer1k: 0.003 },
   },
@@ -81,6 +108,12 @@ export const DEFAULT_PRICING: PricingConfig = {
   },
   ollama: {
     // Ollama is free (runs locally)
+    "llama3.2": { inputPer1k: 0, outputPer1k: 0 },
+    "llama3.1": { inputPer1k: 0, outputPer1k: 0 },
+    "mistral": { inputPer1k: 0, outputPer1k: 0 },
+    "codellama": { inputPer1k: 0, outputPer1k: 0 },
+    "phi3": { inputPer1k: 0, outputPer1k: 0 },
+    "gemma2": { inputPer1k: 0, outputPer1k: 0 },
     "*": { inputPer1k: 0, outputPer1k: 0 },
   },
   // Default for unknown providers
@@ -94,19 +127,52 @@ export const DEFAULT_PRICING: PricingConfig = {
  * Prices are in USD per minute of audio.
  */
 export const DEFAULT_STT_PRICING: STTPricingConfig = {
-  openai: {
+  // OpenAI Whisper (via openai-whisper provider ID)
+  "openai-whisper": {
     "whisper-1": { perMinute: 0.006 },
     "gpt-4o-mini-transcribe": { perMinute: 0.003 }, // Cheaper than Whisper!
     "gpt-4o-transcribe": { perMinute: 0.006 },
     "*": { perMinute: 0.006 },
   },
+  // Legacy key for backwards compatibility
+  openai: {
+    "whisper-1": { perMinute: 0.006 },
+    "gpt-4o-mini-transcribe": { perMinute: 0.003 },
+    "gpt-4o-transcribe": { perMinute: 0.006 },
+    "*": { perMinute: 0.006 },
+  },
+  // Groq Whisper (very affordable!)
   groq: {
-    // Groq Whisper is much cheaper!
     "whisper-large-v3": { perMinute: 0.000111 },
     "whisper-large-v3-turbo": { perMinute: 0.00004 },
     "distil-whisper-large-v3-en": { perMinute: 0.00002 },
     "*": { perMinute: 0.0001 },
   },
+  // ElevenLabs STT
+  "elevenlabs-stt": {
+    "scribe_v1": { perMinute: 0.01 }, // Estimate
+    "*": { perMinute: 0.01 },
+  },
+  // Google Cloud Speech-to-Text
+  "google-stt": {
+    "default": { perMinute: 0.006 },
+    "latest_long": { perMinute: 0.006 },
+    "latest_short": { perMinute: 0.006 },
+    "*": { perMinute: 0.006 },
+  },
+  // Legacy key for backwards compatibility
+  google: {
+    "*": { perMinute: 0.006 },
+  },
+  // Deepgram STT
+  "deepgram-stt": {
+    "nova-2": { perMinute: 0.0043 },
+    "nova": { perMinute: 0.0043 },
+    "enhanced": { perMinute: 0.0145 },
+    "base": { perMinute: 0.0125 },
+    "*": { perMinute: 0.0043 },
+  },
+  // Legacy key for backwards compatibility
   deepgram: {
     "nova-2": { perMinute: 0.0043 },
     "nova": { perMinute: 0.0043 },
@@ -114,20 +180,43 @@ export const DEFAULT_STT_PRICING: STTPricingConfig = {
     "base": { perMinute: 0.0125 },
     "*": { perMinute: 0.0043 },
   },
+  // Azure Speech Services
+  "azure-stt": {
+    "default": { perMinute: 0.01 },
+    "*": { perMinute: 0.01 },
+  },
+  // Legacy key for backwards compatibility
+  azure: {
+    "*": { perMinute: 0.01 },
+  },
+  // Speechmatics STT
+  "speechmatics-stt": {
+    "default": { perMinute: 0.012 }, // ~$0.72/hour
+    "*": { perMinute: 0.012 },
+  },
+  // Rev.ai STT
+  "rev-ai-stt": {
+    "default": { perMinute: 0.02 }, // $0.02/min for async
+    "*": { perMinute: 0.02 },
+  },
+  // IBM Watson STT
+  "ibm-watson-stt": {
+    "default": { perMinute: 0.02 }, // ~$0.02/min
+    "*": { perMinute: 0.02 },
+  },
+  // AssemblyAI (with diarization)
+  "assemblyai-diarization": {
+    "best": { perMinute: 0.00617 },
+    "nano": { perMinute: 0.002 },
+    "*": { perMinute: 0.00617 },
+  },
+  // Legacy key for backwards compatibility
   assemblyai: {
     "best": { perMinute: 0.00617 },
     "nano": { perMinute: 0.002 },
     "universal": { perMinute: 0.0025 },
-    "universal-diarization": { perMinute: 0.00283 }, // Universal + speaker labels ($0.00033 extra)
-    "*": { perMinute: 0.00283 }, // Default assumes diarization enabled
-  },
-  google: {
-    // Google Cloud Speech-to-Text
-    "*": { perMinute: 0.006 },
-  },
-  azure: {
-    // Azure Speech Services
-    "*": { perMinute: 0.01 },
+    "universal-diarization": { perMinute: 0.00283 },
+    "*": { perMinute: 0.00283 },
   },
   // Default for unknown STT providers
   "*": {

@@ -1,8 +1,22 @@
-import { Button, Header, Input, Selection, TextInput } from "@/components";
+import { Button, Header, Input, Selection, TextInput, ModelSelector } from "@/components";
 import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
-import { KeyIcon, TrashIcon } from "lucide-react";
+import { KeyIcon, TrashIcon, ExternalLink } from "lucide-react";
 import { useEffect, useState } from "react";
+import { getAIProviderInfo } from "@/config/models.constants";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
+
+const handleOpenUrl = async (url: string) => {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error("Failed to open URL:", error);
+    toast.error("Failed to open link", {
+      description: "Please try again or copy the URL manually.",
+    });
+  }
+};
 
 export const Providers = ({
   allAiProviders,
@@ -76,6 +90,33 @@ export const Providers = ({
           description={`If you want to use different url or method, you can always create a custom provider.`}
         />
       ) : null}
+
+      {/* Provider signup/pricing links */}
+      {selectedAIProvider?.provider && !allAiProviders?.find(p => p?.id === selectedAIProvider?.provider)?.isCustom && (() => {
+        const providerInfo = getAIProviderInfo(selectedAIProvider.provider);
+        if (!providerInfo) return null;
+        const { pricingUrl } = providerInfo;
+        return (
+          <div className="flex flex-wrap gap-2 py-2">
+            <button
+              onClick={() => handleOpenUrl(providerInfo.signupUrl)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary/10 hover:bg-primary/20 text-primary rounded-md transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Get API Key from {providerInfo.name}
+            </button>
+            {pricingUrl && (
+              <button
+                onClick={() => handleOpenUrl(pricingUrl)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 text-secondary-foreground rounded-md transition-colors"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                View Pricing
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {findKeyAndValue("api_key") ? (
         <div className="space-y-2">
@@ -184,6 +225,39 @@ export const Providers = ({
               return selectedAIProvider.variables[variable.key] || "";
             };
 
+            const isModelVariable = variable?.key === "model";
+            const currentProvider = allAiProviders?.find(
+              (p) => p?.id === selectedAIProvider?.provider
+            );
+            const isCustomProvider = currentProvider?.isCustom;
+            const providerDisplayName = isCustomProvider
+              ? "Custom Provider"
+              : selectedAIProvider?.provider;
+
+            // Use ModelSelector for model variable if provider has predefined models
+            if (isModelVariable && !isCustomProvider && selectedAIProvider?.provider) {
+              return (
+                <div key={variable?.key}>
+                  <ModelSelector
+                    providerId={selectedAIProvider.provider}
+                    selectedModel={getVariableValue()}
+                    onModelChange={(model) => {
+                      if (!variable?.key || !selectedAIProvider) return;
+                      onSetSelectedAIProvider({
+                        ...selectedAIProvider,
+                        variables: {
+                          ...selectedAIProvider.variables,
+                          [variable.key]: model,
+                        },
+                      });
+                    }}
+                    type="ai"
+                    providerDisplayName={providerDisplayName}
+                  />
+                </div>
+              );
+            }
+
             return (
               <div className="space-y-1" key={variable?.key}>
                 <Header
@@ -191,22 +265,10 @@ export const Providers = ({
                   description={`add your preferred ${variable?.key?.replace(
                     /_/g,
                     " "
-                  )} for ${
-                    allAiProviders?.find(
-                      (p) => p?.id === selectedAIProvider?.provider
-                    )?.isCustom
-                      ? "Custom Provider"
-                      : selectedAIProvider?.provider
-                  }`}
+                  )} for ${providerDisplayName}`}
                 />
                 <TextInput
-                  placeholder={`Enter ${
-                    allAiProviders?.find(
-                      (p) => p?.id === selectedAIProvider?.provider
-                    )?.isCustom
-                      ? "Custom Provider"
-                      : selectedAIProvider?.provider
-                  } ${variable?.key?.replace(/_/g, " ") || "value"}`}
+                  placeholder={`Enter ${providerDisplayName} ${variable?.key?.replace(/_/g, " ") || "value"}`}
                   value={getVariableValue()}
                   onChange={(value) => {
                     if (!variable?.key || !selectedAIProvider) return;
