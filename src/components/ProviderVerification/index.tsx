@@ -53,18 +53,22 @@ export const ProviderVerification = ({
       return;
     }
 
-    const isValid = type === "ai"
-      ? isAIVerificationValid(providerId, model, apiKey)
-      : isSTTVerificationValid(providerId, model, apiKey);
+    const checkVerification = async () => {
+      const isValid = type === "ai"
+        ? await isAIVerificationValid(providerId, model, apiKey)
+        : await isSTTVerificationValid(providerId, model, apiKey);
 
-    if (isValid) {
-      setState("verified");
-      onVerificationChange?.(true);
-    } else {
-      setState("idle");
-      onVerificationChange?.(false);
-    }
-  }, [providerId, model, apiKey, isConfigured, type]);
+      if (isValid) {
+        setState("verified");
+        onVerificationChange?.(true);
+      } else {
+        setState("idle");
+        onVerificationChange?.(false);
+      }
+    };
+
+    checkVerification();
+  }, [providerId, model, apiKey, isConfigured, type, onVerificationChange]);
 
   const handleVerify = useCallback(async () => {
     if (!isConfigured || state === "testing") return;
@@ -91,9 +95,9 @@ export const ProviderVerification = ({
       setState("verified");
       setErrorMessage(null);
       if (type === "ai") {
-        setAIVerificationStatus(providerId, model, apiKey, true);
+        await setAIVerificationStatus(providerId, model, apiKey, true);
       } else {
-        setSTTVerificationStatus(providerId, model, apiKey, true);
+        await setSTTVerificationStatus(providerId, model, apiKey, true);
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));
@@ -102,9 +106,9 @@ export const ProviderVerification = ({
       setState("failed");
       setErrorMessage(result.error || result.message);
       if (type === "ai") {
-        setAIVerificationStatus(providerId, model, apiKey, false, result.error);
+        await setAIVerificationStatus(providerId, model, apiKey, false, result.error);
       } else {
-        setSTTVerificationStatus(providerId, model, apiKey, false, result.error);
+        await setSTTVerificationStatus(providerId, model, apiKey, false, result.error);
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));

@@ -12,7 +12,7 @@ interface VerificationData {
   provider: string;
   /** Model name (for detecting changes) */
   model: string;
-  /** Hash of the API key (to detect changes without storing the key) */
+  /** SHA-256 hash of the API key (to detect changes securely) */
   apiKeyHash: string;
   /** When the verification was performed */
   verifiedAt: number;
@@ -23,15 +23,17 @@ interface VerificationData {
 }
 
 /**
- * Creates a simple hash of the API key for change detection.
- * This is not for security - just to detect if the key changed.
+ * Creates a secure SHA-256 hash of the API key for change detection.
+ * Uses Web Crypto API for cryptographically secure hashing.
  */
-function hashApiKey(apiKey: string): string {
+async function hashApiKey(apiKey: string): Promise<string> {
   if (!apiKey) return "";
-  // Simple hash: length + first 4 chars + last 4 chars
-  const first = apiKey.substring(0, 4);
-  const last = apiKey.substring(apiKey.length - 4);
-  return `${apiKey.length}:${first}...${last}`;
+
+  const encoder = new TextEncoder();
+  const data = encoder.encode(apiKey);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -63,17 +65,17 @@ export function getSTTVerificationStatus(): VerificationData | null {
 /**
  * Saves AI provider verification status to localStorage.
  */
-export function setAIVerificationStatus(
+export async function setAIVerificationStatus(
   provider: string,
   model: string,
   apiKey: string,
   isVerified: boolean,
   errorMessage?: string
-): void {
+): Promise<void> {
   const data: VerificationData = {
     provider,
     model,
-    apiKeyHash: hashApiKey(apiKey),
+    apiKeyHash: await hashApiKey(apiKey),
     verifiedAt: Date.now(),
     isVerified,
     errorMessage,
@@ -84,17 +86,17 @@ export function setAIVerificationStatus(
 /**
  * Saves STT provider verification status to localStorage.
  */
-export function setSTTVerificationStatus(
+export async function setSTTVerificationStatus(
   provider: string,
   model: string,
   apiKey: string,
   isVerified: boolean,
   errorMessage?: string
-): void {
+): Promise<void> {
   const data: VerificationData = {
     provider,
     model,
-    apiKeyHash: hashApiKey(apiKey),
+    apiKeyHash: await hashApiKey(apiKey),
     verifiedAt: Date.now(),
     isVerified,
     errorMessage,
@@ -120,17 +122,19 @@ export function clearSTTVerificationStatus(): void {
  * Checks if the AI provider verification is still valid.
  * Invalidates if provider, model, or API key has changed.
  */
-export function isAIVerificationValid(
+export async function isAIVerificationValid(
   provider: string,
   model: string,
   apiKey: string
-): boolean {
+): Promise<boolean> {
   const status = getAIVerificationStatus();
   if (!status) return false;
   if (!status.isVerified) return false;
   if (status.provider !== provider) return false;
   if (status.model !== model) return false;
-  if (status.apiKeyHash !== hashApiKey(apiKey)) return false;
+
+  const currentHash = await hashApiKey(apiKey);
+  if (status.apiKeyHash !== currentHash) return false;
 
   return true;
 }
@@ -139,17 +143,19 @@ export function isAIVerificationValid(
  * Checks if the STT provider verification is still valid.
  * Invalidates if provider, model, or API key has changed.
  */
-export function isSTTVerificationValid(
+export async function isSTTVerificationValid(
   provider: string,
   model: string,
   apiKey: string
-): boolean {
+): Promise<boolean> {
   const status = getSTTVerificationStatus();
   if (!status) return false;
   if (!status.isVerified) return false;
   if (status.provider !== provider) return false;
   if (status.model !== model) return false;
-  if (status.apiKeyHash !== hashApiKey(apiKey)) return false;
+
+  const currentHash = await hashApiKey(apiKey);
+  if (status.apiKeyHash !== currentHash) return false;
 
   return true;
 }

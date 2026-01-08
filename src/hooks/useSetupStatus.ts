@@ -1,7 +1,12 @@
 import { useApp } from "@/contexts";
-import { useMemo, useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { TYPE_PROVIDER } from "@/types";
-import { isAIVerificationValid, isSTTVerificationValid } from "@/lib/storage";
+import {
+  isAIVerificationValid,
+  isSTTVerificationValid,
+  getAIVerificationStatus,
+  getSTTVerificationStatus,
+} from "@/lib/storage";
 
 interface SetupStatus {
   /** Whether the minimum required setup is complete (AI + STT configured AND verified) */
@@ -44,6 +49,28 @@ export function useSetupStatus(): SetupStatus {
     allSttProviders,
   } = useApp();
 
+  // Optimistic initialization from stored verification data
+  // This prevents flash of "Setup Required" while async hash check runs
+  const getInitialAIVerified = () => {
+    const stored = getAIVerificationStatus();
+    if (!stored?.isVerified) return false;
+    // Check if provider/model match (can't verify hash synchronously)
+    return stored.provider === selectedAIProvider?.provider &&
+           stored.model === (selectedAIProvider?.variables?.model || "");
+  };
+
+  const getInitialSTTVerified = () => {
+    const stored = getSTTVerificationStatus();
+    if (!stored?.isVerified) return false;
+    // Check if provider/model match (can't verify hash synchronously)
+    return stored.provider === selectedSttProvider?.provider &&
+           stored.model === (selectedSttProvider?.variables?.model || "");
+  };
+
+  // State for async verification results (optimistically initialized)
+  const [aiVerified, setAiVerified] = useState(getInitialAIVerified);
+  const [sttVerified, setSttVerified] = useState(getInitialSTTVerified);
+
   // This state forces a re-render when verification status changes
   const [verificationTrigger, setVerificationTrigger] = useState(0);
 
@@ -59,79 +86,102 @@ export function useSetupStatus(): SetupStatus {
     };
   }, []);
 
-  return useMemo(() => {
-    // Check AI configuration
-    const aiProviderSelected = Boolean(selectedAIProvider?.provider);
-    const aiApiKey = selectedAIProvider?.variables?.api_key || "";
-    const aiHasApiKey = aiApiKey.trim().length > 0;
-    const aiConfigured = aiProviderSelected && aiHasApiKey;
+  // Compute configuration status (sync)
+  const aiProviderSelected = Boolean(selectedAIProvider?.provider);
+  const aiApiKey = selectedAIProvider?.variables?.api_key || "";
+  const aiHasApiKey = aiApiKey.trim().length > 0;
+  const aiConfigured = aiProviderSelected && aiHasApiKey;
 
-    // Get AI provider display name
-    const aiProvider = allAiProviders?.find(
-      (p: TYPE_PROVIDER) => p.id === selectedAIProvider?.provider
-    );
-    const aiProviderName = aiProvider?.isCustom
-      ? "Custom Provider"
-      : aiProvider?.name || selectedAIProvider?.provider || null;
-    const aiModelName = selectedAIProvider?.variables?.model || null;
+  const sttProviderSelected = Boolean(selectedSttProvider?.provider);
+  const sttApiKey = selectedSttProvider?.variables?.api_key || "";
+  const sttHasApiKey = sttApiKey.trim().length > 0;
+  const sttConfigured = sttProviderSelected && sttHasApiKey;
 
-    // Check STT configuration
-    const sttProviderSelected = Boolean(selectedSttProvider?.provider);
-    const sttApiKey = selectedSttProvider?.variables?.api_key || "";
-    const sttHasApiKey = sttApiKey.trim().length > 0;
-    const sttConfigured = sttProviderSelected && sttHasApiKey;
+  // Get provider display names
+  const aiProvider = allAiProviders?.find(
+    (p: TYPE_PROVIDER) => p.id === selectedAIProvider?.provider
+  );
+  const aiProviderName = aiProvider?.isCustom
+    ? "Custom Provider"
+    : aiProvider?.name || selectedAIProvider?.provider || null;
+  const aiModelName = selectedAIProvider?.variables?.model || null;
 
-    // Get STT provider display name
-    const sttProvider = allSttProviders?.find(
-      (p: TYPE_PROVIDER) => p.id === selectedSttProvider?.provider
-    );
-    const sttProviderName = sttProvider?.isCustom
-      ? "Custom Provider"
-      : sttProvider?.name || selectedSttProvider?.provider || null;
-    const sttModelName = selectedSttProvider?.variables?.model || null;
+  const sttProvider = allSttProviders?.find(
+    (p: TYPE_PROVIDER) => p.id === selectedSttProvider?.provider
+  );
+  const sttProviderName = sttProvider?.isCustom
+    ? "Custom Provider"
+    : sttProvider?.name || selectedSttProvider?.provider || null;
+  const sttModelName = selectedSttProvider?.variables?.model || null;
 
-    // Check verification status
-    const aiVerified = aiConfigured && isAIVerificationValid(
-      selectedAIProvider?.provider || "",
-      selectedAIProvider?.variables?.model || "",
-      aiApiKey
-    );
-    const sttVerified = sttConfigured && isSTTVerificationValid(
-      selectedSttProvider?.provider || "",
-      selectedSttProvider?.variables?.model || "",
-      sttApiKey
-    );
+  // Check verification status asynchronously
+  const checkVerificationStatus = useCallback(async () => {
+    if (aiConfigured) {
+      const valid = await isAIVerificationValid(
+        selectedAIProvider?.provider || "",
+        selectedAIProvider?.variables?.model || "",
+        aiApiKey
+      );
+      setAiVerified(valid);
+    } else {
+      setAiVerified(false);
+    }
 
-    // Calculate completion (4 steps: AI configured, AI verified, STT configured, STT verified)
-    let completedSteps = 0;
-    if (aiConfigured) completedSteps++;
-    if (aiVerified) completedSteps++;
-    if (sttConfigured) completedSteps++;
-    if (sttVerified) completedSteps++;
-    const completionPercent = (completedSteps / 4) * 100;
+    if (sttConfigured) {
+      const valid = await isSTTVerificationValid(
+        selectedSttProvider?.provider || "",
+        selectedSttProvider?.variables?.model || "",
+        sttApiKey
+      );
+      setSttVerified(valid);
+    } else {
+      setSttVerified(false);
+    }
+  }, [
+    aiConfigured,
+    sttConfigured,
+    selectedAIProvider?.provider,
+    selectedAIProvider?.variables?.model,
+    aiApiKey,
+    selectedSttProvider?.provider,
+    selectedSttProvider?.variables?.model,
+    sttApiKey,
+  ]);
 
-    // App is only complete when both are configured AND verified
-    const isComplete = aiVerified && sttVerified;
+  // Run verification check when dependencies change
+  useEffect(() => {
+    checkVerificationStatus();
+  }, [checkVerificationStatus, verificationTrigger]);
 
-    return {
-      isComplete,
-      aiConfigured,
-      sttConfigured,
-      aiVerified,
-      sttVerified,
-      completionPercent,
-      aiDetails: {
-        providerSelected: aiProviderSelected,
-        hasApiKey: aiHasApiKey,
-        providerName: aiProviderName,
-        modelName: aiModelName,
-      },
-      sttDetails: {
-        providerSelected: sttProviderSelected,
-        hasApiKey: sttHasApiKey,
-        providerName: sttProviderName,
-        modelName: sttModelName,
-      },
-    };
-  }, [selectedAIProvider, selectedSttProvider, allAiProviders, allSttProviders, verificationTrigger]);
+  // Calculate completion (4 steps: AI configured, AI verified, STT configured, STT verified)
+  let completedSteps = 0;
+  if (aiConfigured) completedSteps++;
+  if (aiVerified) completedSteps++;
+  if (sttConfigured) completedSteps++;
+  if (sttVerified) completedSteps++;
+  const completionPercent = (completedSteps / 4) * 100;
+
+  // App is only complete when both are configured AND verified
+  const isComplete = aiVerified && sttVerified;
+
+  return {
+    isComplete,
+    aiConfigured,
+    sttConfigured,
+    aiVerified,
+    sttVerified,
+    completionPercent,
+    aiDetails: {
+      providerSelected: aiProviderSelected,
+      hasApiKey: aiHasApiKey,
+      providerName: aiProviderName,
+      modelName: aiModelName,
+    },
+    sttDetails: {
+      providerSelected: sttProviderSelected,
+      hasApiKey: sttHasApiKey,
+      providerName: sttProviderName,
+      modelName: sttModelName,
+    },
+  };
 }

@@ -12,6 +12,15 @@ import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
 import {
+  loadSecureAIConfigs,
+  loadSecureSTTConfigs,
+  updateAIConfigCache,
+  updateSTTConfigCache,
+  getCachedAIConfig,
+  getCachedSTTConfig,
+  migrateProviderConfigsToSecureStorage,
+} from "@/lib/storage/secure-provider-configs";
+import {
   getCustomizableState,
   setCustomizableState,
   updateAppIconVisibility,
@@ -344,6 +353,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // Load data on mount
   useEffect(() => {
     const initializeApp = async () => {
+      // Migrate provider configs from localStorage to secure storage (one-time)
+      await migrateProviderConfigsToSecureStorage();
+
+      // Load secure provider configs into cache
+      await Promise.all([
+        loadSecureAIConfigs(),
+        loadSecureSTTConfigs(),
+      ]);
+
       // Load license and data
       await getActiveLicenseStatus();
 
@@ -511,16 +529,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setSelectedAIProvider((prev) => {
       // If provider is changing, save the old provider's config and load any saved config for the new provider
       if (provider !== prev.provider) {
-        // Save current provider's variables to per-provider storage (if we have a provider selected)
+        // Save current provider's variables to secure storage (if we have a provider selected)
+        // This happens asynchronously but the cache is updated synchronously
         if (prev.provider && Object.keys(prev.variables).length > 0) {
-          const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS) || '{}');
-          savedConfigs[prev.provider] = prev.variables;
-          safeLocalStorage.setItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS, JSON.stringify(savedConfigs));
+          updateAIConfigCache(prev.provider, prev.variables);
         }
 
-        // Load saved config for the new provider (if any)
-        const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.AI_PROVIDER_CONFIGS) || '{}');
-        const savedVariables = savedConfigs[provider] || {};
+        // Load saved config for the new provider from secure storage cache
+        const savedVariables = getCachedAIConfig(provider) || {};
 
         // Merge: saved config as base, then overlay with any passed variables
         return {
@@ -560,16 +576,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     setSelectedSttProvider((prev) => {
       // If provider is changing, save the old provider's config and load any saved config for the new provider
       if (provider !== prev.provider) {
-        // Save current provider's variables to per-provider storage (if we have a provider selected)
+        // Save current provider's variables to secure storage (if we have a provider selected)
+        // This happens asynchronously but the cache is updated synchronously
         if (prev.provider && Object.keys(prev.variables).length > 0) {
-          const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS) || '{}');
-          savedConfigs[prev.provider] = prev.variables;
-          safeLocalStorage.setItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS, JSON.stringify(savedConfigs));
+          updateSTTConfigCache(prev.provider, prev.variables);
         }
 
-        // Load saved config for the new provider (if any)
-        const savedConfigs = JSON.parse(safeLocalStorage.getItem(STORAGE_KEYS.STT_PROVIDER_CONFIGS) || '{}');
-        const savedVariables = savedConfigs[provider] || {};
+        // Load saved config for the new provider from secure storage cache
+        const savedVariables = getCachedSTTConfig(provider) || {};
 
         // Merge: saved config as base, then overlay with any passed variables
         return {

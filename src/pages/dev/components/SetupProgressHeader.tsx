@@ -2,6 +2,13 @@ import { useSetupStatus } from "@/hooks";
 import { CheckCircle2, AlertCircle, Circle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+// StatusIcon component defined outside to prevent recreation on every render
+const StatusIcon = ({ done, pending }: { done: boolean; pending?: boolean }) => {
+  if (done) return <CheckCircle2 className="size-4 text-green-500 flex-shrink-0" />;
+  if (pending) return <Circle className="size-4 text-muted-foreground/50 flex-shrink-0" />;
+  return <AlertCircle className="size-4 text-yellow-500 flex-shrink-0" />;
+};
+
 export const SetupProgressHeader = () => {
   const {
     isComplete,
@@ -13,12 +20,6 @@ export const SetupProgressHeader = () => {
     sttDetails,
     completionPercent,
   } = useSetupStatus();
-
-  const StatusIcon = ({ done, pending }: { done: boolean; pending?: boolean }) => {
-    if (done) return <CheckCircle2 className="size-4 text-green-500 flex-shrink-0" />;
-    if (pending) return <Circle className="size-4 text-muted-foreground/50 flex-shrink-0" />;
-    return <AlertCircle className="size-4 text-yellow-500 flex-shrink-0" />;
-  };
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 mb-6">
