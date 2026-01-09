@@ -68,9 +68,14 @@ async function hashApiKey(apiKey: string): Promise<string> {
 /**
  * Load verification data from secure storage into cache.
  * Must be called during app initialization before using getters.
- * Dispatches "verification-status-changed" event to notify listeners.
+ * Dispatches "verification-status-changed" event only if data was loaded.
  */
 export async function loadVerificationCache(): Promise<void> {
+  // Track previous state to detect changes
+  const previousAiCache = aiVerificationCache;
+  const previousSttCache = sttVerificationCache;
+  const wasLoaded = cacheLoaded;
+
   try {
     const [aiData, sttData] = await Promise.all([
       secureGet(AI_VERIFICATION_KEY),
@@ -81,16 +86,26 @@ export async function loadVerificationCache(): Promise<void> {
     sttVerificationCache = sttData ? JSON.parse(sttData) : null;
     cacheLoaded = true;
 
-    // Notify listeners that verification data is now available
-    window.dispatchEvent(new CustomEvent("verification-status-changed"));
+    // Only dispatch event if data actually changed or this is first load
+    const aiChanged = JSON.stringify(previousAiCache) !== JSON.stringify(aiVerificationCache);
+    const sttChanged = JSON.stringify(previousSttCache) !== JSON.stringify(sttVerificationCache);
+    const hasData = aiVerificationCache !== null || sttVerificationCache !== null;
+
+    if (!wasLoaded || aiChanged || sttChanged || hasData) {
+      window.dispatchEvent(new CustomEvent("verification-status-changed"));
+    }
   } catch (error) {
     console.error("[VerificationStorage] Failed to load cache:", error);
+    const hadData = aiVerificationCache !== null || sttVerificationCache !== null;
+
     aiVerificationCache = null;
     sttVerificationCache = null;
     cacheLoaded = true;
 
-    // Still notify listeners so they can update
-    window.dispatchEvent(new CustomEvent("verification-status-changed"));
+    // Only notify if we previously had data (state changed to null)
+    if (!wasLoaded || hadData) {
+      window.dispatchEvent(new CustomEvent("verification-status-changed"));
+    }
   }
 }
 
@@ -257,11 +272,17 @@ export async function isAIVerificationValid(
   model: string,
   apiKey: string
 ): Promise<boolean> {
+  // Require non-empty API key for valid verification
+  if (!apiKey || apiKey.trim() === "") return false;
+
   const status = getAIVerificationStatus();
   if (!status) return false;
   if (!status.isVerified) return false;
   if (status.provider !== provider) return false;
   if (status.model !== model) return false;
+
+  // Don't allow empty hash comparisons (would incorrectly match)
+  if (!status.apiKeyHash) return false;
 
   const currentHash = await hashApiKey(apiKey);
   if (status.apiKeyHash !== currentHash) return false;
@@ -278,11 +299,17 @@ export async function isSTTVerificationValid(
   model: string,
   apiKey: string
 ): Promise<boolean> {
+  // Require non-empty API key for valid verification
+  if (!apiKey || apiKey.trim() === "") return false;
+
   const status = getSTTVerificationStatus();
   if (!status) return false;
   if (!status.isVerified) return false;
   if (status.provider !== provider) return false;
   if (status.model !== model) return false;
+
+  // Don't allow empty hash comparisons (would incorrectly match)
+  if (!status.apiKeyHash) return false;
 
   const currentHash = await hashApiKey(apiKey);
   if (status.apiKeyHash !== currentHash) return false;

@@ -306,3 +306,94 @@ export function hasModelsForProvider(providerId: string, type: "ai" | "stt"): bo
   }
   return providerId in STT_MODELS && STT_MODELS[providerId].length > 0;
 }
+
+/**
+ * Check if a model exists in the predefined list for a provider.
+ * Returns true if:
+ * - The model is in the predefined list, OR
+ * - The provider has no predefined models (custom models allowed)
+ *
+ * @param providerId - The provider ID
+ * @param modelId - The model ID to validate
+ * @param type - "ai" or "stt"
+ * @returns true if the model is valid for this provider
+ */
+export function isModelValidForProvider(
+  providerId: string,
+  modelId: string,
+  type: "ai" | "stt"
+): boolean {
+  // Empty model is invalid
+  if (!modelId || modelId.trim() === "") {
+    return false;
+  }
+
+  const models = type === "ai"
+    ? getAIModelsForProvider(providerId)
+    : getSTTModelsForProvider(providerId);
+
+  // If no predefined models, any model is valid (custom provider)
+  if (models.length === 0) {
+    return true;
+  }
+
+  // Check if model exists in predefined list
+  return models.some((m) => m.id === modelId);
+}
+
+/**
+ * Validate model configuration for a provider.
+ * Returns an error message if invalid, null if valid.
+ *
+ * @param providerId - The provider ID
+ * @param modelId - The model ID to validate
+ * @param type - "ai" or "stt"
+ * @returns Error message or null if valid
+ */
+export function validateModelForProvider(
+  providerId: string,
+  modelId: string,
+  type: "ai" | "stt"
+): string | null {
+  if (!modelId || modelId.trim() === "") {
+    return "Model is required";
+  }
+
+  // Custom models are always allowed
+  const models = type === "ai"
+    ? getAIModelsForProvider(providerId)
+    : getSTTModelsForProvider(providerId);
+
+  // No predefined models = custom provider, any model valid
+  if (models.length === 0) {
+    return null;
+  }
+
+  // Check if it's a known model
+  const isKnown = models.some((m) => m.id === modelId);
+
+  // For providers with predefined models, we still allow custom models
+  // but we can return a warning (not an error)
+  if (!isKnown) {
+    // This is informational, not a blocking error
+    // Custom models are allowed but not in the predefined list
+    return null; // Allow custom models
+  }
+
+  return null;
+}
+
+/**
+ * Get the recommended model for a provider.
+ * Returns null if no models are defined or no recommended model.
+ */
+export function getRecommendedModel(
+  providerId: string,
+  type: "ai" | "stt"
+): ModelOption | null {
+  const models = type === "ai"
+    ? getAIModelsForProvider(providerId)
+    : getSTTModelsForProvider(providerId);
+
+  return models.find((m) => m.recommended) || models[0] || null;
+}

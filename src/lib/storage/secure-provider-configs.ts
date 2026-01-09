@@ -21,9 +21,45 @@ const STT_CONFIGS_KEY = "secure_stt_provider_configs";
 let aiConfigsCache: Record<string, Record<string, string>> | null = null;
 let sttConfigsCache: Record<string, Record<string, string>> | null = null;
 
+// Track initialization status
+let aiCacheInitialized = false;
+let sttCacheInitialized = false;
+
 // Loading promises to avoid race conditions
 let aiLoadingPromise: Promise<void> | null = null;
 let sttLoadingPromise: Promise<void> | null = null;
+
+/**
+ * Check if the AI provider config cache has been initialized.
+ * Use this to guard against premature access.
+ */
+export function isAIConfigCacheInitialized(): boolean {
+  return aiCacheInitialized;
+}
+
+/**
+ * Check if the STT provider config cache has been initialized.
+ * Use this to guard against premature access.
+ */
+export function isSTTConfigCacheInitialized(): boolean {
+  return sttCacheInitialized;
+}
+
+/**
+ * Assert that caches are initialized. Call at the start of any function
+ * that requires the cache to be loaded.
+ */
+function assertCacheInitialized(type: "ai" | "stt"): void {
+  const isInitialized = type === "ai" ? aiCacheInitialized : sttCacheInitialized;
+  if (!isInitialized) {
+    const functionName = type === "ai" ? "loadSecureAIConfigs" : "loadSecureSTTConfigs";
+    console.warn(
+      `[SecureStorage] ${type.toUpperCase()} config cache not initialized. ` +
+      `Call ${functionName}() during app initialization before accessing configs. ` +
+      `This may cause incorrect behavior.`
+    );
+  }
+}
 
 /**
  * Load AI provider configs from secure storage into cache
@@ -51,6 +87,7 @@ export async function loadSecureAIConfigs(): Promise<Record<string, Record<strin
       console.error("[SecureStorage] Failed to load AI configs:", error);
       aiConfigsCache = {};
     }
+    aiCacheInitialized = true;
   })();
 
   await aiLoadingPromise;
@@ -84,6 +121,7 @@ export async function loadSecureSTTConfigs(): Promise<Record<string, Record<stri
       console.error("[SecureStorage] Failed to load STT configs:", error);
       sttConfigsCache = {};
     }
+    sttCacheInitialized = true;
   })();
 
   await sttLoadingPromise;
@@ -163,15 +201,23 @@ export async function saveSecureSTTConfig(
 
 /**
  * Get cached AI config for a provider (sync, must call loadSecureAIConfigs first)
+ *
+ * NOTE: This function requires loadSecureAIConfigs() to have been called first.
+ * A warning will be logged if the cache hasn't been initialized.
  */
 export function getCachedAIConfig(providerId: string): Record<string, string> | undefined {
+  assertCacheInitialized("ai");
   return aiConfigsCache?.[providerId];
 }
 
 /**
  * Get cached STT config for a provider (sync, must call loadSecureSTTConfigs first)
+ *
+ * NOTE: This function requires loadSecureSTTConfigs() to have been called first.
+ * A warning will be logged if the cache hasn't been initialized.
  */
 export function getCachedSTTConfig(providerId: string): Record<string, string> | undefined {
+  assertCacheInitialized("stt");
   return sttConfigsCache?.[providerId];
 }
 
@@ -241,10 +287,24 @@ export async function updateSTTConfigCache(
 export async function clearSecureProviderConfigs(): Promise<void> {
   aiConfigsCache = null;
   sttConfigsCache = null;
+  aiCacheInitialized = false;
+  sttCacheInitialized = false;
   await Promise.all([
     secureDelete(AI_CONFIGS_KEY),
     secureDelete(STT_CONFIGS_KEY),
   ]);
+}
+
+/**
+ * Reset cache state (for testing purposes only)
+ */
+export function resetSecureProviderConfigsCache(): void {
+  aiConfigsCache = null;
+  sttConfigsCache = null;
+  aiCacheInitialized = false;
+  sttCacheInitialized = false;
+  aiLoadingPromise = null;
+  sttLoadingPromise = null;
 }
 
 /**
