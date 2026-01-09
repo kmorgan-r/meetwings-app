@@ -116,7 +116,7 @@ export const ProviderVerification = ({
     }
   }, [isConfigured, state, type, provider, selectedProvider, providerId, model, apiKey, onVerificationChange]);
 
-  const handleCheckboxChange = useCallback((checked: boolean | "indeterminate") => {
+  const handleCheckboxChange = useCallback(async (checked: boolean | "indeterminate") => {
     if (checked === true) {
       handleVerify();
     } else {
@@ -124,9 +124,9 @@ export const ProviderVerification = ({
       setState("idle");
       setErrorMessage(null);
       if (type === "ai") {
-        clearAIVerificationStatus();
+        await clearAIVerificationStatus();
       } else {
-        clearSTTVerificationStatus();
+        await clearSTTVerificationStatus();
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));

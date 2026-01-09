@@ -7,11 +7,12 @@ import {
   STTCustomProviders,
 } from "./components";
 import Contribute from "@/components/Contribute";
-import { useSettings } from "@/hooks";
+import { useSettings, useSetupStatus } from "@/hooks";
 import { PageLayout } from "@/layouts";
 
 const DevSpace = () => {
   const settings = useSettings();
+  const { isComplete } = useSetupStatus();
 
   return (
     <PageLayout
@@ -25,9 +26,11 @@ const DevSpace = () => {
       <div className="space-y-6">
         <div className="flex items-center gap-2 mb-2">
           <h2 className="text-sm font-semibold text-foreground">Required</h2>
-          <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-600 dark:text-red-400">
-            Must configure
-          </span>
+          {!isComplete && (
+            <span className="text-xs px-2 py-0.5 rounded-full bg-red-500/10 text-red-600 dark:text-red-400">
+              Must configure
+            </span>
+          )}
         </div>
 
         {/* AI Provider Selection */}

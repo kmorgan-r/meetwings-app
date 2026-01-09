@@ -152,35 +152,45 @@ export function getCachedSTTConfig(providerId: string): Record<string, string> |
 }
 
 /**
- * Update cache synchronously (for use in state setters)
- * The actual save to secure storage happens asynchronously
+ * Update AI config cache and persist to secure storage
+ * Returns a Promise that resolves when the save is complete
  */
-export function updateAIConfigCache(providerId: string, variables: Record<string, string>): void {
+export async function updateAIConfigCache(
+  providerId: string,
+  variables: Record<string, string>
+): Promise<void> {
   if (aiConfigsCache === null) {
     aiConfigsCache = {};
   }
   aiConfigsCache[providerId] = variables;
 
-  // Fire-and-forget async save
-  secureSet(AI_CONFIGS_KEY, JSON.stringify(aiConfigsCache)).catch((error) => {
+  try {
+    await secureSet(AI_CONFIGS_KEY, JSON.stringify(aiConfigsCache));
+  } catch (error) {
     console.error("[SecureStorage] Failed to persist AI config:", error);
-  });
+    throw error;
+  }
 }
 
 /**
- * Update cache synchronously (for use in state setters)
- * The actual save to secure storage happens asynchronously
+ * Update STT config cache and persist to secure storage
+ * Returns a Promise that resolves when the save is complete
  */
-export function updateSTTConfigCache(providerId: string, variables: Record<string, string>): void {
+export async function updateSTTConfigCache(
+  providerId: string,
+  variables: Record<string, string>
+): Promise<void> {
   if (sttConfigsCache === null) {
     sttConfigsCache = {};
   }
   sttConfigsCache[providerId] = variables;
 
-  // Fire-and-forget async save
-  secureSet(STT_CONFIGS_KEY, JSON.stringify(sttConfigsCache)).catch((error) => {
+  try {
+    await secureSet(STT_CONFIGS_KEY, JSON.stringify(sttConfigsCache));
+  } catch (error) {
     console.error("[SecureStorage] Failed to persist STT config:", error);
-  });
+    throw error;
+  }
 }
 
 /**
