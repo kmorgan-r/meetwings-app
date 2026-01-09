@@ -86,14 +86,21 @@ export function useSetupStatus(): SetupStatus {
     };
   }, []);
 
-  // Compute configuration status (sync)
-  const aiProviderSelected = Boolean(selectedAIProvider?.provider);
+  // Extract provider values for dependency tracking
+  const aiProviderId = selectedAIProvider?.provider || "";
+  const aiModel = selectedAIProvider?.variables?.model || "";
   const aiApiKey = selectedAIProvider?.variables?.api_key || "";
+
+  const sttProviderId = selectedSttProvider?.provider || "";
+  const sttModel = selectedSttProvider?.variables?.model || "";
+  const sttApiKey = selectedSttProvider?.variables?.api_key || "";
+
+  // Compute configuration status (sync)
+  const aiProviderSelected = Boolean(aiProviderId);
   const aiHasApiKey = aiApiKey.trim().length > 0;
   const aiConfigured = aiProviderSelected && aiHasApiKey;
 
-  const sttProviderSelected = Boolean(selectedSttProvider?.provider);
-  const sttApiKey = selectedSttProvider?.variables?.api_key || "";
+  const sttProviderSelected = Boolean(sttProviderId);
   const sttHasApiKey = sttApiKey.trim().length > 0;
   const sttConfigured = sttProviderSelected && sttHasApiKey;
 
@@ -118,11 +125,7 @@ export function useSetupStatus(): SetupStatus {
   const checkVerificationStatus = useCallback(async () => {
     try {
       if (aiConfigured) {
-        const valid = await isAIVerificationValid(
-          selectedAIProvider?.provider || "",
-          selectedAIProvider?.variables?.model || "",
-          aiApiKey
-        );
+        const valid = await isAIVerificationValid(aiProviderId, aiModel, aiApiKey);
         setAiVerified(valid);
       } else {
         setAiVerified(false);
@@ -134,11 +137,7 @@ export function useSetupStatus(): SetupStatus {
 
     try {
       if (sttConfigured) {
-        const valid = await isSTTVerificationValid(
-          selectedSttProvider?.provider || "",
-          selectedSttProvider?.variables?.model || "",
-          sttApiKey
-        );
+        const valid = await isSTTVerificationValid(sttProviderId, sttModel, sttApiKey);
         setSttVerified(valid);
       } else {
         setSttVerified(false);
@@ -147,16 +146,7 @@ export function useSetupStatus(): SetupStatus {
       console.error("[useSetupStatus] Error checking STT verification:", error);
       setSttVerified(false);
     }
-  }, [
-    aiConfigured,
-    sttConfigured,
-    selectedAIProvider?.provider,
-    selectedAIProvider?.variables?.model,
-    aiApiKey,
-    selectedSttProvider?.provider,
-    selectedSttProvider?.variables?.model,
-    sttApiKey,
-  ]);
+  }, [aiConfigured, sttConfigured, aiProviderId, aiModel, aiApiKey, sttProviderId, sttModel, sttApiKey]);
 
   // Run verification check when dependencies change
   useEffect(() => {
