@@ -92,17 +92,21 @@ export function generateConversationId(
  *
  * @param role - The role of the message ('user', 'assistant', or 'system')
  * @param timestamp - Optional timestamp (defaults to Date.now())
- * @returns A unique message ID in the format: msg_{timestamp}_{role}
+ * @returns A unique message ID in the format: msg_{timestamp}_{random}_{role}
  *
  * Examples:
- * - msg_1696291234567_user
- * - msg_1696291234568_assistant
+ * - msg_1696291234567_k3j9_user
+ * - msg_1696291234568_m2n4_assistant
+ *
+ * Note: Random suffix ensures uniqueness even if multiple messages
+ * are created at the same millisecond with the same role.
  */
 export function generateMessageId(
   role: "user" | "assistant" | "system",
   timestamp: number = Date.now()
 ): string {
-  return `msg_${timestamp}_${role}`;
+  const random = Math.random().toString(36).substring(2, 6);
+  return `msg_${timestamp}_${random}_${role}`;
 }
 
 /**
@@ -135,7 +139,10 @@ export function isValidConversationId(id: string): boolean {
  *
  * @param id - The ID to validate
  * @returns true if the ID matches the expected format
+ *
+ * Supports both old format (msg_{timestamp}_{role}) and
+ * new format (msg_{timestamp}_{random}_{role})
  */
 export function isValidMessageId(id: string): boolean {
-  return /^msg_\d+_(user|assistant|system)$/.test(id);
+  return /^msg_\d+_([a-z0-9]{4}_)?(user|assistant|system)$/.test(id);
 }

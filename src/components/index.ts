@@ -13,3 +13,5 @@ export * from "./Markdown/copy-button";
 export * from "./Icons";
 export * from "./SpeakerTaggingPopover";
 export * from "./WingIcon";
+export * from "./ModelSelector";
+export * from "./ProviderVerification";

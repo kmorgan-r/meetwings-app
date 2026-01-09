@@ -1,9 +1,22 @@
 import { Sidebar } from "@/components";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "./ErrorLayout";
+import { useSetupStatus } from "@/hooks";
+import { useEffect } from "react";
 
 export const DashboardLayout = () => {
+  const { isComplete } = useSetupStatus();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Redirect to API Setup if not configured
+  useEffect(() => {
+    if (!isComplete && location.pathname !== "/api-setup") {
+      navigate("/api-setup", { replace: true });
+    }
+  }, [isComplete, location.pathname, navigate]);
+
   return (
     <ErrorBoundary
       fallbackRender={() => {

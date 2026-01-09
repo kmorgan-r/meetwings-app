@@ -1,8 +1,22 @@
-import { Button, Header, Input, Selection, TextInput } from "@/components";
-import { UseSettingsReturn } from "@/types";
+import { Button, Header, Input, Selection, TextInput, ModelSelector, ProviderVerification } from "@/components";
+import { UseSettingsReturn, TYPE_PROVIDER } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
-import { KeyIcon, TrashIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { KeyIcon, TrashIcon, ExternalLink } from "lucide-react";
+import { useEffect, useState, useCallback } from "react";
+import { getSTTProviderInfo } from "@/config/models.constants";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { toast } from "sonner";
+
+const handleOpenUrl = async (url: string) => {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error("Failed to open URL:", error);
+    toast.error("Failed to open link", {
+      description: "Please try again or copy the URL manually.",
+    });
+  }
+};
 
 export const Providers = ({
   allSttProviders,
@@ -12,6 +26,17 @@ export const Providers = ({
 }: UseSettingsReturn) => {
   const [localSelectedProvider, setLocalSelectedProvider] =
     useState<ResultJSON | null>(null);
+  const [, forceUpdate] = useState({});
+
+  // Get the current provider object
+  const currentProvider = allSttProviders?.find(
+    (p: TYPE_PROVIDER) => p?.id === selectedSttProvider?.provider
+  ) as TYPE_PROVIDER | undefined;
+
+  // Force re-render when verification changes to update parent state
+  const handleVerificationChange = useCallback(() => {
+    forceUpdate({});
+  }, []);
 
   useEffect(() => {
     if (selectedSttProvider?.provider) {
@@ -76,6 +101,34 @@ export const Providers = ({
           description={`If you want to use different url or method, you can always create a custom provider.`}
         />
       ) : null}
+
+      {/* Provider signup/pricing links */}
+      {selectedSttProvider?.provider && !allSttProviders?.find(p => p?.id === selectedSttProvider?.provider)?.isCustom && (() => {
+        const providerInfo = getSTTProviderInfo(selectedSttProvider.provider);
+        if (!providerInfo) return null;
+        const { pricingUrl } = providerInfo;
+        return (
+          <div className="flex flex-wrap gap-2 py-2">
+            <button
+              onClick={() => handleOpenUrl(providerInfo.signupUrl)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-primary/10 hover:bg-primary/20 text-primary rounded-md transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Get API Key from {providerInfo.name}
+            </button>
+            {pricingUrl && (
+              <button
+                onClick={() => handleOpenUrl(pricingUrl)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-secondary hover:bg-secondary/80 text-secondary-foreground rounded-md transition-colors"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                View Pricing
+              </button>
+            )}
+          </div>
+        );
+      })()}
+
       {findKeyAndValue("api_key") ? (
         <div className="space-y-2">
           <Header
@@ -185,6 +238,39 @@ export const Providers = ({
               return selectedSttProvider.variables[variable.key] || "";
             };
 
+            const isModelVariable = variable?.key === "model";
+            const currentProvider = allSttProviders?.find(
+              (p) => p?.id === selectedSttProvider?.provider
+            );
+            const isCustomProvider = currentProvider?.isCustom;
+            const providerDisplayName = isCustomProvider
+              ? "Custom Provider"
+              : currentProvider?.name || selectedSttProvider?.provider;
+
+            // Use ModelSelector for model variable if provider has predefined models
+            if (isModelVariable && !isCustomProvider && selectedSttProvider?.provider) {
+              return (
+                <div key={variable?.key}>
+                  <ModelSelector
+                    providerId={selectedSttProvider.provider}
+                    selectedModel={getVariableValue()}
+                    onModelChange={(model) => {
+                      if (!variable?.key || !selectedSttProvider) return;
+                      onSetSelectedSttProvider({
+                        ...selectedSttProvider,
+                        variables: {
+                          ...selectedSttProvider.variables,
+                          [variable.key]: model,
+                        },
+                      });
+                    }}
+                    type="stt"
+                    providerDisplayName={providerDisplayName}
+                  />
+                </div>
+              );
+            }
+
             return (
               <div className="space-y-1" key={variable?.key}>
                 <Header
@@ -192,22 +278,10 @@ export const Providers = ({
                   description={`add your preferred ${variable?.key?.replace(
                     /_/g,
                     " "
-                  )} for ${
-                    allSttProviders?.find(
-                      (p) => p?.id === selectedSttProvider?.provider
-                    )?.isCustom
-                      ? "Custom Provider"
-                      : selectedSttProvider?.provider
-                  }`}
+                  )} for ${providerDisplayName}`}
                 />
                 <TextInput
-                  placeholder={`Enter ${
-                    allSttProviders?.find(
-                      (p) => p?.id === selectedSttProvider?.provider
-                    )?.isCustom
-                      ? "Custom Provider"
-                      : selectedSttProvider?.provider
-                  } ${variable?.key?.replace(/_/g, " ") || "value"}`}
+                  placeholder={`Enter ${providerDisplayName} ${variable?.key?.replace(/_/g, " ") || "value"}`}
                   value={getVariableValue()}
                   onChange={(value) => {
                     if (!variable?.key || !selectedSttProvider) return;
@@ -225,6 +299,17 @@ export const Providers = ({
             );
           })}
       </div>
+
+      {/* Verification Checkbox */}
+      {selectedSttProvider?.provider && (
+        <ProviderVerification
+          type="stt"
+          provider={currentProvider}
+          selectedProvider={selectedSttProvider}
+          isConfigured={!isApiKeyEmpty()}
+          onVerificationChange={handleVerificationChange}
+        />
+      )}
     </div>
   );
 };

@@ -47,6 +47,14 @@ export const STORAGE_KEYS = {
 
   // User Identity settings
   USER_IDENTITY: "user_identity",
+
+  // API Verification status
+  AI_PROVIDER_VERIFIED: "ai_provider_verified",
+  STT_PROVIDER_VERIFIED: "stt_provider_verified",
+
+  // Per-provider configuration storage (remembers API keys when switching providers)
+  AI_PROVIDER_CONFIGS: "ai_provider_configs",
+  STT_PROVIDER_CONFIGS: "stt_provider_configs",
 } as const;
 
 // Max number of files that can be attached to a message

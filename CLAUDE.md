@@ -189,7 +189,7 @@ stop.bat         # Stop dev server
 | `/responses` | Responses | Response preferences |
 | `/cost-tracking` | Cost Tracking | API usage costs |
 | `/context-memory` | Context Memory | Knowledge base |
-| `/dev-space` | Dev Space | Developer tools |
+| `/api-setup` | API Setup | AI & Speech provider configuration |
 
 ## Code Style
 
