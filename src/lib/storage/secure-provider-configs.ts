@@ -94,6 +94,7 @@ export async function loadSecureSTTConfigs(): Promise<Record<string, Record<stri
 /**
  * Save AI provider config to secure storage
  * Updates both cache and persistent storage
+ * Rolls back cache on persistence failure to maintain consistency
  */
 export async function saveSecureAIConfig(
   providerId: string,
@@ -101,6 +102,9 @@ export async function saveSecureAIConfig(
 ): Promise<void> {
   // Ensure cache is loaded
   const configs = await loadSecureAIConfigs();
+
+  // Save previous value for rollback
+  const previousValue = configs[providerId];
 
   // Update cache
   configs[providerId] = variables;
@@ -110,13 +114,22 @@ export async function saveSecureAIConfig(
   try {
     await secureSet(AI_CONFIGS_KEY, JSON.stringify(configs));
   } catch (error) {
+    // Rollback cache on failure to maintain consistency with storage
+    if (previousValue === undefined) {
+      delete configs[providerId];
+    } else {
+      configs[providerId] = previousValue;
+    }
+    aiConfigsCache = configs;
     console.error("[SecureStorage] Failed to save AI config:", error);
+    throw error;
   }
 }
 
 /**
  * Save STT provider config to secure storage
  * Updates both cache and persistent storage
+ * Rolls back cache on persistence failure to maintain consistency
  */
 export async function saveSecureSTTConfig(
   providerId: string,
@@ -124,6 +137,9 @@ export async function saveSecureSTTConfig(
 ): Promise<void> {
   // Ensure cache is loaded
   const configs = await loadSecureSTTConfigs();
+
+  // Save previous value for rollback
+  const previousValue = configs[providerId];
 
   // Update cache
   configs[providerId] = variables;
@@ -133,7 +149,15 @@ export async function saveSecureSTTConfig(
   try {
     await secureSet(STT_CONFIGS_KEY, JSON.stringify(configs));
   } catch (error) {
+    // Rollback cache on failure to maintain consistency with storage
+    if (previousValue === undefined) {
+      delete configs[providerId];
+    } else {
+      configs[providerId] = previousValue;
+    }
+    sttConfigsCache = configs;
     console.error("[SecureStorage] Failed to save STT config:", error);
+    throw error;
   }
 }
 
@@ -154,6 +178,7 @@ export function getCachedSTTConfig(providerId: string): Record<string, string> |
 /**
  * Update AI config cache and persist to secure storage
  * Returns a Promise that resolves when the save is complete
+ * Rolls back cache on persistence failure to maintain consistency
  */
 export async function updateAIConfigCache(
   providerId: string,
@@ -162,11 +187,19 @@ export async function updateAIConfigCache(
   if (aiConfigsCache === null) {
     aiConfigsCache = {};
   }
+
+  const previousValue = aiConfigsCache[providerId]; // Save for rollback
   aiConfigsCache[providerId] = variables;
 
   try {
     await secureSet(AI_CONFIGS_KEY, JSON.stringify(aiConfigsCache));
   } catch (error) {
+    // Rollback cache on failure to maintain consistency with storage
+    if (previousValue === undefined) {
+      delete aiConfigsCache[providerId];
+    } else {
+      aiConfigsCache[providerId] = previousValue;
+    }
     console.error("[SecureStorage] Failed to persist AI config:", error);
     throw error;
   }
@@ -175,6 +208,7 @@ export async function updateAIConfigCache(
 /**
  * Update STT config cache and persist to secure storage
  * Returns a Promise that resolves when the save is complete
+ * Rolls back cache on persistence failure to maintain consistency
  */
 export async function updateSTTConfigCache(
   providerId: string,
@@ -183,11 +217,19 @@ export async function updateSTTConfigCache(
   if (sttConfigsCache === null) {
     sttConfigsCache = {};
   }
+
+  const previousValue = sttConfigsCache[providerId]; // Save for rollback
   sttConfigsCache[providerId] = variables;
 
   try {
     await secureSet(STT_CONFIGS_KEY, JSON.stringify(sttConfigsCache));
   } catch (error) {
+    // Rollback cache on failure to maintain consistency with storage
+    if (previousValue === undefined) {
+      delete sttConfigsCache[providerId];
+    } else {
+      sttConfigsCache[providerId] = previousValue;
+    }
     console.error("[SecureStorage] Failed to persist STT config:", error);
     throw error;
   }

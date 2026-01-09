@@ -149,6 +149,49 @@ describe("secure-provider-configs", () => {
       const stored = JSON.parse(secureStorageData["secure_ai_provider_configs"]);
       expect(stored.openai).toEqual({ api_key: "new-key" });
     });
+
+    it("throws on save errors and rolls back cache", async () => {
+      vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
+
+      await expect(
+        saveSecureAIConfig("openai", { api_key: "error-key" })
+      ).rejects.toThrow("Save failed");
+
+      // Cache should be rolled back (no previous value)
+      expect(getCachedAIConfig("openai")).toBeUndefined();
+    });
+
+    it("rolls back AI config to previous value on save error", async () => {
+      // First, successfully save a value
+      await saveSecureAIConfig("openai", { api_key: "original-key" });
+      expect(getCachedAIConfig("openai")).toEqual({ api_key: "original-key" });
+
+      // Now fail on update
+      vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
+
+      await expect(
+        saveSecureAIConfig("openai", { api_key: "new-key" })
+      ).rejects.toThrow("Save failed");
+
+      // Cache should be rolled back to previous value
+      expect(getCachedAIConfig("openai")).toEqual({ api_key: "original-key" });
+    });
+
+    it("rolls back STT config to previous value on save error", async () => {
+      // First, successfully save a value
+      await saveSecureSTTConfig("whisper", { api_key: "original-stt-key" });
+      expect(getCachedSTTConfig("whisper")).toEqual({ api_key: "original-stt-key" });
+
+      // Now fail on update
+      vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
+
+      await expect(
+        saveSecureSTTConfig("whisper", { api_key: "new-stt-key" })
+      ).rejects.toThrow("Save failed");
+
+      // Cache should be rolled back to previous value
+      expect(getCachedSTTConfig("whisper")).toEqual({ api_key: "original-stt-key" });
+    });
   });
 
   describe("getCachedAIConfig / getCachedSTTConfig", () => {
@@ -198,7 +241,7 @@ describe("secure-provider-configs", () => {
       );
     });
 
-    it("throws on save errors", async () => {
+    it("throws on save errors and rolls back cache", async () => {
       vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
 
       // Should throw the error
@@ -206,8 +249,39 @@ describe("secure-provider-configs", () => {
         updateAIConfigCache("openai", { api_key: "error-key" })
       ).rejects.toThrow("Save failed");
 
-      // Cache should still be updated even if save fails
-      expect(getCachedAIConfig("openai")).toEqual({ api_key: "error-key" });
+      // Cache should be rolled back (no previous value, so undefined)
+      expect(getCachedAIConfig("openai")).toBeUndefined();
+    });
+
+    it("rolls back to previous value on save error", async () => {
+      // First, successfully save a value
+      await updateAIConfigCache("openai", { api_key: "original-key" });
+      expect(getCachedAIConfig("openai")).toEqual({ api_key: "original-key" });
+
+      // Now fail on update
+      vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
+
+      await expect(
+        updateAIConfigCache("openai", { api_key: "new-key" })
+      ).rejects.toThrow("Save failed");
+
+      // Cache should be rolled back to previous value
+      expect(getCachedAIConfig("openai")).toEqual({ api_key: "original-key" });
+    });
+
+    it("rolls back STT cache on save error", async () => {
+      // First, successfully save a value
+      await updateSTTConfigCache("whisper", { api_key: "original-stt-key" });
+
+      // Now fail on update
+      vi.mocked(secureSet).mockRejectedValueOnce(new Error("Save failed"));
+
+      await expect(
+        updateSTTConfigCache("whisper", { api_key: "new-stt-key" })
+      ).rejects.toThrow("Save failed");
+
+      // Cache should be rolled back to previous value
+      expect(getCachedSTTConfig("whisper")).toEqual({ api_key: "original-stt-key" });
     });
   });
 

@@ -5,7 +5,15 @@
  * Verification is invalidated when the provider, model, or API key changes.
  *
  * Uses secure storage (encrypted at rest) with a cache layer for synchronous access.
- * The cache must be loaded via loadVerificationCache() before the app renders.
+ *
+ * IMPORTANT: Initialization Requirements
+ * --------------------------------------
+ * The following functions MUST be called during app initialization (in app.context.tsx):
+ * 1. migrateVerificationToSecureStorage() - Migrates data from localStorage (one-time)
+ * 2. loadVerificationCache() - Loads data into cache for synchronous access
+ *
+ * These must complete BEFORE calling any getter functions (getAIVerificationStatus, etc.)
+ * Failure to initialize will result in getters returning null with a console warning.
  */
 
 import { STORAGE_KEYS } from "@/config/constants";
@@ -34,6 +42,14 @@ interface VerificationData {
 let aiVerificationCache: VerificationData | null = null;
 let sttVerificationCache: VerificationData | null = null;
 let cacheLoaded = false;
+
+/**
+ * Check if the verification cache has been loaded.
+ * Use this to guard against premature access to verification data.
+ */
+export function isVerificationCacheLoaded(): boolean {
+  return cacheLoaded;
+}
 
 /**
  * Creates a secure SHA-256 hash of the API key for change detection.
@@ -113,10 +129,17 @@ export async function migrateVerificationToSecureStorage(): Promise<void> {
 /**
  * Gets the AI provider verification status from cache.
  * Returns null if cache not loaded or no verification exists.
+ *
+ * NOTE: Ensure loadVerificationCache() has been called before using this function.
+ * If cache is not loaded, this returns null which may cause the UI to show
+ * "verification required" incorrectly.
  */
 export function getAIVerificationStatus(): VerificationData | null {
   if (!cacheLoaded) {
-    console.warn("[VerificationStorage] Cache not loaded, returning null");
+    console.warn(
+      "[VerificationStorage] Cache not loaded - call loadVerificationCache() during app init. " +
+      "Returning null which may cause incorrect 'verification required' state."
+    );
   }
   return aiVerificationCache;
 }
@@ -124,10 +147,17 @@ export function getAIVerificationStatus(): VerificationData | null {
 /**
  * Gets the STT provider verification status from cache.
  * Returns null if cache not loaded or no verification exists.
+ *
+ * NOTE: Ensure loadVerificationCache() has been called before using this function.
+ * If cache is not loaded, this returns null which may cause the UI to show
+ * "verification required" incorrectly.
  */
 export function getSTTVerificationStatus(): VerificationData | null {
   if (!cacheLoaded) {
-    console.warn("[VerificationStorage] Cache not loaded, returning null");
+    console.warn(
+      "[VerificationStorage] Cache not loaded - call loadVerificationCache() during app init. " +
+      "Returning null which may cause incorrect 'verification required' state."
+    );
   }
   return sttVerificationCache;
 }

@@ -54,14 +54,20 @@ export const ProviderVerification = ({
     }
 
     const checkVerification = async () => {
-      const isValid = type === "ai"
-        ? await isAIVerificationValid(providerId, model, apiKey)
-        : await isSTTVerificationValid(providerId, model, apiKey);
+      try {
+        const isValid = type === "ai"
+          ? await isAIVerificationValid(providerId, model, apiKey)
+          : await isSTTVerificationValid(providerId, model, apiKey);
 
-      if (isValid) {
-        setState("verified");
-        onVerificationChange?.(true);
-      } else {
+        if (isValid) {
+          setState("verified");
+          onVerificationChange?.(true);
+        } else {
+          setState("idle");
+          onVerificationChange?.(false);
+        }
+      } catch (error) {
+        console.error("[ProviderVerification] Error checking verification status:", error);
         setState("idle");
         onVerificationChange?.(false);
       }
@@ -94,10 +100,15 @@ export const ProviderVerification = ({
     if (result.success) {
       setState("verified");
       setErrorMessage(null);
-      if (type === "ai") {
-        await setAIVerificationStatus(providerId, model, apiKey, true);
-      } else {
-        await setSTTVerificationStatus(providerId, model, apiKey, true);
+      try {
+        if (type === "ai") {
+          await setAIVerificationStatus(providerId, model, apiKey, true);
+        } else {
+          await setSTTVerificationStatus(providerId, model, apiKey, true);
+        }
+      } catch (error) {
+        console.error("[ProviderVerification] Error saving verification status:", error);
+        // Continue anyway - verification succeeded even if save failed
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));
@@ -105,10 +116,15 @@ export const ProviderVerification = ({
     } else {
       setState("failed");
       setErrorMessage(result.error || result.message);
-      if (type === "ai") {
-        await setAIVerificationStatus(providerId, model, apiKey, false, result.error);
-      } else {
-        await setSTTVerificationStatus(providerId, model, apiKey, false, result.error);
+      try {
+        if (type === "ai") {
+          await setAIVerificationStatus(providerId, model, apiKey, false, result.error);
+        } else {
+          await setSTTVerificationStatus(providerId, model, apiKey, false, result.error);
+        }
+      } catch (error) {
+        console.error("[ProviderVerification] Error saving verification status:", error);
+        // Continue anyway - we still want to show the failed state
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));
@@ -123,10 +139,15 @@ export const ProviderVerification = ({
       // Clear verification when unchecked
       setState("idle");
       setErrorMessage(null);
-      if (type === "ai") {
-        await clearAIVerificationStatus();
-      } else {
-        await clearSTTVerificationStatus();
+      try {
+        if (type === "ai") {
+          await clearAIVerificationStatus();
+        } else {
+          await clearSTTVerificationStatus();
+        }
+      } catch (error) {
+        console.error("[ProviderVerification] Error clearing verification status:", error);
+        // Continue anyway - UI state is already updated
       }
       // Notify other components that verification status changed
       window.dispatchEvent(new CustomEvent("verification-status-changed"));

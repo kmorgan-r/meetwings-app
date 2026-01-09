@@ -116,25 +116,35 @@ export function useSetupStatus(): SetupStatus {
 
   // Check verification status asynchronously
   const checkVerificationStatus = useCallback(async () => {
-    if (aiConfigured) {
-      const valid = await isAIVerificationValid(
-        selectedAIProvider?.provider || "",
-        selectedAIProvider?.variables?.model || "",
-        aiApiKey
-      );
-      setAiVerified(valid);
-    } else {
+    try {
+      if (aiConfigured) {
+        const valid = await isAIVerificationValid(
+          selectedAIProvider?.provider || "",
+          selectedAIProvider?.variables?.model || "",
+          aiApiKey
+        );
+        setAiVerified(valid);
+      } else {
+        setAiVerified(false);
+      }
+    } catch (error) {
+      console.error("[useSetupStatus] Error checking AI verification:", error);
       setAiVerified(false);
     }
 
-    if (sttConfigured) {
-      const valid = await isSTTVerificationValid(
-        selectedSttProvider?.provider || "",
-        selectedSttProvider?.variables?.model || "",
-        sttApiKey
-      );
-      setSttVerified(valid);
-    } else {
+    try {
+      if (sttConfigured) {
+        const valid = await isSTTVerificationValid(
+          selectedSttProvider?.provider || "",
+          selectedSttProvider?.variables?.model || "",
+          sttApiKey
+        );
+        setSttVerified(valid);
+      } else {
+        setSttVerified(false);
+      }
+    } catch (error) {
+      console.error("[useSetupStatus] Error checking STT verification:", error);
       setSttVerified(false);
     }
   }, [
