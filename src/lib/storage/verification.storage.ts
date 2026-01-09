@@ -54,9 +54,13 @@ export function isVerificationCacheLoaded(): boolean {
 /**
  * Creates a secure SHA-256 hash of the API key for change detection.
  * Uses Web Crypto API for cryptographically secure hashing.
+ *
+ * @throws Error if API key is empty or whitespace-only
  */
 async function hashApiKey(apiKey: string): Promise<string> {
-  if (!apiKey) return "";
+  if (!apiKey || apiKey.trim() === "") {
+    throw new Error("API key cannot be empty");
+  }
 
   const encoder = new TextEncoder();
   const data = encoder.encode(apiKey);

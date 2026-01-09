@@ -370,11 +370,10 @@ describe("verification.storage", () => {
       expect(mockDigest).toHaveBeenCalledWith("SHA-256", expect.any(Uint8Array));
     });
 
-    it("produces empty hash for empty API key", async () => {
-      await setAIVerificationStatus("openai", "gpt-4", "", true);
-
-      const cached = getAIVerificationStatus();
-      expect(cached?.apiKeyHash).toBe("");
+    it("throws error for empty API key", async () => {
+      await expect(
+        setAIVerificationStatus("openai", "gpt-4", "", true)
+      ).rejects.toThrow("API key cannot be empty");
     });
 
     it("produces consistent hashes for same input", async () => {

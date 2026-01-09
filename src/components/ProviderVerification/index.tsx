@@ -264,12 +264,13 @@ export const ProviderVerification = ({
         } else {
           await setSTTVerificationStatus(providerId, model, apiKey, true);
         }
+        // Notify after successful storage to avoid stale reads
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       } catch (error) {
         console.error("[ProviderVerification] Error saving verification status:", error);
-        // Continue anyway - verification succeeded even if save failed
+        // Still notify on error - UI state changed even if save failed
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       }
-      // Notify other components that verification status changed
-      window.dispatchEvent(new CustomEvent("verification-status-changed"));
       onVerificationChange?.(true);
     } else {
       setState("failed");
@@ -280,12 +281,13 @@ export const ProviderVerification = ({
         } else {
           await setSTTVerificationStatus(providerId, model, apiKey, false, result.error);
         }
+        // Notify after successful storage to avoid stale reads
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       } catch (error) {
         console.error("[ProviderVerification] Error saving verification status:", error);
-        // Continue anyway - we still want to show the failed state
+        // Still notify on error - UI state changed even if save failed
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       }
-      // Notify other components that verification status changed
-      window.dispatchEvent(new CustomEvent("verification-status-changed"));
       onVerificationChange?.(false);
     }
   }, [isConfigured, state, type, provider, selectedProvider, providerId, model, apiKey, onVerificationChange]);
@@ -303,12 +305,13 @@ export const ProviderVerification = ({
         } else {
           await clearSTTVerificationStatus();
         }
+        // Notify after successful storage to avoid stale reads
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       } catch (error) {
         console.error("[ProviderVerification] Error clearing verification status:", error);
-        // Continue anyway - UI state is already updated
+        // Still notify on error - UI state changed even if clear failed
+        window.dispatchEvent(new CustomEvent("verification-status-changed"));
       }
-      // Notify other components that verification status changed
-      window.dispatchEvent(new CustomEvent("verification-status-changed"));
       onVerificationChange?.(false);
     }
   }, [handleVerify, type, onVerificationChange]);
