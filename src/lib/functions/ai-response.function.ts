@@ -299,9 +299,12 @@ export async function* fetchAIResponse(params: {
         } else {
           bodyObj.stream = true;
         }
-        // Request usage data in streaming response (OpenAI-compatible APIs)
-        // This makes OpenAI include token usage in the final chunk
-        bodyObj.stream_options = { include_usage: true };
+        // Request usage data in streaming response (OpenAI-compatible APIs).
+        // Anthropic rejects stream_options (400) and returns usage natively in
+        // its message_delta events, so only send it to non-Anthropic endpoints.
+        if (!url.includes("anthropic.com")) {
+          bodyObj.stream_options = { include_usage: true };
+        }
       }
     }
 
