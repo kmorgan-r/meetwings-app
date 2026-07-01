@@ -302,7 +302,11 @@ export async function* fetchAIResponse(params: {
         // Request usage data in streaming response (OpenAI-compatible APIs).
         // Anthropic rejects stream_options (400) and returns usage natively in
         // its message_delta events, so only send it to non-Anthropic endpoints.
-        if (!url.includes("anthropic.com")) {
+        // Detect Anthropic by both provider identity (built-in "claude") and
+        // URL host, so custom providers/proxies pointing at Anthropic are covered.
+        const isAnthropic =
+          provider?.id === "claude" || url.includes("anthropic.com");
+        if (!isAnthropic) {
           bodyObj.stream_options = { include_usage: true };
         }
       }

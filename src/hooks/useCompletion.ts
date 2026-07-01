@@ -836,6 +836,7 @@ export const useCompletion = () => {
       // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
       selectedAIProvider,
       allAiProviders,
+      systemPrompt,
       submit,
     ]
   );
