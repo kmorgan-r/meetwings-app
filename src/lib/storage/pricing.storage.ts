@@ -18,6 +18,10 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.002, outputPer1k: 0.008 }, // Default for unknown OpenAI models
   },
   claude: {
+    // Current models (per 1M: opus $5/$25, sonnet $3/$15, haiku $1/$5)
+    "claude-opus-4-8": { inputPer1k: 0.005, outputPer1k: 0.025 },
+    "claude-sonnet-5": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "claude-haiku-4-5": { inputPer1k: 0.001, outputPer1k: 0.005 },
     // Exact model IDs used in API
     "claude-3-5-sonnet-20241022": { inputPer1k: 0.003, outputPer1k: 0.015 },
     "claude-3-opus-20240229": { inputPer1k: 0.015, outputPer1k: 0.075 },

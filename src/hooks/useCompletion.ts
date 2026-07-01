@@ -1,7 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
-import { MAX_FILES, STORAGE_KEYS, MEETING_ASSIST_SYSTEM_PROMPT } from "@/config";
+import {
+  MAX_FILES,
+  STORAGE_KEYS,
+  MEETING_ASSIST_SYSTEM_PROMPT,
+  DEFAULT_SYSTEM_PROMPT,
+} from "@/config";
 import { useApp } from "@/contexts";
 import {
   fetchAIResponse,
@@ -650,21 +655,35 @@ export const useCompletion = () => {
         return;
       }
 
+      // Resolve a speaker label for an entry ("You" = the user).
+      const labelFor = (entry: (typeof meetingTranscript)[number]) =>
+        entry.speaker?.speakerLabel ||
+        (entry.audioSource === "microphone"
+          ? "You"
+          : entry.audioSource === "system"
+          ? "Guest"
+          : null);
+
       // Build the meeting context prompt with speaker attribution
-      const meetingContext = meetingTranscript.map((entry) => {
-        // Extract speaker label with fallback logic
-        const speakerLabel = entry.speaker?.speakerLabel ||
-          (entry.audioSource === 'microphone' ? 'You' :
-           entry.audioSource === 'system' ? 'Guest' : null);
+      const meetingContext = meetingTranscript
+        .map((entry) => {
+          const speakerLabel = labelFor(entry);
+          // No speaker info - return text as-is (backwards compatible)
+          return speakerLabel ? `${speakerLabel}: ${entry.original}` : entry.original;
+        })
+        .join("\n\n");
 
-        if (speakerLabel) {
-          return `${speakerLabel}: ${entry.original}`;
-        }
+      // Find the most recent thing said by someone OTHER than the user, so the
+      // model answers the LATEST question instead of an earlier one. Fall back
+      // to the last line if we can't tell who spoke.
+      const lastParticipant =
+        [...meetingTranscript].reverse().find((e) => labelFor(e) !== "You") ??
+        meetingTranscript[meetingTranscript.length - 1];
+      const latestLine = lastParticipant
+        ? `${labelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
+        : "";
 
-        // No speaker info - return text as-is (backwards compatible)
-        return entry.original;
-      }).join("\n\n");
-      const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## Your Request: ${action}`;
+      const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## MOST RECENT thing said to you (answer THIS):\n${latestLine}\n\n## Your Request: ${action}`;
 
       // Generate unique request ID
       const requestId = generateRequestId();
@@ -726,11 +745,17 @@ export const useCompletion = () => {
           content: msg.content,
         }));
 
-        // Use Meeting Assist system prompt for better context
+        // Use Meeting Assist system prompt for better context, and fold in the
+        // user's own system prompt (their background/context) so answers are
+        // personalized. The default generic prompt adds nothing, so skip it.
+        const userContext =
+          systemPrompt && systemPrompt !== DEFAULT_SYSTEM_PROMPT
+            ? `\n\nAbout the user (use this to make answers specific and in their voice):\n${systemPrompt}`
+            : "";
         for await (const chunk of fetchAIResponse({
           provider: useMeetwingsAPI ? undefined : provider,
           selectedProvider: selectedAIProvider,
-          systemPrompt: MEETING_ASSIST_SYSTEM_PROMPT,
+          systemPrompt: MEETING_ASSIST_SYSTEM_PROMPT + userContext,
           history: messageHistory,
           userMessage: contextualPrompt,
           signal,
@@ -811,6 +836,7 @@ export const useCompletion = () => {
       // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
       selectedAIProvider,
       allAiProviders,
+      systemPrompt,
       submit,
     ]
   );
