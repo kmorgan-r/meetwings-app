@@ -175,10 +175,9 @@ export const AI_MODELS: Record<string, ModelOption[]> = {
     { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "Fast, cost-effective" },
   ],
   claude: [
-    { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", recommended: true, description: "Latest, excellent balance of speed and quality" },
-    { id: "claude-3-opus-20240229", name: "Claude 3 Opus", description: "Highest capability" },
-    { id: "claude-3-sonnet-20240229", name: "Claude 3 Sonnet", description: "Good balance" },
-    { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku", description: "Fastest, most affordable" },
+    { id: "claude-opus-4-8", name: "Claude Opus 4.8", recommended: true, description: "Most capable, best reasoning — ideal for interviews" },
+    { id: "claude-sonnet-5", name: "Claude Sonnet 5", description: "Near-Opus quality, faster and cheaper" },
+    { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", description: "Fastest, most affordable" },
   ],
   grok: [
     { id: "grok-2", name: "Grok 2", recommended: true, description: "Most capable xAI model" },
