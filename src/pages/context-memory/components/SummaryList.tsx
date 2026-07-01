@@ -16,12 +16,14 @@ interface SummaryListProps {
   onSelectSummary: (summary: MeetingSummary) => void;
   selectedSummaryId?: string;
   refreshTrigger?: number;
+  mockSummaries?: MeetingSummary[]; // Optional mock data for UI mockup
 }
 
 export const SummaryList = ({
   onSelectSummary,
   selectedSummaryId,
   refreshTrigger,
+  mockSummaries,
 }: SummaryListProps) => {
   const [summaries, setSummaries] = useState<MeetingSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -30,8 +32,13 @@ export const SummaryList = ({
   const loadSummaries = async () => {
     setLoading(true);
     try {
-      const data = await getAllMeetingSummaries();
-      setSummaries(data);
+      // Use mock data if provided, otherwise load from database
+      if (mockSummaries) {
+        setSummaries(mockSummaries);
+      } else {
+        const data = await getAllMeetingSummaries();
+        setSummaries(data);
+      }
     } catch (error) {
       console.error("Failed to load summaries:", error);
     } finally {
@@ -41,7 +48,7 @@ export const SummaryList = ({
 
   useEffect(() => {
     loadSummaries();
-  }, [refreshTrigger]);
+  }, [refreshTrigger, mockSummaries]);
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -72,6 +79,16 @@ export const SummaryList = ({
       hour: "2-digit",
       minute: "2-digit",
     });
+  };
+
+  const formatDuration = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) {
+      return `${minutes}min`;
+    }
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours}h${remainingMinutes > 0 ? ` ${remainingMinutes}m` : ''}`;
   };
 
   if (loading) {
@@ -136,18 +153,33 @@ export const SummaryList = ({
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    {/* Meeting Title */}
+                    {(summary as any).title && (
+                      <h4 className="text-sm font-semibold mb-1 line-clamp-1">
+                        {(summary as any).title}
+                      </h4>
+                    )}
+
+                    {/* Metadata with duration */}
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      {(summary as any).durationSeconds && (summary as any).durationSeconds > 0 && (
+                        <Badge variant="outline" className="text-xs">
+                          {formatDuration((summary as any).durationSeconds)}
+                        </Badge>
+                      )}
+                      {summary.participants && summary.participants.length > 0 && (
+                        <Badge variant="outline" className="text-xs">
+                          {summary.participants.length} participant{summary.participants.length !== 1 ? 's' : ''}
+                        </Badge>
+                      )}
                       <span className="text-xs text-muted-foreground">
                         {formatDate(summary.createdAt)}
                       </span>
                       <span className="text-xs text-muted-foreground">
                         {formatTime(summary.createdAt)}
                       </span>
-                      <Badge variant="outline" className="text-xs">
-                        {summary.exchangeCount} exchanges
-                      </Badge>
                     </div>
-                    <p className="text-sm line-clamp-2">{summary.summary}</p>
+                    <p className="text-sm text-muted-foreground line-clamp-2">{summary.summary}</p>
                     {summary.topics.length > 0 && (
                       <div className="flex flex-wrap gap-1 mt-2">
                         {summary.topics.slice(0, 3).map((topic, i) => (
