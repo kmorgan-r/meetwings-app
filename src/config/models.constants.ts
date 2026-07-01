@@ -244,8 +244,8 @@ export const STT_MODELS: Record<string, ModelOption[]> = {
     { id: "gpt-4o-mini-transcribe", name: "GPT-4o Mini Transcribe", description: "Fast and affordable" },
   ],
   groq: [
-    { id: "whisper-large-v3", name: "Whisper Large V3", recommended: true, description: "Best accuracy" },
-    { id: "whisper-large-v3-turbo", name: "Whisper Large V3 Turbo", description: "Faster variant" },
+    { id: "whisper-large-v3-turbo", name: "Whisper Large V3 Turbo", recommended: true, description: "Fastest + cheapest, near-instant for live use" },
+    { id: "whisper-large-v3", name: "Whisper Large V3", description: "Best accuracy, slightly slower" },
     { id: "distil-whisper-large-v3-en", name: "Distil Whisper (English)", description: "Fast, English only" },
   ],
   "elevenlabs-stt": [
