@@ -85,6 +85,9 @@ export const SummaryList = ({
 
   const formatDuration = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60);
+    if (minutes < 1) {
+      return `${Math.max(0, Math.round(seconds))}s`;
+    }
     if (minutes < 60) {
       return `${minutes}min`;
     }

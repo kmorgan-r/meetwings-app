@@ -3,12 +3,13 @@
 //
 // SCAFFOLDING — not yet wired into the app. Feeds the upcoming context-memory
 // enhancement (titles, durations, action-item status, knowledge profile).
-// TODO(context-memory): consume via SummaryList `mockSummaries` prop, and once
-// the real KnowledgeEntity/action-item DB schema lands, replace MockActionItem /
-// MOCK_KNOWLEDGE_PROFILE with the canonical types in @/types so the compiler
-// keeps them in sync. Remove this file when the feature ships.
+// TODO(context-memory): consume via SummaryList `mockSummaries` prop. Summaries
+// and the knowledge profile are annotated against the canonical @/types so the
+// compiler flags drift. MockActionItem stays local: the richer per-item shape
+// (priority/status/dueDate) has no canonical equivalent yet — the real @/types
+// ActionItem is minimal ({ text, assignee?, status }). Remove when feature ships.
 
-import type { MeetingSummary } from "@/types";
+import type { MeetingSummary, KnowledgeProfile } from "@/types";
 
 // Mock enhanced meeting summary data
 export const MOCK_ENHANCED_SUMMARIES: MeetingSummary[] = [
@@ -244,7 +245,7 @@ export const MOCK_ACTION_ITEMS: Record<string, MockActionItem[]> = {
 };
 
 // Mock enhanced knowledge profile
-export const MOCK_KNOWLEDGE_PROFILE = {
+export const MOCK_KNOWLEDGE_PROFILE: KnowledgeProfile = {
   id: "profile",
   summary: "Working on Q1 product launch with focus on dark mode feature, API v2 migration, and enterprise client onboarding. Leading a team of 5 engineers and collaborating with design and marketing teams.",
   keyPeople: [
@@ -284,6 +285,5 @@ export const MOCK_KNOWLEDGE_PROFILE = {
     "Team velocity increased by 15% this sprint",
   ],
   lastCompacted: Date.now(),
-  lastFiltered: Date.now(),
   sourceCount: 3,
 };
