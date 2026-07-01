@@ -1,5 +1,12 @@
 // Mock data for enhanced meeting summaries UI
 // This demonstrates the new features from the website screenshots
+//
+// SCAFFOLDING — not yet wired into the app. Feeds the upcoming context-memory
+// enhancement (titles, durations, action-item status, knowledge profile).
+// TODO(context-memory): consume via SummaryList `mockSummaries` prop, and once
+// the real KnowledgeEntity/action-item DB schema lands, replace MockActionItem /
+// MOCK_KNOWLEDGE_PROFILE with the canonical types in @/types so the compiler
+// keeps them in sync. Remove this file when the feature ships.
 
 import type { MeetingSummary } from "@/types";
 

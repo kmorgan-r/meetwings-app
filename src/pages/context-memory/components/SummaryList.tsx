@@ -16,7 +16,9 @@ interface SummaryListProps {
   onSelectSummary: (summary: MeetingSummary) => void;
   selectedSummaryId?: string;
   refreshTrigger?: number;
-  mockSummaries?: MeetingSummary[]; // Optional mock data for UI mockup
+  // SCAFFOLDING: optional mock data for UI mockup, not yet passed by any caller.
+  // TODO(context-memory): wire from index.tsx using MOCK_ENHANCED_SUMMARIES.
+  mockSummaries?: MeetingSummary[];
 }
 
 export const SummaryList = ({
@@ -154,17 +156,17 @@ export const SummaryList = ({
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     {/* Meeting Title */}
-                    {(summary as any).title && (
+                    {summary.title && (
                       <h4 className="text-sm font-semibold mb-1 line-clamp-1">
-                        {(summary as any).title}
+                        {summary.title}
                       </h4>
                     )}
 
                     {/* Metadata with duration */}
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      {(summary as any).durationSeconds && (summary as any).durationSeconds > 0 && (
+                      {summary.durationSeconds && summary.durationSeconds > 0 && (
                         <Badge variant="outline" className="text-xs">
-                          {formatDuration((summary as any).durationSeconds)}
+                          {formatDuration(summary.durationSeconds)}
                         </Badge>
                       )}
                       {summary.participants && summary.participants.length > 0 && (
