@@ -145,6 +145,52 @@ export async function createConversation(
 }
 
 /**
+ * Hydrates a set of conversation rows with their messages in a single query.
+ */
+async function attachMessages(
+  conversations: DbConversation[]
+): Promise<ChatConversation[]> {
+  if (conversations.length === 0) {
+    return [];
+  }
+
+  const db = await getDatabase();
+
+  // Get all messages for these conversations in one query
+  const conversationIds = conversations.map((c) => c.id);
+  const placeholders = conversationIds.map(() => "?").join(",");
+  const allMessages = await db.select<DbMessage[]>(
+    `SELECT * FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY conversation_id, timestamp ASC`,
+    conversationIds
+  );
+
+  // Group messages by conversation_id
+  const messagesByConversation = new Map<string, DbMessage[]>();
+  for (const msg of allMessages) {
+    if (!messagesByConversation.has(msg.conversation_id)) {
+      messagesByConversation.set(msg.conversation_id, []);
+    }
+    messagesByConversation.get(msg.conversation_id)!.push(msg);
+  }
+
+  // Build result
+  return conversations.map((conv) => ({
+    id: conv.id,
+    title: conv.title,
+    createdAt: conv.created_at,
+    updatedAt: conv.updated_at,
+    messages:
+      messagesByConversation.get(conv.id)?.map((msg) => ({
+        id: msg.id,
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp,
+        attachedFiles: safeJsonParse(msg.attached_files, undefined),
+      })) || [],
+  }));
+}
+
+/**
  * Get all conversations with messages in a single optimized query
  */
 export async function getAllConversations(): Promise<ChatConversation[]> {
@@ -156,44 +202,35 @@ export async function getAllConversations(): Promise<ChatConversation[]> {
       "SELECT * FROM conversations ORDER BY updated_at DESC"
     );
 
-    if (conversations.length === 0) {
-      return [];
-    }
-
-    // Get all messages for these conversations in one query
-    const conversationIds = conversations.map((c) => c.id);
-    const placeholders = conversationIds.map(() => "?").join(",");
-    const allMessages = await db.select<DbMessage[]>(
-      `SELECT * FROM messages WHERE conversation_id IN (${placeholders}) ORDER BY conversation_id, timestamp ASC`,
-      conversationIds
-    );
-
-    // Group messages by conversation_id
-    const messagesByConversation = new Map<string, DbMessage[]>();
-    for (const msg of allMessages) {
-      if (!messagesByConversation.has(msg.conversation_id)) {
-        messagesByConversation.set(msg.conversation_id, []);
-      }
-      messagesByConversation.get(msg.conversation_id)!.push(msg);
-    }
-
-    // Build result
-    return conversations.map((conv) => ({
-      id: conv.id,
-      title: conv.title,
-      createdAt: conv.created_at,
-      updatedAt: conv.updated_at,
-      messages:
-        messagesByConversation.get(conv.id)?.map((msg) => ({
-          id: msg.id,
-          role: msg.role,
-          content: msg.content,
-          timestamp: msg.timestamp,
-          attachedFiles: safeJsonParse(msg.attached_files, undefined),
-        })) || [],
-    }));
+    return attachMessages(conversations);
   } catch (error) {
     console.error("Failed to get all conversations:", error);
+    throw error;
+  }
+}
+
+/**
+ * Get only conversations that have no meeting summary yet, with their messages
+ * hydrated. The knowledge backfill uses this so it loads message bodies only for
+ * conversations it might actually summarize, instead of every conversation on
+ * every "Update Knowledge" click.
+ */
+export async function getUnsummarizedConversations(): Promise<
+  ChatConversation[]
+> {
+  const db = await getDatabase();
+
+  try {
+    const conversations = await db.select<DbConversation[]>(
+      `SELECT c.* FROM conversations c
+       LEFT JOIN meeting_summaries ms ON ms.conversation_id = c.id
+       WHERE ms.id IS NULL
+       ORDER BY c.updated_at DESC`
+    );
+
+    return attachMessages(conversations);
+  } catch (error) {
+    console.error("Failed to get unsummarized conversations:", error);
     throw error;
   }
 }

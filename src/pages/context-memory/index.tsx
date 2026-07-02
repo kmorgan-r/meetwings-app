@@ -1,8 +1,14 @@
 import { useState, useCallback } from "react";
+import { toast } from "sonner";
 import { PageLayout } from "@/layouts";
 import { Button } from "@/components/ui/button";
 import { RefreshCcw, Sparkles } from "lucide-react";
-import { compactKnowledge } from "@/lib/functions/knowledge-compactor";
+import {
+  compactKnowledge,
+  summarizePendingConversations,
+} from "@/lib/functions/knowledge-compactor";
+import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
+import { getUncompactedSummaryCount } from "@/lib/database";
 import { useApp } from "@/contexts";
 import {
   SummaryList,
@@ -43,16 +49,74 @@ const ContextMemory = () => {
   const handleCompactKnowledge = useCallback(async () => {
     setIsCompacting(true);
     try {
+      // Meetwings-cloud users have no locally configured provider, so gate on
+      // the Meetwings API too (mirrors the chat completion call sites).
+      const useMeetwingsAPI = await shouldUseMeetwingsAPI();
       const provider = allAiProviders.find(
         (p) => p.id === selectedAIProvider.provider
       );
-      await compactKnowledge({
-        provider,
+
+      if (!useMeetwingsAPI && !provider) {
+        toast.error(
+          "No AI provider selected. Choose one in Dev Space to update knowledge."
+        );
+        return;
+      }
+
+      const providerConfig = {
+        provider: useMeetwingsAPI ? undefined : provider,
         selectedProvider: selectedAIProvider,
-      });
+      };
+
+      // Summarize any conversations that were never summarized, so compaction
+      // has fresh material (summaries are otherwise only created when leaving a
+      // conversation).
+      const { summarized: backfilled, attempts, cappedAtLimit } =
+        await summarizePendingConversations(providerConfig);
+
+      // Nothing new since the last compaction -> don't claim an update. But
+      // distinguish a genuine no-op from a batch where every AI summarization
+      // attempt failed (rate limit, network, unparseable response): that writes
+      // no summaries, so uncompacted can be 0 despite real failures.
+      const uncompacted = await getUncompactedSummaryCount();
+      if (uncompacted === 0) {
+        if (attempts > 0 && backfilled === 0) {
+          toast.error(
+            "Couldn't summarize new conversations — the AI calls failed. See console for details."
+          );
+        } else {
+          toast.info("No new conversations to add to your knowledge profile.");
+        }
+        return;
+      }
+
+      const updated = await compactKnowledge(providerConfig);
       handleRefresh();
+
+      if (updated) {
+        const base =
+          backfilled > 0
+            ? `Knowledge updated (${backfilled} new conversation${
+                backfilled === 1 ? "" : "s"
+              } summarized).`
+            : "Knowledge updated.";
+        // More may remain from either cap: unsummarized conversations left by the
+        // backfill cap (cappedAtLimit), or summaries left by the compaction batch
+        // cap (re-check the uncompacted count after compaction advanced the
+        // watermark to the newest summary it actually folded in).
+        const remainingAfter = await getUncompactedSummaryCount();
+        const moreRemain = cappedAtLimit || remainingAfter > 0;
+        toast.success(
+          moreRemain
+            ? `${base} More remain — click Update Knowledge again to continue.`
+            : base
+        );
+      } else {
+        toast.error("Failed to update knowledge. See console for details.");
+      }
     } catch (error) {
       console.error("Failed to compact knowledge:", error);
+      toast.error("Failed to update knowledge. See console for details.");
     } finally {
       setIsCompacting(false);
     }
