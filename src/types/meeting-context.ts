@@ -171,4 +171,10 @@ export interface UpdateKnowledgeProfileInput {
   recentDecisions?: string[];
   recentTeamUpdates?: string[];
   sourceCount?: number;
+  /**
+   * Explicit compaction watermark (ms). Defaults to now when omitted. Compaction
+   * sets this to the newest summary it actually incorporated so summaries beyond
+   * a single batch aren't skipped past.
+   */
+  lastCompacted?: number;
 }

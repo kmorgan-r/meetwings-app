@@ -179,6 +179,32 @@ export async function getRecentMeetingSummaries(
   }
 }
 
+/**
+ * Returns the oldest uncompacted summaries (created strictly after
+ * `sinceTimestamp`), oldest-first, up to `limit`. Compaction drains these in
+ * chronological batches and advances its watermark to the newest summary it
+ * actually incorporated, so histories larger than one batch are never skipped
+ * past. Strict `>` matches getUncompactedSummaryCount and avoids re-including
+ * the watermark summary on the next run.
+ */
+export async function getOldestUncompactedSummaries(
+  limit: number,
+  sinceTimestamp: number
+): Promise<MeetingSummary[]> {
+  const db = await getDatabase();
+
+  try {
+    const rows = await db.select<DbMeetingSummary[]>(
+      `SELECT * FROM meeting_summaries WHERE created_at > ? ORDER BY created_at ASC LIMIT ?`,
+      [sinceTimestamp, limit]
+    );
+    return rows.map(dbRowToMeetingSummary);
+  } catch (error) {
+    console.error("Failed to get oldest uncompacted summaries:", error);
+    return [];
+  }
+}
+
 export async function getAllMeetingSummaries(): Promise<MeetingSummary[]> {
   const db = await getDatabase();
 
@@ -574,7 +600,7 @@ export async function updateKnowledgeProfile(
       recentGoals: updates.recentGoals ?? existing?.recentGoals ?? [],
       recentDecisions: updates.recentDecisions ?? existing?.recentDecisions ?? [],
       recentTeamUpdates: updates.recentTeamUpdates ?? existing?.recentTeamUpdates ?? [],
-      lastCompacted: now,
+      lastCompacted: updates.lastCompacted ?? now,
       sourceCount: updates.sourceCount ?? existing?.sourceCount ?? 0,
     };
 

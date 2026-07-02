@@ -9,10 +9,9 @@ import {
 import {
   getKnowledgeProfile,
   updateKnowledgeProfile,
-  getRecentMeetingSummaries,
+  getOldestUncompactedSummaries,
   getUncompactedSummaryCount,
-  getAllConversations,
-  getMeetingSummaryByConversation,
+  getUnsummarizedConversations,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import {
@@ -59,15 +58,16 @@ export type BackfillResult = {
  *
  * Normally summaries are only generated when the user leaves a conversation
  * (start new / switch). This backfills any conversation that was never
- * summarized so "Update Knowledge" has fresh material to compact. Conversations
- * that already have a summary or are too short are skipped by
- * summarizeConversation itself (no AI call). The conversation currently open in
- * the chat view is skipped too, so it isn't summarized before it's finished.
+ * summarized so "Update Knowledge" has fresh material to compact. Already-
+ * summarized conversations are excluded at the DB layer by
+ * getUnsummarizedConversations; too-short ones are skipped in the loop below
+ * (no AI call). The conversation currently open in the chat view is skipped too,
+ * so it isn't summarized before it's finished.
  */
 export async function summarizePendingConversations(
   providerConfig?: ProviderConfig
 ): Promise<BackfillResult> {
-  const conversations = await getAllConversations();
+  const conversations = await getUnsummarizedConversations();
   // The conversation currently open in the chat view may still receive more
   // messages. Summarizing it now would freeze its summary early (there is no
   // update path), permanently dropping anything said afterwards, so skip it.
@@ -86,14 +86,10 @@ export async function summarizePendingConversations(
       content: m.content,
     }));
 
-    // Cheap, no-AI skips (mirror the guards inside summarizeConversation): a
-    // conversation too short to summarize, or one that already has a summary,
-    // never fires an AI call, so it must not count against the cap. Check them
-    // here so the cap gates only real AI attempts.
+    // Too short to summarize — a cheap no-AI skip, so it must not count against
+    // the cap. (Already-summarized conversations are excluded at the DB layer by
+    // getUnsummarizedConversations.)
     if (!shouldSummarize(messages)) {
-      continue;
-    }
-    if (await getMeetingSummaryByConversation(conv.id)) {
       continue;
     }
 
@@ -122,6 +118,11 @@ export async function summarizePendingConversations(
 // Compaction thresholds
 const COMPACTION_DAYS_THRESHOLD = 30; // Compact if last compaction was > 30 days ago
 const COMPACTION_SUMMARY_THRESHOLD = 50; // Compact if > 50 uncompacted summaries
+// Max summaries folded into the profile per compaction run. Bounds the prompt
+// size / cost of a single AI call. If more uncompacted summaries exist, the
+// watermark advances only to the newest one included so the rest are compacted
+// on the next run (never skipped).
+const COMPACTION_BATCH_SIZE = 100;
 
 // Compaction prompt template
 const COMPACTION_PROMPT = `You are creating a knowledge profile about a user based on their meeting/conversation summaries.
@@ -427,9 +428,15 @@ export async function compactKnowledge(
     // Get existing profile
     const existingProfile = await getKnowledgeProfile();
 
-    // Get uncompacted summaries (since last compaction)
+    // Get uncompacted summaries (oldest-first, strictly after the last
+    // watermark). Bounded to COMPACTION_BATCH_SIZE; we advance the watermark
+    // below only to the newest summary actually included, so a larger backlog
+    // is drained over subsequent runs rather than being skipped.
     const sinceTimestamp = existingProfile?.lastCompacted || 0;
-    const summaries = await getRecentMeetingSummaries(100, sinceTimestamp);
+    const summaries = await getOldestUncompactedSummaries(
+      COMPACTION_BATCH_SIZE,
+      sinceTimestamp
+    );
 
     if (summaries.length === 0) {
       console.log("No summaries to compact");
@@ -487,6 +494,11 @@ Create the updated knowledge profile JSON:`;
 
     // Update source count
     updates.sourceCount = (existingProfile?.sourceCount || 0) + summaries.length;
+
+    // Advance the watermark only to the newest summary we actually incorporated
+    // (summaries are oldest-first). Anything created after this stays uncompacted
+    // and is picked up next run, instead of being skipped by a blanket "now".
+    updates.lastCompacted = summaries[summaries.length - 1].createdAt;
 
     // Save the updated profile
     const updatedProfile = await updateKnowledgeProfile(updates);
