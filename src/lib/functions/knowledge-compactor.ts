@@ -12,9 +12,14 @@ import {
   getRecentMeetingSummaries,
   getUncompactedSummaryCount,
   getAllConversations,
+  getMeetingSummaryByConversation,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
-import { extractJsonObject, summarizeConversation } from "./meeting-summarizer";
+import {
+  extractJsonObject,
+  summarizeConversation,
+  shouldSummarize,
+} from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import {
   getUserIdentity,
@@ -30,11 +35,15 @@ type ProviderConfig = {
   };
 };
 
-// Max conversations to newly summarize per "Update Knowledge" click. Each new
-// summary is a serial streaming AI call, so an unbounded first-run backfill on a
-// large history could fire dozens of calls. Cap it; the remainder is picked up
-// on the next click. Skips (already-summarized / too short) are cheap no-AI
-// checks and don't count against this cap.
+// Max serial AI calls per "Update Knowledge" click. Each conversation we try to
+// summarize is a streaming AI call, so an unbounded first-run backfill on a
+// large history could fire dozens of calls. Cap the number of AI *attempts*
+// (not successes); the remainder is picked up on the next click. Skips
+// (already-summarized / too short) are cheap no-AI checks and don't count.
+// Counting attempts rather than successes matters: if the AI call keeps failing
+// (rate limit, network, unparseable response), those failures must still count,
+// or the loop would fire one call per remaining conversation — the exact
+// unbounded backfill this cap exists to prevent.
 export const MAX_BACKFILL_PER_CLICK = 10;
 
 export type BackfillResult = {
@@ -63,6 +72,7 @@ export async function summarizePendingConversations(
   // messages. Summarizing it now would freeze its summary early (there is no
   // update path), permanently dropping anything said afterwards, so skip it.
   const activeConversationId = getActiveConversationId();
+  let attempts = 0;
   let summarized = 0;
   let cappedAtLimit = false;
 
@@ -71,17 +81,30 @@ export async function summarizePendingConversations(
       continue;
     }
 
-    if (summarized >= MAX_BACKFILL_PER_CLICK) {
-      // More may remain, but each new summary is an AI call — stop here and let
-      // the next click continue.
-      cappedAtLimit = true;
-      break;
-    }
-
     const messages = conv.messages.map((m) => ({
       role: m.role,
       content: m.content,
     }));
+
+    // Cheap, no-AI skips (mirror the guards inside summarizeConversation): a
+    // conversation too short to summarize, or one that already has a summary,
+    // never fires an AI call, so it must not count against the cap. Check them
+    // here so the cap gates only real AI attempts.
+    if (!shouldSummarize(messages)) {
+      continue;
+    }
+    if (await getMeetingSummaryByConversation(conv.id)) {
+      continue;
+    }
+
+    // From here summarizeConversation makes a streaming AI call whether it
+    // succeeds or fails, so count the attempt (not just successes) against the
+    // cap before making it.
+    if (attempts >= MAX_BACKFILL_PER_CLICK) {
+      cappedAtLimit = true;
+      break;
+    }
+    attempts += 1;
 
     const ok = await summarizeConversation(conv.id, messages, providerConfig);
     if (ok) {
