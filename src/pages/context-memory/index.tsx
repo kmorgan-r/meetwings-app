@@ -7,6 +7,7 @@ import {
   compactKnowledge,
   summarizePendingConversations,
 } from "@/lib/functions/knowledge-compactor";
+import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
 import { getUncompactedSummaryCount } from "@/lib/database";
 import { useApp } from "@/contexts";
 import {
@@ -48,11 +49,14 @@ const ContextMemory = () => {
   const handleCompactKnowledge = useCallback(async () => {
     setIsCompacting(true);
     try {
+      // Meetwings-cloud users have no locally configured provider, so gate on
+      // the Meetwings API too (mirrors the chat completion call sites).
+      const useMeetwingsAPI = await shouldUseMeetwingsAPI();
       const provider = allAiProviders.find(
         (p) => p.id === selectedAIProvider.provider
       );
 
-      if (!provider) {
+      if (!useMeetwingsAPI && !provider) {
         toast.error(
           "No AI provider selected. Choose one in Dev Space to update knowledge."
         );
@@ -60,7 +64,7 @@ const ContextMemory = () => {
       }
 
       const providerConfig = {
-        provider,
+        provider: useMeetwingsAPI ? undefined : provider,
         selectedProvider: selectedAIProvider,
       };
 

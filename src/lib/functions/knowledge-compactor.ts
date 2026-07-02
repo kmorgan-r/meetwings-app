@@ -11,12 +11,16 @@ import {
   updateKnowledgeProfile,
   getRecentMeetingSummaries,
   getUncompactedSummaryCount,
+  getAllConversations,
 } from "@/lib/database";
-import { getAllConversations } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import { extractJsonObject, summarizeConversation } from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
-import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
+import {
+  getUserIdentity,
+  hasUserIdentity,
+  getActiveConversationId,
+} from "@/lib/storage";
 
 type ProviderConfig = {
   provider: any;
@@ -33,7 +37,8 @@ type ProviderConfig = {
  * (start new / switch). This backfills any conversation that was never
  * summarized so "Update Knowledge" has fresh material to compact. Conversations
  * that already have a summary or are too short are skipped by
- * summarizeConversation itself (no AI call).
+ * summarizeConversation itself (no AI call). The conversation currently open in
+ * the chat view is skipped too, so it isn't summarized before it's finished.
  *
  * Returns the number of conversations newly summarized.
  */
@@ -41,9 +46,17 @@ export async function summarizePendingConversations(
   providerConfig?: ProviderConfig
 ): Promise<number> {
   const conversations = await getAllConversations();
+  // The conversation currently open in the chat view may still receive more
+  // messages. Summarizing it now would freeze its summary early (there is no
+  // update path), permanently dropping anything said afterwards, so skip it.
+  const activeConversationId = getActiveConversationId();
   let summarized = 0;
 
   for (const conv of conversations) {
+    if (conv.id === activeConversationId) {
+      continue;
+    }
+
     const messages = conv.messages.map((m) => ({
       role: m.role,
       content: m.content,

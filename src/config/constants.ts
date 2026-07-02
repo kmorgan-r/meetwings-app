@@ -47,6 +47,10 @@ export const STORAGE_KEYS = {
 
   // User Identity settings
   USER_IDENTITY: "user_identity",
+
+  // Id of the conversation currently open in the chat view. Used to exclude the
+  // in-progress conversation from summary backfill so it isn't frozen early.
+  ACTIVE_CONVERSATION_ID: "active_conversation_id",
 } as const;
 
 // Max number of files that can be attached to a message

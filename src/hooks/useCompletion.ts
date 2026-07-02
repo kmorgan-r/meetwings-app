@@ -22,6 +22,8 @@ import {
   createUsageRecord,
   calculateCost,
   calculateSTTCost,
+  setActiveConversationId,
+  clearActiveConversationId,
 } from "@/lib";
 import {
   summarizeConversation,
@@ -929,6 +931,8 @@ export const useCompletion = () => {
     // Summarize current conversation before switching
     summarizeCurrentConversation();
 
+    // The loaded conversation is now the in-progress one.
+    setActiveConversationId(conversation.id);
     currentConversationIdRef.current = conversation.id;
     conversationHistoryRef.current = conversation.messages; // Update ref immediately
     setState((prev) => ({
@@ -946,6 +950,8 @@ export const useCompletion = () => {
     // Summarize current conversation before starting new
     summarizeCurrentConversation();
 
+    // No in-progress conversation until the first exchange is saved.
+    clearActiveConversationId();
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     setState((prev) => ({
@@ -1025,6 +1031,9 @@ export const useCompletion = () => {
 
         // Update ref immediately
         conversationHistoryRef.current = newMessages;
+        // Mark this as the in-progress conversation so the knowledge backfill
+        // doesn't summarize (and freeze) it while it can still grow.
+        setActiveConversationId(conversationId);
         setState((prev) => ({
           ...prev,
           currentConversationId: conversationId,
