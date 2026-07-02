@@ -505,6 +505,14 @@ Create the updated knowledge profile JSON:`;
     // Advance the watermark only to the newest summary we actually incorporated
     // (summaries are oldest-first). Anything created after this stays uncompacted
     // and is picked up next run, instead of being skipped by a blanket "now".
+    //
+    // The next run re-queries with strict `created_at > watermark`. This assumes
+    // no two summaries share the exact same ms createdAt across a batch boundary:
+    // if the batch ended on one of a same-ms pair, the other would be excluded
+    // permanently. Safe in practice — every summary creation is gated behind its
+    // own multi-second streaming AI call, so consecutive summaries never collide
+    // on Date.now(). Closing it fully would need a composite (created_at, id)
+    // watermark (an extra stored last_compacted_id).
     updates.lastCompacted = summaries[summaries.length - 1].createdAt;
 
     // Save the updated profile

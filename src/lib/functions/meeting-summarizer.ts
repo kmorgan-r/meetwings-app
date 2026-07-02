@@ -114,6 +114,39 @@ function countExchanges(messages: Message[]): number {
 }
 
 /**
+ * Scans from an opening-brace index and returns the index of its matching
+ * closing brace, honoring string literals and escapes so braces inside strings
+ * don't throw off the depth count. Returns -1 if no balanced close exists.
+ */
+function matchBalancedBrace(str: string, open: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = open; i < str.length; i++) {
+    const ch = str[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Extracts a JSON object string from a model response that may wrap it in
  * markdown code fences and/or surrounding prose (common with Claude).
  */
@@ -128,16 +161,38 @@ export function extractJsonObject(response: string): string {
     }
   }
 
-  // If there's leading/trailing prose, slice to the outermost object braces.
-  if (!str.startsWith("{")) {
-    const first = str.indexOf("{");
-    const last = str.lastIndexOf("}");
-    if (first !== -1 && last > first) {
-      str = str.slice(first, last + 1);
+  // Fast path: the whole string is already a single JSON object.
+  if (str.startsWith("{") && str.endsWith("}")) {
+    return str;
+  }
+
+  // Otherwise there's surrounding prose. A naive indexOf("{")/lastIndexOf("}")
+  // slice breaks when the prose contains a stray brace before the real object
+  // (e.g. `Note: {} isn't valid, here's the real one: {...}` slices from the
+  // wrong start and JSON.parse then throws on the mixed content). Instead scan
+  // every balanced-brace region, keep the ones that actually parse as JSON, and
+  // return the largest — the real payload is the biggest valid object in
+  // practice, so a stray `{}` earlier in the prose is ignored.
+  let best = "";
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] !== "{") continue;
+    const close = matchBalancedBrace(str, i);
+    if (close === -1) continue; // this brace never closes; a later one might
+    const candidate = str.slice(i, close + 1);
+    // Length guard first so we only pay JSON.parse for a new best.
+    if (candidate.length > best.length) {
+      try {
+        JSON.parse(candidate);
+        best = candidate;
+      } catch {
+        // Balanced but not valid JSON; keep scanning.
+      }
     }
   }
 
-  return str;
+  // Fall back to the raw string if nothing parsed — the caller's JSON.parse then
+  // throws and is handled there, same failure path as before (no silent slice).
+  return best || str;
 }
 
 /**
