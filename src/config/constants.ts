@@ -51,6 +51,14 @@ export const STORAGE_KEYS = {
   // Id of the conversation currently open in the chat view. Used to exclude the
   // in-progress conversation from summary backfill so it isn't frozen early.
   ACTIVE_CONVERSATION_ID: "active_conversation_id",
+
+  // API Verification status
+  AI_PROVIDER_VERIFIED: "ai_provider_verified",
+  STT_PROVIDER_VERIFIED: "stt_provider_verified",
+
+  // Per-provider configuration storage (remembers API keys when switching providers)
+  AI_PROVIDER_CONFIGS: "ai_provider_configs",
+  STT_PROVIDER_CONFIGS: "stt_provider_configs",
 } as const;
 
 // Max number of files that can be attached to a message

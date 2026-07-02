@@ -9,3 +9,4 @@ export * from "./context-builder";
 export * from "./translation.function";
 export * from "./audio-buffer";
 export * from "./pitch-analysis";
+export * from "./api-test.function";

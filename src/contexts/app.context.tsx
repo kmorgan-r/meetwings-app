@@ -12,6 +12,19 @@ import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
 import {
+  loadSecureAIConfigs,
+  loadSecureSTTConfigs,
+  updateAIConfigCache,
+  updateSTTConfigCache,
+  getCachedAIConfig,
+  getCachedSTTConfig,
+  migrateProviderConfigsToSecureStorage,
+} from "@/lib/storage/secure-provider-configs";
+import {
+  loadVerificationCache,
+  migrateVerificationToSecureStorage,
+} from "@/lib/storage/verification.storage";
+import {
   getCustomizableState,
   setCustomizableState,
   updateAppIconVisibility,
@@ -344,6 +357,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // Load data on mount
   useEffect(() => {
     const initializeApp = async () => {
+      // Migrate data from localStorage to secure storage (one-time for existing users)
+      await Promise.all([
+        migrateProviderConfigsToSecureStorage(),
+        migrateVerificationToSecureStorage(),
+      ]);
+
+      // Load secure storage data into caches for synchronous access
+      await Promise.all([
+        loadSecureAIConfigs(),
+        loadSecureSTTConfigs(),
+        loadVerificationCache(),
+      ]);
+
       // Load license and data
       await getActiveLicenseStatus();
 
@@ -496,7 +522,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     ...customSttProviders,
   ];
 
-  const onSetSelectedAIProvider = ({
+  const onSetSelectedAIProvider = async ({
     provider,
     variables,
   }: {
@@ -508,15 +534,49 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    setSelectedAIProvider((prev) => ({
-      ...prev,
-      provider,
-      variables,
-    }));
+    // Check if provider is changing and save old config first (outside state setter)
+    const currentProvider = selectedAIProvider;
+    if (provider !== currentProvider.provider) {
+      // Save current provider's variables to secure storage before switching
+      if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
+        try {
+          await updateAIConfigCache(currentProvider.provider, currentProvider.variables);
+        } catch (error) {
+          console.error("Failed to save AI provider config:", error);
+        }
+      }
+    }
+
+    setSelectedAIProvider((prev) => {
+      // If provider is changing, load any saved config for the new provider
+      if (provider !== prev.provider) {
+        // Load saved config for the new provider from secure storage cache
+        const savedVariables = getCachedAIConfig(provider) || {};
+
+        // Merge: saved config as base, then overlay with any passed variables
+        return {
+          provider,
+          variables: {
+            ...savedVariables,
+            ...variables,
+          }
+        };
+      }
+      // If provider is the same, merge variables to prevent stale closure issues
+      // This ensures that updating one variable (e.g., model) doesn't wipe out
+      // another variable (e.g., api_key) due to stale closure captures
+      return {
+        provider,
+        variables: {
+          ...prev.variables,
+          ...variables,
+        },
+      };
+    });
   };
 
   // Setter for selected STT with validation
-  const onSetSelectedSttProvider = ({
+  const onSetSelectedSttProvider = async ({
     provider,
     variables,
   }: {
@@ -528,7 +588,45 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       return;
     }
 
-    setSelectedSttProvider((prev) => ({ ...prev, provider, variables }));
+    // Check if provider is changing and save old config first (outside state setter)
+    const currentProvider = selectedSttProvider;
+    if (provider !== currentProvider.provider) {
+      // Save current provider's variables to secure storage before switching
+      if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
+        try {
+          await updateSTTConfigCache(currentProvider.provider, currentProvider.variables);
+        } catch (error) {
+          console.error("Failed to save STT provider config:", error);
+        }
+      }
+    }
+
+    setSelectedSttProvider((prev) => {
+      // If provider is changing, load any saved config for the new provider
+      if (provider !== prev.provider) {
+        // Load saved config for the new provider from secure storage cache
+        const savedVariables = getCachedSTTConfig(provider) || {};
+
+        // Merge: saved config as base, then overlay with any passed variables
+        return {
+          provider,
+          variables: {
+            ...savedVariables,
+            ...variables,
+          }
+        };
+      }
+      // If provider is the same, merge variables to prevent stale closure issues
+      // This ensures that updating one variable (e.g., model) doesn't wipe out
+      // another variable (e.g., api_key) due to stale closure captures
+      return {
+        provider,
+        variables: {
+          ...prev.variables,
+          ...variables,
+        },
+      };
+    });
   };
 
   // Toggle handlers

@@ -1,3 +1,4 @@
 export * from "./ai-configs";
 export * from "./stt-configs";
 export * from "./MeetwingsApiSetup";
+export * from "./SetupProgressHeader";
