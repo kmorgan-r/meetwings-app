@@ -114,22 +114,38 @@ function countExchanges(messages: Message[]): number {
 }
 
 /**
+ * Extracts a JSON object string from a model response that may wrap it in
+ * markdown code fences and/or surrounding prose (common with Claude).
+ */
+export function extractJsonObject(response: string): string {
+  let str = response.trim();
+
+  // Strip a fenced code block if present.
+  if (str.startsWith("```")) {
+    const match = str.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (match) {
+      str = match[1].trim();
+    }
+  }
+
+  // If there's leading/trailing prose, slice to the outermost object braces.
+  if (!str.startsWith("{")) {
+    const first = str.indexOf("{");
+    const last = str.lastIndexOf("}");
+    if (first !== -1 && last > first) {
+      str = str.slice(first, last + 1);
+    }
+  }
+
+  return str;
+}
+
+/**
  * Parses the AI response into a SummarizationResult
  */
 function parseSummarizationResponse(response: string): SummarizationResult | null {
   try {
-    // Try to extract JSON from the response (handle potential markdown code blocks)
-    let jsonStr = response.trim();
-
-    // Remove markdown code blocks if present
-    if (jsonStr.startsWith("```")) {
-      const match = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (match) {
-        jsonStr = match[1];
-      }
-    }
-
-    const parsed = JSON.parse(jsonStr);
+    const parsed = JSON.parse(extractJsonObject(response));
 
     // Validate and normalize the response
     const result: SummarizationResult = {

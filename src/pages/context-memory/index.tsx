@@ -1,8 +1,13 @@
 import { useState, useCallback } from "react";
+import { toast } from "sonner";
 import { PageLayout } from "@/layouts";
 import { Button } from "@/components/ui/button";
 import { RefreshCcw, Sparkles } from "lucide-react";
-import { compactKnowledge } from "@/lib/functions/knowledge-compactor";
+import {
+  compactKnowledge,
+  summarizePendingConversations,
+} from "@/lib/functions/knowledge-compactor";
+import { getUncompactedSummaryCount } from "@/lib/database";
 import { useApp } from "@/contexts";
 import {
   SummaryList,
@@ -46,13 +51,48 @@ const ContextMemory = () => {
       const provider = allAiProviders.find(
         (p) => p.id === selectedAIProvider.provider
       );
-      await compactKnowledge({
+
+      if (!provider) {
+        toast.error(
+          "No AI provider selected. Choose one in Dev Space to update knowledge."
+        );
+        return;
+      }
+
+      const providerConfig = {
         provider,
         selectedProvider: selectedAIProvider,
-      });
+      };
+
+      // Summarize any conversations that were never summarized, so compaction
+      // has fresh material (summaries are otherwise only created when leaving a
+      // conversation).
+      const backfilled = await summarizePendingConversations(providerConfig);
+
+      // Nothing new since the last compaction -> don't claim an update.
+      const uncompacted = await getUncompactedSummaryCount();
+      if (uncompacted === 0) {
+        toast.info("No new conversations to add to your knowledge profile.");
+        return;
+      }
+
+      const updated = await compactKnowledge(providerConfig);
       handleRefresh();
+
+      if (updated) {
+        toast.success(
+          backfilled > 0
+            ? `Knowledge updated (${backfilled} new conversation${
+                backfilled === 1 ? "" : "s"
+              } summarized).`
+            : "Knowledge updated."
+        );
+      } else {
+        toast.error("Failed to update knowledge. See console for details.");
+      }
     } catch (error) {
       console.error("Failed to compact knowledge:", error);
+      toast.error("Failed to update knowledge. See console for details.");
     } finally {
       setIsCompacting(false);
     }

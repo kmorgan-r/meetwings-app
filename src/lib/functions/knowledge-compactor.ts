@@ -12,9 +12,55 @@ import {
   getRecentMeetingSummaries,
   getUncompactedSummaryCount,
 } from "@/lib/database";
+import { getAllConversations } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
+import { extractJsonObject, summarizeConversation } from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
+
+type ProviderConfig = {
+  provider: any;
+  selectedProvider: {
+    provider: string;
+    variables: Record<string, string>;
+  };
+};
+
+/**
+ * Summarizes every stored conversation that doesn't yet have a summary.
+ *
+ * Normally summaries are only generated when the user leaves a conversation
+ * (start new / switch). This backfills any conversation that was never
+ * summarized so "Update Knowledge" has fresh material to compact. Conversations
+ * that already have a summary or are too short are skipped by
+ * summarizeConversation itself (no AI call).
+ *
+ * Returns the number of conversations newly summarized.
+ */
+export async function summarizePendingConversations(
+  providerConfig?: ProviderConfig
+): Promise<number> {
+  const conversations = await getAllConversations();
+  let summarized = 0;
+
+  for (const conv of conversations) {
+    const messages = conv.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    const ok = await summarizeConversation(conv.id, messages, providerConfig);
+    if (ok) {
+      summarized += 1;
+    }
+  }
+
+  if (summarized > 0) {
+    console.log(`Backfilled ${summarized} pending conversation summaries`);
+  }
+
+  return summarized;
+}
 
 // Compaction thresholds
 const COMPACTION_DAYS_THRESHOLD = 30; // Compact if last compaction was > 30 days ago
@@ -166,17 +212,7 @@ function formatExistingProfile(profile: KnowledgeProfile | null): string {
  */
 function parseCompactionResponse(response: string): UpdateKnowledgeProfileInput | null {
   try {
-    let jsonStr = response.trim();
-
-    // Remove markdown code blocks if present
-    if (jsonStr.startsWith("```")) {
-      const match = jsonStr.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (match) {
-        jsonStr = match[1];
-      }
-    }
-
-    const parsed = JSON.parse(jsonStr);
+    const parsed = JSON.parse(extractJsonObject(response));
 
     const result: UpdateKnowledgeProfileInput = {
       summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
