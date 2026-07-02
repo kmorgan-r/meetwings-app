@@ -75,7 +75,7 @@ describe("testAIProvider", () => {
     };
 
     it("should return success when API responds with valid content", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 200,
           json: {
@@ -91,7 +91,7 @@ describe("testAIProvider", () => {
     });
 
     it("should return auth error for 401 status", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 401,
           ok: false,
@@ -106,7 +106,7 @@ describe("testAIProvider", () => {
     });
 
     it("should return success for 429 rate limit (key is valid)", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 429,
           ok: false,
@@ -158,7 +158,7 @@ describe("testAIProvider", () => {
     };
 
     it("should parse Claude response format correctly", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 200,
           json: {
@@ -173,7 +173,7 @@ describe("testAIProvider", () => {
     });
 
     it("should handle 403 forbidden as auth error", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 403,
           ok: false,
@@ -212,7 +212,7 @@ describe("testAIProvider", () => {
     };
 
     it("should handle Gemini API format", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 200,
           json: {
@@ -254,7 +254,7 @@ describe("testAIProvider", () => {
     });
 
     it("should handle invalid JSON response", async () => {
-      mockFetch.mockResolvedValueOnce({
+      mockTauriFetch.mockResolvedValueOnce({
         status: 200,
         ok: true,
         json: async () => {
@@ -270,7 +270,7 @@ describe("testAIProvider", () => {
     });
 
     it("should handle network errors", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("Network error: fetch failed"));
+      mockTauriFetch.mockRejectedValueOnce(new Error("Network error: fetch failed"));
 
       const result = await testAIProvider(provider, selectedProvider);
 
@@ -281,7 +281,7 @@ describe("testAIProvider", () => {
     it("should handle timeout errors", async () => {
       const abortError = new Error("Request timed out after 10 seconds");
       abortError.name = "AbortError";
-      mockFetch.mockRejectedValueOnce(abortError);
+      mockTauriFetch.mockRejectedValueOnce(abortError);
 
       const result = await testAIProvider(provider, selectedProvider);
 
@@ -290,7 +290,7 @@ describe("testAIProvider", () => {
     });
 
     it("should handle 500 server errors", async () => {
-      mockFetch.mockResolvedValueOnce(
+      mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 500,
           ok: false,
@@ -302,6 +302,37 @@ describe("testAIProvider", () => {
 
       expect(result.success).toBe(false);
       expect(result.message).toBe("Response error: API returned 500");
+    });
+  });
+
+  describe("HTTP client (CORS bypass)", () => {
+    const httpsProvider: TYPE_PROVIDER = {
+      id: "openai",
+      name: "OpenAI",
+      curl: `curl https://api.openai.com/v1/chat/completions \\
+        -H "Authorization: Bearer {{API_KEY}}" \\
+        -d '{"model": "{{MODEL}}", "messages": [{"role": "user", "content": "{{TEXT}}"}]}'`,
+      responseContentPath: "choices[0].message.content",
+      isStreaming: true,
+    };
+
+    it("should use tauriFetch (not browser fetch) for https URLs", async () => {
+      mockTauriFetch.mockResolvedValueOnce(
+        createMockResponse({ status: 200, json: { choices: [{ message: { content: "OK" } }] } })
+      );
+
+      const result = await testAIProvider(httpsProvider, {
+        provider: "openai",
+        variables: { api_key: "sk-test", model: "gpt-4o" },
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockTauriFetch).toHaveBeenCalledTimes(1);
+      expect(mockTauriFetch).toHaveBeenCalledWith(
+        expect.stringContaining("https://"),
+        expect.anything()
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 });
@@ -578,6 +609,38 @@ describe("testSTTProvider", () => {
       expect(result.message).toBe("Configuration error: API key not provided");
     });
   });
+
+  describe("HTTP client (CORS bypass)", () => {
+    const httpsProvider: TYPE_PROVIDER = {
+      id: "openai-whisper",
+      name: "OpenAI Whisper",
+      curl: `curl -X POST "https://api.openai.com/v1/audio/transcriptions" \\
+        -H "Authorization: Bearer {{API_KEY}}" \\
+        -F "file={{AUDIO}}" \\
+        -F "model={{MODEL}}"`,
+      responseContentPath: "text",
+      isStreaming: false,
+    };
+
+    it("should use tauriFetch (not browser fetch) for https URLs", async () => {
+      mockTauriFetch.mockResolvedValueOnce(
+        createMockResponse({ status: 200, json: { text: "ok" } })
+      );
+
+      const result = await testSTTProvider(httpsProvider, {
+        provider: "openai-whisper",
+        variables: { api_key: "sk-test", model: "whisper-1" },
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockTauriFetch).toHaveBeenCalledTimes(1);
+      expect(mockTauriFetch).toHaveBeenCalledWith(
+        expect.stringContaining("https://"),
+        expect.anything()
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("Variable replacement", () => {
@@ -611,7 +674,7 @@ describe("Variable replacement", () => {
   });
 
   it("should succeed when all variables are provided", async () => {
-    mockFetch.mockResolvedValueOnce(
+    mockTauriFetch.mockResolvedValueOnce(
       createMockResponse({
         status: 200,
         json: { content: "OK" },

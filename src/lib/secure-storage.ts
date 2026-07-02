@@ -1,19 +1,23 @@
 /**
  * Secure Storage Utility
  *
- * Provides encrypted storage for sensitive data (API keys, tokens, etc.)
- * using Tauri's secure store plugin instead of localStorage.
+ * Stores sensitive data (API keys, tokens, etc.) via Tauri's `plugin-store`
+ * instead of localStorage.
  *
- * Security Benefits:
- * - Data is encrypted at rest
- * - Protected from malicious browser extensions
- * - Protected from XSS attacks that read localStorage
- * - Uses OS-level security features
+ * What this provides:
+ * - Data lives in a file in the OS app-data directory, NOT in the webview.
+ * - Not readable from webview JS/DOM (immune to XSS-reads-localStorage).
+ * - Not accessible to browser extensions.
+ *
+ * What this does NOT provide:
+ * - The store file is plaintext JSON on disk; it is NOT encrypted at rest.
+ *   Anyone with read access to the user's app-data directory can read it.
+ *   For true at-rest encryption use tauri-plugin-stronghold or an OS keychain.
  */
 
 import { Store } from "@tauri-apps/plugin-store";
 
-// Store file name (stored in app data directory, encrypted)
+// Store file name (plaintext JSON in the OS app-data directory)
 const SECURE_STORE_FILE = ".secure-settings.dat";
 
 // Singleton store instance
@@ -33,19 +37,19 @@ async function getStore(): Promise<Store> {
  * Securely store a sensitive value
  *
  * @param key - Storage key
- * @param value - Value to store (will be encrypted)
+ * @param value - Value to store
  */
 export async function secureSet(key: string, value: string): Promise<void> {
   const store = await getStore();
   await store.set(key, value);
-  await store.save(); // Persist to disk (encrypted)
+  await store.save(); // Persist to disk (plaintext JSON)
 }
 
 /**
  * Retrieve a securely stored value
  *
  * @param key - Storage key
- * @returns Decrypted value or null if not found
+ * @returns Stored value or null if not found
  */
 export async function secureGet(key: string): Promise<string | null> {
   const store = await getStore();

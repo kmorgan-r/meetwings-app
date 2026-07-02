@@ -296,7 +296,9 @@ export async function testAIProvider(
       bodyObj.max_tokens = 10;
     }
 
-    const fetchFunction = url?.includes("http") ? fetch : tauriFetch;
+    // Always use Tauri's HTTP client to bypass CORS for external providers
+    // (browser fetch is blocked cross-origin in the packaged app — see CLAUDE.md).
+    const fetchFunction = tauriFetch;
 
     const response = await fetchWithTimeout(fetchFunction, url, {
       method: curlJson.method || "POST",
@@ -483,7 +485,9 @@ export async function testSTTProvider(
       url += (url.includes("?") ? "&" : "?") + queryString;
     }
 
-    const fetchFunction = url?.includes("http") ? tauriFetch : fetch;
+    // Always use Tauri's HTTP client to bypass CORS for external providers
+    // (browser fetch is blocked cross-origin in the packaged app — see CLAUDE.md).
+    const fetchFunction = tauriFetch;
 
     const response = await fetchWithTimeout(fetchFunction, url, {
       method: curlJson.method || "POST",
