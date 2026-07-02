@@ -71,7 +71,8 @@ const ContextMemory = () => {
       // Summarize any conversations that were never summarized, so compaction
       // has fresh material (summaries are otherwise only created when leaving a
       // conversation).
-      const backfilled = await summarizePendingConversations(providerConfig);
+      const { summarized: backfilled, cappedAtLimit } =
+        await summarizePendingConversations(providerConfig);
 
       // Nothing new since the last compaction -> don't claim an update.
       const uncompacted = await getUncompactedSummaryCount();
@@ -84,12 +85,16 @@ const ContextMemory = () => {
       handleRefresh();
 
       if (updated) {
-        toast.success(
+        const base =
           backfilled > 0
             ? `Knowledge updated (${backfilled} new conversation${
                 backfilled === 1 ? "" : "s"
               } summarized).`
-            : "Knowledge updated."
+            : "Knowledge updated.";
+        toast.success(
+          cappedAtLimit
+            ? `${base} More remain — click Update Knowledge again to continue.`
+            : base
         );
       } else {
         toast.error("Failed to update knowledge. See console for details.");

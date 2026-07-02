@@ -93,10 +93,10 @@ Rules:
  * Formats conversation messages for summarization
  */
 function formatConversationForSummary(messages: Message[]): string {
-  // Messages are typically in reverse chronological order, so reverse them
-  const chronological = [...messages].reverse();
-
-  return chronological
+  // Callers pass messages in chronological order (oldest-first): the live path
+  // appends to conversationHistory, and the backfill reads them ORDER BY
+  // timestamp ASC. Send them to the model as-is.
+  return messages
     .map((msg) => {
       const role = msg.role === "user" ? "User" : "Assistant";
       return `${role}: ${msg.content}`;

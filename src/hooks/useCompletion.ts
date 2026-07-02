@@ -1051,6 +1051,14 @@ export const useCompletion = () => {
     [state.currentConversationId] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
+  // On startup there is no in-progress conversation (state resets to null), so
+  // any persisted active-conversation id is stale — e.g. the app was quit
+  // mid-conversation without going through startNewConversation. Clear it so the
+  // knowledge backfill doesn't skip that conversation forever.
+  useEffect(() => {
+    clearActiveConversationId();
+  }, []);
+
   // Listen for conversation events from the main ChatHistory component
   useEffect(() => {
     const handleConversationSelected = async (event: any) => {

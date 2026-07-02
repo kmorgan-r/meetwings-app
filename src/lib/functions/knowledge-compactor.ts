@@ -30,8 +30,23 @@ type ProviderConfig = {
   };
 };
 
+// Max conversations to newly summarize per "Update Knowledge" click. Each new
+// summary is a serial streaming AI call, so an unbounded first-run backfill on a
+// large history could fire dozens of calls. Cap it; the remainder is picked up
+// on the next click. Skips (already-summarized / too short) are cheap no-AI
+// checks and don't count against this cap.
+export const MAX_BACKFILL_PER_CLICK = 10;
+
+export type BackfillResult = {
+  /** Conversations newly summarized this click. */
+  summarized: number;
+  /** True if the cap was hit and more unsummarized conversations may remain. */
+  cappedAtLimit: boolean;
+};
+
 /**
- * Summarizes every stored conversation that doesn't yet have a summary.
+ * Summarizes stored conversations that don't yet have a summary, up to
+ * MAX_BACKFILL_PER_CLICK new summaries per call.
  *
  * Normally summaries are only generated when the user leaves a conversation
  * (start new / switch). This backfills any conversation that was never
@@ -39,22 +54,28 @@ type ProviderConfig = {
  * that already have a summary or are too short are skipped by
  * summarizeConversation itself (no AI call). The conversation currently open in
  * the chat view is skipped too, so it isn't summarized before it's finished.
- *
- * Returns the number of conversations newly summarized.
  */
 export async function summarizePendingConversations(
   providerConfig?: ProviderConfig
-): Promise<number> {
+): Promise<BackfillResult> {
   const conversations = await getAllConversations();
   // The conversation currently open in the chat view may still receive more
   // messages. Summarizing it now would freeze its summary early (there is no
   // update path), permanently dropping anything said afterwards, so skip it.
   const activeConversationId = getActiveConversationId();
   let summarized = 0;
+  let cappedAtLimit = false;
 
   for (const conv of conversations) {
     if (conv.id === activeConversationId) {
       continue;
+    }
+
+    if (summarized >= MAX_BACKFILL_PER_CLICK) {
+      // More may remain, but each new summary is an AI call — stop here and let
+      // the next click continue.
+      cappedAtLimit = true;
+      break;
     }
 
     const messages = conv.messages.map((m) => ({
@@ -72,7 +93,7 @@ export async function summarizePendingConversations(
     console.log(`Backfilled ${summarized} pending conversation summaries`);
   }
 
-  return summarized;
+  return { summarized, cappedAtLimit };
 }
 
 // Compaction thresholds
