@@ -48,6 +48,13 @@ export const MAX_BACKFILL_PER_CLICK = 10;
 export type BackfillResult = {
   /** Conversations newly summarized this click. */
   summarized: number;
+  /**
+   * AI summarization calls made this click (successes + failures). Lets the
+   * caller distinguish "nothing to summarize" (attempts === 0) from "every
+   * attempt failed" (attempts > 0 && summarized === 0), which would otherwise
+   * both look like a no-op.
+   */
+  attempts: number;
   /** True if the cap was hit and more unsummarized conversations may remain. */
   cappedAtLimit: boolean;
 };
@@ -112,7 +119,7 @@ export async function summarizePendingConversations(
     console.log(`Backfilled ${summarized} pending conversation summaries`);
   }
 
-  return { summarized, cappedAtLimit };
+  return { summarized, attempts, cappedAtLimit };
 }
 
 // Compaction thresholds

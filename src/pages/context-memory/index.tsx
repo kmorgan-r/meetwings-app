@@ -71,13 +71,22 @@ const ContextMemory = () => {
       // Summarize any conversations that were never summarized, so compaction
       // has fresh material (summaries are otherwise only created when leaving a
       // conversation).
-      const { summarized: backfilled, cappedAtLimit } =
+      const { summarized: backfilled, attempts, cappedAtLimit } =
         await summarizePendingConversations(providerConfig);
 
-      // Nothing new since the last compaction -> don't claim an update.
+      // Nothing new since the last compaction -> don't claim an update. But
+      // distinguish a genuine no-op from a batch where every AI summarization
+      // attempt failed (rate limit, network, unparseable response): that writes
+      // no summaries, so uncompacted can be 0 despite real failures.
       const uncompacted = await getUncompactedSummaryCount();
       if (uncompacted === 0) {
-        toast.info("No new conversations to add to your knowledge profile.");
+        if (attempts > 0 && backfilled === 0) {
+          toast.error(
+            "Couldn't summarize new conversations — the AI calls failed. See console for details."
+          );
+        } else {
+          toast.info("No new conversations to add to your knowledge profile.");
+        }
         return;
       }
 
@@ -91,8 +100,14 @@ const ContextMemory = () => {
                 backfilled === 1 ? "" : "s"
               } summarized).`
             : "Knowledge updated.";
+        // More may remain from either cap: unsummarized conversations left by the
+        // backfill cap (cappedAtLimit), or summaries left by the compaction batch
+        // cap (re-check the uncompacted count after compaction advanced the
+        // watermark to the newest summary it actually folded in).
+        const remainingAfter = await getUncompactedSummaryCount();
+        const moreRemain = cappedAtLimit || remainingAfter > 0;
         toast.success(
-          cappedAtLimit
+          moreRemain
             ? `${base} More remain — click Update Knowledge again to continue.`
             : base
         );
