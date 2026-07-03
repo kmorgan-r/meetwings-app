@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import { useLocation, useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMenuItems, useVersion } from "@/hooks";
+import { AlertCircle } from "lucide-react";
 
 export const Sidebar = () => {
   const { version, isLoading } = useVersion();
@@ -34,11 +35,15 @@ export const Sidebar = () => {
       <nav className="flex-1 space-y-1 px-3 py-6">
         {menu.map((item, index) => (
           <button
-            onClick={() => navigate(item.href)}
+            onClick={() => !item.disabled && navigate(item.href)}
             key={`${item.label}-${index}`}
+            disabled={item.disabled}
             className={cn(
-              "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm text-sidebar-foreground/70 transition-all duration-300 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-              activeRoute.includes(item.href)
+              "flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2 text-xs lg:text-sm transition-all duration-300",
+              item.disabled
+                ? "text-sidebar-foreground/30 cursor-not-allowed"
+                : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+              activeRoute.includes(item.href) && !item.disabled
                 ? "font-medium bg-sidebar-accent text-sidebar-accent-foreground"
                 : ""
             )}
@@ -47,7 +52,9 @@ export const Sidebar = () => {
               <item.icon className="size-3 lg:size-4 transition-all duration-300" />
               {item.label}
             </div>
-            {item.count ? (
+            {item.showWarning ? (
+              <AlertCircle className="size-4 text-yellow-500 animate-pulse" />
+            ) : item.count ? (
               <span className="flex size-5 items-center justify-center rounded-md bg-muted text-xs font-semibold text-muted-foreground">
                 {item.count}
               </span>

@@ -597,10 +597,15 @@ export function useSystemAudio() {
 
       // Trigger summarization if we have enough exchanges (async, non-blocking)
       if (conversation.id && conversation.messages.length > 0) {
-        const messagesToSummarize = conversation.messages.map((msg) => ({
-          role: msg.role,
-          content: msg.content,
-        }));
+        // conversation.messages is newest-first here (each exchange is prepended
+        // during capture). summarizeConversation expects chronological
+        // (oldest-first) order like the other callers, so reverse before sending.
+        const messagesToSummarize = [...conversation.messages]
+          .reverse()
+          .map((msg) => ({
+            role: msg.role,
+            content: msg.content,
+          }));
 
         if (shouldSummarize(messagesToSummarize)) {
           // Get provider config for summarization

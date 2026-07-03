@@ -109,12 +109,25 @@ export async function createConversation(
       ]
     );
 
+    // Deduplicate messages by ID before inserting. A duplicate ID would violate
+    // the messages primary key and abort the whole insert (rolling back the
+    // conversation), so guard here the same way updateConversation does.
+    const seenIds = new Set<string>();
+
     // Insert all messages
     for (const message of conversation.messages) {
       if (!validateMessage(message)) {
         console.warn("Skipping invalid message in conversation creation");
         continue;
       }
+
+      if (seenIds.has(message.id)) {
+        console.warn(
+          `[ChatHistory] Skipping duplicate message ID during create: ${message.id}`
+        );
+        continue;
+      }
+      seenIds.add(message.id);
 
       const attachedFilesJson = message.attachedFiles
         ? JSON.stringify(message.attachedFiles)
@@ -320,9 +333,20 @@ export async function updateConversation(
       conversation.id,
     ]);
 
+    // Deduplicate messages by ID (keep first occurrence to preserve order)
+    const seenIds = new Set<string>();
+    const uniqueMessages = conversation.messages.filter((msg) => {
+      if (seenIds.has(msg.id)) {
+        console.warn(`[ChatHistory] Skipping duplicate message ID: ${msg.id}`);
+        return false;
+      }
+      seenIds.add(msg.id);
+      return true;
+    });
+
     // Insert updated messages
     try {
-      for (const message of conversation.messages) {
+      for (const message of uniqueMessages) {
         if (!validateMessage(message)) {
           console.warn("Skipping invalid message in conversation update");
           continue;

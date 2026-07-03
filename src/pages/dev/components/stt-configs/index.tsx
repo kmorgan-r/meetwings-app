@@ -1,7 +1,8 @@
 import { Header } from "@/components";
 import { UseSettingsReturn } from "@/types";
 import { Providers } from "./Providers";
-import { CustomProviders } from "./CustomProvider";
+
+export { CustomProviders as STTCustomProviders } from "./CustomProvider";
 
 export const STTProviders = (settings: UseSettingsReturn) => {
   return (
@@ -12,8 +13,6 @@ export const STTProviders = (settings: UseSettingsReturn) => {
         isMainTitle
       />
 
-      {/* Custom Provider */}
-      <CustomProviders {...settings} />
       {/* Providers Selection */}
       <Providers {...settings} />
     </div>

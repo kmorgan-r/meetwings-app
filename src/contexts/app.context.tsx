@@ -12,6 +12,17 @@ import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { getShortcutsConfig } from "@/lib/storage";
 import {
+  loadSecureAIConfigs,
+  loadSecureSTTConfigs,
+  updateAIConfigCache,
+  updateSTTConfigCache,
+  migrateProviderConfigsToSecureStorage,
+} from "@/lib/storage/secure-provider-configs";
+import {
+  loadVerificationCache,
+  migrateVerificationToSecureStorage,
+} from "@/lib/storage/verification.storage";
+import {
   getCustomizableState,
   setCustomizableState,
   updateAppIconVisibility,
@@ -35,6 +46,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -116,6 +128,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     variables: {},
   });
 
+  // Refs mirroring the latest committed provider selection. The switch handlers
+  // read these (not closure state) so rapid consecutive switches see the true
+  // previous selection instead of a stale render's value, and never drop an
+  // interleaved config edit.
+  const selectedAIProviderRef = useRef(selectedAIProvider);
+  const selectedSttProviderRef = useRef(selectedSttProvider);
+
+  // Serialize switch handlers so each completes (and updates the ref) before the
+  // next reads it. Without this, two switches fired within one tick both read
+  // the same stale ref and the middle provider's config is never persisted.
+  const aiSwitchQueue = useRef<Promise<void>>(Promise.resolve());
+  const sttSwitchQueue = useRef<Promise<void>>(Promise.resolve());
+
   const [screenshotConfiguration, setScreenshotConfiguration] =
     useState<ScreenshotConfig>({
       mode: "manual",
@@ -128,6 +153,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     DEFAULT_CUSTOMIZABLE_STATE
   );
   const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
+
+  // True once the first data load + secure-storage caches have finished.
+  // Consumers (e.g. useSetupStatus / DashboardLayout) must not treat an empty
+  // provider selection as "not configured" until this is true, otherwise they
+  // act on the pre-load state (e.g. redirecting a configured user to setup).
+  const [isInitialized, setIsInitialized] = useState<boolean>(false);
 
   // Meetwings API State
   const [meetwingsApiEnabled, setMeetwingsApiEnabledState] = useState<boolean>(
@@ -344,6 +375,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // Load data on mount
   useEffect(() => {
     const initializeApp = async () => {
+      // Migrate data from localStorage to secure storage (one-time for existing users)
+      await Promise.all([
+        migrateProviderConfigsToSecureStorage(),
+        migrateVerificationToSecureStorage(),
+      ]);
+
+      // Load secure storage data into caches for synchronous access
+      await Promise.all([
+        loadSecureAIConfigs(),
+        loadSecureSTTConfigs(),
+        loadVerificationCache(),
+      ]);
+
       // Load license and data
       await getActiveLicenseStatus();
 
@@ -358,9 +402,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         console.debug("Failed to track app start:", error);
       }
     };
-    // Load data
+    // Load synchronous state first, then the async migrations/caches/license.
+    // Only mark initialized once everything setup-gating depends on is settled.
     loadData();
-    initializeApp();
+    initializeApp().finally(() => setIsInitialized(true));
   }, []);
 
   // Handle customizable settings on state changes
@@ -464,8 +509,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  // Sync selected AI to localStorage
+  // Sync selected AI to localStorage + keep the latest-selection ref current
+  // (the ref also gets set synchronously inside the switch handler; this
+  // reconciles selections made from other sources, e.g. initial load).
   useEffect(() => {
+    selectedAIProviderRef.current = selectedAIProvider;
     if (selectedAIProvider.provider) {
       safeLocalStorage.setItem(
         STORAGE_KEYS.SELECTED_AI_PROVIDER,
@@ -474,8 +522,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [selectedAIProvider]);
 
-  // Sync selected STT to localStorage
+  // Sync selected STT to localStorage + keep the latest-selection ref current
   useEffect(() => {
+    selectedSttProviderRef.current = selectedSttProvider;
     if (selectedSttProvider.provider) {
       safeLocalStorage.setItem(
         STORAGE_KEYS.SELECTED_STT_PROVIDER,
@@ -502,17 +551,65 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }: {
     provider: string;
     variables: Record<string, string>;
-  }) => {
+  }): Promise<void> => {
     if (provider && !allAiProviders.some((p) => p.id === provider)) {
       console.warn(`Invalid AI provider ID: ${provider}`);
-      return;
+      return Promise.resolve();
     }
 
-    setSelectedAIProvider((prev) => ({
-      ...prev,
-      provider,
-      variables,
-    }));
+    // Serialize switches so each completes (and advances the ref) before the
+    // next reads it — otherwise A→B→C fired within one tick all read the same
+    // stale ref and B's interleaved config edit is never persisted.
+    const run = aiSwitchQueue.current.then(async () => {
+      // Read the true current selection from the ref (not closure state, which
+      // lags behind rapid successive calls).
+      const currentProvider = selectedAIProviderRef.current;
+      const isChanging = provider !== currentProvider.provider;
+      let savedVariables: Record<string, string> = {};
+
+      if (isChanging) {
+        // Save the outgoing provider's variables to secure storage before
+        // switching away, so an edit made while it was selected isn't lost.
+        if (
+          currentProvider.provider &&
+          Object.keys(currentProvider.variables).length > 0
+        ) {
+          try {
+            await updateAIConfigCache(
+              currentProvider.provider,
+              currentProvider.variables
+            );
+          } catch (error) {
+            console.error("Failed to save AI provider config:", error);
+          }
+        }
+        // Ensure the secure-config cache is loaded before reading it. During the
+        // async init window getCachedAIConfig returns undefined, which would wipe
+        // the target provider's saved key/model. Awaiting the load resolves the
+        // real config (returns {} only when genuinely unset). Writes above are
+        // serialized, so the ref cannot change under us across these awaits.
+        try {
+          const configs = await loadSecureAIConfigs();
+          savedVariables = configs[provider] || {};
+        } catch (error) {
+          console.error("Failed to load AI provider config:", error);
+        }
+      }
+
+      // Merge: on a switch, saved config is the base; on a same-provider update,
+      // the current variables are the base so a single-field change doesn't wipe
+      // the others. Passed variables always overlay.
+      const base = isChanging ? savedVariables : currentProvider.variables;
+      const nextState = { provider, variables: { ...base, ...variables } };
+
+      // Advance the ref synchronously so the next queued switch reads this value.
+      selectedAIProviderRef.current = nextState;
+      setSelectedAIProvider(nextState);
+    });
+
+    // Keep the queue alive even if this switch throws, so it doesn't wedge.
+    aiSwitchQueue.current = run.catch(() => {});
+    return run;
   };
 
   // Setter for selected STT with validation
@@ -522,13 +619,54 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }: {
     provider: string;
     variables: Record<string, string>;
-  }) => {
+  }): Promise<void> => {
     if (provider && !allSttProviders.some((p) => p.id === provider)) {
       console.warn(`Invalid STT provider ID: ${provider}`);
-      return;
+      return Promise.resolve();
     }
 
-    setSelectedSttProvider((prev) => ({ ...prev, provider, variables }));
+    // Serialize switches (see onSetSelectedAIProvider for the race this closes).
+    const run = sttSwitchQueue.current.then(async () => {
+      // Read the true current selection from the ref, not lagging closure state.
+      const currentProvider = selectedSttProviderRef.current;
+      const isChanging = provider !== currentProvider.provider;
+      let savedVariables: Record<string, string> = {};
+
+      if (isChanging) {
+        // Save the outgoing provider's variables before switching away.
+        if (
+          currentProvider.provider &&
+          Object.keys(currentProvider.variables).length > 0
+        ) {
+          try {
+            await updateSTTConfigCache(
+              currentProvider.provider,
+              currentProvider.variables
+            );
+          } catch (error) {
+            console.error("Failed to save STT provider config:", error);
+          }
+        }
+        // Ensure the secure-config cache is loaded before reading it (see the AI
+        // setter above for why getCachedSTTConfig alone is unsafe during init).
+        try {
+          const configs = await loadSecureSTTConfigs();
+          savedVariables = configs[provider] || {};
+        } catch (error) {
+          console.error("Failed to load STT provider config:", error);
+        }
+      }
+
+      const base = isChanging ? savedVariables : currentProvider.variables;
+      const nextState = { provider, variables: { ...base, ...variables } };
+
+      // Advance the ref synchronously so the next queued switch reads this value.
+      selectedSttProviderRef.current = nextState;
+      setSelectedSttProvider(nextState);
+    });
+
+    sttSwitchQueue.current = run.catch(() => {});
+    return run;
   };
 
   // Toggle handlers
@@ -636,6 +774,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     toggleAlwaysOnTop,
     toggleAutostart,
     loadData,
+    isInitialized,
     meetwingsApiEnabled,
     setMeetwingsApiEnabled,
     hasActiveLicense,

@@ -8,3 +8,5 @@ export * from "./pricing.storage";
 export * from "./speaker-profiles.storage";
 export * from "./user-identity.storage";
 export * from "./active-conversation.storage";
+export * from "./verification.storage";
+export * from "./secure-provider-configs";

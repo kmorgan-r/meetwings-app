@@ -305,3 +305,52 @@ export function hasModelsForProvider(providerId: string, type: "ai" | "stt"): bo
   }
   return providerId in STT_MODELS && STT_MODELS[providerId].length > 0;
 }
+
+/**
+ * Check if a model exists in the predefined list for a provider.
+ * Returns true if:
+ * - The model is in the predefined list, OR
+ * - The provider has no predefined models (custom models allowed)
+ *
+ * @param providerId - The provider ID
+ * @param modelId - The model ID to validate
+ * @param type - "ai" or "stt"
+ * @returns true if the model is valid for this provider
+ */
+export function isModelValidForProvider(
+  providerId: string,
+  modelId: string,
+  type: "ai" | "stt"
+): boolean {
+  // Empty model is invalid
+  if (!modelId || modelId.trim() === "") {
+    return false;
+  }
+
+  const models = type === "ai"
+    ? getAIModelsForProvider(providerId)
+    : getSTTModelsForProvider(providerId);
+
+  // If no predefined models, any model is valid (custom provider)
+  if (models.length === 0) {
+    return true;
+  }
+
+  // Check if model exists in predefined list
+  return models.some((m) => m.id === modelId);
+}
+
+/**
+ * Get the recommended model for a provider.
+ * Returns null if no models are defined or no recommended model.
+ */
+export function getRecommendedModel(
+  providerId: string,
+  type: "ai" | "stt"
+): ModelOption | null {
+  const models = type === "ai"
+    ? getAIModelsForProvider(providerId)
+    : getSTTModelsForProvider(providerId);
+
+  return models.find((m) => m.recommended) || models[0] || null;
+}

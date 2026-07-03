@@ -1,8 +1,8 @@
-import { Button, Header, Input, Selection, TextInput, ModelSelector } from "@/components";
-import { UseSettingsReturn } from "@/types";
+import { Button, Header, Input, Selection, TextInput, ModelSelector, ProviderVerification } from "@/components";
+import { UseSettingsReturn, TYPE_PROVIDER } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
 import { KeyIcon, TrashIcon, ExternalLink } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { getAIProviderInfo } from "@/config/models.constants";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
@@ -26,6 +26,17 @@ export const Providers = ({
 }: UseSettingsReturn) => {
   const [localSelectedProvider, setLocalSelectedProvider] =
     useState<ResultJSON | null>(null);
+  const [, forceUpdate] = useState({});
+
+  // Get the current provider object
+  const currentProvider = allAiProviders?.find(
+    (p: TYPE_PROVIDER) => p?.id === selectedAIProvider?.provider
+  ) as TYPE_PROVIDER | undefined;
+
+  // Force re-render when verification changes to update parent state
+  const handleVerificationChange = useCallback(() => {
+    forceUpdate({});
+  }, []);
 
   useEffect(() => {
     if (selectedAIProvider?.provider) {
@@ -286,6 +297,17 @@ export const Providers = ({
             );
           })}
       </div>
+
+      {/* Verification Checkbox */}
+      {selectedAIProvider?.provider && (
+        <ProviderVerification
+          type="ai"
+          provider={currentProvider}
+          selectedProvider={selectedAIProvider}
+          isConfigured={!isApiKeyEmpty()}
+          onVerificationChange={handleVerificationChange}
+        />
+      )}
     </div>
   );
 };

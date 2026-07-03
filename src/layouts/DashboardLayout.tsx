@@ -1,9 +1,25 @@
 import { Sidebar } from "@/components";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "./ErrorLayout";
+import { useSetupStatus } from "@/hooks";
+import { useEffect } from "react";
 
 export const DashboardLayout = () => {
+  const { isComplete, isLoading } = useSetupStatus();
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Redirect to API Setup if not configured. Wait for isLoading to clear first:
+  // on mount the provider selection is still loading, so isComplete is
+  // transiently false and redirecting now would dump a configured user on
+  // /api-setup with no path back.
+  useEffect(() => {
+    if (!isLoading && !isComplete && location.pathname !== "/api-setup") {
+      navigate("/api-setup", { replace: true });
+    }
+  }, [isLoading, isComplete, location.pathname, navigate]);
+
   return (
     <ErrorBoundary
       fallbackRender={() => {
