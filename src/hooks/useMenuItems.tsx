@@ -24,7 +24,14 @@ import { useSetupStatus } from "./useSetupStatus";
 
 export const useMenuItems = () => {
   const { hasActiveLicense } = useApp();
-  const { isComplete: setupComplete } = useSetupStatus();
+  const { isComplete: setupComplete, isLoading: setupLoading } =
+    useSetupStatus();
+
+  // Only gate nav on completeness once setup status has settled. Otherwise an
+  // already-configured user sees every item flash disabled during the async
+  // provider-load window at startup (same lockout-flash class DashboardLayout
+  // guards against). While loading, leave items enabled/un-warned.
+  const gateOnSetup = !setupLoading && !setupComplete;
 
   const menu: {
     icon: React.ElementType;
@@ -38,79 +45,79 @@ export const useMenuItems = () => {
       icon: HomeIcon,
       label: "Dashboard",
       href: "/dashboard",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: KeyRound,
       label: "API Setup",
       href: "/api-setup",
-      showWarning: !setupComplete,
+      showWarning: gateOnSetup,
     },
     {
       icon: MessagesSquare,
       label: "Chats",
       href: "/chats",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: WandSparkles,
       label: "System prompts",
       href: "/system-prompts",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: Settings,
       label: "App Settings",
       href: "/settings",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: MessageSquareTextIcon,
       label: "Responses",
       href: "/responses",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: DollarSignIcon,
       label: "Cost Tracking",
       href: "/cost-tracking",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: BrainIcon,
       label: "Context Memory",
       href: "/context-memory",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: MonitorIcon,
       label: "Screenshot",
       href: "/screenshot",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: AudioLinesIcon,
       label: "Audio",
       href: "/audio",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: UsersIcon,
       label: "Speakers",
       href: "/speakers",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: LanguagesIcon,
       label: "Language",
       href: "/language",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
     {
       icon: SquareSlashIcon,
       label: "Cursor & Shortcuts",
       href: "/shortcuts",
-      disabled: !setupComplete,
+      disabled: gateOnSetup,
     },
   ];
 

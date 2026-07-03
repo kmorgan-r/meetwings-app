@@ -32,6 +32,30 @@ let sttCacheInitialized = false;
 let aiLoadingPromise: Promise<void> | null = null;
 let sttLoadingPromise: Promise<void> | null = null;
 
+// Per-store write queues. All mutating operations for a given type run strictly
+// one-at-a-time through these so an in-flight write's failure-path rollback can
+// never overwrite a concurrent successful write (which would diverge cache from
+// disk). Reads are unaffected.
+let aiWriteQueue: Promise<void> = Promise.resolve();
+let sttWriteQueue: Promise<void> = Promise.resolve();
+
+function enqueueWrite<T>(type: "ai" | "stt", op: () => Promise<T>): Promise<T> {
+  const queue = type === "ai" ? aiWriteQueue : sttWriteQueue;
+  // Chain onto the queue regardless of whether the previous op resolved or
+  // rejected, so one failed write doesn't wedge the queue.
+  const run = queue.then(op, op);
+  const tail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  if (type === "ai") {
+    aiWriteQueue = tail;
+  } else {
+    sttWriteQueue = tail;
+  }
+  return run;
+}
+
 /**
  * Check if the AI provider config cache has been initialized.
  * Use this to guard against premature access.
@@ -141,30 +165,33 @@ export async function saveSecureAIConfig(
   providerId: string,
   variables: Record<string, string>
 ): Promise<void> {
-  // Ensure cache is loaded
-  const configs = await loadSecureAIConfigs();
+  return enqueueWrite("ai", async () => {
+    // Ensure cache is loaded
+    const configs = await loadSecureAIConfigs();
 
-  // Save previous value for rollback
-  const previousValue = configs[providerId];
+    // Save previous value for rollback
+    const previousValue = configs[providerId];
 
-  // Update cache
-  configs[providerId] = variables;
-  aiConfigsCache = configs;
-
-  // Persist to secure storage
-  try {
-    await secureSet(AI_CONFIGS_KEY, JSON.stringify(configs));
-  } catch (error) {
-    // Rollback cache on failure to maintain consistency with storage
-    if (previousValue === undefined) {
-      delete configs[providerId];
-    } else {
-      configs[providerId] = previousValue;
-    }
+    // Update cache
+    configs[providerId] = variables;
     aiConfigsCache = configs;
-    console.error("[SecureStorage] Failed to save AI config:", error);
-    throw error;
-  }
+
+    // Persist to secure storage
+    try {
+      await secureSet(AI_CONFIGS_KEY, JSON.stringify(configs));
+    } catch (error) {
+      // Rollback cache on failure to maintain consistency with storage. Safe
+      // because writes are serialized: no concurrent write can be interleaved.
+      if (previousValue === undefined) {
+        delete configs[providerId];
+      } else {
+        configs[providerId] = previousValue;
+      }
+      aiConfigsCache = configs;
+      console.error("[SecureStorage] Failed to save AI config:", error);
+      throw error;
+    }
+  });
 }
 
 /**
@@ -176,30 +203,33 @@ export async function saveSecureSTTConfig(
   providerId: string,
   variables: Record<string, string>
 ): Promise<void> {
-  // Ensure cache is loaded
-  const configs = await loadSecureSTTConfigs();
+  return enqueueWrite("stt", async () => {
+    // Ensure cache is loaded
+    const configs = await loadSecureSTTConfigs();
 
-  // Save previous value for rollback
-  const previousValue = configs[providerId];
+    // Save previous value for rollback
+    const previousValue = configs[providerId];
 
-  // Update cache
-  configs[providerId] = variables;
-  sttConfigsCache = configs;
-
-  // Persist to secure storage
-  try {
-    await secureSet(STT_CONFIGS_KEY, JSON.stringify(configs));
-  } catch (error) {
-    // Rollback cache on failure to maintain consistency with storage
-    if (previousValue === undefined) {
-      delete configs[providerId];
-    } else {
-      configs[providerId] = previousValue;
-    }
+    // Update cache
+    configs[providerId] = variables;
     sttConfigsCache = configs;
-    console.error("[SecureStorage] Failed to save STT config:", error);
-    throw error;
-  }
+
+    // Persist to secure storage
+    try {
+      await secureSet(STT_CONFIGS_KEY, JSON.stringify(configs));
+    } catch (error) {
+      // Rollback cache on failure to maintain consistency with storage. Safe
+      // because writes are serialized: no concurrent write can be interleaved.
+      if (previousValue === undefined) {
+        delete configs[providerId];
+      } else {
+        configs[providerId] = previousValue;
+      }
+      sttConfigsCache = configs;
+      console.error("[SecureStorage] Failed to save STT config:", error);
+      throw error;
+    }
+  });
 }
 
 /**
@@ -233,31 +263,35 @@ export async function updateAIConfigCache(
   providerId: string,
   variables: Record<string, string>
 ): Promise<void> {
-  if (aiConfigsCache === null) {
-    // Load existing configs from storage before mutating. Starting from {} here
-    // would persist a blob containing ONLY this provider, erasing every other
-    // provider's stored key.
-    await loadSecureAIConfigs();
+  return enqueueWrite("ai", async () => {
     if (aiConfigsCache === null) {
-      aiConfigsCache = {};
+      // Load existing configs from storage before mutating. Starting from {} here
+      // would persist a blob containing ONLY this provider, erasing every other
+      // provider's stored key.
+      await loadSecureAIConfigs();
+      if (aiConfigsCache === null) {
+        aiConfigsCache = {};
+      }
     }
-  }
 
-  const previousValue = aiConfigsCache[providerId]; // Save for rollback
-  aiConfigsCache[providerId] = variables;
+    const previousValue = aiConfigsCache[providerId]; // Save for rollback
+    aiConfigsCache[providerId] = variables;
 
-  try {
-    await secureSet(AI_CONFIGS_KEY, JSON.stringify(aiConfigsCache));
-  } catch (error) {
-    // Rollback cache on failure to maintain consistency with storage
-    if (previousValue === undefined) {
-      delete aiConfigsCache[providerId];
-    } else {
-      aiConfigsCache[providerId] = previousValue;
+    try {
+      await secureSet(AI_CONFIGS_KEY, JSON.stringify(aiConfigsCache));
+    } catch (error) {
+      // Rollback cache on failure to maintain consistency with storage. Safe
+      // because writes are serialized: no concurrent successful write can be
+      // clobbered by restoring this call's snapshot.
+      if (previousValue === undefined) {
+        delete aiConfigsCache[providerId];
+      } else {
+        aiConfigsCache[providerId] = previousValue;
+      }
+      console.error("[SecureStorage] Failed to persist AI config:", error);
+      throw error;
     }
-    console.error("[SecureStorage] Failed to persist AI config:", error);
-    throw error;
-  }
+  });
 }
 
 /**
@@ -269,30 +303,34 @@ export async function updateSTTConfigCache(
   providerId: string,
   variables: Record<string, string>
 ): Promise<void> {
-  if (sttConfigsCache === null) {
-    // Load existing configs before mutating (see updateAIConfigCache) so we
-    // don't overwrite the whole blob with just this one provider.
-    await loadSecureSTTConfigs();
+  return enqueueWrite("stt", async () => {
     if (sttConfigsCache === null) {
-      sttConfigsCache = {};
+      // Load existing configs before mutating (see updateAIConfigCache) so we
+      // don't overwrite the whole blob with just this one provider.
+      await loadSecureSTTConfigs();
+      if (sttConfigsCache === null) {
+        sttConfigsCache = {};
+      }
     }
-  }
 
-  const previousValue = sttConfigsCache[providerId]; // Save for rollback
-  sttConfigsCache[providerId] = variables;
+    const previousValue = sttConfigsCache[providerId]; // Save for rollback
+    sttConfigsCache[providerId] = variables;
 
-  try {
-    await secureSet(STT_CONFIGS_KEY, JSON.stringify(sttConfigsCache));
-  } catch (error) {
-    // Rollback cache on failure to maintain consistency with storage
-    if (previousValue === undefined) {
-      delete sttConfigsCache[providerId];
-    } else {
-      sttConfigsCache[providerId] = previousValue;
+    try {
+      await secureSet(STT_CONFIGS_KEY, JSON.stringify(sttConfigsCache));
+    } catch (error) {
+      // Rollback cache on failure to maintain consistency with storage. Safe
+      // because writes are serialized: no concurrent successful write can be
+      // clobbered by restoring this call's snapshot.
+      if (previousValue === undefined) {
+        delete sttConfigsCache[providerId];
+      } else {
+        sttConfigsCache[providerId] = previousValue;
+      }
+      console.error("[SecureStorage] Failed to persist STT config:", error);
+      throw error;
     }
-    console.error("[SecureStorage] Failed to persist STT config:", error);
-    throw error;
-  }
+  });
 }
 
 /**
@@ -319,6 +357,8 @@ export function resetSecureProviderConfigsCache(): void {
   sttCacheInitialized = false;
   aiLoadingPromise = null;
   sttLoadingPromise = null;
+  aiWriteQueue = Promise.resolve();
+  sttWriteQueue = Promise.resolve();
 }
 
 /**

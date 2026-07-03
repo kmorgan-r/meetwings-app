@@ -46,6 +46,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -126,6 +127,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     provider: "",
     variables: {},
   });
+
+  // Refs mirroring the latest committed provider selection. The switch handlers
+  // read these (not closure state) so rapid consecutive switches see the true
+  // previous selection instead of a stale render's value, and never drop an
+  // interleaved config edit.
+  const selectedAIProviderRef = useRef(selectedAIProvider);
+  const selectedSttProviderRef = useRef(selectedSttProvider);
+
+  // Serialize switch handlers so each completes (and updates the ref) before the
+  // next reads it. Without this, two switches fired within one tick both read
+  // the same stale ref and the middle provider's config is never persisted.
+  const aiSwitchQueue = useRef<Promise<void>>(Promise.resolve());
+  const sttSwitchQueue = useRef<Promise<void>>(Promise.resolve());
 
   const [screenshotConfiguration, setScreenshotConfiguration] =
     useState<ScreenshotConfig>({
@@ -495,8 +509,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     return () => window.removeEventListener("storage", handleStorageChange);
   }, []);
 
-  // Sync selected AI to localStorage
+  // Sync selected AI to localStorage + keep the latest-selection ref current
+  // (the ref also gets set synchronously inside the switch handler; this
+  // reconciles selections made from other sources, e.g. initial load).
   useEffect(() => {
+    selectedAIProviderRef.current = selectedAIProvider;
     if (selectedAIProvider.provider) {
       safeLocalStorage.setItem(
         STORAGE_KEYS.SELECTED_AI_PROVIDER,
@@ -505,8 +522,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [selectedAIProvider]);
 
-  // Sync selected STT to localStorage
+  // Sync selected STT to localStorage + keep the latest-selection ref current
   useEffect(() => {
+    selectedSttProviderRef.current = selectedSttProvider;
     if (selectedSttProvider.provider) {
       safeLocalStorage.setItem(
         STORAGE_KEYS.SELECTED_STT_PROVIDER,
@@ -527,125 +545,128 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     ...customSttProviders,
   ];
 
-  const onSetSelectedAIProvider = async ({
+  const onSetSelectedAIProvider = ({
     provider,
     variables,
   }: {
     provider: string;
     variables: Record<string, string>;
-  }) => {
+  }): Promise<void> => {
     if (provider && !allAiProviders.some((p) => p.id === provider)) {
       console.warn(`Invalid AI provider ID: ${provider}`);
-      return;
+      return Promise.resolve();
     }
 
-    // Check if provider is changing and save old config first (outside state setter)
-    const currentProvider = selectedAIProvider;
-    let savedVariables: Record<string, string> = {};
-    if (provider !== currentProvider.provider) {
-      // Save current provider's variables to secure storage before switching
-      if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
+    // Serialize switches so each completes (and advances the ref) before the
+    // next reads it — otherwise A→B→C fired within one tick all read the same
+    // stale ref and B's interleaved config edit is never persisted.
+    const run = aiSwitchQueue.current.then(async () => {
+      // Read the true current selection from the ref (not closure state, which
+      // lags behind rapid successive calls).
+      const currentProvider = selectedAIProviderRef.current;
+      const isChanging = provider !== currentProvider.provider;
+      let savedVariables: Record<string, string> = {};
+
+      if (isChanging) {
+        // Save the outgoing provider's variables to secure storage before
+        // switching away, so an edit made while it was selected isn't lost.
+        if (
+          currentProvider.provider &&
+          Object.keys(currentProvider.variables).length > 0
+        ) {
+          try {
+            await updateAIConfigCache(
+              currentProvider.provider,
+              currentProvider.variables
+            );
+          } catch (error) {
+            console.error("Failed to save AI provider config:", error);
+          }
+        }
+        // Ensure the secure-config cache is loaded before reading it. During the
+        // async init window getCachedAIConfig returns undefined, which would wipe
+        // the target provider's saved key/model. Awaiting the load resolves the
+        // real config (returns {} only when genuinely unset). Writes above are
+        // serialized, so the ref cannot change under us across these awaits.
         try {
-          await updateAIConfigCache(currentProvider.provider, currentProvider.variables);
+          const configs = await loadSecureAIConfigs();
+          savedVariables = configs[provider] || {};
         } catch (error) {
-          console.error("Failed to save AI provider config:", error);
+          console.error("Failed to load AI provider config:", error);
         }
       }
-      // Ensure the secure-config cache is loaded before reading it. During the
-      // async init window getCachedAIConfig returns undefined, which would wipe
-      // the target provider's saved key/model. Awaiting the load resolves the
-      // real config (returns {} only when genuinely unset).
-      try {
-        const configs = await loadSecureAIConfigs();
-        savedVariables = configs[provider] || {};
-      } catch (error) {
-        console.error("Failed to load AI provider config:", error);
-      }
-    }
 
-    setSelectedAIProvider((prev) => {
-      // If provider is changing, load any saved config for the new provider
-      if (provider !== prev.provider) {
-        // Merge: saved config as base, then overlay with any passed variables
-        return {
-          provider,
-          variables: {
-            ...savedVariables,
-            ...variables,
-          }
-        };
-      }
-      // If provider is the same, merge variables to prevent stale closure issues
-      // This ensures that updating one variable (e.g., model) doesn't wipe out
-      // another variable (e.g., api_key) due to stale closure captures
-      return {
-        provider,
-        variables: {
-          ...prev.variables,
-          ...variables,
-        },
-      };
+      // Merge: on a switch, saved config is the base; on a same-provider update,
+      // the current variables are the base so a single-field change doesn't wipe
+      // the others. Passed variables always overlay.
+      const base = isChanging ? savedVariables : currentProvider.variables;
+      const nextState = { provider, variables: { ...base, ...variables } };
+
+      // Advance the ref synchronously so the next queued switch reads this value.
+      selectedAIProviderRef.current = nextState;
+      setSelectedAIProvider(nextState);
     });
+
+    // Keep the queue alive even if this switch throws, so it doesn't wedge.
+    aiSwitchQueue.current = run.catch(() => {});
+    return run;
   };
 
   // Setter for selected STT with validation
-  const onSetSelectedSttProvider = async ({
+  const onSetSelectedSttProvider = ({
     provider,
     variables,
   }: {
     provider: string;
     variables: Record<string, string>;
-  }) => {
+  }): Promise<void> => {
     if (provider && !allSttProviders.some((p) => p.id === provider)) {
       console.warn(`Invalid STT provider ID: ${provider}`);
-      return;
+      return Promise.resolve();
     }
 
-    // Check if provider is changing and save old config first (outside state setter)
-    const currentProvider = selectedSttProvider;
-    let savedVariables: Record<string, string> = {};
-    if (provider !== currentProvider.provider) {
-      // Save current provider's variables to secure storage before switching
-      if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
+    // Serialize switches (see onSetSelectedAIProvider for the race this closes).
+    const run = sttSwitchQueue.current.then(async () => {
+      // Read the true current selection from the ref, not lagging closure state.
+      const currentProvider = selectedSttProviderRef.current;
+      const isChanging = provider !== currentProvider.provider;
+      let savedVariables: Record<string, string> = {};
+
+      if (isChanging) {
+        // Save the outgoing provider's variables before switching away.
+        if (
+          currentProvider.provider &&
+          Object.keys(currentProvider.variables).length > 0
+        ) {
+          try {
+            await updateSTTConfigCache(
+              currentProvider.provider,
+              currentProvider.variables
+            );
+          } catch (error) {
+            console.error("Failed to save STT provider config:", error);
+          }
+        }
+        // Ensure the secure-config cache is loaded before reading it (see the AI
+        // setter above for why getCachedSTTConfig alone is unsafe during init).
         try {
-          await updateSTTConfigCache(currentProvider.provider, currentProvider.variables);
+          const configs = await loadSecureSTTConfigs();
+          savedVariables = configs[provider] || {};
         } catch (error) {
-          console.error("Failed to save STT provider config:", error);
+          console.error("Failed to load STT provider config:", error);
         }
       }
-      // Ensure the secure-config cache is loaded before reading it (see the AI
-      // setter above for why getCachedSTTConfig alone is unsafe during init).
-      try {
-        const configs = await loadSecureSTTConfigs();
-        savedVariables = configs[provider] || {};
-      } catch (error) {
-        console.error("Failed to load STT provider config:", error);
-      }
-    }
 
-    setSelectedSttProvider((prev) => {
-      // If provider is changing, load any saved config for the new provider
-      if (provider !== prev.provider) {
-        // Merge: saved config as base, then overlay with any passed variables
-        return {
-          provider,
-          variables: {
-            ...savedVariables,
-            ...variables,
-          }
-        };
-      }
-      // If provider is the same, merge variables to prevent stale closure issues
-      // This ensures that updating one variable (e.g., model) doesn't wipe out
-      // another variable (e.g., api_key) due to stale closure captures
-      return {
-        provider,
-        variables: {
-          ...prev.variables,
-          ...variables,
-        },
-      };
+      const base = isChanging ? savedVariables : currentProvider.variables;
+      const nextState = { provider, variables: { ...base, ...variables } };
+
+      // Advance the ref synchronously so the next queued switch reads this value.
+      selectedSttProviderRef.current = nextState;
+      setSelectedSttProvider(nextState);
     });
+
+    sttSwitchQueue.current = run.catch(() => {});
+    return run;
   };
 
   // Toggle handlers

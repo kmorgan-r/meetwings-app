@@ -88,27 +88,41 @@ export function generateConversationId(
 }
 
 /**
+ * Monotonic per-session counter. Guarantees IDs generated within a single app
+ * session never collide, even when many messages are created in the same
+ * millisecond (a same-ms + same-random + same-role collision would otherwise be
+ * possible and cause silent message loss on save).
+ */
+let messageIdSequence = 0;
+
+/**
  * Generate a unique message ID
  *
  * @param role - The role of the message ('user', 'assistant', or 'system')
  * @param timestamp - Optional timestamp (defaults to Date.now())
- * @returns A unique message ID in the format: msg_{timestamp}_{random}_{role}
+ * @returns A unique message ID in the format: msg_{timestamp}_{suffix}_{role}
  *
  * Examples:
- * - msg_1696291234567_k3j9_user
- * - msg_1696291234568_m2n4_assistant
+ * - msg_1696291234567_0k3j9_user
+ * - msg_1696291234568_1m2n4_assistant
  *
- * Note: Random suffix ensures uniqueness even if multiple messages
- * are created at the same millisecond with the same role.
+ * The suffix combines a monotonic session counter (collision-proof within a
+ * session) with a random segment (guards cross-session collisions), so no two
+ * messages can share an ID regardless of creation timing.
  */
 export function generateMessageId(
   role: "user" | "assistant" | "system",
   timestamp: number = Date.now()
 ): string {
+  // Wrap the counter well below Number.MAX_SAFE_INTEGER; base36-encoded it stays
+  // short. Uniqueness within a session comes from this counter; the random tail
+  // guards against two separate sessions minting the same timestamp+counter.
+  messageIdSequence = (messageIdSequence + 1) % 0xffffffff;
+  const counter = messageIdSequence.toString(36);
   // Pad before slicing: for small fractions toString(36) can yield fewer than 4
-  // post-"0." chars (e.g. 0.5 -> "0.i"), which would fail the [a-z0-9]{4} id regex.
+  // post-"0." chars (e.g. 0.5 -> "0.i").
   const random = (Math.random().toString(36).substring(2) + "0000").substring(0, 4);
-  return `msg_${timestamp}_${random}_${role}`;
+  return `msg_${timestamp}_${counter}${random}_${role}`;
 }
 
 /**
@@ -143,8 +157,9 @@ export function isValidConversationId(id: string): boolean {
  * @returns true if the ID matches the expected format
  *
  * Supports both old format (msg_{timestamp}_{role}) and
- * new format (msg_{timestamp}_{random}_{role})
+ * new format (msg_{timestamp}_{suffix}_{role}), where suffix is one or more
+ * base36 chars (counter + random).
  */
 export function isValidMessageId(id: string): boolean {
-  return /^msg_\d+_([a-z0-9]{4}_)?(user|assistant|system)$/.test(id);
+  return /^msg_\d+_([a-z0-9]+_)?(user|assistant|system)$/.test(id);
 }
