@@ -1,7 +1,7 @@
 {
   "name": "meetwings",
   "private": false,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Your invisible AI wingman for meetings and conversations. An open-source, privacy-first AI assistant that provides real-time support during meetings, interviews, and conversations - completely undetectable.",
   "author": {
     "name": "Kevin Morgan-Rothschild",
