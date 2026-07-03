@@ -9,8 +9,19 @@ import {
 } from "@/lib/storage";
 
 interface SetupStatus {
-  /** Whether the minimum required setup is complete (AI + STT configured AND verified) */
+  /**
+   * Whether the minimum required setup is complete: either Meetwings cloud mode
+   * is active, or both AI and STT providers are configured (have an API key).
+   * Verification is an advisory signal (see completionPercent), not a hard gate —
+   * some providers can't be auto-verified and cloud mode has no local key to verify.
+   */
   isComplete: boolean;
+  /**
+   * True until the app context has finished its initial load. Consumers that
+   * redirect/gate on isComplete MUST wait for this to avoid acting on the
+   * pre-load state (empty providers) and bouncing configured users to setup.
+   */
+  isLoading: boolean;
   /** Whether an AI provider is selected and has an API key */
   aiConfigured: boolean;
   /** Whether an STT provider is selected and has an API key */
@@ -47,7 +58,14 @@ export function useSetupStatus(): SetupStatus {
     selectedSttProvider,
     allAiProviders,
     allSttProviders,
+    meetwingsApiEnabled,
+    hasActiveLicense,
+    isInitialized,
   } = useApp();
+
+  // Meetwings cloud mode provides the AI + STT pipeline without a local key,
+  // so it satisfies setup on its own (mirrors shouldUseMeetwingsAPI).
+  const cloudMode = meetwingsApiEnabled && hasActiveLicense;
 
   // Optimistic initialization from stored verification data
   // This prevents flash of "Setup Required" while async hash check runs
@@ -161,11 +179,14 @@ export function useSetupStatus(): SetupStatus {
   if (sttVerified) completedSteps++;
   const completionPercent = (completedSteps / 4) * 100;
 
-  // App is only complete when both are configured AND verified
-  const isComplete = aiVerified && sttVerified;
+  // Complete when running through Meetwings cloud, or when both providers have
+  // a key configured. Verification is surfaced via completionPercent but does
+  // not hard-gate the app (unverifiable formats + cloud have nothing to verify).
+  const isComplete = cloudMode || (aiConfigured && sttConfigured);
 
   return {
     isComplete,
+    isLoading: !isInitialized,
     aiConfigured,
     sttConfigured,
     aiVerified,

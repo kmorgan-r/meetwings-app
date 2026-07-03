@@ -6,16 +6,19 @@ import { useSetupStatus } from "@/hooks";
 import { useEffect } from "react";
 
 export const DashboardLayout = () => {
-  const { isComplete } = useSetupStatus();
+  const { isComplete, isLoading } = useSetupStatus();
   const location = useLocation();
   const navigate = useNavigate();
 
-  // Redirect to API Setup if not configured
+  // Redirect to API Setup if not configured. Wait for isLoading to clear first:
+  // on mount the provider selection is still loading, so isComplete is
+  // transiently false and redirecting now would dump a configured user on
+  // /api-setup with no path back.
   useEffect(() => {
-    if (!isComplete && location.pathname !== "/api-setup") {
+    if (!isLoading && !isComplete && location.pathname !== "/api-setup") {
       navigate("/api-setup", { replace: true });
     }
-  }, [isComplete, location.pathname, navigate]);
+  }, [isLoading, isComplete, location.pathname, navigate]);
 
   return (
     <ErrorBoundary

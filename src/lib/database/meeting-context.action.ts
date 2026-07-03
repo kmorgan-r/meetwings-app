@@ -580,7 +580,6 @@ export async function updateKnowledgeProfile(
   updates: UpdateKnowledgeProfileInput
 ): Promise<KnowledgeProfile | null> {
   const db = await getDatabase();
-  const now = Date.now();
 
   try {
     const existing = await getKnowledgeProfile();
@@ -600,7 +599,12 @@ export async function updateKnowledgeProfile(
       recentGoals: updates.recentGoals ?? existing?.recentGoals ?? [],
       recentDecisions: updates.recentDecisions ?? existing?.recentDecisions ?? [],
       recentTeamUpdates: updates.recentTeamUpdates ?? existing?.recentTeamUpdates ?? [],
-      lastCompacted: updates.lastCompacted ?? now,
+      // Only the compactor passes lastCompacted (the watermark of the newest
+      // incorporated summary). Non-compaction edits (dashboard/context-memory
+      // field saves) omit it and MUST preserve the existing watermark — defaulting
+      // to `now` here would jump it past all uncompacted summaries and silently
+      // drop them from future compaction.
+      lastCompacted: updates.lastCompacted ?? existing?.lastCompacted ?? null,
       sourceCount: updates.sourceCount ?? existing?.sourceCount ?? 0,
     };
 

@@ -16,8 +16,6 @@ import {
   loadSecureSTTConfigs,
   updateAIConfigCache,
   updateSTTConfigCache,
-  getCachedAIConfig,
-  getCachedSTTConfig,
   migrateProviderConfigsToSecureStorage,
 } from "@/lib/storage/secure-provider-configs";
 import {
@@ -141,6 +139,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     DEFAULT_CUSTOMIZABLE_STATE
   );
   const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
+
+  // True once the first data load + secure-storage caches have finished.
+  // Consumers (e.g. useSetupStatus / DashboardLayout) must not treat an empty
+  // provider selection as "not configured" until this is true, otherwise they
+  // act on the pre-load state (e.g. redirecting a configured user to setup).
+  const [isInitialized, setIsInitialized] = useState<boolean>(false);
 
   // Meetwings API State
   const [meetwingsApiEnabled, setMeetwingsApiEnabledState] = useState<boolean>(
@@ -384,9 +388,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         console.debug("Failed to track app start:", error);
       }
     };
-    // Load data
+    // Load synchronous state first, then the async migrations/caches/license.
+    // Only mark initialized once everything setup-gating depends on is settled.
     loadData();
-    initializeApp();
+    initializeApp().finally(() => setIsInitialized(true));
   }, []);
 
   // Handle customizable settings on state changes
@@ -536,6 +541,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     // Check if provider is changing and save old config first (outside state setter)
     const currentProvider = selectedAIProvider;
+    let savedVariables: Record<string, string> = {};
     if (provider !== currentProvider.provider) {
       // Save current provider's variables to secure storage before switching
       if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
@@ -545,14 +551,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           console.error("Failed to save AI provider config:", error);
         }
       }
+      // Ensure the secure-config cache is loaded before reading it. During the
+      // async init window getCachedAIConfig returns undefined, which would wipe
+      // the target provider's saved key/model. Awaiting the load resolves the
+      // real config (returns {} only when genuinely unset).
+      try {
+        const configs = await loadSecureAIConfigs();
+        savedVariables = configs[provider] || {};
+      } catch (error) {
+        console.error("Failed to load AI provider config:", error);
+      }
     }
 
     setSelectedAIProvider((prev) => {
       // If provider is changing, load any saved config for the new provider
       if (provider !== prev.provider) {
-        // Load saved config for the new provider from secure storage cache
-        const savedVariables = getCachedAIConfig(provider) || {};
-
         // Merge: saved config as base, then overlay with any passed variables
         return {
           provider,
@@ -590,6 +603,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
     // Check if provider is changing and save old config first (outside state setter)
     const currentProvider = selectedSttProvider;
+    let savedVariables: Record<string, string> = {};
     if (provider !== currentProvider.provider) {
       // Save current provider's variables to secure storage before switching
       if (currentProvider.provider && Object.keys(currentProvider.variables).length > 0) {
@@ -599,14 +613,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           console.error("Failed to save STT provider config:", error);
         }
       }
+      // Ensure the secure-config cache is loaded before reading it (see the AI
+      // setter above for why getCachedSTTConfig alone is unsafe during init).
+      try {
+        const configs = await loadSecureSTTConfigs();
+        savedVariables = configs[provider] || {};
+      } catch (error) {
+        console.error("Failed to load STT provider config:", error);
+      }
     }
 
     setSelectedSttProvider((prev) => {
       // If provider is changing, load any saved config for the new provider
       if (provider !== prev.provider) {
-        // Load saved config for the new provider from secure storage cache
-        const savedVariables = getCachedSTTConfig(provider) || {};
-
         // Merge: saved config as base, then overlay with any passed variables
         return {
           provider,
@@ -734,6 +753,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     toggleAlwaysOnTop,
     toggleAutostart,
     loadData,
+    isInitialized,
     meetwingsApiEnabled,
     setMeetwingsApiEnabled,
     hasActiveLicense,

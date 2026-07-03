@@ -1,14 +1,17 @@
 /**
  * Secure Provider Configuration Storage
  *
- * Stores API keys and other sensitive provider configuration using Tauri's
- * encrypted store plugin instead of plain localStorage.
+ * Stores API keys and other sensitive provider configuration via Tauri's
+ * plugin-store instead of localStorage (see secure-storage.ts for the backing).
  *
- * Security Benefits:
- * - Data is encrypted at rest
- * - Protected from malicious browser extensions
- * - Protected from XSS attacks that read localStorage
- * - Uses OS-level security features
+ * What this provides:
+ * - Not readable from the webview's JS/DOM (immune to XSS-reads-localStorage).
+ * - Not accessible to browser extensions.
+ *
+ * What this does NOT provide:
+ * - The store file is plaintext JSON on disk; it is NOT encrypted at rest.
+ *   Anyone with read access to the app-data directory can read the keys.
+ *   For true at-rest encryption use tauri-plugin-stronghold or an OS keychain.
  */
 
 import { secureSet, secureGet, secureDelete } from "@/lib/secure-storage";
@@ -231,7 +234,13 @@ export async function updateAIConfigCache(
   variables: Record<string, string>
 ): Promise<void> {
   if (aiConfigsCache === null) {
-    aiConfigsCache = {};
+    // Load existing configs from storage before mutating. Starting from {} here
+    // would persist a blob containing ONLY this provider, erasing every other
+    // provider's stored key.
+    await loadSecureAIConfigs();
+    if (aiConfigsCache === null) {
+      aiConfigsCache = {};
+    }
   }
 
   const previousValue = aiConfigsCache[providerId]; // Save for rollback
@@ -261,7 +270,12 @@ export async function updateSTTConfigCache(
   variables: Record<string, string>
 ): Promise<void> {
   if (sttConfigsCache === null) {
-    sttConfigsCache = {};
+    // Load existing configs before mutating (see updateAIConfigCache) so we
+    // don't overwrite the whole blob with just this one provider.
+    await loadSecureSTTConfigs();
+    if (sttConfigsCache === null) {
+      sttConfigsCache = {};
+    }
   }
 
   const previousValue = sttConfigsCache[providerId]; // Save for rollback

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, CheckCircle2, XCircle, AlertCircle, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -325,10 +326,12 @@ export const ProviderVerification = ({
     [state, errorMessage, providerId, type]
   );
 
-  // Handle opening external links safely
+  // Open external links via the Tauri opener. Plain window.open is a no-op in
+  // the packaged webview, so the "Learn more" link would do nothing there.
   const handleLearnMore = useCallback((url: string) => {
-    // Use Tauri's shell open for security
-    window.open(url, "_blank", "noopener,noreferrer");
+    openUrl(url).catch((error) => {
+      console.error("[ProviderVerification] Failed to open URL:", error);
+    });
   }, []);
 
   return (

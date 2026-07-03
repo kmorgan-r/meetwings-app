@@ -332,7 +332,11 @@ export async function testAIProvider(
     }
 
     const content = getByPath(json, provider?.responseContentPath || "") || "";
-    if (content || json) {
+    // Require actual extracted content. `json` is a parsed object and thus almost
+    // always truthy, so `content || json` would pass verification for any 200
+    // response — including error bodies or shapes that don't match
+    // responseContentPath — and real completions would then fail.
+    if (content) {
       return {
         success: true,
         message: ErrorMessages.SUCCESS_VERIFIED,

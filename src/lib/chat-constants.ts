@@ -105,7 +105,9 @@ export function generateMessageId(
   role: "user" | "assistant" | "system",
   timestamp: number = Date.now()
 ): string {
-  const random = Math.random().toString(36).substring(2, 6);
+  // Pad before slicing: for small fractions toString(36) can yield fewer than 4
+  // post-"0." chars (e.g. 0.5 -> "0.i"), which would fail the [a-z0-9]{4} id regex.
+  const random = (Math.random().toString(36).substring(2) + "0000").substring(0, 4);
   return `msg_${timestamp}_${random}_${role}`;
 }
 

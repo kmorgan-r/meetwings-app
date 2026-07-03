@@ -4,7 +4,10 @@
  * Stores and retrieves API verification status for AI and STT providers.
  * Verification is invalidated when the provider, model, or API key changes.
  *
- * Uses secure storage (encrypted at rest) with a cache layer for synchronous access.
+ * Persisted via secure-storage (plugin-store: plaintext JSON in the OS app-data
+ * directory, NOT encrypted at rest — see secure-storage.ts), with a cache layer
+ * for synchronous access. Only a SHA-256 hash of the API key is stored here, not
+ * the key itself.
  *
  * IMPORTANT: Initialization Requirements
  * --------------------------------------
@@ -80,14 +83,26 @@ export async function loadVerificationCache(): Promise<void> {
   const previousSttCache = sttVerificationCache;
   const wasLoaded = cacheLoaded;
 
+  // Parse one provider's blob in isolation so a corrupt/unparseable value for
+  // one provider can't discard the other provider's valid verification record.
+  const parseBlob = (raw: string | null, label: string): VerificationData | null => {
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as VerificationData;
+    } catch (error) {
+      console.error(`[VerificationStorage] Failed to parse ${label} verification blob:`, error);
+      return null;
+    }
+  };
+
   try {
     const [aiData, sttData] = await Promise.all([
       secureGet(AI_VERIFICATION_KEY),
       secureGet(STT_VERIFICATION_KEY),
     ]);
 
-    aiVerificationCache = aiData ? JSON.parse(aiData) : null;
-    sttVerificationCache = sttData ? JSON.parse(sttData) : null;
+    aiVerificationCache = parseBlob(aiData, "AI");
+    sttVerificationCache = parseBlob(sttData, "STT");
     cacheLoaded = true;
 
     // Only dispatch event if data actually changed or this is first load

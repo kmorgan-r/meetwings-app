@@ -16,7 +16,7 @@ import { AlertCircle } from "lucide-react";
 const App = () => {
   const { isHidden, systemAudio } = useApp();
   const { customizable } = useAppContext();
-  const { isComplete: setupComplete, aiConfigured, sttConfigured } = useSetupStatus();
+  const { isComplete: setupComplete, isLoading: setupLoading, aiConfigured, sttConfigured } = useSetupStatus();
   const platform = getPlatform();
 
   const openDashboard = async () => {
@@ -43,8 +43,8 @@ const App = () => {
         }`}
       >
         <Card className="w-full flex flex-row items-center gap-2 p-2">
-          {/* Setup Required Message */}
-          {!setupComplete && (
+          {/* Setup Required Message (suppressed until setup status settles) */}
+          {!setupLoading && !setupComplete && (
             <div className="flex flex-1 items-center gap-3 px-2">
               <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
               <div className="flex flex-col min-w-0">
@@ -73,7 +73,7 @@ const App = () => {
           )}
 
           {/* Normal UI when setup is complete */}
-          {setupComplete && (
+          {!setupLoading && setupComplete && (
             <>
               <SystemAudio {...systemAudio} />
               {systemAudio?.capturing ? (

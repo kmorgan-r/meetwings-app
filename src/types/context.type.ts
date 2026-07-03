@@ -40,6 +40,8 @@ export type IContextType = {
   toggleAlwaysOnTop: (isEnabled: boolean) => Promise<void>;
   toggleAutostart: (isEnabled: boolean) => Promise<void>;
   loadData: () => void;
+  /** True once the initial data load + secure-storage caches have settled. */
+  isInitialized: boolean;
   meetwingsApiEnabled: boolean;
   setMeetwingsApiEnabled: (enabled: boolean) => void;
   hasActiveLicense: boolean;
