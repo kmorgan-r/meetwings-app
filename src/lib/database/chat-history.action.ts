@@ -418,10 +418,14 @@ export async function appendMessagesToConversation(
   const db = await getDatabase();
 
   try {
-    await db.execute(
+    const updateResult = await db.execute(
       "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
       [title, updatedAt, conversationId]
     );
+
+    if (updateResult.rowsAffected === 0) {
+      throw new Error("Conversation not found");
+    }
 
     const seenIds = new Set<string>();
     for (const message of newMessages) {

@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, Dispatch, SetStateAction } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import {
@@ -120,7 +120,7 @@ export const useCompletion = () => {
   const [keepEngaged, setKeepEngaged] = useState(false);
 
   // Meeting Assist Mode state
-  const [meetingAssistMode, setMeetingAssistMode] = useState(() => {
+  const [meetingAssistMode, setMeetingAssistModeState] = useState(() => {
     const stored = localStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
     return stored === "true";
   });
@@ -334,6 +334,34 @@ export const useCompletion = () => {
       autoSaveMeetingTranscript();
     }
   }, [meetingAssistMode, meetingTranscript.length, autoSaveMeetingTranscript]);
+
+  // Wraps the raw state setter so turning meeting mode off flushes any
+  // unsaved transcript segments first. The periodic autosave effect above
+  // early-returns once meetingAssistMode is false, so without this a user
+  // with fewer than MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL unsaved segments who
+  // toggles off (without clearing/starting new) then quits loses them.
+  const setMeetingAssistMode = useCallback<Dispatch<SetStateAction<boolean>>>(
+    (value) => {
+      setMeetingAssistModeState((prev) => {
+        const next = typeof value === "function"
+          ? (value as (p: boolean) => boolean)(prev)
+          : value;
+        if (prev && !next) {
+          const unsavedCount =
+            meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
+          if (
+            unsavedCount > 0 &&
+            currentConversationIdRef.current &&
+            conversationHistoryRef.current.length > 0
+          ) {
+            autoSaveMeetingTranscript();
+          }
+        }
+        return next;
+      });
+    },
+    [meetingTranscript.length, autoSaveMeetingTranscript]
+  );
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));

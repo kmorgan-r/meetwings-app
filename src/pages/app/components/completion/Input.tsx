@@ -195,7 +195,7 @@ export const Input = ({
                     reset();
                     // Also clear meeting transcript if in meeting mode
                     if (meetingAssistMode && clearMeetingTranscript) {
-                      clearMeetingTranscript();
+                      await clearMeetingTranscript();
                     }
                   }
                 }}
