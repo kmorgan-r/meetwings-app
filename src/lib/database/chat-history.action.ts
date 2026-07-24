@@ -400,6 +400,68 @@ export async function updateConversation(
 }
 
 /**
+ * Append new messages to an existing conversation without touching rows that
+ * are already persisted. Unlike updateConversation, this does not delete and
+ * re-insert every message, so its cost is proportional to what's new, not to
+ * the conversation's total size — used by the periodic meeting-transcript
+ * autosave, which would otherwise redo a full delete+reinsert of the whole
+ * conversation on every trigger. INSERT OR IGNORE makes retries with an
+ * already-inserted id a no-op instead of a primary-key error, so callers
+ * don't need failure/rollback bookkeeping to stay safe.
+ */
+export async function appendMessagesToConversation(
+  conversationId: string,
+  title: string,
+  updatedAt: number,
+  newMessages: ChatConversation["messages"]
+): Promise<void> {
+  const db = await getDatabase();
+
+  try {
+    const updateResult = await db.execute(
+      "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+      [title, updatedAt, conversationId]
+    );
+
+    if (updateResult.rowsAffected === 0) {
+      throw new Error("Conversation not found");
+    }
+
+    const seenIds = new Set<string>();
+    for (const message of newMessages) {
+      if (!validateMessage(message)) {
+        console.warn("Skipping invalid message in conversation append");
+        continue;
+      }
+      if (seenIds.has(message.id)) {
+        console.warn(`[ChatHistory] Skipping duplicate message ID during append: ${message.id}`);
+        continue;
+      }
+      seenIds.add(message.id);
+
+      const attachedFilesJson = message.attachedFiles
+        ? JSON.stringify(message.attachedFiles)
+        : null;
+
+      await db.execute(
+        "INSERT OR IGNORE INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          message.id,
+          conversationId,
+          message.role,
+          message.content,
+          message.timestamp,
+          attachedFilesJson,
+        ]
+      );
+    }
+  } catch (error) {
+    console.error("Failed to append messages to conversation:", error);
+    throw error;
+  }
+}
+
+/**
  * Save or update a conversation (upsert operation)
  */
 export async function saveConversation(
