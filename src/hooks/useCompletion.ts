@@ -12,6 +12,7 @@ import { useApp } from "@/contexts";
 import {
   fetchAIResponse,
   saveConversation,
+  appendMessagesToConversation,
   getConversationById,
   generateConversationTitle,
   shouldUseMeetwingsAPI,
@@ -161,6 +162,13 @@ export const useCompletion = () => {
   // periodically persist transcripts to chat history without stale closures.
   const meetingTranscriptLengthRef = useRef(0);
   const lastAutoSavedTranscriptCountRef = useRef(0);
+  // How many of conversationHistoryRef.current's messages (from the start)
+  // are already persisted for the current conversation. Lets the periodic
+  // autosave append only the new tail instead of redoing a full
+  // delete+reinsert of every message each time. Any full-rewrite save
+  // (quick action, normal submit, initial creation) advances this to cover
+  // everything it just wrote.
+  const persistedMessageCountRef = useRef(0);
   // Cached title/createdAt for the conversation currently being auto-saved, so
   // repeated autosaves don't re-read the row just to recover fields that never
   // change after the first save. Keyed by id: a mismatched/absent id means a
@@ -222,6 +230,12 @@ export const useCompletion = () => {
         if (messages.length === 0) {
           return;
         }
+        // Captured alongside messages, before any await below, so the
+        // watermark this run sets always matches what messages actually
+        // contains — not whatever the live ref has advanced to by the time
+        // the save finishes.
+        const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
+        const persistedCountAtSnapshot = persistedMessageCountRef.current;
 
         const conversationId =
           currentConversationIdRef.current || generateConversationId("chat");
@@ -252,19 +266,36 @@ export const useCompletion = () => {
           createdAt = existingConversation?.createdAt || Date.now();
         }
 
-        const conversation: ChatConversation = {
-          id: conversationId,
-          title,
-          messages,
-          createdAt,
-          updatedAt: Date.now(),
-        };
-
         try {
-          await saveConversation(conversation);
+          if (persistedCountAtSnapshot > 0) {
+            // Row already exists — append just the new tail instead of a
+            // full delete+reinsert, so autosave cost stays proportional to
+            // what changed rather than the whole conversation's size.
+            const newTailMessages = messages.slice(persistedCountAtSnapshot);
+            if (newTailMessages.length > 0) {
+              await appendMessagesToConversation(
+                conversationId,
+                title,
+                Date.now(),
+                newTailMessages
+              );
+            }
+          } else {
+            // First save for this conversation — need the full create/update
+            // upsert since there may be no row yet.
+            const conversation: ChatConversation = {
+              id: conversationId,
+              title,
+              messages,
+              createdAt,
+              updatedAt: Date.now(),
+            };
+            await saveConversation(conversation);
+          }
           setActiveConversationId(conversationId);
-          const savedCount = meetingTranscriptLengthRef.current;
+          const savedCount = transcriptLengthAtSnapshot;
           lastAutoSavedTranscriptCountRef.current = savedCount;
+          persistedMessageCountRef.current = messages.length;
           conversationMetaCacheRef.current = { id: conversationId, title, createdAt };
           console.log(
             `[Meeting Transcript Autosave] Saved ${savedCount} transcript segment(s) to conversation ${conversationId}`
@@ -545,6 +576,7 @@ export const useCompletion = () => {
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
+    persistedMessageCountRef.current = 0;
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -971,6 +1003,10 @@ export const useCompletion = () => {
           };
           const currentHistory = conversationHistoryRef.current;
           const newMessages = [...currentHistory, userMsg, assistantMsg];
+          // Captured alongside newMessages, before the write below, so the
+          // watermark matches what was actually persisted even if more
+          // transcript segments stream in while the write is in flight.
+          const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
 
           const conversation: ChatConversation = {
             id: conversationId,
@@ -993,7 +1029,10 @@ export const useCompletion = () => {
           }));
           // Quick-action saves already persisted any accumulated meeting
           // transcript, so advance the autosave watermark.
-          lastAutoSavedTranscriptCountRef.current = meetingTranscriptLengthRef.current;
+          lastAutoSavedTranscriptCountRef.current = transcriptLengthAtSnapshot;
+          // This was a full rewrite of every message, so all of them are now
+          // persisted — the next periodic autosave can append from here.
+          persistedMessageCountRef.current = newMessages.length;
         }
       } catch (error) {
         if (!signal?.aborted && currentRequestIdRef.current === requestId) {
@@ -1127,6 +1166,8 @@ export const useCompletion = () => {
     // Reset autosave watermark relative to any existing meeting transcript so
     // newly added segments start a fresh count toward the next auto-save.
     lastAutoSavedTranscriptCountRef.current = meetingTranscript.length;
+    // Everything in the loaded conversation is already in the DB.
+    persistedMessageCountRef.current = conversation.messages.length;
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
@@ -1160,6 +1201,7 @@ export const useCompletion = () => {
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
+    persistedMessageCountRef.current = 0;
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -1205,6 +1247,10 @@ export const useCompletion = () => {
       // Use ref to avoid stale closure
       const currentHistory = conversationHistoryRef.current;
       const newMessages = [...currentHistory, userMsg, assistantMsg];
+      // Captured alongside newMessages, before the awaits below, so the
+      // watermark matches what was actually persisted even if more
+      // transcript segments stream in while this save is in flight.
+      const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
 
       // Get existing conversation if updating
       let existingConversation = null;
@@ -1247,7 +1293,10 @@ export const useCompletion = () => {
         }));
         // Normal AI saves already persisted any accumulated meeting transcript,
         // so advance the autosave watermark to avoid a redundant flush.
-        lastAutoSavedTranscriptCountRef.current = meetingTranscriptLengthRef.current;
+        lastAutoSavedTranscriptCountRef.current = transcriptLengthAtSnapshot;
+        // This was a full rewrite of every message, so all of them are now
+        // persisted — the next periodic autosave can append from here.
+        persistedMessageCountRef.current = newMessages.length;
       } catch (error) {
         console.error("Failed to save conversation:", error);
         // Show error to user
