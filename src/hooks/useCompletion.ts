@@ -170,9 +170,10 @@ export const useCompletion = () => {
     title: string;
     createdAt: number;
   } | null>(null);
-  // Serializes autosave writes so two threshold crossings that fire close
-  // together can't run concurrent saveConversation calls against the same
-  // conversation id (which does a full delete+reinsert of messages).
+  // Serializes writes to the currently open conversation's row — periodic
+  // autosave, manual save, and quick-action save all funnel through this so
+  // two of them can never run concurrent saveConversation calls against the
+  // same conversation id (which does a full delete+reinsert of messages).
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   // Count of autosaves enqueued but not yet finished. Lets the periodic
   // trigger skip queuing another save while one is already pending instead of
@@ -180,6 +181,20 @@ export const useCompletion = () => {
   // the pending save reads conversationHistoryRef fresh when it actually runs,
   // so it picks up whatever arrived in the meantime.
   const pendingAutosaveCountRef = useRef(0);
+
+  // Chains a write onto saveQueueRef so it can't run concurrently with any
+  // other queued conversation write. The queue itself never rejects (each
+  // task's outcome is absorbed here) so one failed write can't jam the queue
+  // for whatever runs after it; the caller still sees the task's own
+  // rejection through the returned promise.
+  const queueConversationWrite = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const result = saveQueueRef.current.then(task, task);
+    saveQueueRef.current = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }, []);
 
   // Generate a readable title for a meeting transcript conversation when it is
   // first auto-saved. Falls back to a timestamped title if no user text exists.
@@ -265,10 +280,8 @@ export const useCompletion = () => {
       }
     };
 
-    const next = saveQueueRef.current.then(run, run);
-    saveQueueRef.current = next;
-    return next;
-  }, []);
+    return queueConversationWrite(run);
+  }, [queueConversationWrite]);
 
   // Keep a ref in sync with the current meeting transcript length so async
   // save paths (normal submit, quick actions) can update the autosave watermark.
@@ -969,7 +982,7 @@ export const useCompletion = () => {
             updatedAt: timestamp,
           };
 
-          await saveConversation(conversation);
+          await queueConversationWrite(() => saveConversation(conversation));
           // Update ref immediately
           conversationHistoryRef.current = newMessages;
           setState((prev) => ({
@@ -1000,6 +1013,7 @@ export const useCompletion = () => {
       allAiProviders,
       systemPrompt,
       submit,
+      queueConversationWrite,
     ]
   );
 
@@ -1219,7 +1233,7 @@ export const useCompletion = () => {
       };
 
       try {
-        await saveConversation(conversation);
+        await queueConversationWrite(() => saveConversation(conversation));
 
         // Update ref immediately
         conversationHistoryRef.current = newMessages;
@@ -1243,7 +1257,7 @@ export const useCompletion = () => {
         }));
       }
     },
-    [state.currentConversationId] // Note: conversationHistory removed - using conversationHistoryRef
+    [state.currentConversationId, queueConversationWrite] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
   // On startup there is no in-progress conversation (state resets to null), so

@@ -176,16 +176,20 @@ export const Input = ({
               <Button
                 size="icon"
                 variant="ghost"
-                onClick={() => {
+                onClick={async () => {
                   if (isLoading) {
                     cancel();
                   } else if (keepEngaged) {
-                    // When keepEngaged is on, close everything and start new conversation
+                    // When keepEngaged is on, close everything and start new conversation.
+                    // Awaited in sequence: startNewConversation flushes any unsaved
+                    // transcript and clears currentConversationIdRef itself, so by the
+                    // time clearMeetingTranscript runs there is nothing left for it to
+                    // (redundantly) flush.
                     setKeepEngaged(false);
-                    startNewConversation();
+                    await startNewConversation();
                     // Also clear meeting transcript if in meeting mode
                     if (meetingAssistMode && clearMeetingTranscript) {
-                      clearMeetingTranscript();
+                      await clearMeetingTranscript();
                     }
                   } else {
                     reset();

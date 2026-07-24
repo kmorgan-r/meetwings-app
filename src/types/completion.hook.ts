@@ -71,10 +71,13 @@ export interface UseCompletionReturn {
   currentConversationId: string | null;
   /** Array of messages in the current conversation */
   conversationHistory: any[];
-  /** Function to load an existing conversation */
-  loadConversation: (conversation: any) => void;
-  /** Function to start a new conversation (clears current state) */
-  startNewConversation: () => void;
+  /** Function to load an existing conversation. Flushes any unsaved meeting
+   * transcript before switching, so callers may await it to ensure that
+   * finishes before further navigation. */
+  loadConversation: (conversation: any) => Promise<void>;
+  /** Function to start a new conversation (clears current state). Flushes any
+   * unsaved meeting transcript first, so callers may await it. */
+  startNewConversation: () => Promise<void>;
 
   // UI state management
   /** Whether the message history modal/panel is open */
@@ -144,8 +147,9 @@ export interface UseCompletionReturn {
   addSystemAudioTranscript: (text: string, timestamp: number) => void;
   /** Function to update translation for a specific transcript entry */
   updateTranscriptTranslation: (timestamp: number, translation?: string, error?: string) => void;
-  /** Function to clear the meeting transcript */
-  clearMeetingTranscript: () => void;
+  /** Function to clear the meeting transcript. Flushes any unsaved segments
+   * first, so callers may await it. */
+  clearMeetingTranscript: () => Promise<void>;
   /** Function to submit a quick action with meeting context */
   submitWithMeetingContext: (action: string) => Promise<void>;
 
