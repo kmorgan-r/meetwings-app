@@ -161,6 +161,19 @@ export const useCompletion = () => {
   // periodically persist transcripts to chat history without stale closures.
   const meetingTranscriptLengthRef = useRef(0);
   const lastAutoSavedTranscriptCountRef = useRef(0);
+  // Cached title/createdAt for the conversation currently being auto-saved, so
+  // repeated autosaves don't re-read the row just to recover fields that never
+  // change after the first save. Keyed by id: a mismatched/absent id means a
+  // different (or new) conversation, so the cache is naturally treated as a miss.
+  const conversationMetaCacheRef = useRef<{
+    id: string;
+    title: string;
+    createdAt: number;
+  } | null>(null);
+  // Serializes autosave writes so two threshold crossings that fire close
+  // together can't run concurrent saveConversation calls against the same
+  // conversation id (which does a full delete+reinsert of messages).
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   // Generate a readable title for a meeting transcript conversation when it is
   // first auto-saved. Falls back to a timestamped title if no user text exists.
@@ -173,52 +186,72 @@ export const useCompletion = () => {
 
   // Persist the current in-memory meeting transcript to chat history. Used by
   // the periodic autosave and the final flush when the transcript is cleared.
-  const autoSaveMeetingTranscript = useCallback(async (transcriptCount: number) => {
-    const messages = conversationHistoryRef.current;
-    if (messages.length === 0) {
-      return;
-    }
+  // Queued (not fired directly) so concurrent triggers serialize instead of
+  // racing; callers can still `await` the returned promise for the flush to
+  // actually land before proceeding.
+  const autoSaveMeetingTranscript = useCallback((transcriptCount: number) => {
+    const run = async () => {
+      const messages = conversationHistoryRef.current;
+      if (messages.length === 0) {
+        return;
+      }
 
-    const conversationId =
-      currentConversationIdRef.current || generateConversationId("chat");
-    currentConversationIdRef.current = conversationId;
+      const conversationId =
+        currentConversationIdRef.current || generateConversationId("chat");
+      currentConversationIdRef.current = conversationId;
 
-    let existingConversation: ChatConversation | null = null;
-    try {
-      existingConversation = await getConversationById(conversationId);
-    } catch (error) {
-      console.error(
-        "[Meeting Transcript Autosave] Failed to load existing conversation:",
-        error
-      );
-    }
+      const cachedMeta = conversationMetaCacheRef.current;
+      let title: string;
+      let createdAt: number;
 
-    const firstUserMessage = messages.find((msg) => msg.role === "user");
-    const title =
-      existingConversation?.title ||
-      generateMeetingTranscriptTitle(firstUserMessage?.content);
+      if (cachedMeta && cachedMeta.id === conversationId) {
+        title = cachedMeta.title;
+        createdAt = cachedMeta.createdAt;
+      } else {
+        let existingConversation: ChatConversation | null = null;
+        try {
+          existingConversation = await getConversationById(conversationId);
+        } catch (error) {
+          console.error(
+            "[Meeting Transcript Autosave] Failed to load existing conversation:",
+            error
+          );
+        }
 
-    const conversation: ChatConversation = {
-      id: conversationId,
-      title,
-      messages,
-      createdAt: existingConversation?.createdAt || Date.now(),
-      updatedAt: Date.now(),
+        const firstUserMessage = messages.find((msg) => msg.role === "user");
+        title =
+          existingConversation?.title ||
+          generateMeetingTranscriptTitle(firstUserMessage?.content);
+        createdAt = existingConversation?.createdAt || Date.now();
+      }
+
+      const conversation: ChatConversation = {
+        id: conversationId,
+        title,
+        messages,
+        createdAt,
+        updatedAt: Date.now(),
+      };
+
+      try {
+        await saveConversation(conversation);
+        setActiveConversationId(conversationId);
+        lastAutoSavedTranscriptCountRef.current = transcriptCount;
+        conversationMetaCacheRef.current = { id: conversationId, title, createdAt };
+        console.log(
+          `[Meeting Transcript Autosave] Saved ${transcriptCount} transcript segment(s) to conversation ${conversationId}`
+        );
+      } catch (error) {
+        console.error(
+          "[Meeting Transcript Autosave] Failed to save meeting transcript:",
+          error
+        );
+      }
     };
 
-    try {
-      await saveConversation(conversation);
-      setActiveConversationId(conversationId);
-      lastAutoSavedTranscriptCountRef.current = transcriptCount;
-      console.log(
-        `[Meeting Transcript Autosave] Saved ${transcriptCount} transcript segment(s) to conversation ${conversationId}`
-      );
-    } catch (error) {
-      console.error(
-        "[Meeting Transcript Autosave] Failed to save meeting transcript:",
-        error
-      );
-    }
+    const next = saveQueueRef.current.then(run, run);
+    saveQueueRef.current = next;
+    return next;
   }, []);
 
   // Keep a ref in sync with the current meeting transcript length so async
@@ -451,9 +484,12 @@ export const useCompletion = () => {
     []
   );
 
-  const clearMeetingTranscript = useCallback(() => {
+  const clearMeetingTranscript = useCallback(async () => {
     // Flush any remaining unsaved transcript segments before clearing so the
     // user does not lose the final batch if they never hit the autosave threshold.
+    // Must be awaited: autoSaveMeetingTranscript updates
+    // lastAutoSavedTranscriptCountRef asynchronously, and if it resolves after
+    // the synchronous reset below, it would stomp the reset with the old count.
     const unsavedCount =
       meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
     if (
@@ -461,7 +497,7 @@ export const useCompletion = () => {
       currentConversationIdRef.current &&
       conversationHistoryRef.current.length > 0
     ) {
-      autoSaveMeetingTranscript(meetingTranscript.length);
+      await autoSaveMeetingTranscript(meetingTranscript.length);
     }
 
     setMeetingTranscript([]);
@@ -1048,9 +1084,10 @@ export const useCompletion = () => {
     }));
   }, [summarizeCurrentConversation, meetingTranscript.length]);
 
-  const startNewConversation = useCallback(() => {
+  const startNewConversation = useCallback(async () => {
     // Flush any remaining unsaved meeting transcript before starting a new
-    // conversation so the previous meeting is not lost.
+    // conversation so the previous meeting is not lost. Must be awaited — see
+    // clearMeetingTranscript for why (async watermark update vs sync reset below).
     const unsavedCount =
       meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
     if (
@@ -1058,7 +1095,7 @@ export const useCompletion = () => {
       currentConversationIdRef.current &&
       conversationHistoryRef.current.length > 0
     ) {
-      autoSaveMeetingTranscript(meetingTranscript.length);
+      await autoSaveMeetingTranscript(meetingTranscript.length);
     }
 
     // Summarize current conversation before starting new
