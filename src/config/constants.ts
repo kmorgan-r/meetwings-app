@@ -93,6 +93,11 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
   "Action items",
 ];
 
+// Number of meeting transcript segments to accumulate before auto-saving the
+// in-progress conversation to chat history. This prevents losing a whole meeting
+// if the user ends/clears the transcript without ever asking the AI a question.
+export const MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4;
+
 // Meeting Assist system prompt for contextual insights
 export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a live meeting/interview assistant feeding the user answers in real time. The transcript uses speaker labels: "You" is the user; other labels are the other participants.
 
