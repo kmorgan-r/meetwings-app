@@ -124,6 +124,7 @@ export const useCompletion = () => {
     const stored = localStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
     return stored === "true";
   });
+  const meetingAssistModeRef = useRef(meetingAssistMode);
   const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
 
   // Session-level speaker mapping (resets when meeting transcript is cleared)
@@ -335,32 +336,43 @@ export const useCompletion = () => {
     }
   }, [meetingAssistMode, meetingTranscript.length, autoSaveMeetingTranscript]);
 
+  // Flush any transcript segments not covered by the latest successful save.
+  // Every meeting-session boundary uses this helper so the persistence guard
+  // and watermark calculation stay consistent.
+  const flushUnsavedMeetingTranscript = useCallback((): Promise<void> => {
+    const unsavedCount =
+      meetingTranscriptLengthRef.current -
+      lastAutoSavedTranscriptCountRef.current;
+    if (
+      unsavedCount <= 0 ||
+      !currentConversationIdRef.current ||
+      conversationHistoryRef.current.length === 0
+    ) {
+      return Promise.resolve();
+    }
+
+    return autoSaveMeetingTranscript();
+  }, [autoSaveMeetingTranscript]);
+
   // Wraps the raw state setter so turning meeting mode off flushes any
-  // unsaved transcript segments first. The periodic autosave effect above
-  // early-returns once meetingAssistMode is false, so without this a user
-  // with fewer than MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL unsaved segments who
-  // toggles off (without clearing/starting new) then quits loses them.
+  // unsaved transcript segments first. Transition state lives in a ref because
+  // invoking persistence from a React state updater is unsafe in StrictMode.
   const setMeetingAssistMode = useCallback<Dispatch<SetStateAction<boolean>>>(
     (value) => {
-      setMeetingAssistModeState((prev) => {
-        const next = typeof value === "function"
-          ? (value as (p: boolean) => boolean)(prev)
+      const previous = meetingAssistModeRef.current;
+      const next =
+        typeof value === "function"
+          ? (value as (p: boolean) => boolean)(previous)
           : value;
-        if (prev && !next) {
-          const unsavedCount =
-            meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
-          if (
-            unsavedCount > 0 &&
-            currentConversationIdRef.current &&
-            conversationHistoryRef.current.length > 0
-          ) {
-            autoSaveMeetingTranscript();
-          }
-        }
-        return next;
-      });
+
+      meetingAssistModeRef.current = next;
+      setMeetingAssistModeState(next);
+
+      if (previous && !next) {
+        void flushUnsavedMeetingTranscript();
+      }
     },
-    [meetingTranscript.length, autoSaveMeetingTranscript]
+    [flushUnsavedMeetingTranscript]
   );
 
   const setInput = useCallback((value: string) => {
@@ -581,15 +593,7 @@ export const useCompletion = () => {
     // Must be awaited: autoSaveMeetingTranscript updates
     // lastAutoSavedTranscriptCountRef asynchronously, and if it resolves after
     // the synchronous reset below, it would stomp the reset with the old count.
-    const unsavedCount =
-      meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
-    if (
-      unsavedCount > 0 &&
-      currentConversationIdRef.current &&
-      conversationHistoryRef.current.length > 0
-    ) {
-      await autoSaveMeetingTranscript();
-    }
+    await flushUnsavedMeetingTranscript();
 
     setMeetingTranscript([]);
     // Also clear session speaker mapping
@@ -611,7 +615,7 @@ export const useCompletion = () => {
       conversationHistory: [],
       response: "",
     }));
-  }, [meetingTranscript.length, autoSaveMeetingTranscript]);
+  }, [flushUnsavedMeetingTranscript]);
 
   /**
    * Assigns a speaker label to a speaker ID and propagates to all matching entries.
@@ -1174,15 +1178,7 @@ export const useCompletion = () => {
     // a different one — otherwise those segments are lost, and any further
     // live transcript growth gets appended onto the newly loaded (unrelated)
     // conversation instead.
-    const unsavedCount =
-      meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
-    if (
-      unsavedCount > 0 &&
-      currentConversationIdRef.current &&
-      conversationHistoryRef.current.length > 0
-    ) {
-      await autoSaveMeetingTranscript();
-    }
+    await flushUnsavedMeetingTranscript();
 
     // Summarize current conversation before switching
     summarizeCurrentConversation();
@@ -1205,21 +1201,17 @@ export const useCompletion = () => {
       error: null,
       isLoading: false,
     }));
-  }, [summarizeCurrentConversation, meetingTranscript.length, autoSaveMeetingTranscript]);
+  }, [
+    summarizeCurrentConversation,
+    meetingTranscript.length,
+    flushUnsavedMeetingTranscript,
+  ]);
 
   const startNewConversation = useCallback(async () => {
     // Flush any remaining unsaved meeting transcript before starting a new
     // conversation so the previous meeting is not lost. Must be awaited — see
     // clearMeetingTranscript for why (async watermark update vs sync reset below).
-    const unsavedCount =
-      meetingTranscript.length - lastAutoSavedTranscriptCountRef.current;
-    if (
-      unsavedCount > 0 &&
-      currentConversationIdRef.current &&
-      conversationHistoryRef.current.length > 0
-    ) {
-      await autoSaveMeetingTranscript();
-    }
+    await flushUnsavedMeetingTranscript();
 
     // Summarize current conversation before starting new
     summarizeCurrentConversation();
@@ -1240,7 +1232,7 @@ export const useCompletion = () => {
       isLoading: false,
       attachedFiles: [],
     }));
-  }, [summarizeCurrentConversation, meetingTranscript.length, autoSaveMeetingTranscript]);
+  }, [summarizeCurrentConversation, flushUnsavedMeetingTranscript]);
 
   const saveCurrentConversation = useCallback(
     async (
