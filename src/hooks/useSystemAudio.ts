@@ -5,6 +5,10 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse, summarizeConversation, shouldSummarize } from "@/lib/functions";
 import {
+  applyAIConversationTitle,
+  type TitleProviderConfig,
+} from "@/lib/functions/conversation-title";
+import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
   STORAGE_KEYS,
@@ -112,6 +116,38 @@ export function useSystemAudio() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
+
+  // Provider wiring for the background title call, held in a ref so the
+  // debounced save effect below doesn't restart every time the provider list
+  // or selection changes.
+  const titleProviderConfigRef = useRef<TitleProviderConfig>({
+    provider: undefined,
+    selectedProvider: { provider: "", variables: {} },
+  });
+  useEffect(() => {
+    titleProviderConfigRef.current = {
+      provider: allAiProviders.find((p) => p.id === selectedAIProvider.provider),
+      selectedProvider: selectedAIProvider,
+    };
+  }, [allAiProviders, selectedAIProvider]);
+
+  // The titler writes straight to the database, so mirror the new title into
+  // local state — otherwise the next debounced save writes the stale fallback
+  // title back over it.
+  useEffect(() => {
+    const handleTitleUpdated = (event: Event) => {
+      const { id, title } = (event as CustomEvent).detail || {};
+      if (!id || typeof title !== "string") return;
+      setConversation((prev) => (prev.id === id ? { ...prev, title } : prev));
+    };
+
+    window.addEventListener("conversation-title-updated", handleTitleUpdated);
+    return () =>
+      window.removeEventListener(
+        "conversation-title-updated",
+        handleTitleUpdated
+      );
+  }, []);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
   // Load context settings and VAD config from localStorage on mount
@@ -794,6 +830,17 @@ export function useSystemAudio() {
       try {
         isSavingRef.current = true;
         await saveConversation(conversation);
+        // Replace the fallback title (the raw first transcription) with an
+        // AI-generated one. One-shot per conversation — applyAIConversationTitle
+        // ignores repeat calls, so the debounced saves that follow are no-ops.
+        void applyAIConversationTitle(
+          conversation.id,
+          conversation.messages.map((msg) => ({
+            role: msg.role,
+            content: msg.content,
+          })),
+          titleProviderConfigRef.current
+        );
       } catch (error) {
         console.error("Failed to save system audio conversation:", error);
       } finally {

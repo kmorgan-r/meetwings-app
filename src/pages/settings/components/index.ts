@@ -1,3 +1,4 @@
+export * from "./AITitlesToggle";
 export * from "./AlwaysOnTopToggle";
 export * from "./AppIconToggle";
 export * from "./AutostartToggle";

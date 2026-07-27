@@ -76,6 +76,32 @@ export function useHistory(): UseHistoryReturn {
     refreshConversations();
   }, [refreshConversations]);
 
+  // AI titles are generated in the background and written straight to the
+  // database, so a list rendered before one lands would keep showing the
+  // fallback title until the next full refresh.
+  useEffect(() => {
+    const handleTitleUpdated = (event: Event) => {
+      const { id, title } = (event as CustomEvent).detail || {};
+      if (!id || typeof title !== "string") return;
+
+      setConversations((prev) =>
+        prev.map((conversation) =>
+          conversation.id === id ? { ...conversation, title } : conversation
+        )
+      );
+      setViewingConversation((prev) =>
+        prev && prev.id === id ? { ...prev, title } : prev
+      );
+    };
+
+    window.addEventListener("conversation-title-updated", handleTitleUpdated);
+    return () =>
+      window.removeEventListener(
+        "conversation-title-updated",
+        handleTitleUpdated
+      );
+  }, []);
+
   const handleViewConversation = (conversation: ChatConversation) => {
     setViewingConversation(conversation);
   };

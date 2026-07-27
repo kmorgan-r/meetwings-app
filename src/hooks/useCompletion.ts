@@ -31,6 +31,10 @@ import {
   summarizeConversation,
   shouldSummarize,
 } from "@/lib/functions/meeting-summarizer";
+import {
+  applyAIConversationTitle,
+  type TitleProviderConfig,
+} from "@/lib/functions/conversation-title";
 import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
 import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
@@ -191,6 +195,55 @@ export const useCompletion = () => {
   // so it picks up whatever arrived in the meantime.
   const pendingAutosaveCountRef = useRef(0);
 
+  // Provider wiring for the background title call, held in a ref so the save
+  // callbacks below don't take the provider list as a dependency and get a new
+  // identity every time it changes.
+  const titleProviderConfigRef = useRef<TitleProviderConfig>({
+    provider: undefined,
+    selectedProvider: { provider: "", variables: {} },
+  });
+  useEffect(() => {
+    titleProviderConfigRef.current = {
+      provider: allAiProviders.find((p) => p.id === selectedAIProvider.provider),
+      selectedProvider: selectedAIProvider,
+    };
+  }, [allAiProviders, selectedAIProvider]);
+
+  // Replaces a just-created conversation's fallback title (the raw first
+  // message) with an AI-generated one. Fire-and-forget on purpose: it must not
+  // delay the save path, and applyAIConversationTitle swallows its own
+  // failures, leaving the fallback title in place.
+  const requestAITitle = useCallback(
+    (conversationId: string, messages: ChatMessage[]) => {
+      void applyAIConversationTitle(
+        conversationId,
+        messages.map((msg) => ({ role: msg.role, content: msg.content })),
+        titleProviderConfigRef.current
+      );
+    },
+    []
+  );
+
+  // The generated title lands in the database directly, so the cached copy the
+  // transcript autosave reuses has to be corrected — otherwise the next append
+  // writes the stale fallback title back over it.
+  useEffect(() => {
+    const handleTitleUpdated = (event: Event) => {
+      const { id, title } = (event as CustomEvent).detail || {};
+      const cached = conversationMetaCacheRef.current;
+      if (cached && cached.id === id && typeof title === "string") {
+        conversationMetaCacheRef.current = { ...cached, title };
+      }
+    };
+
+    window.addEventListener("conversation-title-updated", handleTitleUpdated);
+    return () =>
+      window.removeEventListener(
+        "conversation-title-updated",
+        handleTitleUpdated
+      );
+  }, []);
+
   // Chains a write onto saveQueueRef so it can't run concurrently with any
   // other queued conversation write. The queue itself never rejects (each
   // task's outcome is absorbed here) so one failed write can't jam the queue
@@ -245,10 +298,15 @@ export const useCompletion = () => {
         const cachedMeta = conversationMetaCacheRef.current;
         let title: string;
         let createdAt: number;
+        // Whether `title` is a name this conversation already had, as opposed
+        // to one this run just invented. Only the invented case may be handed
+        // to the AI titler — the rest are somebody's real title.
+        let hasStoredTitle: boolean;
 
         if (cachedMeta && cachedMeta.id === conversationId) {
           title = cachedMeta.title;
           createdAt = cachedMeta.createdAt;
+          hasStoredTitle = true;
         } else {
           let existingConversation: ChatConversation | null = null;
           try {
@@ -265,6 +323,7 @@ export const useCompletion = () => {
             existingConversation?.title ||
             generateMeetingTranscriptTitle(firstUserMessage?.content);
           createdAt = existingConversation?.createdAt || Date.now();
+          hasStoredTitle = Boolean(existingConversation?.title);
         }
 
         try {
@@ -297,7 +356,19 @@ export const useCompletion = () => {
           const savedCount = transcriptLengthAtSnapshot;
           lastAutoSavedTranscriptCountRef.current = savedCount;
           persistedMessageCountRef.current = messages.length;
-          conversationMetaCacheRef.current = { id: conversationId, title, createdAt };
+          const latestMeta = conversationMetaCacheRef.current;
+          conversationMetaCacheRef.current = {
+            id: conversationId,
+            // A generated title may have landed while this save was in flight.
+            // Restoring the title this run started with would put the fallback
+            // back in the cache, and the next append would write it to the row.
+            title:
+              latestMeta?.id === conversationId ? latestMeta.title : title,
+            createdAt,
+          };
+          if (!hasStoredTitle) {
+            requestAITitle(conversationId, messages);
+          }
           console.log(
             `[Meeting Transcript Autosave] Saved ${savedCount} transcript segment(s) to conversation ${conversationId}`
           );
@@ -313,7 +384,7 @@ export const useCompletion = () => {
     };
 
     return queueConversationWrite(run);
-  }, [queueConversationWrite]);
+  }, [queueConversationWrite, requestAITitle]);
 
   // Keep a ref in sync with the current meeting transcript length so async
   // save paths (normal submit, quick actions) can update the autosave watermark.
@@ -1079,6 +1150,11 @@ export const useCompletion = () => {
           // This was a full rewrite of every message, so all of them are now
           // persisted — the next periodic autosave can append from here.
           persistedMessageCountRef.current = newMessages.length;
+          // Same rule as the title above: name a conversation that has none,
+          // never rename one.
+          if (!existingConversation?.title) {
+            requestAITitle(conversationId, newMessages);
+          }
         }
       } catch (error) {
         if (!signal?.aborted && currentRequestIdRef.current === requestId) {
@@ -1099,6 +1175,7 @@ export const useCompletion = () => {
       systemPrompt,
       submit,
       queueConversationWrite,
+      requestAITitle,
     ]
   );
 
@@ -1331,6 +1408,11 @@ export const useCompletion = () => {
         // This was a full rewrite of every message, so all of them are now
         // persisted — the next periodic autosave can append from here.
         persistedMessageCountRef.current = newMessages.length;
+        // The conversation had no name before this save, so the title stored
+        // above is the raw first message — hand it to the AI titler.
+        if (!existingConversation?.title) {
+          requestAITitle(conversationId, newMessages);
+        }
       } catch (error) {
         console.error("Failed to save conversation:", error);
         // Show error to user
@@ -1340,7 +1422,7 @@ export const useCompletion = () => {
         }));
       }
     },
-    [state.currentConversationId, queueConversationWrite] // Note: conversationHistory removed - using conversationHistoryRef
+    [state.currentConversationId, queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
   // On startup there is no in-progress conversation (state resets to null), so
