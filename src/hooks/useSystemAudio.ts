@@ -131,6 +131,14 @@ export function useSystemAudio() {
     };
   }, [allAiProviders, selectedAIProvider]);
 
+  // Conversation ids this hook minted itself, and so knows have no stored title
+  // yet. Only those may be renamed by the titler. setConversation is part of the
+  // hook's public surface, so a future caller could load an existing — possibly
+  // user-named — conversation in here, and renaming that would destroy a real
+  // title. Checking conversation.title instead would not work: the in-memory
+  // title is always the fallback by the time the save runs.
+  const selfCreatedConversationIdsRef = useRef<Set<string>>(new Set());
+
   // The titler writes straight to the database, so mirror the new title into
   // local state — otherwise the next debounced save writes the stale fallback
   // title back over it.
@@ -580,6 +588,7 @@ export function useSystemAudio() {
 
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
+      selfCreatedConversationIdsRef.current.add(conversationId);
       setConversation({
         id: conversationId,
         title: "",
@@ -833,14 +842,16 @@ export function useSystemAudio() {
         // Replace the fallback title (the raw first transcription) with an
         // AI-generated one. One-shot per conversation — applyAIConversationTitle
         // ignores repeat calls, so the debounced saves that follow are no-ops.
-        void applyAIConversationTitle(
-          conversation.id,
-          conversation.messages.map((msg) => ({
-            role: msg.role,
-            content: msg.content,
-          })),
-          titleProviderConfigRef.current
-        );
+        if (selfCreatedConversationIdsRef.current.has(conversation.id)) {
+          void applyAIConversationTitle(
+            conversation.id,
+            conversation.messages.map((msg) => ({
+              role: msg.role,
+              content: msg.content,
+            })),
+            titleProviderConfigRef.current
+          );
+        }
       } catch (error) {
         console.error("Failed to save system audio conversation:", error);
       } finally {
@@ -862,8 +873,10 @@ export function useSystemAudio() {
   ]);
 
   const startNewConversation = useCallback(() => {
+    const conversationId = generateConversationId("sysaudio");
+    selfCreatedConversationIdsRef.current.add(conversationId);
     setConversation({
-      id: generateConversationId("sysaudio"),
+      id: conversationId,
       title: "",
       messages: [],
       createdAt: 0,

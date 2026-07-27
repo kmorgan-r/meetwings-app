@@ -514,12 +514,17 @@ export async function updateConversationTitle(
 
   const db = await getDatabase();
 
-  const result = await db.execute(
-    "UPDATE conversations SET title = ? WHERE id = ?",
-    [title, id]
-  );
+  try {
+    const result = await db.execute(
+      "UPDATE conversations SET title = ? WHERE id = ?",
+      [title, id]
+    );
 
-  return result.rowsAffected > 0;
+    return result.rowsAffected > 0;
+  } catch (error) {
+    console.error(`Failed to rename conversation ${id}:`, error);
+    throw error;
+  }
 }
 
 /**
