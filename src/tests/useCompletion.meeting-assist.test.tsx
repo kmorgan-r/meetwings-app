@@ -164,9 +164,8 @@ describe("useCompletion meeting assist mode", () => {
     // An existing title must short-circuit the `||`, not merely tie with it.
     expect(generateConversationTitle).not.toHaveBeenCalled();
     // Pin WHICH row is read. mockResolvedValue ignores arguments, so without
-    // this an implementation that reads the wrong identifier (e.g.
-    // state.currentConversationId, null on the new-conversation path) still
-    // gets EXISTING_CONVERSATION back and passes.
+    // this an implementation that reads an incorrect or undefined identifier
+    // would still receive EXISTING_CONVERSATION and incorrectly pass the test.
     expect(getConversationById).toHaveBeenCalledWith("conversation-1");
     // updatedAt must still advance. Symmetrically "preserving" it would freeze
     // the row's updated_at, which is what the chats list sorts on
@@ -247,7 +246,7 @@ describe("useCompletion meeting assist mode", () => {
     });
 
     // Without the try/catch the rejection reaches the outer catch at
-    // useCompletion.ts:1069-1076, which skips the save entirely and shows a
+    // useCompletion.ts:1083-1091, which skips the save entirely and shows a
     // completion error even though the AI response succeeded.
     expect(saveConversation).toHaveBeenCalledTimes(1);
     expect(saveConversation).toHaveBeenCalledWith(
