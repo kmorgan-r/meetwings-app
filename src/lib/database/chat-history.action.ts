@@ -97,6 +97,13 @@ export async function createConversation(
 
   const db = await getDatabase();
 
+  // Whether *this call* inserted the conversation row. The rollback below is a
+  // compensating delete for a partial write, so it must only ever remove a row
+  // this call created. If the INSERT itself failed — most likely because the id
+  // already exists — the row is somebody else's real conversation, and deleting
+  // it cascades to every message it holds.
+  let insertedConversationRow = false;
+
   try {
     // Insert conversation
     await db.execute(
@@ -108,6 +115,7 @@ export async function createConversation(
         conversation.updatedAt || Date.now(),
       ]
     );
+    insertedConversationRow = true;
 
     // Deduplicate messages by ID before inserting. A duplicate ID would violate
     // the messages primary key and abort the whole insert (rolling back the
@@ -150,9 +158,11 @@ export async function createConversation(
   } catch (error) {
     console.error("Failed to create conversation:", error);
     // Rollback: delete conversation if message insertion failed
-    await db
-      .execute("DELETE FROM conversations WHERE id = ?", [conversation.id])
-      .catch(() => {});
+    if (insertedConversationRow) {
+      await db
+        .execute("DELETE FROM conversations WHERE id = ?", [conversation.id])
+        .catch(() => {});
+    }
     throw error;
   }
 }
@@ -297,6 +307,24 @@ export async function getConversationById(
     console.error(`Failed to get conversation ${id}:`, error);
     return null;
   }
+}
+
+/**
+ * Whether a conversation row exists, letting query failures propagate.
+ *
+ * getConversationById returns null on a failed read, which makes a transient
+ * error indistinguishable from "no such row" — fine for read-only callers that
+ * just render "not found", wrong for anything that routes a write on the answer.
+ */
+async function conversationExists(id: string): Promise<boolean> {
+  const db = await getDatabase();
+
+  const rows = await db.select<{ id: string }[]>(
+    "SELECT id FROM conversations WHERE id = ? LIMIT 1",
+    [id]
+  );
+
+  return rows.length > 0;
 }
 
 /**
@@ -472,9 +500,9 @@ export async function saveConversation(
   }
 
   try {
-    const existing = await getConversationById(conversation.id);
-
-    if (existing) {
+    // Deliberately not getConversationById: a read failure there returns null,
+    // which would route an existing conversation into createConversation.
+    if (await conversationExists(conversation.id)) {
       return await updateConversation(conversation);
     } else {
       return await createConversation(conversation);
@@ -586,6 +614,10 @@ export async function migrateLocalStorageToSQLite(): Promise<{
     let errorCount = 0;
 
     for (const conversation of conversations) {
+      // Same rule as createConversation: the cleanup below may only delete a
+      // row this iteration inserted, never a conversation already in the DB.
+      let insertedConversationRow = false;
+
       try {
         // Validate conversation data
         if (!conversation?.id || !conversation?.title) {
@@ -613,6 +645,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
             conversation.updatedAt || Date.now(),
           ]
         );
+        insertedConversationRow = true;
 
         // Insert messages
         if (
@@ -659,9 +692,13 @@ export async function migrateLocalStorageToSQLite(): Promise<{
         );
         errorCount++;
         // Clean up partially migrated conversation
-        await db
-          .execute("DELETE FROM conversations WHERE id = ?", [conversation?.id])
-          .catch(() => {});
+        if (insertedConversationRow) {
+          await db
+            .execute("DELETE FROM conversations WHERE id = ?", [
+              conversation?.id,
+            ])
+            .catch(() => {});
+        }
       }
     }
 
