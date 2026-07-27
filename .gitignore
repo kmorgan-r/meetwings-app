@@ -30,3 +30,6 @@ create-shortcut.ps1
 
 # Documentation - Ignore all documentation files
 docs/*
+.claude/
+.claude-ship-state.json
+.claude-pr-fix-state.json

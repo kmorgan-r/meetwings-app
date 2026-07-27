@@ -1040,13 +1040,27 @@ export const useCompletion = () => {
           // transcript segments stream in while the write is in flight.
           const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
 
+          // Same existing-row read autoSaveMeetingTranscript uses
+          // (useCompletion.ts:253-267): a quick action names a conversation
+          // that has no name, it never renames one. currentHistory is not the
+          // right signal — it tracks in-memory messages, not whether a row
+          // exists.
+          let existingConversation: ChatConversation | null = null;
+          try {
+            existingConversation = await getConversationById(conversationId);
+          } catch (error) {
+            console.error(
+              "[Meeting Assist] Failed to load existing conversation:",
+              error
+            );
+          }
+
           const conversation: ChatConversation = {
             id: conversationId,
-            title: currentHistory.length === 0
-              ? generateConversationTitle(action)
-              : generateConversationTitle(action),
+            title:
+              existingConversation?.title || generateConversationTitle(action),
             messages: newMessages,
-            createdAt: timestamp,
+            createdAt: existingConversation?.createdAt || timestamp,
             updatedAt: timestamp,
           };
 
