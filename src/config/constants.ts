@@ -31,6 +31,9 @@ export const STORAGE_KEYS = {
   // Meeting Assist Mode settings
   MEETING_ASSIST_MODE_ENABLED: "meeting_assist_mode_enabled",
 
+  // AI-generated conversation titles
+  AI_TITLES_ENABLED: "ai_titles_enabled",
+
   // STT Language setting
   STT_LANGUAGE: "stt_language",
 

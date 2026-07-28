@@ -1,5 +1,6 @@
 import {
   Theme,
+  AITitlesToggle,
   AlwaysOnTopToggle,
   AppIconToggle,
   AutostartToggle,
@@ -20,6 +21,9 @@ const Settings = () => {
 
       {/* Always On Top Toggle */}
       <AlwaysOnTopToggle />
+
+      {/* AI Conversation Titles Toggle */}
+      <AITitlesToggle />
     </PageLayout>
   );
 };

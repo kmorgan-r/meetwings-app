@@ -490,6 +490,44 @@ export async function appendMessagesToConversation(
 }
 
 /**
+ * Rename a conversation without touching its messages or its position in the
+ * chats list. Deliberately leaves updated_at alone: a rename is not new
+ * activity, and the list sorts and groups conversations by that column, so
+ * bumping it would jump the conversation to "now" just because a background
+ * title generation landed.
+ *
+ * Returns false when no row matched — e.g. the conversation was deleted while
+ * the title was being generated.
+ */
+export async function updateConversationTitle(
+  id: string,
+  title: string
+): Promise<boolean> {
+  if (!id || typeof id !== "string") {
+    console.error("Invalid conversation id");
+    return false;
+  }
+  if (!title || typeof title !== "string") {
+    console.error("Invalid conversation title");
+    return false;
+  }
+
+  const db = await getDatabase();
+
+  try {
+    const result = await db.execute(
+      "UPDATE conversations SET title = ? WHERE id = ?",
+      [title, id]
+    );
+
+    return result.rowsAffected > 0;
+  } catch (error) {
+    console.error(`Failed to rename conversation ${id}:`, error);
+    throw error;
+  }
+}
+
+/**
  * Save or update a conversation (upsert operation)
  */
 export async function saveConversation(
