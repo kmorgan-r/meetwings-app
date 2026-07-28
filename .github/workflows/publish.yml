@@ -5,6 +5,14 @@ on:
     branches:
       - main
 
+# GitHub dispatched two identical runs for commit 88d6b84, and both raced to
+# upload the same asset names - one won, the other died on "already_exists".
+# Serialize instead of cancelling: a cancelled run can leave a release
+# half-populated, and a duplicate that merely repeats the uploads is harmless.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # This workflow runs on every push to main, but the release it targets is
   # named after the version in package.json. Merging anything without bumping
@@ -128,19 +136,29 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
           version=$(node -p "require('./package.json').version")
           mkdir -p _aliases
-          for pair in ${{ matrix.bundles }}; do
+          # Split the pair list with pathname expansion off. Every entry
+          # contains a `*`, so bash tries to glob the whole "<glob>:<name>"
+          # word, which matches no file - and under `nullglob` a non-matching
+          # pattern is dropped from the list outright, so the loop ran zero
+          # times and uploaded nothing while still exiting 0.
+          set -f
+          pairs=( ${{ matrix.bundles }} )
+          set +f
+          for pair in "${pairs[@]}"; do
             src="${pair%%:*}"
             dest="${pair##*:}"
             matches=( $src )
             # Fail loudly: a silently missing copy is a dead download button on
-            # the website, which nothing else would catch.
-            if [ ${#matches[@]} -ne 1 ]; then
-              echo "::error::expected exactly 1 bundle matching $src, found ${#matches[@]}"
+            # the website, which nothing else would catch. Without nullglob a
+            # pattern that matches nothing stays literal, so the -e test is what
+            # catches that case.
+            if [ ${#matches[@]} -ne 1 ] || [ ! -e "${matches[0]}" ]; then
+              echo "::error::expected exactly 1 bundle matching $src, got: ${matches[*]}"
               exit 1
             fi
             cp "${matches[0]}" "_aliases/$dest"
             gh release upload "app-v$version" "_aliases/$dest" --clobber
+            echo "uploaded $dest"
           done
