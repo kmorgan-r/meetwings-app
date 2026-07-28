@@ -8,7 +8,7 @@ This file provides context for AI assistants (like Claude) when working on the M
 
 Meetwings is based on [Pluely](https://github.com/iamsrikanthnani/pluely) by [Srikanth Nani](https://www.srikanthnani.com/), providing your invisible AI wingman for every meeting.
 
-- **Version**: 0.1.8
+- **Version**: 1.0.2
 - **License**: GPL-3.0
 - **Size**: ~10MB (27x smaller than commercial alternatives)
 - **Platforms**: Windows, macOS, Linux
