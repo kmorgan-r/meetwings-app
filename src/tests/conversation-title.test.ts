@@ -172,6 +172,30 @@ describe("generateAIConversationTitle", () => {
     expect(userMessage).not.toContain("base64");
   });
 
+  it("leaves the request running for a well-formed response", async () => {
+    await generateAIConversationTitle(MESSAGES);
+
+    expect(mockFetchAIResponse.mock.calls[0][0].signal.aborted).toBe(false);
+  });
+
+  it("cancels a response that blows past any plausible title", async () => {
+    let chunksPulled = 0;
+    mockFetchAIResponse.mockImplementation(async function* () {
+      while (true) {
+        chunksPulled += 1;
+        yield "x".repeat(300);
+      }
+    });
+
+    await expect(generateAIConversationTitle(MESSAGES)).resolves.toBeNull();
+
+    expect(chunksPulled).toBe(2);
+    // Abandoning the loop is not enough on its own: that tears the generator
+    // down with .return(), which skips fetchAIResponse's reader.cancel() and
+    // leaves the HTTP stream open. The abort is what cancels the request.
+    expect(mockFetchAIResponse.mock.calls[0][0].signal.aborted).toBe(true);
+  });
+
   it("returns null when the request throws", async () => {
     mockFetchAIResponse.mockImplementation(async function* () {
       throw new Error("network down");

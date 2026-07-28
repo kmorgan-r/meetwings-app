@@ -159,6 +159,7 @@ export async function generateAIConversationTitle(
     }
 
     let raw = "";
+    const controller = new AbortController();
     for await (const chunk of fetchAIResponse({
       provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
       selectedProvider: providerConfig?.selectedProvider || {
@@ -169,11 +170,19 @@ export async function generateAIConversationTitle(
       history: [],
       userMessage: `CONVERSATION:\n${excerpt}\n\nProvide the JSON title:`,
       imagesBase64: [],
+      signal: controller.signal,
     })) {
       raw += chunk;
       // Stop reading a response that has already blown past any plausible
       // title rather than buffering a whole runaway generation.
+      //
+      // Abort before breaking: leaving the loop tears the generator down with
+      // .return(), which runs finally blocks only, and fetchAIResponse's
+      // streaming branch has none — its reader.cancel() sits behind abort
+      // checks that never get to run. Aborting cancels the fetch itself, which
+      // is what actually releases the HTTP stream.
       if (raw.length > MAX_RAW_RESPONSE_LENGTH) {
+        controller.abort();
         break;
       }
     }
