@@ -6,21 +6,61 @@ on:
       - main
 
 jobs:
+  # This workflow runs on every push to main, but the release it targets is
+  # named after the version in package.json. Merging anything without bumping
+  # that version therefore rebuilds the *existing* release and replaces its
+  # binaries, so a published version stops meaning one fixed set of artifacts.
+  # Skip the build in that case; a bump is what asks for a new release.
+  check-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          # A draft is still fair game: re-running a release that has not been
+          # published yet is how you replace a bad build.
+          if [ "$(gh release view "app-v$version" --json isDraft -q .isDraft 2>/dev/null)" = "false" ]; then
+            echo "app-v$version is already published - skipping build."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   publish-tauri:
+    needs: check-version
+    if: needs.check-version.outputs.publish == 'true'
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
+        # `bundles` lists "<glob>:<stable name>" pairs. The stable names are
+        # what https://github.com/.../releases/latest/download/<name> resolves
+        # to, which is how the website links to the current build without being
+        # edited every release. Tauri's own filenames carry the version, so they
+        # can't serve that purpose.
         include:
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
+            bundles: "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-arm64.dmg"
           - platform: "macos-latest"
             args: "--target x86_64-apple-darwin"
+            bundles: "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-x64.dmg"
           - platform: "ubuntu-22.04"
             args: ""
+            bundles: "src-tauri/target/release/bundle/deb/*.deb:Meetwings-linux-x64.deb src-tauri/target/release/bundle/appimage/*.AppImage:Meetwings-linux-x64.AppImage src-tauri/target/release/bundle/rpm/*.rpm:Meetwings-linux-x64.rpm"
           - platform: "windows-latest"
             args: ""
+            bundles: "src-tauri/target/release/bundle/nsis/*-setup.exe:Meetwings-windows-x64-setup.exe src-tauri/target/release/bundle/msi/*.msi:Meetwings-windows-x64.msi"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -77,3 +117,30 @@ jobs:
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      # Same binaries, uploaded a second time under a name that does not change
+      # between releases, so the download links on meetwings.com keep working.
+      # The versioned originals stay put — the updater's latest.json refers to
+      # those by name.
+      - name: Upload stable-name copies
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          version=$(node -p "require('./package.json').version")
+          mkdir -p _aliases
+          for pair in ${{ matrix.bundles }}; do
+            src="${pair%%:*}"
+            dest="${pair##*:}"
+            matches=( $src )
+            # Fail loudly: a silently missing copy is a dead download button on
+            # the website, which nothing else would catch.
+            if [ ${#matches[@]} -ne 1 ]; then
+              echo "::error::expected exactly 1 bundle matching $src, found ${#matches[@]}"
+              exit 1
+            fi
+            cp "${matches[0]}" "_aliases/$dest"
+            gh release upload "app-v$version" "_aliases/$dest" --clobber
+          done
