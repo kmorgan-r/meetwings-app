@@ -626,6 +626,10 @@ pub async fn stop_meeting_watcher(app: AppHandle) -> Result<StopOutcome, String>
         StopAction::ReapCorpse => {
             let generation = { lock_recover(&state.current).take() };
             if let Some(generation) = generation {
+                // The slot may have been refilled by a concurrent start between
+                // the has_generation read and this take(); signal before joining so
+                // a wrongly-reaped LIVE generation exits instead of blocking here.
+                generation.shutdown.store(true, Ordering::SeqCst);
                 let _ = generation.handle.join();
             }
             state.stopping.store(false, Ordering::SeqCst);
