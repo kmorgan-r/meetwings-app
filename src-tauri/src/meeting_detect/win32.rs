@@ -4,6 +4,10 @@
 //! IMMDevice across polls would survive a mid-call device change as a stale
 //! interface that either fails forever or returns an empty list - and an empty
 //! list reads as "the call ended".
+//!
+//! Callers must have COM initialized (CoInitializeEx) on the calling thread
+//! before invoking enumerate_capture_sessions; otherwise CoCreateInstance fails
+//! with CO_E_NOTINITIALIZED.
 
 use super::{image_name_from_path, SessionInfo};
 use windows::core::Interface;
