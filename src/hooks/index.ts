@@ -20,3 +20,4 @@ export * from "./useMeetingAudio";
 export * from "./useSpeakerDiarization";
 export * from "./useSetupStatus";
 export * from "./usePricing";
+export * from "./useMeetingDetection";
