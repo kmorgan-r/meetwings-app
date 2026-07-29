@@ -48,6 +48,11 @@ export const STORAGE_KEYS = {
   ASSEMBLYAI_API_KEY: "assemblyai_api_key",
   PREVIOUS_STT_PROVIDER: "previous_stt_provider",
 
+  // Meeting detection (Teams call notifications). Named for notification, NOT
+  // recording: the deferred auto-start feature must ship its own separate
+  // opt-in rather than reinterpreting this consent.
+  MEETING_DETECTION_ENABLED: "meeting_detection_enabled",
+
   // User Identity settings
   USER_IDENTITY: "user_identity",
 
@@ -63,6 +68,26 @@ export const STORAGE_KEYS = {
   AI_PROVIDER_CONFIGS: "ai_provider_configs",
   STT_PROVIDER_CONFIGS: "stt_provider_configs",
 } as const;
+
+// Process image names that indicate a meeting call is in progress. Passed to the
+// Rust watcher, so adding an app here is a config change rather than a Rust one.
+export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe"];
+
+// Display names for the detection toasts, keyed by LOWERCASED process name.
+// Matching on the Rust side is case-insensitive and the observed basename keeps
+// its original case, so the lookup must lowercase before indexing.
+export const MEETING_DETECT_LABELS: Record<string, string> = {
+  "ms-teams.exe": "Teams",
+  "teams.exe": "Teams",
+};
+
+export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
+
+// The serialized form of the Rust StopOutcome::TimedOut variant. Kept here so
+// the string that gates the disable-failure ladder has exactly one home; a
+// Rust-side serde change would otherwise turn that branch into dead code with
+// every test still green.
+export const STOP_TIMED_OUT = "timedOut";
 
 // Max number of files that can be attached to a message
 export const MAX_FILES = 6;
