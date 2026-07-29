@@ -189,6 +189,59 @@ fn step(mut state: MachineState, outcome: PollOutcome) -> (MachineState, Option<
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartAction {
+    Spawn,
+    UpdateWatchList,
+    Retryable(&'static str),
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopAction {
+    Nothing,
+    Signal,
+    ReapCorpse,
+    AlreadyStopping,
+}
+
+/// `stopping` is read from an explicit state flag, never derived from whether a
+/// generation is in the slot: `stop_meeting_watcher` removes the generation
+/// before it waits, so a slot-derived rule could never observe a stop in flight
+/// and `Retryable` would be dead code.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn plan_start(running: bool, stopping: bool) -> StartAction {
+    match (running, stopping) {
+        (false, _) => StartAction::Spawn,
+        (true, true) => StartAction::Retryable("watcher is still stopping, retry"),
+        (true, false) => StartAction::UpdateWatchList,
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn plan_stop(running: bool, has_generation: bool) -> StopAction {
+    match (running, has_generation) {
+        (false, false) => StopAction::Nothing,
+        (true, true) => StopAction::Signal,
+        (true, false) => StopAction::AlreadyStopping,
+        (false, true) => StopAction::ReapCorpse,
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn apply_spawn_outcome(running: &AtomicBool, spawned: Result<(), ()>) -> Result<(), String> {
+    match spawned {
+        Ok(()) => Ok(()),
+        Err(()) => {
+            running.store(false, Ordering::SeqCst);
+            Err("failed to spawn the meeting detection thread".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +541,68 @@ mod tests {
                 .any(|e| matches!(e, WatcherEvent::Degraded(_))),
             "an alternating Unknown/Failed run must still reach Degraded"
         );
+    }
+
+    // R13
+    #[test]
+    fn plan_start_spawns_when_not_running() {
+        assert_eq!(plan_start(false, false), StartAction::Spawn);
+        assert_eq!(
+            plan_start(false, true),
+            StartAction::Spawn,
+            "a stale stopping flag with nothing running still spawns"
+        );
+    }
+
+    // R14 — the two-concurrent-threads regression test
+    #[test]
+    fn plan_start_is_retryable_while_a_stop_is_in_flight() {
+        assert!(matches!(plan_start(true, true), StartAction::Retryable(_)));
+        // Spawning here would leave two poll threads alive emitting duplicate
+        // events, and whichever exited first would clear `running` out from
+        // under the other.
+        assert_ne!(plan_start(true, true), StartAction::Spawn);
+    }
+
+    // R15
+    #[test]
+    fn plan_start_is_idempotent_when_already_running() {
+        assert_eq!(plan_start(true, false), StartAction::UpdateWatchList);
+    }
+
+    // R16
+    #[test]
+    fn plan_stop_covers_all_four_states() {
+        assert_eq!(plan_stop(false, false), StopAction::Nothing);
+        assert_eq!(plan_stop(true, true), StopAction::Signal);
+        assert_eq!(
+            plan_stop(true, false),
+            StopAction::AlreadyStopping,
+            "the post-TimedOut state: must not report NotRunning, which the \
+             frontend would read as success while a live thread keeps polling"
+        );
+        assert_eq!(
+            plan_stop(false, true),
+            StopAction::ReapCorpse,
+            "a terminal exit leaves the generation in the slot; join and drop it"
+        );
+    }
+
+    // R17
+    #[test]
+    fn apply_spawn_outcome_rolls_running_back_on_failure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let running = AtomicBool::new(true);
+        assert!(apply_spawn_outcome(&running, Err(())).is_err());
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "a failed spawn must not leave running=true with no thread, or every \
+             later start returns Ok(()) with nothing polling"
+        );
+
+        let running = AtomicBool::new(true);
+        assert!(apply_spawn_outcome(&running, Ok(())).is_ok());
+        assert!(running.load(Ordering::SeqCst));
     }
 }
