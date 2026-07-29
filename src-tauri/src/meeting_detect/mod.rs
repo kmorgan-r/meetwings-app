@@ -4,6 +4,16 @@
 //! compiles and is unit-tested on every target including the Linux CI runner.
 //! `win32.rs` / `stub.rs` contribute only session enumeration.
 
+#[cfg(target_os = "windows")]
+mod win32;
+#[cfg(target_os = "windows")]
+use win32::enumerate_capture_sessions;
+
+#[cfg(not(target_os = "windows"))]
+mod stub;
+#[cfg(not(target_os = "windows"))]
+use stub::enumerate_capture_sessions;
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub const UNSUPPORTED_PLATFORM: &str = "Meeting detection is only supported on Windows";
 
