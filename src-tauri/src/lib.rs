@@ -3,6 +3,7 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod meeting_detect;
 mod shortcuts;
 mod window;
 use std::sync::{Arc, Mutex};
