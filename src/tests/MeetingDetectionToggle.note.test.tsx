@@ -155,7 +155,13 @@ describe("MeetingDetectionToggle", () => {
     expect(emit).toHaveBeenCalledWith("meeting-detection-retry-requested", undefined);
 
     fire("meeting-detection-watcher-restarted", { ok: true });
-    expect(note()).toBeNull();
+    // Synchronously the note clears either way (pending vs a trusting impl),
+    // so that alone proves nothing. Let the re-query settle: the component
+    // re-reads status rather than believing ok:true, and the still-unhealthy
+    // status repaints the note. An impl that trusted ok:true leaves it gone.
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("get_meeting_watcher_status");
+    expect(note()).not.toBeNull();
   });
 
   // F25 - payload-driven, NOT localStorage-driven. Deliver true with storage
