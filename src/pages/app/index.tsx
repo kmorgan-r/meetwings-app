@@ -5,7 +5,7 @@ import {
   AudioVisualizer,
   StatusIndicator,
 } from "./components";
-import { useApp, useSetupStatus } from "@/hooks";
+import { useApp, useSetupStatus, useMeetingDetection } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { ErrorBoundary } from "react-error-boundary";
@@ -15,6 +15,9 @@ import { AlertCircle } from "lucide-react";
 
 const App = () => {
   const { isHidden, systemAudio } = useApp();
+  // Teams call detection. Self-gating: inert outside the `main` window and off
+  // Windows. Takes no arguments and never touches capture state.
+  useMeetingDetection();
   const { customizable } = useAppContext();
   const { isComplete: setupComplete, isLoading: setupLoading, aiConfigured, sttConfigured } = useSetupStatus();
   const platform = getPlatform();

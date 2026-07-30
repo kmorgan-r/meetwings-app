@@ -3,6 +3,7 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod meeting_detect;
 mod shortcuts;
 mod window;
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,7 @@ pub fn run() {
         .manage(shortcuts::RegisteredShortcuts::default())
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
+        .manage(meeting_detect::MeetingWatcherState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -120,6 +122,9 @@ pub fn run() {
             speaker::update_vad_config,
             speaker::get_capture_status,
             speaker::get_audio_sample_rate,
+            meeting_detect::start_meeting_watcher,
+            meeting_detect::stop_meeting_watcher,
+            meeting_detect::get_meeting_watcher_status,
         ])
         .setup(|app| {
             // Setup main window positioning
