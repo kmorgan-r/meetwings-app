@@ -84,6 +84,44 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --manifest-path=src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
+      - name: Run backend tests
+        run: cargo test --manifest-path=src-tauri/Cargo.toml --all-features
+
+  # Every other job here runs on Linux, so `#[cfg(target_os = "windows")]`
+  # modules are not merely untested - rustc never parses them. The only Windows
+  # build in this repo is publish.yml, which runs on push to main AND skips
+  # itself once the current package.json version is already released. A
+  # Windows-only compile error could therefore reach main unnoticed and first
+  # surface on a version bump, failing that leg of the release matrix.
+  backend-windows:
+    name: Backend Lint (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # `shell: bash` so this block behaves identically to the Linux job's;
+      # PowerShell redirection would decide the file's encoding for us.
+      - name: Create dummy .env file
+        shell: bash
+        run: |
+          echo "API_ACCESS_KEY=dummy" > src-tauri/.env
+          echo "PAYMENT_ENDPOINT=dummy" >> src-tauri/.env
+          echo "APP_ENDPOINT=dummy" >> src-tauri/.env
+          echo "POSTHOG_API_KEY=dummy" >> src-tauri/.env
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path=src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
   backend-format:
     name: Backend Format Check (Rust)
     runs-on: ubuntu-latest
