@@ -32,8 +32,43 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Route `tracing` events to stdout.
+///
+/// Without this, every `tracing::debug!`/`warn!` in the crate compiles to a
+/// no-op at runtime: the macros record into a global subscriber, and with none
+/// installed the events are dropped. Code that looks like it reports failures
+/// reports nothing. `meeting_detect` is the case that motivated this - its poll
+/// loop logs the COM/WASAPI failure paths that are otherwise indistinguishable
+/// from "no meeting is running", so a systematic failure there presents as the
+/// feature quietly never firing.
+///
+/// `RUST_LOG` overrides the default when set, using the usual env-filter syntax
+/// (`RUST_LOG=meetwings_lib::meeting_detect=trace`). The default deliberately
+/// scopes to this crate: `debug` across every dependency is unreadable.
+///
+/// `try_init` rather than `init` so a second call - a test harness, or a mobile
+/// entry point invoked twice - returns Err instead of panicking on startup.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("meetwings_lib=debug,meetwings=debug"));
+
+    let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+
+    // One event on the healthy path, so "no log output" is unambiguous: it means
+    // the subscriber failed to install, not that nothing has gone wrong yet.
+    // Every other tracing call in this crate sits on a failure path, which would
+    // otherwise make a broken subscriber indistinguishable from a quiet one.
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tracing initialized");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the builder: a failure during plugin or state setup is exactly the
+    // kind of thing worth having logs for.
+    init_tracing();
+
     // Get PostHog API key
     let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("").to_string();
     #[allow(unused_mut)]
