@@ -29,7 +29,12 @@ unsafe fn process_image_name(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
     }
-    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    // Logged, not silent: None here is indistinguishable from "this process is
+    // not on the watch list", so a systematic failure would present as the
+    // feature quietly never firing, with nothing anywhere to point at the cause.
+    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+        .inspect_err(|e| tracing::debug!("OpenProcess failed for pid {}: {}", pid, e))
+        .ok()?;
 
     let mut buffer = [0u16; 260];
     let mut size = buffer.len() as u32;
@@ -40,7 +45,13 @@ unsafe fn process_image_name(pid: u32) -> Option<String> {
         &mut size,
     );
     let _ = CloseHandle(handle);
-    result.ok()?;
+    // The 260-u16 buffer is the interesting failure here: a longer image path
+    // returns ERROR_INSUFFICIENT_BUFFER, which this logs rather than swallows.
+    result
+        .inspect_err(|e| {
+            tracing::debug!("QueryFullProcessImageNameW failed for pid {}: {}", pid, e)
+        })
+        .ok()?;
 
     let full_path = String::from_utf16_lossy(&buffer[..size as usize]);
     image_name_from_path(&full_path)

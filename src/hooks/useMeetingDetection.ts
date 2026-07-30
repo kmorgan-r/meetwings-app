@@ -49,6 +49,15 @@ export const useMeetingDetection = () => {
 
   // Serializes every watcher command. Held in a ref so it survives a StrictMode
   // remount; an effect-local chain would serialize nothing.
+  //
+  // LOAD-BEARING BEYOND THIS FILE. Two races in the Rust watcher are documented
+  // as accepted rather than fixed - the start-path orphan window
+  // (meeting_detect/mod.rs, at the `running.store(true)` before the spawn) and
+  // the ReapCorpse TOCTOU (same file, in `stop_meeting_watcher`). Both need two
+  // OVERLAPPING watcher commands, and both are unreachable only because this
+  // chain guarantees there is never more than one in flight. Relaxing the
+  // serialization here makes them live bugs, and nothing in Rust - no compiler
+  // check, no test - will catch it. Fix them there first.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
 
   // Resolves once the four detection listeners are actually registered. listen()
