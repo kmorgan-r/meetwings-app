@@ -48,11 +48,28 @@ fn get_app_version() -> String {
 ///
 /// `try_init` rather than `init` so a second call - a test harness, or a mobile
 /// entry point invoked twice - returns Err instead of panicking on startup.
+///
+/// SCOPE, so the next reader does not over-trust this: the writer is stdout, and
+/// release builds on Windows set `windows_subsystem = "windows"` (main.rs:2), so
+/// there is no console attached and these events go nowhere in a shipped build.
+/// This buys developer observability, NOT diagnosis of user-reported issues. A
+/// file sink (tracing-appender, into the app data dir) is what that would need,
+/// and it brings its own questions - rotation, retention, and what a privacy
+/// first app is willing to persist to disk.
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("meetwings_lib=debug,meetwings=debug"));
+    // Quieter by default in release. `debug` is the right default while
+    // developing, but a release build launched from a terminal (macOS/Linux,
+    // where the no-console note above does not apply) should not narrate its
+    // failure paths unless asked. RUST_LOG still opts back in.
+    let fallback = if cfg!(debug_assertions) {
+        "meetwings_lib=debug,meetwings=debug"
+    } else {
+        "meetwings_lib=info,meetwings=info"
+    };
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
 
     let _ = fmt().with_env_filter(filter).with_target(true).try_init();
 
