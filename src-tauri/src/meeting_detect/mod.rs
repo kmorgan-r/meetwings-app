@@ -553,6 +553,18 @@ pub fn start_meeting_watcher(app: AppHandle, processes: Vec<String>) -> Result<(
 
             let shutdown = Arc::new(AtomicBool::new(false));
             let (done_tx, done_rx) = channel();
+            // Set BEFORE the spawn, while the Generation can only be stored
+            // after it (see the comment on the store below). If poll_loop exits
+            // immediately - a CoInitializeEx failure - ExitGuard::drop clears
+            // `running` inside that window. A CONCURRENT start would then read
+            // running == false, spawn a second thread, and this call's store
+            // would clobber the slot with its dead Generation, orphaning the
+            // live thread: no handle, no shutdown flag, polling until exit.
+            // Accepted, not fixed: reaching it needs two OVERLAPPING starts,
+            // and every watcher command in the owner window is serialized
+            // through a single chainRef promise (useMeetingDetection.ts:74).
+            // Closing it properly means holding `current` across the atomics,
+            // the spawn and the store - a lifecycle change worth its own pass.
             state.running.store(true, Ordering::SeqCst);
 
             let thread_args = (
