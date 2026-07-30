@@ -63,6 +63,12 @@ fn init_tracing() {
     // developing, but a release build launched from a terminal (macOS/Linux,
     // where the no-console note above does not apply) should not narrate its
     // failure paths unless asked. RUST_LOG still opts back in.
+    //
+    // The `meetwings` half of each pair is inert today - the bin crate is a
+    // one-line call into this lib and has no tracing calls of its own. Kept so
+    // that a future call site in main.rs is covered by default rather than
+    // silently filtered, which is the exact failure this whole function exists
+    // to remove.
     let fallback = if cfg!(debug_assertions) {
         "meetwings_lib=debug,meetwings=debug"
     } else {
@@ -71,7 +77,13 @@ fn init_tracing() {
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fallback));
 
-    let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+    // ANSI only where a terminal is actually expected. A release build with its
+    // stdout redirected to a file would otherwise write escape sequences into it.
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(cfg!(debug_assertions))
+        .try_init();
 
     // One event on the healthy path, so "no log output" is unambiguous: it means
     // the subscriber failed to install, not that nothing has gone wrong yet.
