@@ -55,53 +55,57 @@ export const MeetingDetectionToggle = ({
       else unlisteners.push(un);
     };
 
-    register("meeting-watcher-error", (payload) =>
-      setStatus({
-        kind: "ok",
-        running: true,
-        lastError: payload?.message ?? "detection error",
-      })
-    );
-    register("meeting-watcher-stopped", (payload) =>
-      setStatus({
-        kind: "ok",
-        running: false,
-        lastError: payload?.reason ?? "detection stopped",
-      })
-    );
-    register("meeting-watcher-recovered", () =>
-      setStatus({ kind: "ok", running: true, lastError: null })
-    );
-    register("meeting-detection-watcher-restarted", (payload) => {
-      if (!payload?.ok) {
+    Promise.all([
+      register("meeting-watcher-error", (payload) =>
+        setStatus({
+          kind: "ok",
+          running: true,
+          lastError: payload?.message ?? "detection error",
+        })
+      ),
+      register("meeting-watcher-stopped", (payload) =>
         setStatus({
           kind: "ok",
           running: false,
-          lastError: payload?.error ?? "retry failed",
-        });
-        return;
-      }
-      // Never assume `running: true` from an ok reply. `start_meeting_watcher`
-      // resolves Ok(()) even when the thread died immediately (a CoInitializeEx
-      // failure whose Drop guard ran before the Generation was stored). That
-      // failure's meeting-watcher-stopped reaches this card FIRST and paints the
-      // note; a reply that asserted health would then erase it, leaving the
-      // switch on, no note, no retry button, and nothing polling.
-      setStatus({ kind: "pending" });
-      void refreshStatus();
-    });
-    register("meeting-detection-setting-changed", (payload) => {
-      // Derived from the payload, not from re-reading storage: the emitter has
-      // already persisted, and a storage read would add a cross-window sharing
-      // assumption no test here could falsify.
-      const enabled = Boolean(payload?.enabled);
-      setIsEnabled(enabled);
-      if (enabled) {
-        // The card's `running` is otherwise the stale mount value, so enabling
-        // would paint "detection unavailable" over a watcher that started fine.
+          lastError: payload?.reason ?? "detection stopped",
+        })
+      ),
+      register("meeting-watcher-recovered", () =>
+        setStatus({ kind: "ok", running: true, lastError: null })
+      ),
+      register("meeting-detection-watcher-restarted", (payload) => {
+        if (!payload?.ok) {
+          setStatus({
+            kind: "ok",
+            running: false,
+            lastError: payload?.error ?? "retry failed",
+          });
+          return;
+        }
+        // Never assume `running: true` from an ok reply. `start_meeting_watcher`
+        // resolves Ok(()) even when the thread died immediately (a CoInitializeEx
+        // failure whose Drop guard ran before the Generation was stored). That
+        // failure's meeting-watcher-stopped reaches this card FIRST and paints the
+        // note; a reply that asserted health would then erase it, leaving the
+        // switch on, no note, no retry button, and nothing polling.
         setStatus({ kind: "pending" });
         void refreshStatus();
-      }
+      }),
+      register("meeting-detection-setting-changed", (payload) => {
+        // Derived from the payload, not from re-reading storage: the emitter has
+        // already persisted, and a storage read would add a cross-window sharing
+        // assumption no test here could falsify.
+        const enabled = Boolean(payload?.enabled);
+        setIsEnabled(enabled);
+        if (enabled) {
+          // The card's `running` is otherwise the stale mount value, so enabling
+          // would paint "detection unavailable" over a watcher that started fine.
+          setStatus({ kind: "pending" });
+          void refreshStatus();
+        }
+      }),
+    ]).catch((error) => {
+      console.error("Meeting detection listener setup failed:", error);
     });
 
     return () => {
