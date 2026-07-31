@@ -120,7 +120,6 @@ export const useMeetingAutoRecord = (
 
   // One ref per message: sharing a single budget would let a user who fixes their
   // VAD setting never see a subsequent genuine capture failure.
-  // (`startFailToastedRef` arrives in Task 5, where it is first read.)
   const setupToastedRef = useRef(false);
   const vadToastedRef = useRef(false);
   const stuckToastedRef = useRef(false);
@@ -160,9 +159,10 @@ export const useMeetingAutoRecord = (
   };
 
   const handleDetected = async () => {
-    // Read once, synchronously, before any await: :170 (the decision) and :190
-    // (the ignore-busy re-check) must see the SAME object, structurally rather
-    // than by coincidence of there being no await between them.
+    // Read once, synchronously, before any await: the decideOnDetected call
+    // below and the ignore-busy re-check further down must see the SAME
+    // object, structurally rather than by coincidence of there being no await
+    // between them.
     const audio = systemAudioRef.current;
     const decision = decideOnDetected({
       enabled: enabledRef.current && listenersOkRef.current,
@@ -243,8 +243,32 @@ export const useMeetingAutoRecord = (
   };
 
   const handleStop = async () => {
-    decideOnEnded({ autoStarted: autoStartedRef.current });
-    // Stop sequence lands in Task 6.
+    if (decideOnEnded({ autoStarted: autoStartedRef.current }) !== "stop") return;
+
+    try {
+      await systemAudioRef.current.stopCapture();
+
+      // stopCapture never rejects either - its whole body is wrapped - so a failed
+      // stop resolves normally and the hook would otherwise believe it worked.
+      //
+      // Note the default: an unreadable status is reported as STILL ACTIVE, not as
+      // success. Defaulting to false would let a broken IPC silently claim the stop
+      // worked and leave a live recording nothing will ever stop again. This is the
+      // same discipline as the sibling hook's disable ladder in
+      // `useMeetingDetection.ts`, which initialises `running = true` and lowers
+      // it only on a SUCCESSFUL query.
+      let stillActive = true;
+      try {
+        stillActive = Boolean(await invoke<boolean>("get_capture_status"));
+      } catch (error) {
+        console.error("get_capture_status rejected after stop:", error);
+      }
+      if (stillActive) toast.error(STOP_FAILED_MESSAGE);
+    } finally {
+      // In a finally so no rejection can strand provenance set forever, and here
+      // rather than relying on capture-stopped, which a failed stop never emits.
+      autoStartedRef.current = false;
+    }
   };
 
   useEffect(() => {

@@ -457,6 +457,33 @@ describe("useMeetingAutoRecord - start", () => {
 
     await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
   });
+
+  it("F14: awaits startCapture before querying status", async () => {
+    // Every mock startCapture elsewhere in this file resolves immediately, so
+    // deleting the `await` before startCapture() in the start sequence leaves the
+    // rest of the suite green. A held promise makes the ordering itself the
+    // assertion: with the await removed, get_capture_status fires right away and
+    // statusCalls() is already 1 below, before releaseStart() ever runs.
+    seedStatus([true]);
+    let releaseStart: () => void = () => {};
+    const audio = makeAudio({
+      startCapture: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStart = resolve;
+          })
+      ),
+    });
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    expect(statusCalls()).toBe(0);
+
+    releaseStart();
+    await waitFor(() => expect(statusCalls()).toBe(1));
+  });
 });
 
 describe("useMeetingAutoRecord - start failure", () => {
@@ -550,5 +577,112 @@ describe("useMeetingAutoRecord - start failure", () => {
 
     await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(2));
     expect(mocks.toast.error).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useMeetingAutoRecord - stop", () => {
+  it("F19: stops a session it started", async () => {
+    seedStatus([true, false]); // confirm start, then post-stop re-query
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F20: never stops a session the user started by hand", async () => {
+    // The provenance regression test. capturing:true means the detect is ignored,
+    // so no provenance is ever claimed and meeting-ended must do nothing.
+    seedStatus([true]); // the ignore-busy cross-check only
+    const audio = makeAudio({ capturing: true });
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    await fire("meeting-ended");
+    await flush();
+
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F21: a capture-stopped event disowns the session", async () => {
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    await fire("capture-stopped"); // the user stopped it by hand
+    await fire("meeting-ended");
+    await flush();
+
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F22: a stop that did not take toasts, and provenance is still cleared", async () => {
+    seedStatus([true, true]); // confirm start, then STILL capturing after the stop
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(STOP_FAILED_MESSAGE);
+
+    // Provenance must be cleared by the stop link ITSELF - a failed stop emits no
+    // capture-stopped, so nothing else would ever clear it.
+    await fire("meeting-ended");
+    await flush();
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it("F22b: a clean stop toasts nothing", async () => {
+    seedStatus([true, false]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F22c: an UNREADABLE post-stop status is reported, not assumed clean", async () => {
+    // The `let stillActive = true` default. Flipping it to false is silent and
+    // leaves a live recording nothing will ever stop again - so it needs a test
+    // that rejects the query, which no other case does.
+    seedStatus([true]); // confirm the start, then swap to rejecting
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_capture_status") throw new Error("ipc down");
+      return undefined;
+    });
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(STOP_FAILED_MESSAGE);
+    // Provenance is still cleared by the finally, so a second ended is a no-op.
+    await fire("meeting-ended");
+    await flush();
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
   });
 });
