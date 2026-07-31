@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
@@ -117,6 +118,24 @@ export const useMeetingAutoRecord = (
   // Held in a ref so it outlives individual renders.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
 
+  // One ref per message: sharing a single budget would let a user who fixes their
+  // VAD setting never see a subsequent genuine capture failure.
+  // (`startFailToastedRef` arrives in Task 5, where it is first read.)
+  const setupToastedRef = useRef(false);
+  const vadToastedRef = useRef(false);
+  const stuckToastedRef = useRef(false);
+
+  const toastOnce = (
+    ref: { current: boolean },
+    message: string,
+    kind: "info" | "error"
+  ) => {
+    if (ref.current) return;
+    ref.current = true;
+    if (kind === "info") toast.info(message);
+    else toast.error(message);
+  };
+
   // Declared BEFORE the listener effect so it runs first: React runs mount effects
   // in declaration order, and enabledRef must be seeded before any callback reads
   // it. Ungated on purpose - the isOwner gate exists to stop two windows driving
@@ -140,7 +159,7 @@ export const useMeetingAutoRecord = (
   };
 
   const handleDetected = async () => {
-    decideOnDetected({
+    const decision = decideOnDetected({
       enabled: enabledRef.current && listenersOkRef.current,
       capturing: systemAudioRef.current.capturing,
       meetingAssist:
@@ -150,7 +169,50 @@ export const useMeetingAutoRecord = (
       setupComplete: setupCompleteRef.current,
       vadEnabled: systemAudioRef.current.vadConfig.enabled,
     });
-    // Dispatch lands in Task 4.
+
+    if (decision === "tell-setup") {
+      toastOnce(setupToastedRef, SETUP_MESSAGE, "info");
+      return;
+    }
+
+    if (decision === "tell-vad") {
+      toastOnce(vadToastedRef, VAD_MESSAGE, "info");
+      return;
+    }
+
+    if (decision === "ignore-busy") {
+      // ONLY meaningful in VAD mode, and this guard is load-bearing. In continuous
+      // mode `capturing: true` with Rust reporting false is the NORMAL idle state
+      // of a manual session: startCapture sets capturing at useSystemAudio.ts:600
+      // and returns at :606-609 WITHOUT invoking start_system_audio_capture, which
+      // is the only place `is_capturing` is ever set (commands.rs:102-105). So a
+      // continuous user waiting to press Enter looks exactly like a stuck mirror.
+      if (!systemAudioRef.current.vadConfig.enabled) return;
+
+      // In VAD mode the two should agree, so a disagreement is real: the mirror
+      // can be stuck true forever because setCapturing(false) exists in exactly
+      // one place (useSystemAudio.ts:686), after an await and a summarization
+      // block inside the same try, so any throw there strands it.
+      //
+      // Report it; do NOT try to repair it by calling stopCapture. An earlier
+      // draft did, and it would have torn down a manual session on the sub-second
+      // window during a manual VAD start, when :600 has set capturing but the
+      // invokes at :613/:621 have not landed. Stomping a real recording is far
+      // worse than a stale feature, so this branch never touches capture.
+      //
+      // Default true on a rejected query: never take an unreadable status as
+      // licence to call the user's session stuck.
+      const active = await invoke<boolean>("get_capture_status").catch(
+        () => true
+      );
+      if (!active) toastOnce(stuckToastedRef, STUCK_MESSAGE, "error");
+      return;
+    }
+
+    // ignore-off, ignore-assist and ignore-undecided are all silent.
+    if (decision !== "start") return;
+
+    // The start sequence lands in Task 5.
   };
 
   const handleStop = async () => {
@@ -217,5 +279,11 @@ export const useMeetingAutoRecord = (
       cancelled = true;
       unlisteners.forEach((un) => un());
     };
+    // handleDetected/handleStop are recreated every render but close over nothing
+    // render-scoped - only refs, module imports and module-level constants - so
+    // capturing them once is safe. Listing them would re-run this effect on every
+    // commit of App (which re-renders per streamed AI chunk), tearing down and
+    // re-registering all five listeners with an async listen() gap each time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOwner]);
 };
