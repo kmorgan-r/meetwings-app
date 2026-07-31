@@ -57,6 +57,38 @@ describe("settings page meeting detection gate", () => {
   });
 });
 
+// Shared render-path stubs for the app page's mount tests below. `App` throws
+// without every one of these - only the @/hooks factory varies between cases.
+// These are vi.doMock, not vi.mock, so they must run inside each `it` body
+// (after that case's own vi.resetModules()), not hoisted to file scope.
+const mockAppRenderDeps = () => {
+  vi.doMock("@/contexts", () => ({
+    // App reads customizable.cursor.type at render, so the stub must hold shape.
+    useApp: () => ({ customizable: { cursor: { type: "default" } } }),
+  }));
+  vi.doMock("@/lib", () => ({ getPlatform: () => "windows" }));
+  vi.doMock("@/layouts", () => ({ ErrorLayout: () => null }));
+  vi.doMock("@/components", () => ({
+    Card: ({ children }: any) => <>{children}</>,
+    Updater: () => null,
+    DragButton: () => null,
+    CustomCursor: () => null,
+    Button: ({ children }: any) => <>{children}</>,
+    WingIcon: () => null,
+  }));
+  vi.doMock("@/pages/app/components", () => ({
+    SystemAudio: () => null,
+    Completion: () => null,
+    AudioVisualizer: () => null,
+    StatusIndicator: () => null,
+  }));
+  vi.doMock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+  vi.doMock("react-error-boundary", () => ({
+    ErrorBoundary: ({ children }: any) => <>{children}</>,
+  }));
+  vi.doMock("lucide-react", () => ({ AlertCircle: () => null }));
+};
+
 // F29 - the hook mount site. Without this, deleting the useMeetingDetection()
 // call from the app page leaves every other test green and the feature inert.
 describe("app page mounts the detection hook", () => {
@@ -81,32 +113,9 @@ describe("app page mounts the detection hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection,
+      useMeetingAutoRecord: vi.fn(),
     }));
-    vi.doMock("@/contexts", () => ({
-      // App reads customizable.cursor.type at render, so the stub must hold shape.
-      useApp: () => ({ customizable: { cursor: { type: "default" } } }),
-    }));
-    vi.doMock("@/lib", () => ({ getPlatform: () => "windows" }));
-    vi.doMock("@/layouts", () => ({ ErrorLayout: () => null }));
-    vi.doMock("@/components", () => ({
-      Card: ({ children }: any) => <>{children}</>,
-      Updater: () => null,
-      DragButton: () => null,
-      CustomCursor: () => null,
-      Button: ({ children }: any) => <>{children}</>,
-      WingIcon: () => null,
-    }));
-    vi.doMock("@/pages/app/components", () => ({
-      SystemAudio: () => null,
-      Completion: () => null,
-      AudioVisualizer: () => null,
-      StatusIndicator: () => null,
-    }));
-    vi.doMock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-    vi.doMock("react-error-boundary", () => ({
-      ErrorBoundary: ({ children }: any) => <>{children}</>,
-    }));
-    vi.doMock("lucide-react", () => ({ AlertCircle: () => null }));
+    mockAppRenderDeps();
 
     const { default: App } = await import("@/pages/app");
     render(
@@ -116,5 +125,81 @@ describe("app page mounts the detection hook", () => {
     );
 
     expect(useMeetingDetection).toHaveBeenCalled();
+  });
+});
+
+// F34/F34b - the auto-record hook mount site. Without this, deleting the
+// useMeetingAutoRecord(...) call from the app page leaves every other test
+// green (including the detection-hook test above, which stubs it as a no-op)
+// and the feature inert.
+describe("app page mounts the auto-record hook", () => {
+  it("F34: mounts useMeetingAutoRecord with the shared systemAudio and setup status", async () => {
+    vi.resetModules(); // or the cached @/pages/app ignores the factory below
+    const systemAudio = { capturing: false };
+    const useMeetingAutoRecord = vi.fn();
+
+    vi.doMock("@/hooks", () => ({
+      useApp: () => ({ isHidden: false, systemAudio }),
+      // isComplete is true while aiConfigured/sttConfigured are both false: a
+      // real state, not a contrived one - cloud mode satisfies isComplete on
+      // its own (useSetupStatus.ts:68,185: `isComplete = cloudMode ||
+      // (aiConfigured && sttConfigured)`) with neither local provider
+      // configured. Chosen so a mount that substitutes either flag for
+      // setupComplete sends `false` where `true` is expected below, and fails.
+      useSetupStatus: () => ({
+        isComplete: true,
+        isLoading: false,
+        aiConfigured: false,
+        sttConfigured: false,
+      }),
+      useMeetingDetection: vi.fn(),
+      useMeetingAutoRecord,
+    }));
+    mockAppRenderDeps();
+
+    const { default: App } = await import("@/pages/app");
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    // Pins the two booleans (and that a substituted aiConfigured/sttConfigured
+    // would fail here - see the fixture comment above) plus that setupLoading
+    // isn't dropped.
+    expect(useMeetingAutoRecord).toHaveBeenCalledWith(systemAudio, true, false);
+    // toHaveBeenCalledWith is deep-equal, so it would also pass a `{ ...systemAudio }`
+    // copy. useMeetingAutoRecord.ts:57-59 requires the SAME object the UI
+    // renders (a second copy would drive independent capture state), so assert
+    // reference identity too.
+    expect(useMeetingAutoRecord.mock.calls[0][0]).toBe(systemAudio);
+  });
+
+  it("F34b: forwards a loading setup status", async () => {
+    vi.resetModules();
+    const systemAudio = { capturing: false };
+    const useMeetingAutoRecord = vi.fn();
+
+    vi.doMock("@/hooks", () => ({
+      useApp: () => ({ isHidden: false, systemAudio }),
+      useSetupStatus: () => ({
+        isComplete: false,
+        isLoading: true,
+        aiConfigured: false,
+        sttConfigured: false,
+      }),
+      useMeetingDetection: vi.fn(),
+      useMeetingAutoRecord,
+    }));
+    mockAppRenderDeps();
+
+    const { default: App } = await import("@/pages/app");
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(useMeetingAutoRecord).toHaveBeenCalledWith(systemAudio, false, true);
   });
 });

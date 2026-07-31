@@ -5,7 +5,12 @@ import {
   AudioVisualizer,
   StatusIndicator,
 } from "./components";
-import { useApp, useSetupStatus, useMeetingDetection } from "@/hooks";
+import {
+  useApp,
+  useSetupStatus,
+  useMeetingDetection,
+  useMeetingAutoRecord,
+} from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { ErrorBoundary } from "react-error-boundary";
@@ -15,11 +20,24 @@ import { AlertCircle } from "lucide-react";
 
 const App = () => {
   const { isHidden, systemAudio } = useApp();
+  // useSetupStatus moves ABOVE useMeetingDetection so useMeetingAutoRecord can be
+  // mounted first. Effects run in hook order, and useMeetingDetection's effect 3
+  // starts the watcher gated only on ITS OWN listeners being ready - so if a Teams
+  // call is already in progress at launch, registering first is what gives this
+  // hook a chance to catch the very first meeting-detected. Best-effort, not a
+  // guarantee (both hooks' listen() promises resolve independently); the cost of
+  // losing the race is one missed auto-start for a call already underway.
+  const {
+    isComplete: setupComplete,
+    isLoading: setupLoading,
+    aiConfigured,
+    sttConfigured,
+  } = useSetupStatus();
+  useMeetingAutoRecord(systemAudio, setupComplete, setupLoading);
   // Teams call detection. Self-gating: inert outside the `main` window and off
   // Windows. Takes no arguments and never touches capture state.
   useMeetingDetection();
   const { customizable } = useAppContext();
-  const { isComplete: setupComplete, isLoading: setupLoading, aiConfigured, sttConfigured } = useSetupStatus();
   const platform = getPlatform();
 
   const openDashboard = async () => {
