@@ -21,3 +21,4 @@ export * from "./useSpeakerDiarization";
 export * from "./useSetupStatus";
 export * from "./usePricing";
 export * from "./useMeetingDetection";
+export * from "./useMeetingAutoRecord";
