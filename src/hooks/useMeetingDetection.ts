@@ -239,7 +239,7 @@ export const useMeetingDetection = () => {
         );
         setEnabled(false);
         await emit("meeting-detection-setting-changed", { enabled: false });
-        toast.error("Could not start meeting detection");
+        toast.error("Could not turn on auto-record");
         throw error;
       }
       await emit("meeting-detection-watcher-restarted", { ok: true });

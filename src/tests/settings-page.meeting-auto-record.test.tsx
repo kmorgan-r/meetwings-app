@@ -40,7 +40,7 @@ beforeEach(() => {
   onWindows = true;
 });
 
-describe("settings page meeting detection gate", () => {
+describe("settings page auto-record gate", () => {
   // F28
   it("renders the toggle on Windows only", () => {
     const { unmount } = render(<Settings />);

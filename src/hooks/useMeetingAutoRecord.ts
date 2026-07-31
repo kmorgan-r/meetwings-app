@@ -52,7 +52,9 @@ export type MeetingAutoRecordAudio = {
  *
  * Single-owner: Tauri events broadcast to every window, so only the main window
  * may drive the single global capture. Mount it once, in the app page, ABOVE
- * useMeetingDetection.
+ * useMeetingDetection. The dashboard window is held off by the label check;
+ * the capture-overlay windows never reach it at all, because main.tsx renders
+ * Overlay instead of the routes for those labels.
  *
  * `systemAudio` is passed in rather than obtained by calling useSystemAudio()
  * here: a second call would create a second, independent copy of the capture
