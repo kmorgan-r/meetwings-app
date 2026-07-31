@@ -775,3 +775,154 @@ describe("useMeetingAutoRecord - watcher lifecycle", () => {
     expect(audio.startCapture).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useMeetingAutoRecord - structure", () => {
+  it("F26: handles two calls back to back", async () => {
+    // confirm start 1, post-stop re-query, confirm start 2. Pin ALL THREE: an
+    // unpinned third call defaults to false and fires a spurious teardown
+    // stopCapture, breaking this case against a CORRECT hook.
+    seedStatus([true, false, true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    await fire("meeting-ended");
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(2));
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it("F27: a rejected command does not poison the chain", async () => {
+    const audio = makeAudio();
+    audio.startCapture = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(undefined);
+    seedStatus([true]);
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected"); // rejects
+    await fire("meeting-detected"); // must still run
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(2));
+  });
+
+  it("F28: a capture-stopped mid-flight does not block later provenance", async () => {
+    // Regression guard, not a live bug: stop_system_audio_capture (which emits
+    // capture-stopped, commands.rs:490) is issued by startCapture at
+    // useSystemAudio.ts:613, BEFORE the real start at :621 - so in production
+    // this event always lands before autoStartedRef is assigned, which happens
+    // two further IPC round trips later (the real start, then the confirmation
+    // query). If that ordering ever inverted - the event delivered AFTER
+    // provenance is claimed - the capture-stopped listener would clear a live
+    // auto-started session's provenance, and the following meeting-ended would
+    // return silently at the decideOnEnded gate: a leaked recording with no
+    // toast at all. This pins the current, correct ordering so a refactor that
+    // assigns provenance before startCapture resolves gets caught here.
+    seedStatus([true, false]); // confirm start, then post-stop re-query
+    let releaseStart: () => void = () => {};
+    const audio = makeAudio({
+      startCapture: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStart = resolve;
+          })
+      ),
+    });
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    await fire("capture-stopped"); // fires while startCapture is still pending
+    releaseStart();
+    await waitFor(() => expect(statusCalls()).toBe(1));
+
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F29: StrictMode does not double-register or double-start", async () => {
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio, true, false, { strict: true });
+    await flush();
+
+    expect(registered("meeting-detected")).toBe(1);
+
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F13: all four toast budgets are independent", async () => {
+    const audio = makeAudio({ vadConfig: { enabled: false } });
+    const view = mount(audio);
+    await flush();
+
+    await fire("meeting-detected"); // 1: VAD
+    view.rerender({ a: makeAudio(), c: false, l: false });
+    await fire("meeting-detected"); // 2: setup
+
+    const busy = makeAudio({ capturing: true });
+    seedStatus([false]);
+    view.rerender({ a: busy, c: true, l: false });
+    await fire("meeting-detected"); // 3: stuck
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+
+    const failing = makeAudio();
+    seedStatus([false]);
+    view.rerender({ a: failing, c: true, l: false });
+    await fire("meeting-detected"); // 4: start failure
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(2));
+    expect(mocks.toast.info).toHaveBeenCalledTimes(2);
+    expect(mocks.toast.info).toHaveBeenCalledWith(VAD_MESSAGE);
+    expect(mocks.toast.info).toHaveBeenCalledWith(SETUP_MESSAGE);
+    expect(mocks.toast.error).toHaveBeenCalledWith(STUCK_MESSAGE);
+    expect(mocks.toast.error).toHaveBeenCalledWith(GENERIC_START_MESSAGE);
+  });
+
+  it("F32: uses the FRESH startCapture after a re-render", async () => {
+    seedStatus([true]);
+    const first = makeAudio();
+    const view = mount(first);
+    await flush();
+
+    const second = makeAudio();
+    view.rerender({ a: second, c: true, l: false });
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(second.startCapture).toHaveBeenCalledTimes(1));
+    expect(first.startCapture).not.toHaveBeenCalled();
+  });
+
+  it("F33: uses the FRESH stopCapture after a re-render", async () => {
+    // Without this, a hook that reads startCapture through the ref but closes over
+    // stopCapture passes every other case - and its real consequence is that
+    // summarization silently never runs for any auto-recorded meeting, because the
+    // captured stopCapture holds an empty conversation.
+    seedStatus([true, false]);
+    const first = makeAudio();
+    const view = mount(first);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(first.startCapture).toHaveBeenCalledTimes(1));
+
+    const second = makeAudio();
+    view.rerender({ a: second, c: true, l: false });
+    await flush();
+    await fire("meeting-ended");
+
+    await waitFor(() => expect(second.stopCapture).toHaveBeenCalledTimes(1));
+    expect(first.stopCapture).not.toHaveBeenCalled();
+  });
+});
