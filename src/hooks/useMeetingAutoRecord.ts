@@ -124,6 +124,7 @@ export const useMeetingAutoRecord = (
   const setupToastedRef = useRef(false);
   const vadToastedRef = useRef(false);
   const stuckToastedRef = useRef(false);
+  const startFailToastedRef = useRef(false);
 
   const toastOnce = (
     ref: { current: boolean },
@@ -159,15 +160,19 @@ export const useMeetingAutoRecord = (
   };
 
   const handleDetected = async () => {
+    // Read once, synchronously, before any await: :170 (the decision) and :190
+    // (the ignore-busy re-check) must see the SAME object, structurally rather
+    // than by coincidence of there being no await between them.
+    const audio = systemAudioRef.current;
     const decision = decideOnDetected({
       enabled: enabledRef.current && listenersOkRef.current,
-      capturing: systemAudioRef.current.capturing,
+      capturing: audio.capturing,
       meetingAssist:
         safeLocalStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED) ===
         "true",
       setupLoading: setupLoadingRef.current,
       setupComplete: setupCompleteRef.current,
-      vadEnabled: systemAudioRef.current.vadConfig.enabled,
+      vadEnabled: audio.vadConfig.enabled,
     });
 
     if (decision === "tell-setup") {
@@ -187,7 +192,7 @@ export const useMeetingAutoRecord = (
       // and returns at :606-609 WITHOUT invoking start_system_audio_capture, which
       // is the only place `is_capturing` is ever set (commands.rs:102-105). So a
       // continuous user waiting to press Enter looks exactly like a stuck mirror.
-      if (!systemAudioRef.current.vadConfig.enabled) return;
+      if (!audio.vadConfig.enabled) return;
 
       // In VAD mode the two should agree, so a disagreement is real: the mirror
       // can be stuck true forever because setCapturing(false) exists in exactly
@@ -212,7 +217,29 @@ export const useMeetingAutoRecord = (
     // ignore-off, ignore-assist and ignore-undecided are all silent.
     if (decision !== "start") return;
 
-    // The start sequence lands in Task 5.
+    await systemAudioRef.current.startCapture();
+
+    // startCapture NEVER throws - it swallows everything into setError /
+    // setSetupRequired - so the only signal is asking Rust. Default false on a
+    // rejected query: an unreadable status must never be reported as a healthy
+    // start. Note this read is `systemAudioRef.current`, not a snapshot taken at
+    // the top of the op: startCapture reports its failure via setError, which only
+    // appears on the NEXT render's object.
+    const started = await invoke<boolean>("get_capture_status").catch(
+      () => false
+    );
+
+    if (started) {
+      autoStartedRef.current = true;
+      return;
+    }
+
+    toastOnce(
+      startFailToastedRef,
+      systemAudioRef.current.error || GENERIC_START_MESSAGE,
+      "error"
+    );
+    await systemAudioRef.current.stopCapture();
   };
 
   const handleStop = async () => {
@@ -280,10 +307,12 @@ export const useMeetingAutoRecord = (
       unlisteners.forEach((un) => un());
     };
     // handleDetected/handleStop are recreated every render but close over nothing
-    // render-scoped - only refs, module imports and module-level constants - so
-    // capturing them once is safe. Listing them would re-run this effect on every
-    // commit of App (which re-renders per streamed AI chunk), tearing down and
-    // re-registering all five listeners with an async listen() gap each time.
+    // render-VARYING - only refs, module imports, and render-invariant local
+    // helpers (toastOnce closes over nothing but the module-level toast, so every
+    // render's copy is behaviourally identical to the last) - so capturing them
+    // once is safe. Listing them would re-run this effect on every commit of App
+    // (which re-renders per streamed AI chunk), tearing down and re-registering
+    // all five listeners with an async listen() gap each time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOwner]);
 };

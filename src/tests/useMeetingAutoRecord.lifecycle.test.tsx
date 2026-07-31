@@ -399,3 +399,156 @@ describe("useMeetingAutoRecord - decision branches", () => {
     expect(audio.startContinuousRecording).not.toHaveBeenCalled();
   });
 });
+
+describe("useMeetingAutoRecord - start", () => {
+  it("F1: starts on detection when the key is seeded on", async () => {
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    // VAD-only: this slice must never drive continuous recording.
+    expect(audio.startContinuousRecording).not.toHaveBeenCalled();
+  });
+
+  it("F2: does NOT start when only the legacy key is set", async () => {
+    stored = { meeting_detection_enabled: "true" };
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    // FIFO sentinel: ignore-off invokes nothing, so enable and fire again.
+    stored.meeting_auto_record_enabled = "true";
+    await fire("meeting-detection-setting-changed", { enabled: true });
+    seedStatus([true]);
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F3: starts after the switch is turned on by event", async () => {
+    stored = {};
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detection-setting-changed", { enabled: true });
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F4: does not start after the switch is turned off by event", async () => {
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detection-setting-changed", { enabled: false });
+    await fire("meeting-detected");
+    // Sentinel: re-enable and fire again to prove the chain has drained.
+    seedStatus([true]);
+    await fire("meeting-detection-setting-changed", { enabled: true });
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("useMeetingAutoRecord - start failure", () => {
+  it("F15: toasts, tears down, and claims no provenance", async () => {
+    seedStatus([false]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(GENERIC_START_MESSAGE);
+    // startCapture already set capturing and opened the popover before failing,
+    // so toasting alone would leave the UI claiming to record nothing.
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+
+    await fire("meeting-ended");
+    await flush();
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1); // not called again
+  });
+
+  it("F15b: a confirmed start toasts nothing and tears nothing down", async () => {
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F16: a REJECTED confirmation is treated as a failed start", async () => {
+    // The only case that fails if `.catch(() => false)` is dropped: without it the
+    // rejection escapes to the chain's catch, so no toast, no teardown, and the UI
+    // is left claiming to record.
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_capture_status") throw new Error("ipc down");
+      return undefined;
+    });
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+
+    await fire("meeting-ended");
+    await flush();
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it("F17: the toast carries the real error set DURING startCapture", async () => {
+    seedStatus([false]);
+    const audio = makeAudio();
+    let view: ReturnType<typeof mount>;
+    // Setting `error` from inside the mock is what makes this discriminate: a
+    // static mount prop passes even against a hook that snapshots systemAudio once
+    // at the top of the op, which is the bug this guards.
+    audio.startCapture = vi.fn(async () => {
+      view.rerender({
+        a: { ...audio, error: "Failed to access system audio" },
+        c: true,
+        l: false,
+      });
+    });
+
+    view = mount(audio);
+    await flush();
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(
+      "Failed to access system audio"
+    );
+  });
+
+  it("F18: only one start-failure toast per run", async () => {
+    seedStatus([false, false]); // one confirmation per failed start
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(2));
+    expect(mocks.toast.error).toHaveBeenCalledTimes(1);
+  });
+});
