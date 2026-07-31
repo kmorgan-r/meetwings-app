@@ -686,3 +686,92 @@ describe("useMeetingAutoRecord - stop", () => {
     expect(audio.stopCapture).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useMeetingAutoRecord - watcher lifecycle", () => {
+  it("F23: warns but keeps recording when the watcher dies mid-session", async () => {
+    seedStatus([true]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    await fire("meeting-watcher-stopped");
+
+    expect(mocks.toast.warning).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.warning).toHaveBeenCalledWith(WATCHER_STOPPED_MESSAGE);
+    // Deliberate: a transient watcher death must not truncate a real recording.
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F23b: says nothing when the watcher dies with nothing recording", async () => {
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-watcher-stopped");
+
+    expect(mocks.toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("F24: turning the switch off mid-recording stops it", async () => {
+    // This path has no other exit: stop_meeting_watcher sets explicit_stop, which
+    // SUPPRESSES meeting-watcher-stopped, and no meeting-ended will ever arrive.
+    seedStatus([true, false]);
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected");
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    await fire("meeting-detection-setting-changed", { enabled: false });
+
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+  });
+
+  it("F24b: turning the switch off with nothing recording stops nothing", async () => {
+    const audio = makeAudio();
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detection-setting-changed", { enabled: false });
+    await flush();
+
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F25: the chain serializes, so a queued op sees the toggle-off", async () => {
+    // [confirm start A, post-stop re-query]. The toggle-off legitimately enqueues a
+    // stop behind ops A and B, and by the time it runs A has confirmed - so this
+    // case also demonstrates switch-off-while-recording end to end.
+    seedStatus([true, false]);
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const audio = makeAudio();
+    audio.startCapture = vi.fn(async () => {
+      await held;
+    });
+
+    mount(audio);
+    await flush();
+    await fire("meeting-detected"); // op A, now in flight and parked
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+
+    await fire("meeting-detected"); // op B queues behind A
+    await fire("meeting-detection-setting-changed", { enabled: false });
+    release();
+
+    // Settle FIRST on a positive marker (rule 1), then assert the absence. Op A
+    // confirms and claims provenance, so the toggle-off's stop runs against it.
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    // Op B re-read enabledRef and found it false, so it never started a second
+    // capture. This is the case's unique value: it is the ONLY one that fails
+    // against a fire-and-forget `enqueue`, because without serialization B would
+    // have run concurrently with A and started one.
+    expect(audio.startCapture).toHaveBeenCalledTimes(1);
+  });
+});
