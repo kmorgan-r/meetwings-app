@@ -104,7 +104,7 @@ beforeEach(() => {
   emit.mockResolvedValue(undefined);
   windowLabel = "main";
   onWindows = true;
-  stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+  stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
 });
 
 describe("useMeetingDetection", () => {
@@ -134,7 +134,7 @@ describe("useMeetingDetection", () => {
 
   // F3 - regression: the setting listener must NOT be trapped in the [enabled] effect
   it("receives the first toggle-on delivered only by event", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "false" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "false" };
     renderHook(() => useMeetingDetection());
     await flush();
     expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
@@ -434,7 +434,7 @@ describe("useMeetingDetection", () => {
     renderHook(() => useMeetingDetection());
     await flush();
 
-    expect(stored[STORAGE_KEYS.MEETING_DETECTION_ENABLED]).toBe("false");
+    expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("false");
     expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
       enabled: false,
     });
@@ -477,7 +477,7 @@ describe("useMeetingDetection", () => {
 
     fire("meeting-watcher-stopped", { reason: "30 consecutive failed polls" });
     expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(stored[STORAGE_KEYS.MEETING_DETECTION_ENABLED]).toBe(
+    expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe(
       "true",
       // deliberately left on so the settings note and its retry stay reachable
     );

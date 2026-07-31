@@ -12,9 +12,9 @@ vi.mock("@/lib/platform", () => ({
 
 // The toggle's own behaviour is covered by its unit test; here we only care
 // whether the settings page renders it.
-vi.mock("@/pages/settings/components/MeetingDetectionToggle", () => ({
-  MeetingDetectionToggle: () => (
-    <div aria-label="Notify me when a Teams call starts" />
+vi.mock("@/pages/settings/components/MeetingAutoRecordToggle", () => ({
+  MeetingAutoRecordToggle: () => (
+    <div aria-label="Automatically record Teams calls" />
   ),
 }));
 
@@ -45,14 +45,14 @@ describe("settings page meeting detection gate", () => {
   it("renders the toggle on Windows only", () => {
     const { unmount } = render(<Settings />);
     expect(
-      screen.queryByLabelText(/notify me when a teams call starts/i)
+      screen.queryByLabelText(/automatically record teams calls/i)
     ).not.toBeNull();
     unmount();
 
     onWindows = false;
     render(<Settings />);
     expect(
-      screen.queryByLabelText(/notify me when a teams call starts/i)
+      screen.queryByLabelText(/automatically record teams calls/i)
     ).toBeNull();
   });
 });

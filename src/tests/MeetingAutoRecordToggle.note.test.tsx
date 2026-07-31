@@ -39,7 +39,7 @@ vi.mock("@/lib", async (importOriginal) => {
   };
 });
 
-import { MeetingDetectionToggle } from "@/pages/settings/components/MeetingDetectionToggle";
+import { MeetingAutoRecordToggle } from "@/pages/settings/components/MeetingAutoRecordToggle";
 import { STORAGE_KEYS } from "@/config/constants";
 
 const flush = async () => {
@@ -62,7 +62,7 @@ const note = () => screen.queryByText(/detection unavailable/i);
 const renderToggle = () =>
   render(
     <MemoryRouter>
-      <MeetingDetectionToggle />
+      <MeetingAutoRecordToggle />
     </MemoryRouter>
   );
 
@@ -73,16 +73,16 @@ beforeEach(() => {
   invoke.mockResolvedValue({ running: true, lastError: null });
 });
 
-describe("MeetingDetectionToggle", () => {
+describe("MeetingAutoRecordToggle", () => {
   // F20
   it("persists and announces a toggle", async () => {
     renderToggle();
     await flush();
 
-    fireEvent.click(screen.getByLabelText(/notify me when a teams call starts/i));
+    fireEvent.click(screen.getByLabelText(/automatically record teams calls/i));
     await flush();
 
-    expect(stored[STORAGE_KEYS.MEETING_DETECTION_ENABLED]).toBe("true");
+    expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("true");
     expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
       enabled: true,
     });
@@ -100,7 +100,7 @@ describe("MeetingDetectionToggle", () => {
     u1();
 
     // on + not running -> desync, note
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     const { unmount: u2 } = renderToggle();
     await flush();
     expect(note()).not.toBeNull();
@@ -122,7 +122,7 @@ describe("MeetingDetectionToggle", () => {
 
   // F22 - fail-visible
   it("shows the note when the status query rejects", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     invoke.mockRejectedValue(new Error("unknown command"));
     renderToggle();
     await flush();
@@ -131,7 +131,7 @@ describe("MeetingDetectionToggle", () => {
 
   // F23 / F31
   it("shows one note for repeated errors and clears it on recovery", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     renderToggle();
     await flush();
 
@@ -146,7 +146,7 @@ describe("MeetingDetectionToggle", () => {
 
   // F24
   it("offers retry only while the feature is on", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     invoke.mockResolvedValue({ running: false, lastError: "x" });
     renderToggle();
     await flush();
@@ -171,7 +171,7 @@ describe("MeetingDetectionToggle", () => {
     renderToggle();
     await flush();
 
-    const toggle = screen.getByLabelText(/notify me when a teams call starts/i);
+    const toggle = screen.getByLabelText(/automatically record teams calls/i);
     expect(toggle).not.toBeChecked();
 
     fire("meeting-detection-setting-changed", { enabled: true });
@@ -192,10 +192,10 @@ describe("MeetingDetectionToggle", () => {
 
   // F27 - the sole-invoker invariant
   it("never invokes the watcher commands directly", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     renderToggle();
     await flush();
-    fireEvent.click(screen.getByLabelText(/notify me when a teams call starts/i));
+    fireEvent.click(screen.getByLabelText(/automatically record teams calls/i));
     await flush();
 
     expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
@@ -204,7 +204,7 @@ describe("MeetingDetectionToggle", () => {
 
   // F30 - no note flash on toggle-on
   it("does not show the note while the status query is pending", async () => {
-    stored = { [STORAGE_KEYS.MEETING_DETECTION_ENABLED]: "true" };
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     let resolveStatus: (v: unknown) => void = () => {};
     invoke.mockImplementation(
       () => new Promise((resolve) => {
@@ -220,5 +220,22 @@ describe("MeetingDetectionToggle", () => {
       await Promise.resolve();
     });
     expect(note()).toBeNull();
+  });
+
+  it("renders off when only the legacy detection key is set", async () => {
+    // #31's toggle copy promised "Does not start or stop recording", so its
+    // persisted `true` is NOT consent to being recorded. The old key must not be
+    // migrated - a user who had detection on opts in again, to honest copy.
+    stored = { meeting_detection_enabled: "true" };
+
+    renderToggle();
+    // Every other case in this file flushes. Without it the component's mount
+    // get_meeting_watcher_status resolves after the test and setStatus runs
+    // outside act.
+    await flush();
+
+    expect(
+      screen.getByLabelText("Automatically record Teams calls")
+    ).not.toBeChecked();
   });
 });

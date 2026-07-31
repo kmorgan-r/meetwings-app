@@ -48,10 +48,11 @@ export const STORAGE_KEYS = {
   ASSEMBLYAI_API_KEY: "assemblyai_api_key",
   PREVIOUS_STT_PROVIDER: "previous_stt_provider",
 
-  // Meeting detection (Teams call notifications). Named for notification, NOT
-  // recording: the deferred auto-start feature must ship its own separate
-  // opt-in rather than reinterpreting this consent.
-  MEETING_DETECTION_ENABLED: "meeting_detection_enabled",
+  // Auto-record meetings (detect Teams calls and record them). Deliberately a NEW
+  // key: the previous `meeting_detection_enabled` carried consent to NOTIFICATIONS
+  // only ("Does not start or stop recording"), so reusing it would silently expand
+  // what the user agreed to. The old key is deleted, not migrated.
+  MEETING_AUTO_RECORD_ENABLED: "meeting_auto_record_enabled",
 
   // User Identity settings
   USER_IDENTITY: "user_identity",

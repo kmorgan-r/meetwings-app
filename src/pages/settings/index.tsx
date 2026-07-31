@@ -4,7 +4,7 @@ import {
   AlwaysOnTopToggle,
   AppIconToggle,
   AutostartToggle,
-  MeetingDetectionToggle,
+  MeetingAutoRecordToggle,
 } from "./components";
 import { PageLayout } from "@/layouts";
 import { isWindows } from "@/lib/platform";
@@ -27,8 +27,8 @@ const Settings = () => {
       {/* AI Conversation Titles Toggle */}
       <AITitlesToggle />
 
-      {/* Meeting Detection Toggle - Windows only */}
-      {isWindows() && <MeetingDetectionToggle />}
+      {/* Auto-record Meetings Toggle - Windows only */}
+      {isWindows() && <MeetingAutoRecordToggle />}
     </PageLayout>
   );
 };
