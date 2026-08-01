@@ -18,16 +18,18 @@ const label = (process?: string) =>
   MEETING_DETECT_FALLBACK_LABEL;
 
 const readSetting = () =>
-  safeLocalStorage.getItem(STORAGE_KEYS.MEETING_DETECTION_ENABLED) === "true";
+  safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) === "true";
 
 /**
  * Owns the Teams call detection watcher and its toasts.
  *
- * Single-owner: the whole React tree mounts in both the `main` and `dashboard`
- * windows and Tauri events broadcast to all of them, so only the main window may
- * drive the watcher. Mount it once, in the app page.
+ * Single-owner: Tauri events broadcast to every window, so only the main window may
+ * drive the watcher. Today only `main` renders the app page, but a capture-overlay
+ * window class also loads index.html, so the gate is defence in depth. Mount it
+ * once, in the app page.
  *
- * This hook must never touch capture state - notification only.
+ * This hook must never touch capture state - capture is owned by
+ * useMeetingAutoRecord.
  */
 export const useMeetingDetection = () => {
   const isOwner = useMemo(
@@ -231,10 +233,13 @@ export const useMeetingDetection = () => {
       try {
         await startWatcher();
       } catch (error) {
-        safeLocalStorage.setItem(STORAGE_KEYS.MEETING_DETECTION_ENABLED, "false");
+        safeLocalStorage.setItem(
+          STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
+          "false"
+        );
         setEnabled(false);
         await emit("meeting-detection-setting-changed", { enabled: false });
-        toast.error("Could not start meeting detection");
+        toast.error("Could not turn on auto-record");
         throw error;
       }
       await emit("meeting-detection-watcher-restarted", { ok: true });

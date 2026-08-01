@@ -5,7 +5,7 @@ import { Switch, Label, Header, Button } from "@/components";
 import { safeLocalStorage } from "@/lib";
 import { STORAGE_KEYS } from "@/config/constants";
 
-interface MeetingDetectionToggleProps {
+interface MeetingAutoRecordToggleProps {
   className?: string;
 }
 
@@ -14,12 +14,13 @@ type Status =
   | { kind: "ok"; running: boolean; lastError: string | null }
   | { kind: "rejected" };
 
-export const MeetingDetectionToggle = ({
+export const MeetingAutoRecordToggle = ({
   className,
-}: MeetingDetectionToggleProps) => {
+}: MeetingAutoRecordToggleProps) => {
   const [isEnabled, setIsEnabled] = useState(
     () =>
-      safeLocalStorage.getItem(STORAGE_KEYS.MEETING_DETECTION_ENABLED) === "true"
+      safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) ===
+      "true"
   );
   // Three-valued: `pending` renders no note, or the note flashes on every visit
   // to this page before the query resolves.
@@ -99,7 +100,7 @@ export const MeetingDetectionToggle = ({
         setIsEnabled(enabled);
         if (enabled) {
           // The card's `running` is otherwise the stale mount value, so enabling
-          // would paint "detection unavailable" over a watcher that started fine.
+          // would paint "auto-record unavailable" over a watcher that started fine.
           setStatus({ kind: "pending" });
           void refreshStatus();
         }
@@ -117,7 +118,7 @@ export const MeetingDetectionToggle = ({
   const handleSwitchChange = async (checked: boolean) => {
     setIsEnabled(checked);
     safeLocalStorage.setItem(
-      STORAGE_KEYS.MEETING_DETECTION_ENABLED,
+      STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
       String(checked)
     );
     setStatus({ kind: "pending" });
@@ -138,41 +139,43 @@ export const MeetingDetectionToggle = ({
 
   // The `isEnabled` conjunct is load-bearing: `running: false` is the ordinary
   // state for every user who never turned the feature on, so a bare !running
-  // predicate would show "detection unavailable" to all of them.
+  // predicate would show "auto-record unavailable" to all of them.
   const showNote =
     isEnabled &&
     (status.kind === "rejected" ||
       (status.kind === "ok" && (!status.running || status.lastError !== null)));
 
   return (
-    <div id="meeting-detection" className={`space-y-2 ${className ?? ""}`}>
+    <div id="meeting-auto-record" className={`space-y-2 ${className ?? ""}`}>
       <Header
-        title="Meeting Detection"
-        description="Get notified when a Microsoft Teams call starts"
+        title="Auto-record meetings"
+        description="Record Microsoft Teams calls automatically"
         isMainTitle
       />
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div>
             <Label className="text-sm font-medium">
-              Notify me when a Teams call starts
+              Automatically record Teams calls
             </Label>
             <p className="text-xs text-muted-foreground mt-1">
-              Shows a notification when a Teams call begins or ends. Does not
-              start or stop recording.
+              Starts recording when a Teams call begins and stops when it ends.
+              Requires voice detection to be enabled in audio settings. Windows
+              only. Participants may need to be told the call is being recorded —
+              rules vary by country.
             </p>
           </div>
         </div>
         <Switch
           checked={isEnabled}
           onCheckedChange={handleSwitchChange}
-          aria-label="Notify me when a Teams call starts"
+          aria-label="Automatically record Teams calls"
         />
       </div>
       {showNote && (
         <div className="flex items-center justify-between rounded-md border border-destructive/40 px-3 py-2">
           <p className="text-xs text-destructive">
-            Detection unavailable
+            Auto-record unavailable
             {status.kind === "ok" && status.lastError
               ? ` — ${status.lastError}`
               : ""}
