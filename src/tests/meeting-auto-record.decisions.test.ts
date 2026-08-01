@@ -10,7 +10,7 @@ import {
 const ALL_CLEAR = {
   enabled: true,
   capturing: false,
-  meetingAssist: false,
+  meetingAssistCapturing: false,
   setupLoading: false,
   setupComplete: true,
   vadEnabled: true,
@@ -29,10 +29,10 @@ describe("decideOnDetected", () => {
     expect(decideOnDetected({ ...ALL_CLEAR, capturing: true })).toBe("ignore-busy");
   });
 
-  it("ignores when Meeting Assist Mode owns the device", () => {
-    expect(decideOnDetected({ ...ALL_CLEAR, meetingAssist: true })).toBe(
-      "ignore-assist"
-    );
+  it("ignores when Meeting Assist Mode is holding the device", () => {
+    expect(
+      decideOnDetected({ ...ALL_CLEAR, meetingAssistCapturing: true })
+    ).toBe("ignore-assist");
   });
 
   it("ignores while setup status is still loading", () => {

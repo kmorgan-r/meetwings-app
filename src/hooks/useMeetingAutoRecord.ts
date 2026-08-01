@@ -166,12 +166,42 @@ export const useMeetingAutoRecord = (
     // object, structurally rather than by coincidence of there being no await
     // between them.
     const audio = systemAudioRef.current;
+
+    const enabled = enabledRef.current && listenersOkRef.current;
+    const assistSetting =
+      safeLocalStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED) ===
+      "true";
+
+    // Meeting Assist Mode only OWNS the capture device while it is ACTUALLY
+    // capturing. useMeetingAudio is gated on `meetingAssistMode && enableVAD`
+    // (Audio.tsx:124), and enableVAD is transient mic state held in
+    // useCompletion - below this hook's mount site, unpersisted, and invisible
+    // here. The setting alone is therefore far broader than the real conflict:
+    // with the pill on and the mic closed nothing is capturing, and standing
+    // down helps nobody. That combination is the DEFAULT (enableVAD starts
+    // false, useCompletion.ts:120), so the broad guard silently disabled the
+    // whole feature for anyone who left Meeting Assist on.
+    //
+    // Ask Rust instead of inferring. useMeetingAudio drives the SAME global
+    // capture (useMeetingAudio.ts:190 and useSystemAudio.ts:621 both invoke
+    // start_system_audio_capture) but does so without touching useSystemAudio's
+    // state - which is precisely why `capturing` above cannot see it, and why
+    // this query is the only honest signal available.
+    //
+    // Only pay for the round trip when it can change the outcome: the
+    // `enabled` and `capturing` branches are decided before meetingAssist is
+    // consulted at all (see the branch order in decideOnDetected) and cost
+    // nothing. Default true on a rejected query - an unreadable status must
+    // never be taken as licence to stomp a live Meeting Assist session.
+    const meetingAssistCapturing =
+      enabled && !audio.capturing && assistSetting
+        ? await invoke<boolean>("get_capture_status").catch(() => true)
+        : assistSetting;
+
     const decision = decideOnDetected({
-      enabled: enabledRef.current && listenersOkRef.current,
+      enabled,
       capturing: audio.capturing,
-      meetingAssist:
-        safeLocalStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED) ===
-        "true",
+      meetingAssistCapturing,
       setupLoading: setupLoadingRef.current,
       setupComplete: setupCompleteRef.current,
       vadEnabled: audio.vadConfig.enabled,

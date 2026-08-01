@@ -331,28 +331,87 @@ describe("useMeetingAutoRecord - decision branches", () => {
     expect(statusCalls()).toBe(0);
   });
 
-  it("F9: defers to Meeting Assist Mode without even querying status", async () => {
+  it("F9: defers to Meeting Assist Mode when it is actually holding the capture", async () => {
     stored.meeting_assist_mode_enabled = "true";
-    seedStatus([true]);
+    seedStatus([true]); // the assist probe: a capture IS live
+    const audio = makeAudio();
+    mount(audio);
+    await flush();
+
+    await fire("meeting-detected");
+
+    // One query - the assist probe - and nothing else. Asserting the exact count
+    // is what distinguishes this from F9b below: a hook that skipped the probe
+    // and deferred on the bare setting would report 0 here and still "pass" a
+    // startCapture-not-called assertion.
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(mocks.toast.info).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F9b: starts when the Meeting Assist setting is on but nothing is capturing", async () => {
+    // The DEFAULT state for anyone who leaves the Meeting pill on: useMeetingAudio
+    // needs `meetingAssistMode && enableVAD` to capture (Audio.tsx:124) and
+    // enableVAD starts false (useCompletion.ts:120). Guarding on the bare setting
+    // disabled the feature outright for these users, silently - ignore-assist does
+    // not toast. This is the regression test for that.
+    stored.meeting_assist_mode_enabled = "true";
+    seedStatus([false, true]); // probe: idle. then the start confirmation.
+    const audio = makeAudio();
+    mount(audio);
+    await flush();
+
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    expect(statusCalls()).toBe(2); // probe + start confirmation, nothing more
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(mocks.toast.info).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F9c: defers when the assist probe cannot be read", async () => {
+    // Conservative default, matching the ignore-busy cross-check: an unreadable
+    // status must never be licence to stomp a live Meeting Assist session.
+    stored.meeting_assist_mode_enabled = "true";
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_capture_status") throw new Error("ipc down");
+      return undefined;
+    });
+    const audio = makeAudio();
+    mount(audio);
+    await flush();
+
+    await fire("meeting-detected");
+
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(mocks.toast.info).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F9d: does not probe when the switch is off or a session is already open", async () => {
+    // The probe must stay behind the cheap branches. Without this, every detection
+    // with the pill on costs an IPC round trip even when the feature is off.
+    stored.meeting_assist_mode_enabled = "true";
+    stored.meeting_auto_record_enabled = "false";
     const audio = makeAudio();
     const view = mount(audio);
     await flush();
 
-    await fire("meeting-detected"); // ignore-assist: invokes nothing at all
+    await fire("meeting-detected"); // ignore-off: no probe
 
-    // Rule 1 FIFO sentinel: this branch is silent, so drive a SECOND detect down a
-    // branch that does invoke something, and wait on that. The chain is FIFO, so
-    // once the sentinel is observable the assist op has already run.
-    stored.meeting_assist_mode_enabled = "false";
+    // Rule 1 FIFO sentinel: the off branch is silent, so drive a second detect
+    // down ignore-busy - which queries exactly once - and wait on that. The chain
+    // is FIFO, so observing the sentinel proves the off op already ran.
+    stored.meeting_auto_record_enabled = "true";
+    await fire("meeting-detection-setting-changed", { enabled: true });
     view.rerender({ a: makeAudio({ capturing: true }), c: true, l: false });
-    await fire("meeting-detected"); // ignore-busy: exactly one status query
+    await fire("meeting-detected"); // ignore-busy: one query, and no assist probe
 
     await waitFor(() => expect(statusCalls()).toBe(1));
-    // One query total means the assist detect made none, and neither detect
-    // started anything.
     expect(audio.startCapture).not.toHaveBeenCalled();
-    expect(mocks.toast.info).not.toHaveBeenCalled();
-    expect(mocks.toast.error).not.toHaveBeenCalled();
   });
 
   it("F10: stays silent while setup is loading, and keeps the toast budget", async () => {

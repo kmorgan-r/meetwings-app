@@ -10,7 +10,7 @@ export type DetectedDecision =
   | "start"
   | "ignore-off" // the switch is off
   | "ignore-busy" // a session is already open
-  | "ignore-assist" // Meeting Assist Mode owns the capture device
+  | "ignore-assist" // Meeting Assist Mode is holding the capture device
   | "ignore-undecided" // setup status has not finished loading
   | "tell-setup" // no AI/STT provider, and not a cloud subscriber
   | "tell-vad"; // VAD disabled, so nothing would actually record
@@ -27,11 +27,19 @@ export type WatcherStoppedAction = "warn" | "ignore";
  * tested before `setupComplete` and `vadEnabled`: a manual continuous session is
  * `capturing: true` with `vadEnabled: false`, and must be ignored in silence
  * rather than drawing the "enable voice detection" toast.
+ *
+ * `meetingAssistCapturing` is "Meeting Assist Mode is HOLDING the capture", not
+ * "the Meeting Assist setting is on". The two are not the same: useMeetingAudio
+ * only captures while `meetingAssistMode && enableVAD` (Audio.tsx:124), and
+ * enableVAD defaults to false. Passing the bare setting here disables the whole
+ * feature for every user who leaves the Meeting pill on with the mic closed -
+ * silently, since this branch does not toast. The caller resolves it against
+ * `get_capture_status`; see useMeetingAutoRecord.
  */
 export const decideOnDetected = (s: {
   enabled: boolean;
   capturing: boolean;
-  meetingAssist: boolean;
+  meetingAssistCapturing: boolean;
   setupLoading: boolean;
   setupComplete: boolean;
   vadEnabled: boolean;
@@ -40,7 +48,7 @@ export const decideOnDetected = (s: {
     ? "ignore-off"
     : s.capturing
     ? "ignore-busy"
-    : s.meetingAssist
+    : s.meetingAssistCapturing
     ? "ignore-assist"
     : s.setupLoading
     ? "ignore-undecided"
