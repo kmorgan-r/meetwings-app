@@ -100,7 +100,7 @@ export const MeetingAutoRecordToggle = ({
         setIsEnabled(enabled);
         if (enabled) {
           // The card's `running` is otherwise the stale mount value, so enabling
-          // would paint "detection unavailable" over a watcher that started fine.
+          // would paint "auto-record unavailable" over a watcher that started fine.
           setStatus({ kind: "pending" });
           void refreshStatus();
         }
@@ -139,7 +139,7 @@ export const MeetingAutoRecordToggle = ({
 
   // The `isEnabled` conjunct is load-bearing: `running: false` is the ordinary
   // state for every user who never turned the feature on, so a bare !running
-  // predicate would show "detection unavailable" to all of them.
+  // predicate would show "auto-record unavailable" to all of them.
   const showNote =
     isEnabled &&
     (status.kind === "rejected" ||

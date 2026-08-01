@@ -54,7 +54,7 @@ const fire = (event: string, payload?: unknown) =>
     listeners.get(event)?.forEach((cb) => cb({ payload }));
   });
 
-const note = () => screen.queryByText(/detection unavailable/i);
+const note = () => screen.queryByText(/auto-record unavailable/i);
 
 // The component renders <Header>, which calls useNavigate() unconditionally
 // (src/components/Header/index.tsx). A bare render throws
@@ -138,7 +138,7 @@ describe("MeetingAutoRecordToggle", () => {
     fire("meeting-watcher-error", { message: "a" });
     fire("meeting-watcher-error", { message: "b" });
     fire("meeting-watcher-error", { message: "c" });
-    expect(screen.getAllByText(/detection unavailable/i)).toHaveLength(1);
+    expect(screen.getAllByText(/auto-record unavailable/i)).toHaveLength(1);
 
     fire("meeting-watcher-recovered");
     expect(note()).toBeNull();
