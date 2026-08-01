@@ -104,6 +104,12 @@ export const useMeetingAutoRecord = (
     setupLoadingRef.current = setupLoading;
   });
 
+  // Never read on its own on a start path - every start goes through
+  // `enabledRef.current && listenersOkRef.current`. A partial subscription failure
+  // leaves the listeners that DID register live, so this ref keeps being updated by
+  // meeting-detection-setting-changed while the feature is meant to be off; only
+  // the combined flag knows that. A future branch reading this alone would start
+  // recordings it cannot stop - exactly what listenersOkRef exists to prevent.
   const enabledRef = useRef(false);
   const autoStartedRef = useRef(false);
 

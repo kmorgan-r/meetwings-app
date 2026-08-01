@@ -175,7 +175,7 @@ export const MeetingAutoRecordToggle = ({
       {showNote && (
         <div className="flex items-center justify-between rounded-md border border-destructive/40 px-3 py-2">
           <p className="text-xs text-destructive">
-            Detection unavailable
+            Auto-record unavailable
             {status.kind === "ok" && status.lastError
               ? ` — ${status.lastError}`
               : ""}
