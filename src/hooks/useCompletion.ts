@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, Dispatch, SetStateAction } from "react";
+import { toast } from "sonner";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import {
@@ -167,6 +168,15 @@ export const useCompletion = () => {
   // periodically persist transcripts to chat history without stale closures.
   const meetingTranscriptLengthRef = useRef(0);
   const lastAutoSavedTranscriptCountRef = useRef(0);
+  // Transcript loss is reported ONLY from the autosave catch below, and only
+  // once the tail has failed to shrink across consecutive attempts. A plain
+  // one-shot budget is measurably wrong here: a failed save advances no
+  // watermark, so the periodic autosave retries on the next segment and a
+  // transient failure repairs itself - spending the budget on a blip and
+  // leaving a later permanent failure silent.
+  const consecutiveAutosaveFailuresRef = useRef(0);
+  const transcriptLossReportedRef = useRef(false);
+  const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
   // How many of conversationHistoryRef.current's messages (from the start)
   // are already persisted for the current conversation. Lets the periodic
   // autosave append only the new tail instead of redoing a full
@@ -339,6 +349,8 @@ export const useCompletion = () => {
                 Date.now(),
                 newTailMessages
               );
+              consecutiveAutosaveFailuresRef.current = 0;
+              transcriptLossReportedRef.current = false;
             }
           } else {
             // First save for this conversation — need the full create/update
@@ -351,6 +363,8 @@ export const useCompletion = () => {
               updatedAt: Date.now(),
             };
             await saveConversation(conversation);
+            consecutiveAutosaveFailuresRef.current = 0;
+            transcriptLossReportedRef.current = false;
           }
           setActiveConversationId(conversationId);
           const savedCount = transcriptLengthAtSnapshot;
@@ -377,6 +391,17 @@ export const useCompletion = () => {
             "[Meeting Transcript Autosave] Failed to save meeting transcript:",
             error
           );
+          consecutiveAutosaveFailuresRef.current += 1;
+          if (
+            consecutiveAutosaveFailuresRef.current >=
+              AUTOSAVE_FAILURE_REPORT_THRESHOLD &&
+            !transcriptLossReportedRef.current
+          ) {
+            transcriptLossReportedRef.current = true;
+            toast.error(
+              "Meeting transcript could not be saved — recent segments may be lost"
+            );
+          }
         }
       } finally {
         pendingAutosaveCountRef.current -= 1;
