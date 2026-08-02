@@ -2,12 +2,14 @@ import { fetchSTT } from "@/lib";
 import { UseCompletionReturn, SpeakerInfo, SpeakerIdFactory } from "@/types";
 import { useMicVAD } from "@ricky0123/vad-react";
 import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components";
 import { useApp } from "@/contexts";
 import { floatArrayToWav } from "@/lib/utils";
 import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
 import { useTranslation } from "@/hooks";
+import { isUsableTranscription } from "@/hooks/useMeetingAudio";
+import { toast } from "sonner";
 
 interface AutoSpeechVADProps {
   submit: UseCompletionReturn["submit"];
@@ -87,7 +89,7 @@ const AutoSpeechVADInternal = ({
           language: sttLanguage,
         });
 
-        if (transcription) {
+        if (isUsableTranscription(transcription)) {
           if (meetingAssistMode && addMeetingTranscript) {
             // In Meeting Assist Mode, accumulate transcripts instead of auto-submitting
             // Phase 1: Label all microphone audio as "You"
@@ -125,6 +127,24 @@ const AutoSpeechVADInternal = ({
       }
     },
   });
+
+  // Nothing else surfaces a failed mic half. On MicVAD.new() failure vad-react
+  // sets `errored`, `listening` stays false, and the button below renders the
+  // plain MicIcon - identical to "voice input off". Under auto-record that is
+  // a silently empty meeting.
+  //
+  // Deduped per mount, which is the right granularity: this component is keyed
+  // on microphoneDeviceId at BOTH Audio.tsx:151 and the wrapper below, so it
+  // remounts on every device change and every enableVAD toggle.
+  const vadErrorToastedRef = useRef(false);
+  useEffect(() => {
+    if (!vad.errored || vadErrorToastedRef.current) return;
+    vadErrorToastedRef.current = true;
+    toast.error("Microphone could not start", {
+      description: String(vad.errored),
+      duration: 5000,
+    });
+  }, [vad.errored]);
 
   return (
     <>
