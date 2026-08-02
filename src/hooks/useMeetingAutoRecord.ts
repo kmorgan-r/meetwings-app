@@ -9,6 +9,7 @@ import {
   decideOnDetected,
   decideOnEnded,
   decideOnWatcherStopped,
+  type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
 import { STORAGE_KEYS } from "@/config/constants";
 
@@ -111,7 +112,7 @@ export const useMeetingAutoRecord = (
   // the combined flag knows that. A future branch reading this alone would start
   // recordings it cannot stop - exactly what listenersOkRef exists to prevent.
   const enabledRef = useRef(false);
-  const autoStartedRef = useRef(false);
+  const startedModeRef = useRef<StartedMode>(null);
 
   // Cleared if any subscription fails. A hook that registered meeting-detected but
   // NOT meeting-ended would start recordings it can never auto-stop, which is
@@ -199,7 +200,7 @@ export const useMeetingAutoRecord = (
     // consulted at all (see the branch order in decideOnDetected) and cost
     // nothing. Default true on a rejected query - an unreadable status must
     // never be taken as licence to stomp a live Meeting Assist session.
-    const meetingAssistCapturing =
+    const globalCaptureHeld =
       enabled && !audio.capturing && assistSetting
         ? await invoke<boolean>("get_capture_status").catch(() => true)
         : assistSetting;
@@ -207,9 +208,11 @@ export const useMeetingAutoRecord = (
     const decision = decideOnDetected({
       enabled,
       capturing: audio.capturing,
-      meetingAssistCapturing,
+      globalCaptureHeld,
       setupLoading: setupLoadingRef.current,
       setupComplete: setupCompleteRef.current,
+      meetingMode: false,
+      vadOpen: false,
       vadEnabled: audio.vadConfig.enabled,
     });
 
@@ -252,7 +255,8 @@ export const useMeetingAutoRecord = (
       return;
     }
 
-    // ignore-off, ignore-assist and ignore-undecided are all silent.
+    // ignore-off, ignore-active, ignore-mic-open and ignore-undecided are all
+    // silent.
     if (decision !== "start") return;
 
     await systemAudioRef.current.startCapture();
@@ -268,7 +272,7 @@ export const useMeetingAutoRecord = (
     );
 
     if (started) {
-      autoStartedRef.current = true;
+      startedModeRef.current = "transcribing";
       return;
     }
 
@@ -281,7 +285,11 @@ export const useMeetingAutoRecord = (
   };
 
   const handleStop = async () => {
-    if (decideOnEnded({ autoStarted: autoStartedRef.current }) !== "stop") return;
+    if (
+      decideOnEnded({ startedMode: startedModeRef.current }) !==
+      "stop-transcribing"
+    )
+      return;
 
     try {
       await systemAudioRef.current.stopCapture();
@@ -305,7 +313,7 @@ export const useMeetingAutoRecord = (
     } finally {
       // In a finally so no rejection can strand provenance set forever, and here
       // rather than relying on capture-stopped, which a failed stop never emits.
-      autoStartedRef.current = false;
+      startedModeRef.current = null;
     }
   };
 
@@ -334,17 +342,19 @@ export const useMeetingAutoRecord = (
       }),
 
       register("capture-stopped", () => {
-        // "A stop was issued" - not "the session ended". It is emitted
-        // unconditionally by stop_system_audio_capture, including the one
-        // startCapture issues before every VAD start. That is safe because
-        // provenance is only set AFTER the confirmation query, two further IPC
-        // round trips later, so this clear is a no-op at that point.
-        autoStartedRef.current = false;
+        // Transcribing provenance ONLY. This fires on any stop - including the
+        // one startCapture issues before every VAD start, and including a
+        // mid-call useMeetingAudio deps re-run (device or STT-language change).
+        // Clearing meeting provenance here would leave the capture running with
+        // decideOnEnded returning "ignore" and the mic never closing.
+        if (startedModeRef.current === "transcribing") {
+          startedModeRef.current = null;
+        }
       }),
 
       register("meeting-watcher-stopped", () => {
         if (
-          decideOnWatcherStopped({ autoStarted: autoStartedRef.current }) ===
+          decideOnWatcherStopped({ startedMode: startedModeRef.current }) ===
           "warn"
         ) {
           toast.warning(WATCHER_STOPPED_MESSAGE);
