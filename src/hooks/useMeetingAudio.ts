@@ -14,6 +14,7 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { fetchSTT } from '@/lib';
+import { STT_FAILURE_REPORT_THRESHOLD } from '@/config';
 import type { TYPE_PROVIDER } from '@/types';
 import type { DiarizationAudioBuffer } from '@/lib/functions/audio-buffer';
 
@@ -58,6 +59,33 @@ const MEETING_VAD_CONFIG = {
 // At ~50-200KB per segment, 50 segments = 2.5-10MB max memory usage (reasonable buffer)
 const MAX_QUEUE_SIZE = 50;
 
+/**
+ * fetchSTT RESOLVES rather than rejects for several real failures, so a
+ * resolved string is not proof of a transcription. Keep these in step with
+ * stt.function.ts - the pinning test in useMeetingAudio.stt-failures.test.tsx
+ * exists so a copy-edit there breaks a test rather than the transcript.
+ *
+ * Deliberately UNANCHORED at the head: :398 joins warnings ahead of the
+ * "No transcription found" tail.
+ *
+ * Accepted residual: :389 passes a raw non-JSON HTTP-200 body straight
+ * through (a proxy/captive-portal page, a plain-text upstream error). That
+ * text is indistinguishable from a real transcription here, is NOT matched by
+ * these sentinels, and would be posted as a Guest line and reset the failure
+ * counter.
+ */
+const STT_FAILURE_SENTINELS = [
+  /^Meetwings STT Error:/i,
+  /No transcription found\s*$/i,
+  /^Transcription failed/i,
+];
+
+export const isUsableTranscription = (value: string | null | undefined): boolean => {
+  const text = value?.trim();
+  if (!text) return false;
+  return !STT_FAILURE_SENTINELS.some((re) => re.test(text));
+};
+
 export function useMeetingAudio({
   enabled,
   onSystemAudioTranscript,
@@ -79,6 +107,11 @@ export function useMeetingAudio({
   const onSystemAudioTranscriptRef = useRef(onSystemAudioTranscript);
   const onErrorRef = useRef(onError);
   const droppedCountRef = useRef(0);
+  // Consecutive segments that produced no usable transcription. Latched, not
+  // re-armed on report: onError lands on an unbudgeted toast in Audio.tsx, so
+  // a re-arming report turns an intermittent provider into a toast storm.
+  const consecutiveSttFailuresRef = useRef(0);
+  const sttFailureReportedRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => {
@@ -90,6 +123,21 @@ export function useMeetingAudio({
 
   // Track processQueue changes
   const processQueueCountRef = useRef(0);
+
+  const noteSttFailure = useCallback(() => {
+    consecutiveSttFailuresRef.current += 1;
+    if (
+      consecutiveSttFailuresRef.current >= STT_FAILURE_REPORT_THRESHOLD &&
+      !sttFailureReportedRef.current
+    ) {
+      sttFailureReportedRef.current = true;
+      onErrorRef.current?.(
+        new Error(
+          "Speech-to-text is failing for this meeting. Check your speech provider's API key and quota."
+        )
+      );
+    }
+  }, []);
 
   // Process queue of audio segments
   const processQueue = useCallback(async () => {
@@ -136,25 +184,36 @@ export function useMeetingAudio({
           language: sttLanguage,
         });
 
-        if (transcription?.trim() && enabledRef.current) {
-          // Use timestamp as entry ID (matches TranscriptEntry.timestamp)
+        if (!enabledRef.current) {
+          // The call ended while this segment was in fetchSTT, so whatever it
+          // resolved is discarded. Loud, so the drop is visible; binding it to
+          // its enqueue-time conversation id is a separate slice.
+          //
+          // Do NOT claim it was "billed" here: emitSTTUsage is only reached on
+          // the template path (stt.function.ts:406), and fetchMeetwingsSTT
+          // returns at :179-182 before it.
+          console.warn(
+            "[MeetingAudio] Discarding a segment that resolved after the session ended"
+          );
+        } else if (!transcription?.trim()) {
+          // Empty/whitespace is silence or noise, NOT a provider failure. The
+          // pre-change guard ignored these; counting them would raise
+          // "check your API key" after three quiet segments.
+        } else if (isUsableTranscription(transcription)) {
+          consecutiveSttFailuresRef.current = 0;
           const timestamp = Date.now();
-
-          // Add to transcript (displayed immediately as "Guest")
-          onSystemAudioTranscriptRef.current(transcription, timestamp);
-
-          // Phase 3: Buffer audio for diarization if buffer is provided
-          // The buffer will batch segments and trigger diarization after 30 seconds
-          // Diarization will then update "Guest" labels to "Speaker 1", "Speaker 2", etc.
+          onSystemAudioTranscriptRef.current(transcription!, timestamp);
           if (audioBufferRef.current) {
-            const entryId = `guest_${timestamp}`; // Matches speakerId format in addSystemAudioTranscript
-            audioBufferRef.current.addSegment(audioBlob, timestamp, entryId);
+            audioBufferRef.current.addSegment(audioBlob, timestamp, `guest_${timestamp}`);
           }
+        } else {
+          noteSttFailure();
         }
       } catch (err) {
         console.error('[MeetingAudio] STT failed:', err);
-        // Don't call onError for individual STT failures - just log
-        // This prevents flooding the user with errors during transient issues
+        // Guarded: a rejection after the session ended must not increment the
+        // counter, or the report can fire after the meeting is over.
+        if (enabledRef.current) noteSttFailure();
       }
     }
 
@@ -284,6 +343,8 @@ export function useMeetingAudio({
       setHasQueuedAudio(false);
       isSetupCompleteRef.current = false;
       droppedCountRef.current = 0; // Reset for next session
+      consecutiveSttFailuresRef.current = 0;
+      sttFailureReportedRef.current = false;
     };
   }, [enabled, processQueue, outputDeviceId]);
 

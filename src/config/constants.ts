@@ -134,6 +134,12 @@ export const MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4;
 // than the first one) avoids spending the report on a blip.
 export const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
 
+// Number of consecutive guest audio segments that produce no usable
+// transcription before useMeetingAudio reports a failing STT provider.
+// Three, not ten: a guest utterance is tens of seconds, so at ten a short
+// call would report nothing.
+export const STT_FAILURE_REPORT_THRESHOLD = 3;
+
 // Meeting Assist system prompt for contextual insights
 export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a live meeting/interview assistant feeding the user answers in real time. The transcript uses speaker labels: "You" is the user; other labels are the other participants.
 
