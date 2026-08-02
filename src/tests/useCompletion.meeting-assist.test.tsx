@@ -136,6 +136,34 @@ describe("useCompletion meeting assist mode", () => {
     });
   });
 
+  it("exposes flushUnsavedMeetingTranscript and it persists the unsaved tail", async () => {
+    const { result } = renderHook(() => useCompletion(), {
+      wrapper: strictModeWrapper,
+    });
+
+    act(() => {
+      result.current.setMeetingAssistMode(true);
+    });
+
+    // Fewer than MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL (4, config/constants.ts:128),
+    // so the periodic autosave effect never fires and any save observed below
+    // came from the explicit flush.
+    act(() => {
+      result.current.addMeetingTranscript("First segment");
+      result.current.addMeetingTranscript("Second segment");
+    });
+    expect(result.current.meetingTranscript).toHaveLength(2);
+
+    // Splitting the add and the flush into separate `act` calls is load-bearing:
+    // a combined async act leaves the commit un-flushed, so
+    // meetingTranscriptLengthRef lags and the flush becomes a no-op.
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    expect(vi.mocked(saveConversation)).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the existing conversation title when a quick action runs", async () => {
     enableProviderGate();
     vi.mocked(getConversationById).mockResolvedValue(EXISTING_CONVERSATION);

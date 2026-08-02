@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, Dispatch, SetStateAction } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, Dispatch, SetStateAction } from "react";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import {
@@ -388,7 +388,21 @@ export const useCompletion = () => {
 
   // Keep a ref in sync with the current meeting transcript length so async
   // save paths (normal submit, quick actions) can update the autosave watermark.
-  useEffect(() => {
+  //
+  // useLayoutEffect, NOT useEffect. useMeetingAutoRecord's ownership layout
+  // effect can call enqueue(handleStop), so handleStop runs on a microtask
+  // scheduled during the commit phase - BEFORE that commit's passive effects
+  // flush. A passive mirror would be one commit stale on exactly that path.
+  //
+  // This does NOT close the setState->commit gap (a Tauri callback arriving on
+  // a macrotask can still read a pre-commit value); that residual is accepted,
+  // because the flush only gates on `unsavedCount > 0` and the actual payload
+  // is conversationHistoryRef.current, which addMeetingTranscript assigns
+  // synchronously and which therefore leads state rather than lagging it.
+  //
+  // NO TEST GUARDS THIS - RTL act()-wraps render/rerender, so passive effects
+  // flush before any assertion. Keep it deliberately; do not "simplify" it.
+  useLayoutEffect(() => {
     meetingTranscriptLengthRef.current = meetingTranscript.length;
   }, [meetingTranscript.length]);
 
@@ -440,7 +454,9 @@ export const useCompletion = () => {
       setMeetingAssistModeState(next);
 
       if (previous && !next) {
-        void flushUnsavedMeetingTranscript();
+        void flushUnsavedMeetingTranscript().catch((error) => {
+          console.error("Meeting-mode flush failed:", error);
+        });
       }
     },
     [flushUnsavedMeetingTranscript]
@@ -1982,6 +1998,15 @@ export const useCompletion = () => {
   }, []);
 
   const toggleRecording = useCallback(() => {
+    // DO NOT convert this to setEnableVAD(v => !v), however much
+    // react-hooks/exhaustive-deps wants you to given the [enableVAD, micOpen]
+    // deps below. Reading the render-time value is load-bearing: auto-record
+    // (useMeetingAutoRecord) owns the mic while enableVAD is true, and a stale
+    // updater would apply on top of auto-record's pending `true`, yield false,
+    // close the mic mid-call and strip ownership. Reading the render-time value
+    // can only ever write the value that is already committed - for a boolean,
+    // either the stale value equals the committed one (the toggle is genuine) or
+    // it differs and `!stale` IS the committed one - so ownership survives.
     setEnableVAD(!enableVAD);
     setMicOpen(!micOpen);
   }, [enableVAD, micOpen]);
@@ -2158,6 +2183,7 @@ export const useCompletion = () => {
     addSystemAudioTranscript,
     updateTranscriptTranslation,
     clearMeetingTranscript,
+    flushUnsavedMeetingTranscript,
     submitWithMeetingContext,
     // Speaker Diarization
     sessionSpeakerMap,

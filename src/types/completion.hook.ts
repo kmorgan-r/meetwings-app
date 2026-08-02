@@ -150,6 +150,11 @@ export interface UseCompletionReturn {
   /** Function to clear the meeting transcript. Flushes any unsaved segments
    * first, so callers may await it. */
   clearMeetingTranscript: () => Promise<void>;
+  /**
+   * Persists any transcript segments not covered by the latest successful save.
+   * Exposed so useMeetingAutoRecord can flush at a session boundary it owns.
+   */
+  flushUnsavedMeetingTranscript: () => Promise<void>;
   /** Function to submit a quick action with meeting context */
   submitWithMeetingContext: (action: string) => Promise<void>;
 
