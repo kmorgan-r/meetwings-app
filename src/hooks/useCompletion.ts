@@ -8,6 +8,7 @@ import {
   MEETING_ASSIST_SYSTEM_PROMPT,
   DEFAULT_SYSTEM_PROMPT,
   MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL,
+  AUTOSAVE_FAILURE_REPORT_THRESHOLD,
 } from "@/config";
 import { useApp } from "@/contexts";
 import {
@@ -176,7 +177,6 @@ export const useCompletion = () => {
   // leaving a later permanent failure silent.
   const consecutiveAutosaveFailuresRef = useRef(0);
   const transcriptLossReportedRef = useRef(false);
-  const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
   // How many of conversationHistoryRef.current's messages (from the start)
   // are already persisted for the current conversation. Lets the periodic
   // autosave append only the new tail instead of redoing a full

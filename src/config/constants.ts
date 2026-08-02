@@ -127,6 +127,13 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
 // if the user ends/clears the transcript without ever asking the AI a question.
 export const MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4;
 
+// Number of consecutive meeting-transcript autosave failures before the user
+// is shown a "transcript could not be saved" report. A failed save advances
+// no watermark, so the periodic autosave retries on the next segment and a
+// transient failure repairs itself - latching on a run of failures (rather
+// than the first one) avoids spending the report on a blip.
+export const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
+
 // Meeting Assist system prompt for contextual insights
 export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a live meeting/interview assistant feeding the user answers in real time. The transcript uses speaker labels: "You" is the user; other labels are the other participants.
 
