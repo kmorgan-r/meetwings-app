@@ -16,7 +16,16 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 // `import { fetchSTT } from '@/lib'`, which re-exports from
 // `@/lib/functions/stt.function` - mocking this exact module id intercepts
 // that import without needing to stub every other @/lib export.
-vi.mock("@/lib/functions/stt.function", () => ({ fetchSTT: mocks.fetchSTT }));
+//
+// Spread the real module rather than returning a bare { fetchSTT }:
+// isUsableTranscription and the failure literals now live in this same module,
+// and a whole-module factory would hand useMeetingAudio `undefined` for the
+// predicate at import time. Only fetchSTT is replaced - the predicate under
+// test below is the REAL one, which is the entire point of pinning it.
+vi.mock("@/lib/functions/stt.function", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  fetchSTT: mocks.fetchSTT,
+}));
 
 // Registry keyed by event name holding EVERY registered callback, so a leak
 // (double registration) would be observable, and unlisten removes only its
@@ -32,7 +41,18 @@ vi.mock("@tauri-apps/api/event", () => ({
   ),
 }));
 
-import { isUsableTranscription, useMeetingAudio } from "@/hooks/useMeetingAudio";
+import { useMeetingAudio } from "@/hooks/useMeetingAudio";
+// The literals are imported, never re-typed here: a copy typed into this file
+// is exactly the desync the pinning is supposed to catch. Asserting on
+// `${STT_ERROR_PREFIX} ...` pins the SHAPE fetchSTT builds, whatever the text
+// happens to be, and the returns in stt.function.ts are built from these same
+// constants.
+import {
+  isUsableTranscription,
+  STT_ERROR_PREFIX,
+  STT_NO_TRANSCRIPTION_FOUND,
+  STT_TRANSCRIPTION_FAILED,
+} from "@/lib/functions/stt.function";
 
 type Props = Parameters<typeof useMeetingAudio>[0];
 
@@ -85,31 +105,31 @@ beforeEach(() => {
 });
 
 describe("isUsableTranscription - pinned against the real stt.function.ts literals", () => {
-  // stt.function.ts:125's bare fallback (`response.error || "Transcription
-  // failed"`), reached when the Meetwings command resolves without a
+  // fetchMeetwingsSTT's bare fallback (`response.error || STT_TRANSCRIPTION_
+  // FAILED`), reached when the Meetwings command resolves without a
   // transcription or an error string.
-  it('rejects the bare :125 fallback "Transcription failed"', () => {
-    expect(isUsableTranscription("Transcription failed")).toBe(false);
+  it("rejects the bare Meetwings fallback", () => {
+    expect(isUsableTranscription(STT_TRANSCRIPTION_FAILED)).toBe(false);
   });
 
   // The real rejection shape: src-tauri/src/api.rs:270 is Err(...), so
-  // `invoke` rejects and fetchMeetwingsSTT's catch (stt.function.ts:129)
-  // prefixes the message. Pinned as its OWN literal, not a hybrid of the two.
-  it('rejects the prefixed rejection text "Meetwings STT Error: Transcription failed. Please try again."', () => {
+  // `invoke` rejects and fetchMeetwingsSTT's catch prefixes the message.
+  // Built the way fetchMeetwingsSTT builds it - prefix, space, message.
+  it("rejects the prefixed rejection text", () => {
     expect(
       isUsableTranscription(
-        "Meetwings STT Error: Transcription failed. Please try again."
+        `${STT_ERROR_PREFIX} Transcription failed. Please try again.`
       )
     ).toBe(false);
   });
 
-  // stt.function.ts:398 joins warnings AHEAD of the "No transcription found"
-  // tail, so an anchored ^-regex would miss this - the sentinel is
-  // deliberately unanchored at the head.
-  it('rejects a warning joined ahead of "No transcription found"', () => {
+  // fetchSTT joins warnings AHEAD of the no-transcription tail, so an anchored
+  // ^-regex would miss this - the sentinel is deliberately unanchored at the
+  // head.
+  it("rejects a warning joined ahead of the no-transcription tail", () => {
     expect(
       isUsableTranscription(
-        "Language auto-detect may not be fully supported by OpenAI; No transcription found"
+        `Language auto-detect may not be fully supported by OpenAI; ${STT_NO_TRANSCRIPTION_FOUND}`
       )
     ).toBe(false);
   });
@@ -146,9 +166,11 @@ describe("useMeetingAudio - failing STT provider visibility", () => {
   });
 
   it("treats a resolved error sentinel as a failure and never posts it", async () => {
-    // A REAL literal: the Rust command's terminal error text
-    // (src-tauri/src/api.rs:270), as it reads via stt.function.ts's
-    // "Transcription failed"-prefixed sentinel shapes.
+    // Deliberately NOT built from STT_TRANSCRIPTION_FAILED: this is the Rust
+    // command's terminal error text as a user would actually receive it
+    // (src-tauri/src/api.rs:270). Because it is written out in full, editing
+    // the constant in stt.function.ts fails HERE - the shape-pins above would
+    // follow the edit and stay green.
     mocks.fetchSTT.mockResolvedValue(
       "Transcription failed. Please try again."
     );

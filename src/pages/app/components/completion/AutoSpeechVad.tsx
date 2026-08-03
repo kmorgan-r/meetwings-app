@@ -8,7 +8,7 @@ import { useApp } from "@/contexts";
 import { floatArrayToWav } from "@/lib/utils";
 import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
 import { useTranslation } from "@/hooks";
-import { isUsableTranscription } from "@/hooks/useMeetingAudio";
+import { isUsableTranscription } from "@/lib/functions/stt.function";
 import { toast } from "sonner";
 
 interface AutoSpeechVADProps {
@@ -114,6 +114,21 @@ const AutoSpeechVADInternal = ({
             // Normal mode: auto-submit to AI
             submit(transcription);
           }
+        } else if (!(meetingAssistMode && addMeetingTranscript) && transcription?.trim()) {
+          // fetchSTT RESOLVES most provider failures - an expired key included -
+          // so the catch below never sees them. Without this the transcribing
+          // user speaks into the app and nothing happens, forever, silently.
+          // state.error is the surface: it forces the popover open
+          // (useCompletion.ts:1811) and renders at Input.tsx:230.
+          //
+          // Mirrors the meeting-mode condition above rather than plain
+          // !meetingAssistMode, because a meeting without addMeetingTranscript
+          // submits and so must also report.
+          //
+          // Meeting mode stays silent-and-dropped on purpose: reporting there
+          // is not the point, keeping forged "You" lines out of
+          // meetingTranscript and its autosave is.
+          setState((prev: any) => ({ ...prev, error: transcription }));
         }
       } catch (error) {
         console.error("Failed to transcribe audio:", error);

@@ -14,6 +14,9 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { fetchSTT } from '@/lib';
+// Deep-imported, not via the @/lib barrel: this predicate is built from the
+// same literals stt.function.ts returns, so it has to come from that module.
+import { isUsableTranscription } from '@/lib/functions/stt.function';
 import { STT_FAILURE_REPORT_THRESHOLD } from '@/config';
 import type { TYPE_PROVIDER } from '@/types';
 import type { DiarizationAudioBuffer } from '@/lib/functions/audio-buffer';
@@ -58,33 +61,6 @@ const MEETING_VAD_CONFIG = {
 // Maximum queue size to prevent unbounded memory growth when STT is slower than audio capture
 // At ~50-200KB per segment, 50 segments = 2.5-10MB max memory usage (reasonable buffer)
 const MAX_QUEUE_SIZE = 50;
-
-/**
- * fetchSTT RESOLVES rather than rejects for several real failures, so a
- * resolved string is not proof of a transcription. Keep these in step with
- * stt.function.ts - the pinning test in useMeetingAudio.stt-failures.test.tsx
- * exists so a copy-edit there breaks a test rather than the transcript.
- *
- * Deliberately UNANCHORED at the head: :398 joins warnings ahead of the
- * "No transcription found" tail.
- *
- * Accepted residual: :389 passes a raw non-JSON HTTP-200 body straight
- * through (a proxy/captive-portal page, a plain-text upstream error). That
- * text is indistinguishable from a real transcription here, is NOT matched by
- * these sentinels, and would be posted as a Guest line and reset the failure
- * counter.
- */
-const STT_FAILURE_SENTINELS = [
-  /^Meetwings STT Error:/i,
-  /No transcription found\s*$/i,
-  /^Transcription failed/i,
-];
-
-export const isUsableTranscription = (value: string | null | undefined): boolean => {
-  const text = value?.trim();
-  if (!text) return false;
-  return !STT_FAILURE_SENTINELS.some((re) => re.test(text));
-};
 
 export function useMeetingAudio({
   enabled,

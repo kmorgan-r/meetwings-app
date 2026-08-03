@@ -104,6 +104,53 @@ function emitSTTUsage(
   }
 }
 
+/**
+ * The failure texts fetchSTT RESOLVES with instead of rejecting.
+ *
+ * Exported, and used at BOTH the return sites below and in the sentinels that
+ * follow, so a copy-edit changes the message and its detector together. A
+ * consumer that re-typed these as its own string literals could silently
+ * desync from them, which is why isUsableTranscription lives here rather than
+ * next to a caller.
+ */
+export const STT_TRANSCRIPTION_FAILED = "Transcription failed";
+export const STT_ERROR_PREFIX = "Meetwings STT Error:";
+export const STT_NO_TRANSCRIPTION_FOUND = "No transcription found";
+
+const escapeForRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A resolved string is not proof of a transcription, so these match the three
+ * shapes the returns above actually produce.
+ *
+ * The no-transcription sentinel is deliberately UNANCHORED at the head:
+ * fetchSTT joins `warnings` AHEAD of that tail, so `^` would miss it.
+ *
+ * Accepted residual: a non-JSON HTTP-200 body is passed straight through (a
+ * proxy/captive-portal page, a plain-text upstream error). That text is
+ * indistinguishable from a real transcription here, is NOT matched by these
+ * sentinels, and would be treated as speech.
+ */
+const STT_FAILURE_SENTINELS = [
+  new RegExp(`^${escapeForRegExp(STT_ERROR_PREFIX)}`, "i"),
+  new RegExp(`${escapeForRegExp(STT_NO_TRANSCRIPTION_FOUND)}\\s*$`, "i"),
+  new RegExp(`^${escapeForRegExp(STT_TRANSCRIPTION_FAILED)}`, "i"),
+];
+
+/**
+ * True when `value` may be treated as speech. Empty or whitespace-only text is
+ * silence, not speech; a resolved failure sentinel is a provider failure, not
+ * speech.
+ */
+export const isUsableTranscription = (
+  value: string | null | undefined
+): boolean => {
+  const text = value?.trim();
+  if (!text) return false;
+  return !STT_FAILURE_SENTINELS.some((re) => re.test(text));
+};
+
 // Meetwings STT function
 async function fetchMeetwingsSTT(audio: File | Blob): Promise<string> {
   try {
@@ -122,11 +169,11 @@ async function fetchMeetwingsSTT(audio: File | Blob): Promise<string> {
     if (response.success && response.transcription) {
       return response.transcription;
     } else {
-      return response.error || "Transcription failed";
+      return response.error || STT_TRANSCRIPTION_FAILED;
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    return `Meetwings STT Error: ${errorMessage}`;
+    return `${STT_ERROR_PREFIX} ${errorMessage}`;
   }
 }
 
@@ -395,7 +442,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     const transcription = (getByPath(data, path) || "").trim();
 
     if (!transcription) {
-      return [...warnings, "No transcription found"].join("; ");
+      return [...warnings, STT_NO_TRANSCRIPTION_FOUND].join("; ");
     }
 
     // Emit STT usage for cost tracking
