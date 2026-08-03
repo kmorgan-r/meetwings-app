@@ -130,6 +130,11 @@ export const useMeetingAutoRecord = ({
   // flush before any assertion and reverting to useEffect leaves the whole suite
   // green - F33 catches a captured-at-registration `stopCapture`, not a
   // one-commit-stale one. Keep it deliberately; do not "simplify" it back.
+  //
+  // `enableVADRef` needs the same timing for its own reason: handleDetected reads
+  // it AFTER an IPC round trip to decide whether the mic is already the user's
+  // (F38), so a mirror lagging one commit would claim a mic the user had just
+  // opened - and the release below would never fire to correct it.
   const systemAudioRef = useRef(systemAudio);
   const enableVADRef = useRef(enableVAD);
   const meetingAssistModeRef = useRef(meetingAssistMode);
@@ -141,6 +146,21 @@ export const useMeetingAutoRecord = ({
     meetingAssistModeRef.current = meetingAssistMode;
     setEnableVADRef.current = setEnableVAD;
     flushRef.current = flushUnsavedMeetingTranscript;
+
+    if (startedModeRef.current !== "meeting") return;
+    if (!enableVAD) {
+      // Someone closed the mic - the user, or us. Either way we no longer own
+      // it. Flush before releasing: this is the same physical operation as the
+      // pill-off path, and nothing else will save the tail - the periodic
+      // autosave is length-driven, and setMeetingAssistMode's flush only fires
+      // when the PILL moves, which here it did not.
+      //
+      // handleStop releases provenance BEFORE it writes the mic, so this branch
+      // never double-fires against it; it is reached only for a close this hook
+      // did not perform.
+      void flushRef.current?.().catch(reportFlushFailure);
+      startedModeRef.current = null;
+    }
   });
 
   // Never read on its own on a start path - every start goes through
@@ -182,6 +202,13 @@ export const useMeetingAutoRecord = ({
     else toast.error(message);
   };
 
+  // The USER-FACING transcript-loss report lives in useCompletion (at the
+  // autosave catch, where the failure actually is). This is only a net for an
+  // unexpected throw - but it is never an empty catch.
+  const reportFlushFailure = (error: unknown) => {
+    console.error("Auto-record transcript flush failed:", error);
+  };
+
   // Declared BEFORE the listener effect so it runs first: React runs mount effects
   // in declaration order, and enabledRef must be seeded before any callback reads
   // it. Ungated on purpose - the isOwner gate exists to stop two windows driving
@@ -212,15 +239,17 @@ export const useMeetingAutoRecord = ({
     const audio = systemAudioRef.current;
 
     const enabled = enabledRef.current && listenersOkRef.current;
-    const assistSetting =
-      safeLocalStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED) ===
-      "true";
+
+    // The LIVE pill, mirrored from useCompletion's state, not the persisted
+    // setting: this same value both gates the probe below and forks the
+    // decision, and the two must not be able to disagree about it.
+    const meetingMode = meetingAssistModeRef.current;
 
     // Meeting Assist Mode only OWNS the capture device while it is ACTUALLY
     // capturing. useMeetingAudio is gated on `meetingAssistMode && enableVAD`
     // (Audio.tsx:124), and enableVAD is transient, unpersisted mic state. The
-    // setting alone is therefore far broader than the real conflict: with the
-    // pill on and the mic closed nothing is capturing, and standing down helps
+    // pill alone is therefore far broader than the real conflict: with it on
+    // and the mic closed nothing is capturing, and standing down helps
     // nobody. That combination is the DEFAULT (enableVAD starts false,
     // useCompletion.ts:120), so the broad guard silently disabled the whole
     // feature for anyone who left Meeting Assist on.
@@ -237,16 +266,27 @@ export const useMeetingAutoRecord = ({
     // nothing. Default true on a rejected query - an unreadable status must
     // never be taken as licence to stomp a live Meeting Assist session.
     const globalCaptureHeld =
-      enabled && !audio.capturing && assistSetting
+      enabled && !audio.capturing && meetingMode
         ? await invoke<boolean>("get_capture_status").catch(() => true)
-        : assistSetting;
+        : meetingMode;
+
+    // READ AFTER THE AWAIT. Deliberately the OPPOSITE discipline to the `audio`
+    // snapshot above, and the asymmetry is load-bearing: an IPC round trip is a
+    // macrotask, so the user can open the mic inside it. A stale `false` here
+    // yields "start-meeting", we record provenance, and setEnableVAD(true) is a
+    // no-op on an already-true value - leaving a state byte-identical to a
+    // legitimate auto-start, with enableVAD never observed false, so ownership
+    // is never released and meeting-ended closes the USER's mic. A stale
+    // meetingMode read self-heals via the layout effect; a stale vadOpen read
+    // cannot.
+    const vadOpen = enableVADRef.current;
 
     const decision = decideOnDetected({
       enabled,
       capturing: audio.capturing,
       globalCaptureHeld,
-      meetingMode: false,
-      vadOpen: false,
+      meetingMode,
+      vadOpen,
       vadEnabled: audio.vadConfig.enabled,
     });
 
@@ -284,7 +324,17 @@ export const useMeetingAutoRecord = ({
       return;
     }
 
-    // ignore-off, ignore-active and ignore-mic-open are all silent.
+    if (decision === "start-meeting") {
+      // Provenance FIRST, then the write, in one synchronous block: no commit
+      // can interleave, so the next commit always observes what we just wrote.
+      // Nothing is confirmed against Rust - see Decision 4. A failing guest half
+      // reports itself via useMeetingAudio's onError.
+      startedModeRef.current = "meeting";
+      setEnableVADRef.current(true);
+      return;
+    }
+
+    // ignore-off, ignore-active, ignore-mic-open are all silent.
     if (decision !== "start") return;
 
     await systemAudioRef.current.startCapture();

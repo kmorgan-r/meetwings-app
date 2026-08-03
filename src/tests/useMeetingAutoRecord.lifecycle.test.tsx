@@ -83,9 +83,17 @@ import {
 
 const registered = (event: string) => listeners.get(event)?.size ?? 0;
 
+/**
+ * Delivers an event to every listener registered for it, draining nothing.
+ * Split out so a case that must land two events inside ONE act() (see F39) can
+ * do so without nesting `fireActed` calls, which would overlap acts.
+ */
+const emit = (event: string, payload?: any) => {
+  for (const cb of [...(listeners.get(event) ?? [])]) cb(payload);
+};
+
 const fire = async (event: string, payload?: any) => {
-  const cbs = [...(listeners.get(event) ?? [])];
-  for (const cb of cbs) cb(payload);
+  emit(event, payload);
   await flush();
 };
 
@@ -100,9 +108,8 @@ const fire = async (event: string, payload?: any) => {
  * leave later cases inert rather than failing.
  */
 const fireActed = async (event: string, payload?: any) => {
-  const cbs = [...(listeners.get(event) ?? [])];
   await act(async () => {
-    for (const cb of cbs) cb(payload);
+    emit(event, payload);
     await flush();
   });
 };
@@ -543,41 +550,23 @@ describe("useMeetingAutoRecord - decision branches", () => {
   });
 
   it("F9: defers to Meeting Assist Mode when it is actually holding the capture", async () => {
-    stored.meeting_assist_mode_enabled = "true";
     seedStatus([true]); // the assist probe: a capture IS live
     const audio = makeAudio();
-    mount(audio);
+    const h = mount(audio, { meetingAssistMode: true });
     await flush();
 
     await fire("meeting-detected");
 
     // One query - the assist probe - and nothing else. Asserting the exact count
-    // is what distinguishes this from F9b below: a hook that skipped the probe
-    // and deferred on the bare setting would report 0 here and still "pass" a
-    // startCapture-not-called assertion.
+    // is what makes this discriminate: a hook that skipped the probe and deferred
+    // on the bare pill would report 0 here and still "pass" a
+    // startCapture-not-called assertion. `ignore-active` is tested BEFORE the
+    // meeting fork, so this outranks F36's start.
     await waitFor(() => expect(statusCalls()).toBe(1));
     expect(audio.startCapture).not.toHaveBeenCalled();
-    expect(mocks.toast.info).not.toHaveBeenCalled();
-    expect(mocks.toast.error).not.toHaveBeenCalled();
-  });
-
-  it("F9b: starts when the Meeting Assist setting is on but nothing is capturing", async () => {
-    // The DEFAULT state for anyone who leaves the Meeting pill on: useMeetingAudio
-    // needs `meetingAssistMode && enableVAD` to capture (Audio.tsx:124) and
-    // enableVAD starts false (useCompletion.ts:120). Guarding on the bare setting
-    // disabled the feature outright for these users, silently - ignore-active
-    // does not toast. This is the regression test for that.
-    stored.meeting_assist_mode_enabled = "true";
-    seedStatus([false, true]); // probe: idle. then the start confirmation.
-    const audio = makeAudio();
-    mount(audio);
-    await flush();
-
-    await fire("meeting-detected");
-
-    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
-    expect(statusCalls()).toBe(2); // probe + start confirmation, nothing more
-    expect(audio.stopCapture).not.toHaveBeenCalled();
+    // Deferring means deferring: a live guest half is already recording this
+    // call, and opening the mic on top of it would double it.
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(mocks.toast.info).not.toHaveBeenCalled();
     expect(mocks.toast.error).not.toHaveBeenCalled();
   });
@@ -585,19 +574,21 @@ describe("useMeetingAutoRecord - decision branches", () => {
   it("F9c: defers when the assist probe cannot be read", async () => {
     // Conservative default, matching the ignore-busy cross-check: an unreadable
     // status must never be licence to stomp a live Meeting Assist session.
-    stored.meeting_assist_mode_enabled = "true";
     mocks.invoke.mockImplementation(async (cmd: string) => {
       if (cmd === "get_capture_status") throw new Error("ipc down");
       return undefined;
     });
     const audio = makeAudio();
-    mount(audio);
+    const h = mount(audio, { meetingAssistMode: true });
     await flush();
 
     await fire("meeting-detected");
 
     await waitFor(() => expect(statusCalls()).toBe(1));
     expect(audio.startCapture).not.toHaveBeenCalled();
+    // The probe defaults to held, so this lands on ignore-active - before the
+    // meeting fork - and claims no mic either.
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(mocks.toast.info).not.toHaveBeenCalled();
     expect(mocks.toast.error).not.toHaveBeenCalled();
   });
@@ -605,10 +596,9 @@ describe("useMeetingAutoRecord - decision branches", () => {
   it("F9d: does not probe when the switch is off or a session is already open", async () => {
     // The probe must stay behind the cheap branches. Without this, every detection
     // with the pill on costs an IPC round trip even when the feature is off.
-    stored.meeting_assist_mode_enabled = "true";
     stored.meeting_auto_record_enabled = "false";
     const audio = makeAudio();
-    const h = mount(audio);
+    const h = mount(audio, { meetingAssistMode: true });
     await flush();
 
     await fire("meeting-detected"); // ignore-off: no probe
@@ -623,6 +613,9 @@ describe("useMeetingAutoRecord - decision branches", () => {
 
     await waitFor(() => expect(statusCalls()).toBe(1));
     expect(audio.startCapture).not.toHaveBeenCalled();
+    // Neither ignore-off nor ignore-busy may open the mic: both are decided
+    // ahead of the meeting fork, pill or no pill.
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
   });
 
   it("F12: explains disabled VAD exactly once per run", async () => {
@@ -724,6 +717,165 @@ describe("useMeetingAutoRecord - start", () => {
 
     releaseStart();
     await waitFor(() => expect(statusCalls()).toBe(1));
+  });
+});
+
+describe("useMeetingAutoRecord - meeting mode start", () => {
+  it("F36: opens the mic and claims provenance when the Meeting pill is on", async () => {
+    seedStatus([false]); // the probe: nothing holds the global capture
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+
+    await fireActed("meeting-detected");
+
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+    expect(h.setEnableVAD).toHaveBeenCalledWith(true);
+    expect(h.observedVAD).toEqual([false, true]);
+
+    // Opening the mic IS the start: AutoSpeechVad, useMeetingAudio and the
+    // diarization buffer are all gated on enableVAD. Driving the transcribing
+    // pipeline as well would record the same call twice.
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(audio.startContinuousRecording).not.toHaveBeenCalled();
+
+    // The probe, and nothing else. Pinning the count is what separates the
+    // meeting fork from the transcribing one, which queries a second time to
+    // confirm the start.
+    expect(statusCalls()).toBe(1);
+    expect(mocks.toast.info).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F37: declines a mic the user already had open", async () => {
+    seedStatus([false]); // the probe: idle, so ignore-active cannot mask this
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+    await h.setMicOpen(true); // the USER, bypassing the spy - see F35
+
+    await fireActed("meeting-detected");
+
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(mocks.toast.info).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+
+    // The other half of "declined": no provenance was recorded either, so the
+    // call ending cannot close a mic this hook never opened. Today that is a
+    // forward guard rather than the killing clause - the meeting-mode stop has
+    // not landed, so meeting-ended is inert whatever provenance says, and it is
+    // the setEnableVAD assertion above that catches a hook claiming anyway.
+    await fireActed("meeting-ended");
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]); // the user's write, only
+  });
+
+  it("F38: declines a mic opened DURING the capture-status round trip", async () => {
+    // The ordering case. An IPC round trip is a macrotask, so the user can open
+    // the mic inside it; a vadOpen read taken before the await would still say
+    // false, claim the session, and later close their mic.
+    //
+    // Two sequential acts, never one. enableVADRef is mirrored from a LAYOUT
+    // effect, so it only moves on COMMIT; releasing the probe in the same act
+    // that writes the mic races the op's continuation against that commit, and
+    // a correct hook can read false there too - the case would then pass while
+    // killing nothing. The first act must close before the second opens for the
+    // same reason nothing here ever nests one act inside another.
+    let releaseProbe!: (held: boolean) => void;
+    mocks.invoke.mockImplementation(async (cmd: string) =>
+      cmd === "get_capture_status"
+        ? new Promise<boolean>((resolve) => {
+            releaseProbe = resolve;
+          })
+        : undefined
+    );
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+
+    await fireActed("meeting-detected"); // parks on the probe
+    await waitFor(() => expect(statusCalls()).toBe(1));
+
+    await h.setMicOpen(true); // act 1: the mirror commits
+    await act(async () => {
+      // act 2: the op resumes and reads it. An async act drains to a macrotask
+      // boundary, so the op has finished by the time this returns.
+      releaseProbe(false);
+      await flush();
+    });
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]); // the user's write, only
+    expect(statusCalls()).toBe(1);
+
+    await fireActed("meeting-ended");
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F39: two detections in one tick claim once and commit once", async () => {
+    seedStatus([false, false]); // one probe per op
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+
+    await act(async () => {
+      emit("meeting-detected");
+      emit("meeting-detected");
+      await flush();
+    });
+
+    // Both ops genuinely run - they share the chain, so op B probes too, and
+    // this count is what stops the case passing on op A alone.
+    await waitFor(() => expect(statusCalls()).toBe(2));
+
+    // ...and op B declines, because its post-probe read lands AFTER React has
+    // committed op A's write. MEASURED, not assumed: React 19 processes the
+    // root schedule from a microtask, and under act() that beats the remaining
+    // hops of op B's own probe. Pinning ONE call is therefore the anti-re-entrancy
+    // assertion - a hook that ignored vadOpen entirely claims twice here and
+    // fails. (Production has no act queue, so the commit may instead land after
+    // op B; that is equally safe, because the claim is idempotent and the second
+    // write is a React bailout. Only the act-driven ordering is observable here.)
+    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    expect(h.observedVAD).toEqual([false, true]); // exactly one commit
+    expect(audio.startCapture).not.toHaveBeenCalled();
+
+    // Two ended events, because handleStop clears provenance first: a single one
+    // cannot tell a correct stop from one that would fire twice. The meeting-mode
+    // stop lands with that path; today both are inert, and what this pins is that
+    // NEITHER writes the mic closed behind the user's back in the meantime.
+    await fireActed("meeting-ended");
+    await fireActed("meeting-ended");
+    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+  });
+
+  it("F40: releases ownership and flushes when the mic goes closed", async () => {
+    seedStatus([false]);
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+
+    // The commit that OPENS the mic must not release anything - it is the one
+    // that claimed it.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
+
+    await h.setMicOpen(false); // the user closes it mid-call
+
+    // Nothing else saves the tail: the periodic autosave is length-driven, and
+    // setMeetingAssistMode's flush only fires when the PILL moves.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // Releasing is not a mic write - the mic is already closed.
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
+    expect(h.observedVAD).toEqual([false, true, false]);
   });
 });
 
