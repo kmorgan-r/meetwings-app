@@ -1568,3 +1568,207 @@ describe("useMeetingAutoRecord - structure", () => {
     expect(first.stopCapture).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The hook is not window-lived. It sits inside the app page's ErrorBoundary
+ * while systemAudio sits outside it, and <Completion /> also unmounts when the
+ * setup gate flips - reachable MID-CALL, because app.context.tsx:490-509
+ * reloads providers on a cross-window `storage` event.
+ *
+ * `h.unmount()` is RTL's, which wraps root.unmount() in a SYNC act of its own.
+ * Never call it from inside another act: overlapping acts leave later cases
+ * inert rather than failing.
+ */
+describe("useMeetingAutoRecord - unmount", () => {
+  it("F49: an unmount with a live TRANSCRIBING session stops it and flushes", async () => {
+    seedStatus([true, false]); // confirm the start, then the post-stop re-query
+    const audio = makeAudio();
+    const h = mount(audio);
+    await flush();
+
+    await fire("meeting-detected");
+    // The confirmation query is the marker: provenance is written on the very
+    // next continuation, and RTL's waitFor returns through an async act, which
+    // drains to a macrotask boundary - so the op has settled by here.
+    await waitFor(() => expect(statusCalls()).toBe(1));
+
+    h.unmount();
+
+    // Nothing else can stop this capture: every listener has just been
+    // unregistered, so a meeting-ended will never be delivered again.
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    // useCompletion dies with the tree, taking meetingTranscript with it, and
+    // it has no unmount flush of its own.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+
+    // The stop went through enqueue(handleStop), not a bare stopCapture(): the
+    // second query is handleStop's post-stop confirmation. A direct call is
+    // otherwise indistinguishable here - it stops the capture too - while
+    // silently bypassing chainRef, decideOnEnded and that confirmation, so a
+    // stop that did not take would never be reported. Measured: this reads 1
+    // against a cleanup that calls systemAudioRef.current.stopCapture().
+    expect(statusCalls()).toBe(2);
+  });
+
+  it("F50: an unmount mid-MEETING flushes but leaves the stop to the tree teardown", async () => {
+    seedStatus([false]); // the detect probe, and nothing after it
+    const audio = makeAudio();
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+
+    h.unmount();
+    await flush();
+
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+
+    // The whole anti-double-stop assertion. Enqueueing handleStop for a MEETING
+    // session here would flush a SECOND time, write the mic on a dead tree, and
+    // run the confirm loop - so all three counts move together against that
+    // build. useMeetingAudio's own cleanup issues the real stop; cleanups run
+    // parent before children, so it lands after this one.
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
+    await drainStopConfirm();
+    expect(statusCalls()).toBe(1); // the detect probe only - no confirm loop
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("F51: an unmount with no session of ours queues no work at all", async () => {
+    const audio = makeAudio();
+    const h = mount(audio);
+    await flush();
+
+    h.unmount();
+    await flush();
+
+    // An UNCONDITIONAL flush would queue a pointless transcript write on every
+    // teardown - including the routine ones, where there is nothing to save.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(statusCalls()).toBe(0);
+  });
+
+  it("F52: an unmount mid-START undoes the capture it can no longer record", async () => {
+    // The pending-start hole. Provenance is written two IPC round trips after
+    // startCapture(), while Rust sets is_capturing before the first of them
+    // (commands.rs:102-105) - so the cleanup cannot see this session at all,
+    // and the op that starts a capture is the only thing that can cancel it.
+    let releaseProbe!: (started: boolean) => void;
+    mocks.invoke.mockImplementation(async (cmd: string) =>
+      cmd === "get_capture_status"
+        ? new Promise<boolean>((resolve) => {
+            releaseProbe = resolve;
+          })
+        : undefined
+    );
+    const audio = makeAudio();
+    const h = mount(audio);
+    await flush();
+
+    await fire("meeting-detected");
+    // SEQUENCING. Let startCapture actually run, and park on the confirmation
+    // probe, BEFORE unmounting: unmount first and the guard at the top of
+    // handleDetected fires instead, startCapture is never called at all, and
+    // the branch under test is unreachable - the case would prove nothing.
+    await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(statusCalls()).toBe(1));
+
+    h.unmount(); // its own act - see the describe comment
+
+    await act(async () => {
+      releaseProbe(true); // Rust confirms a capture that now has no owner
+      await flush();
+    });
+
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+    // Provenance was never written. The cleanup found none to flush, which is
+    // exactly why it could not have been the thing that stopped this capture.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
+    expect(statusCalls()).toBe(1);
+  });
+
+  it("F53: a StrictMode mount still confirms its stop, and flushes once", async () => {
+    // The CREATE body of the unmount effect. StrictMode runs
+    // create -> destroy -> create on mount WITHOUT recreating refs, so a
+    // cleanup-only effect latches mountedRef false for the component's whole
+    // life: confirmMeetingStopped then stands down on poll 1 BEFORE it queries,
+    // and the loop is dead code in every dev build.
+    seedStatus([false, false]); // the detect probe, then the first confirm poll
+    const h = mount(makeAudio(), { strict: true, meetingAssistMode: true });
+    await flush();
+
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+
+    await fireActed("meeting-ended");
+
+    // The POLL is the assertion: a latched mountedRef leaves this at 1 forever.
+    await waitFor(() => expect(statusCalls()).toBe(2));
+    await drainStopConfirm();
+    expect(statusCalls()).toBe(2);
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    // Once for the whole mount. The discarded first mount's cleanup must not
+    // fire one of its own on the way past.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("F54: an unmount mid-confirm stands the loop down instead of crying failure", async () => {
+    // The other half of lowering mountedRef, and the case that makes the guard
+    // in confirmMeetingStopped reachable at all: until this task nothing ever
+    // lowered the ref, so that branch was dead code. The confirm loop is a
+    // real-timer background process that outlives the tree - and after the
+    // teardown there is nobody left to warn, so it stands down and reports
+    // success rather than toasting about a stop it can no longer observe.
+    seedStatus([false]); // the detect probe; the polls are swapped in below
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+
+    // PARK the first poll, so the unmount provably lands inside the loop. A
+    // plain seed cannot: the interval is 5ms here and waitFor first re-checks
+    // at 50ms, by which time the whole five-attempt loop has already run.
+    // Every LATER poll answers "still held", which is what makes a hook that
+    // never lowers mountedRef run to exhaustion and toast.
+    let releasePoll!: (active: boolean) => void;
+    let polls = 0;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "get_capture_status") return undefined;
+      polls += 1;
+      if (polls === 1) {
+        return new Promise<boolean>((resolve) => {
+          releasePoll = resolve;
+        });
+      }
+      return true;
+    });
+
+    await fireActed("meeting-ended");
+    await waitFor(() => expect(statusCalls()).toBe(2)); // parked on poll 1
+
+    h.unmount(); // its own act - see the describe comment
+
+    await act(async () => {
+      releasePoll(true); // Rust still reports the capture held
+      await flush();
+    });
+    await drainStopConfirm();
+
+    // Attempt 2 hit the guard before its query. A hook that never lowered
+    // mountedRef polls out to STOP_CONFIRM_ATTEMPTS + 1 instead.
+    expect(statusCalls()).toBe(2);
+    // And said nothing. Returning FALSE from that guard rather than true would
+    // fire the meeting stop-failure toast for a teardown that merely landed
+    // inside the confirmation window.
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    // handleStop released provenance before the mic write, so the cleanup had
+    // nothing to flush and nothing to enqueue - the loop is the only thing
+    // this case is measuring.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+});

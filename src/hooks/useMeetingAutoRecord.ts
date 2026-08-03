@@ -103,9 +103,9 @@ export type MeetingAutoRecordOptions = {
  * meeting-ended able to stop it and no toast. It is reachable MID-CALL:
  * app.context.tsx:490-509 reloads providers on a cross-window `storage` event,
  * which feeds aiConfigured/sttConfigured and therefore isComplete, so another
- * window changing the provider selection is enough. The unmount cleanup that
- * flushes and enqueues the stop is what closes this; it lands with the
- * meeting-mode stop path. See the design doc, "What the move costs".
+ * window changing the provider selection is enough. The unmount cleanup below
+ * closes this: it flushes, and enqueues the stop for a transcribing session.
+ * See the design doc, "What the move costs".
  *
  * `systemAudio` is passed in rather than obtained by calling useSystemAudio()
  * here: `useApp` in @/hooks is a plain hook, not a context, so a second call
@@ -204,7 +204,13 @@ export const useMeetingAutoRecord = ({
   // Read by the confirm loop below, which is a real-timer background process
   // that can outlive this component: after unmount there is nothing left to
   // warn anybody about, and the loop stands down rather than reporting a stop
-  // it can no longer observe. Lowered by the unmount cleanup that lands next.
+  // it can no longer observe. Read by handleDetected too, which owns cancelling
+  // a start still in flight when the tree goes away - the unmount cleanup
+  // cannot, because provenance is not written yet.
+  //
+  // Lowered by the unmount cleanup below and RE-ARMED by that effect's create
+  // body. The `true` initialiser is NOT sufficient on its own: it runs once per
+  // ref, and StrictMode's discarded first mount shares the ref. See there.
   const mountedRef = useRef(true);
 
   // Latched while a stop is queued or in flight, so the pill-off branch can
@@ -261,6 +267,15 @@ export const useMeetingAutoRecord = ({
   };
 
   const handleDetected = async () => {
+    // The op that starts a capture owns cancelling it, because the unmount
+    // cleanup cannot: provenance is written two IPC round trips after
+    // startCapture(), while Rust sets is_capturing before the first of them
+    // (src-tauri/src/speaker/commands.rs:102-105), so a start still in flight
+    // is invisible to the cleanup. This first guard covers an op still QUEUED
+    // at unmount - the chain is FIFO, so it can resume long after the tree has
+    // gone.
+    if (!mountedRef.current) return;
+
     // Read once, synchronously, before any await: the decideOnDetected call
     // below and the ignore-busy re-check further down must see the SAME
     // object, structurally rather than by coincidence of there being no await
@@ -354,6 +369,12 @@ export const useMeetingAutoRecord = ({
     }
 
     if (decision === "start-meeting") {
+      // Re-checked, because the probe above is an await and the tree can go
+      // away inside it. This branch returns BEFORE the transcribing guard
+      // further down, so without its own check it would still write provenance
+      // and call the setter on a dead tree.
+      if (!mountedRef.current) return;
+
       // Provenance FIRST, then the write, in one synchronous block: no commit
       // can interleave, so the next commit always observes what we just wrote.
       // Nothing is confirmed against Rust - see Decision 4. A failing guest half
@@ -377,6 +398,13 @@ export const useMeetingAutoRecord = ({
     const started = await invoke<boolean>("get_capture_status").catch(
       () => false
     );
+
+    if (!mountedRef.current) {
+      // The tree went away while this start was in flight. Record nothing and
+      // undo it - there is no listener left to stop it later.
+      if (started) await systemAudioRef.current.stopCapture();
+      return;
+    }
 
     if (started) {
       startedModeRef.current = "transcribing";
@@ -486,6 +514,41 @@ export const useMeetingAutoRecord = ({
       stopRequestedRef.current = false;
     }
   };
+
+  useEffect(() => {
+    // The CREATE body is MANDATORY, not decoration. StrictMode runs
+    // create -> destroy -> create on mount WITHOUT recreating refs, so a
+    // cleanup-only effect latches mountedRef false for the component's whole
+    // life. The listenersOkRef declaration comment already records this lesson.
+    // Deleting this line as "redundant with useRef(true)" kills the
+    // stop-confirm loop on poll 1 in every dev build - F53 is what catches it.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (startedModeRef.current) {
+        // useCompletion dies with the tree, taking meetingTranscript and
+        // conversationHistoryRef with it, and there is no unmount flush in
+        // useCompletion today - up to MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL - 1
+        // segments would vanish silently.
+        void flushRef.current?.().catch(reportFlushFailure);
+      }
+      if (startedModeRef.current === "transcribing") {
+        // enqueue, NOT a bare stopCapture(): a direct call bypasses chainRef
+        // and can overlap an in-flight capture command. It would also skip
+        // decideOnEnded, the provenance clear and the post-stop confirmation
+        // query - so a stop that did not take would go unreported. F49 pins
+        // that query's count for exactly that reason.
+        enqueue(handleStop);
+      }
+      // "meeting" needs no stop here - the tree teardown unmounts
+      // useMeetingAudio, whose own cleanup issues it. Verified: cleanups run
+      // PARENT BEFORE CHILDREN, so that stop is issued after this one.
+    };
+    // enqueue and handleStop are recreated every render but close over refs
+    // only, so the mount copies are behaviourally identical to the last ones -
+    // the same argument the listener effect below makes at length.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!isOwner) return;
