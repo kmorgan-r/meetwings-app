@@ -18,7 +18,11 @@ import {
   decideOnWatcherStopped,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
-import { STORAGE_KEYS } from "@/config/constants";
+import {
+  STOP_CONFIRM_ATTEMPTS,
+  STOP_CONFIRM_INTERVAL_MS,
+  STORAGE_KEYS,
+} from "@/config/constants";
 
 /**
  * The pre-#32 key. Used as a literal on purpose: the constant is gone, and
@@ -41,6 +45,18 @@ export const STUCK_MESSAGE =
 export const GENERIC_START_MESSAGE = "Could not start recording for this call";
 export const STOP_FAILED_MESSAGE =
   "Could not stop the recording — stop it manually";
+/**
+ * The transcribing copy tells the user to stop it manually, which works there:
+ * systemAudio.capturing is true, so the app page renders the visualizer and the
+ * SystemAudio button reads "Stop system audio capture"
+ * (src/pages/app/components/speech/index.tsx:85). After a MEETING auto-stop none
+ * of that holds - capturing is false, the block does not render, the mic is
+ * already closed, and that button reads "Start system audio capture" (:86).
+ */
+export const MEETING_STOP_FAILED_MESSAGE =
+  "Recording may still be running — restart Meetwings if audio keeps being captured";
+export const MEETING_WATCHER_STOPPED_MESSAGE =
+  "Meeting detection stopped — still recording this call. Turn the Meeting pill off to end it.";
 export const WATCHER_STOPPED_MESSAGE =
   "Meeting detection stopped — still recording. Stop manually when the call ends.";
 
@@ -184,6 +200,19 @@ export const useMeetingAutoRecord = ({
   // Serializes every capture command, so two capture commands can never overlap.
   // Held in a ref so it outlives individual renders.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // Read by the confirm loop below, which is a real-timer background process
+  // that can outlive this component: after unmount there is nothing left to
+  // warn anybody about, and the loop stands down rather than reporting a stop
+  // it can no longer observe. Lowered by the unmount cleanup that lands next.
+  const mountedRef = useRef(true);
+
+  // Latched while a stop is queued or in flight, so the pill-off branch can
+  // tell "already stopping" from "nothing to stop" and not enqueue a second
+  // one. handleStop clears it on EVERY exit - including the "ignore" early
+  // return, which sits before the try and so is not covered by the finally.
+  // The branch that raises it lands with the pill-off routing.
+  const stopRequestedRef = useRef(false);
 
   // One ref per message: sharing a single budget would let a user who fixes their
   // VAD setting never see a subsequent genuine capture failure.
@@ -362,14 +391,76 @@ export const useMeetingAutoRecord = ({
     await systemAudioRef.current.stopCapture();
   };
 
+  /**
+   * Polls until Rust agrees the capture is down, or the budget runs out.
+   *
+   * A single query would report a false failure on EVERY healthy meeting stop:
+   * closing the mic is fire-and-forget through React, and the Rust stop holds
+   * is_capturing for at least 500ms of its own (commands.rs:478-490).
+   */
+  const confirmMeetingStopped = async (): Promise<boolean> => {
+    for (let attempt = 0; attempt < STOP_CONFIRM_ATTEMPTS; attempt++) {
+      await new Promise((r) => setTimeout(r, STOP_CONFIRM_INTERVAL_MS));
+
+      // BOTH guards run AFTER the sleep, before the query. Placed before it,
+      // the re-acquisition guard fires on every healthy stop - the layout
+      // mirror still reads `true` synchronously and for two microtasks after
+      // our write, flipping only on the first macrotask - and the loop becomes
+      // dead code (measured: checkBeforeSleep -> 0 polls; checkAfterSleep -> 1).
+      // Do not "tidy" them up to the top of the body.
+      //
+      // Unmount returns TRUE, not false: there is nothing left to warn about,
+      // and returning false would fire MEETING_STOP_FAILED_MESSAGE on an
+      // unmount that merely landed inside the window.
+      if (!mountedRef.current) return true;
+      if (enableVADRef.current) return true; // re-opened: something new started
+
+      // Default true on a rejected query: an unreadable status is never
+      // reported as success.
+      const active = await invoke<boolean>("get_capture_status").catch(
+        () => true
+      );
+      if (!active) return true;
+    }
+    return false;
+  };
+
   const handleStop = async () => {
-    if (
-      decideOnEnded({ startedMode: startedModeRef.current }) !==
-      "stop-transcribing"
-    )
+    const action = decideOnEnded({ startedMode: startedModeRef.current });
+    if (action === "ignore") {
+      // MUST clear here, not only in `finally`: this early return is before the
+      // try, and an inert meeting-ended is the COMMON case (ignore-off,
+      // ignore-busy, ignore-active and ignore-mic-open all leave provenance
+      // null). Leaving it latched permanently disarms the pill-off branch.
+      stopRequestedRef.current = false;
       return;
+    }
+
+    // Release ownership BEFORE writing the mic. The write commits during the
+    // confirm loop's first sleep, and the ownership layout effect has no dep
+    // array - so with provenance still "meeting" it would take its release
+    // branch and flush a SECOND time (measured: 2 flushes on every healthy
+    // stop). The action is already captured, so nulling here is safe.
+    startedModeRef.current = null;
 
     try {
+      if (action === "stop-meeting") {
+        // Closing the mic IS the stop: AutoSpeechVad, useMeetingAudio and the
+        // diarization buffer are all gated on enableVAD. Nothing here touches
+        // the transcribing pipeline's startCapture/stopCapture.
+        void flushRef.current?.().catch(reportFlushFailure);
+        setEnableVADRef.current(false);
+
+        const ok = await confirmMeetingStopped();
+        // Gate on our OWN view too: get_capture_status is a global signal we do
+        // not exclusively own, so a session the user started inside the window
+        // must not be reported as our failed stop.
+        if (!ok && !enableVADRef.current && !systemAudioRef.current.capturing) {
+          toast.error(MEETING_STOP_FAILED_MESSAGE);
+        }
+        return;
+      }
+
       await systemAudioRef.current.stopCapture();
 
       // stopCapture never rejects either - its whole body is wrapped - so a failed
@@ -391,7 +482,8 @@ export const useMeetingAutoRecord = ({
     } finally {
       // In a finally so no rejection can strand provenance set forever, and here
       // rather than relying on capture-stopped, which a failed stop never emits.
-      startedModeRef.current = null;
+      startedModeRef.current = null; // idempotent
+      stopRequestedRef.current = false;
     }
   };
 
@@ -431,12 +523,19 @@ export const useMeetingAutoRecord = ({
       }),
 
       register("meeting-watcher-stopped", () => {
+        // decideOnWatcherStopped returns "warn" | "ignore" and carries no mode,
+        // so the copy choice has to happen here.
         if (
-          decideOnWatcherStopped({ startedMode: startedModeRef.current }) ===
+          decideOnWatcherStopped({ startedMode: startedModeRef.current }) !==
           "warn"
         ) {
-          toast.warning(WATCHER_STOPPED_MESSAGE);
+          return;
         }
+        toast.warning(
+          startedModeRef.current === "meeting"
+            ? MEETING_WATCHER_STOPPED_MESSAGE
+            : WATCHER_STOPPED_MESSAGE
+        );
       }),
 
       register("meeting-detection-setting-changed", (payload) => {

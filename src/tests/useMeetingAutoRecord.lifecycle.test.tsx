@@ -53,7 +53,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 // Spread the real module, or STORAGE_KEYS arrives undefined and the hook throws
 // on its first getItem. The override shortens the post-stop confirmation poll:
-// RTL's waitFor budget is 1000ms and the shipped interval blows through it.
+// at the shipped 300ms a five-attempt loop measures 1548ms, and RTL's waitFor
+// budget is 1000ms - so this override is mandatory, not prudent. Only the
+// INTERVAL is overridden: STOP_CONFIRM_ATTEMPTS is asserted against below, and
+// a case that pinned a shortened count would stop describing the real loop.
 vi.mock("@/config/constants", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   STOP_CONFIRM_INTERVAL_MS: 5,
@@ -74,12 +77,21 @@ vi.mock("@/lib", () => ({
 
 import {
   GENERIC_START_MESSAGE,
+  MEETING_STOP_FAILED_MESSAGE,
+  MEETING_WATCHER_STOPPED_MESSAGE,
   STOP_FAILED_MESSAGE,
   STUCK_MESSAGE,
   useMeetingAutoRecord,
   VAD_MESSAGE,
   WATCHER_STOPPED_MESSAGE,
 } from "@/hooks/useMeetingAutoRecord";
+// Through the mock above, so these are the values the HOOK is running on here,
+// not the shipped ones: the drain has to outlast the loop as it actually
+// behaves in this file, and the attempt count has to match what it really does.
+import {
+  STOP_CONFIRM_ATTEMPTS,
+  STOP_CONFIRM_INTERVAL_MS,
+} from "@/config/constants";
 
 const registered = (event: string) => listeners.get(event)?.size ?? 0;
 
@@ -118,6 +130,31 @@ const fireActed = async (event: string, payload?: any) => {
 const flush = async () => {
   await Promise.resolve();
   await Promise.resolve();
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Outlasts the post-stop confirmation loop, which is a REAL-timer background
+ * process that outlives the assertions of the case that started it.
+ *
+ * Called from `beforeEach` BEFORE clearAllMocks and seedStatus, because a poll
+ * landing after the next case has seeded would consume its queue at index 0 and
+ * fail a CORRECT implementation - in the next case, for a reason invisible
+ * there. Cases that settle mid-loop call it directly as well, so an assertion
+ * about a terminal poll count is not merely a snapshot taken early.
+ *
+ * The floor of 20ms is timer clamping and a saturated runner; the doubling is
+ * headroom. Never fake timers: RTL gates its own on `typeof jest`, which Vitest
+ * never defines, so waitFor's timeout is mocked too and the case hangs to the
+ * 20000ms limit.
+ */
+const drainStopConfirm = async () => {
+  await act(async () => {
+    await sleep(
+      STOP_CONFIRM_ATTEMPTS * Math.max(STOP_CONFIRM_INTERVAL_MS, 20) * 2
+    );
+  });
 };
 
 const makeAudio = (overrides: Record<string, any> = {}) => ({
@@ -286,7 +323,11 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
   };
 };
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Drain FIRST, then clear, then seed - see drainStopConfirm. A case that
+  // failed mid-loop never reached its own drain, and the next one must not
+  // inherit its polls.
+  await drainStopConfirm();
   vi.clearAllMocks();
   listeners.clear();
   stored = { meeting_auto_record_enabled: "true" };
@@ -763,15 +804,19 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(mocks.toast.error).not.toHaveBeenCalled();
 
     // The other half of "declined": no provenance was recorded either, so the
-    // call ending cannot close a mic this hook never opened. Today that is a
-    // forward guard rather than the killing clause - the meeting-mode stop has
-    // not landed, so meeting-ended is inert whatever provenance says, and it is
-    // the setEnableVAD assertion above that catches a hook claiming anyway.
-    // TODO(meeting-mode stop): live once handleStop grows its stop-meeting
-    // branch - tighten rather than assume it already discriminates.
+    // call ending cannot close a mic this hook never opened. This is a live
+    // assertion now that handleStop has its stop-meeting branch - a hook that
+    // claimed anyway writes the mic closed right here.
+    //
+    // The drain is what makes the status count discriminate: the first confirm
+    // poll is one sleep away, so asserting it immediately after fireActed would
+    // read 1 against a broken hook too.
     await fireActed("meeting-ended");
+    await drainStopConfirm();
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(statusCalls()).toBe(1); // the detect probe only - no confirm loop
+    expect(mocks.toast.error).not.toHaveBeenCalled();
     expect(h.observedVAD).toEqual([false, true]); // the user's write, only
   });
 
@@ -814,10 +859,15 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(h.observedVAD).toEqual([false, true]); // the user's write, only
     expect(statusCalls()).toBe(1);
 
-    // TODO(meeting-mode stop): inert today for the reason spelled out in F37.
+    // Live now, for the reason spelled out in F37. Note what the count pins
+    // here: this case's invoke NEVER resolves get_capture_status, so a confirm
+    // loop that did start would park on its first poll - visible only as the
+    // extra call, not as a toast.
     await fireActed("meeting-ended");
+    await drainStopConfirm();
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(statusCalls()).toBe(1);
   });
 
   it("F39: two detections in one tick claim once and commit once", async () => {
@@ -849,13 +899,19 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(audio.startCapture).not.toHaveBeenCalled();
 
     // Two ended events, because handleStop clears provenance first: a single one
-    // cannot tell a correct stop from one that would fire twice. The meeting-mode
-    // stop lands with that path; today both are inert, and what this pins is that
-    // NEITHER writes the mic closed behind the user's back in the meantime.
+    // cannot tell a correct stop from one that would fire twice. The first is a
+    // real stop - it releases provenance, flushes and closes the mic - and the
+    // second finds provenance null and must be silent. ONE claim in, ONE close
+    // out, however many events land on either end.
     await fireActed("meeting-ended");
     await fireActed("meeting-ended");
-    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    await drainStopConfirm();
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(h.observedVAD).toEqual([false, true, false]);
+    // The meeting path never drives the transcribing pipeline, in either
+    // direction: closing the mic IS the stop.
     expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
   });
 
   it("F40: releases ownership and flushes when the mic goes closed", async () => {
@@ -889,6 +945,187 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     // will do; a fresh audio object is the cheapest.
     await h.setAudio(makeAudio());
 
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useMeetingAutoRecord - meeting mode stop", () => {
+  /**
+   * Drives a meeting-mode start and settles on the claim, so every case below
+   * begins from one known state: provenance "meeting", the mic open by this
+   * hook's own write, and exactly one status call spent on the detect probe.
+   * The caller seeds that probe - and any confirm polls it wants - first.
+   */
+  const startMeeting = async (audio = makeAudio()) => {
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+    expect(h.observedVAD).toEqual([false, true]);
+    return h;
+  };
+
+  it("F41: a healthy stop closes the mic, confirms it went down, and says nothing", async () => {
+    seedStatus([false, false]); // the detect probe, then the first confirm poll
+    const h = await startMeeting();
+
+    await fireActed("meeting-ended");
+
+    // Settle on the POLL, not on setEnableVAD(false). At the instant of that
+    // write the first sleep has not elapsed, so a healthy stop and a stop that
+    // never confirms anything read identically - and a DELETED loop passes.
+    await waitFor(() => expect(statusCalls()).toBe(2));
+    await drainStopConfirm();
+
+    expect(statusCalls()).toBe(2); // it stopped polling the moment Rust agreed
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(h.observedVAD).toEqual([false, true, false]);
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+
+    // Exactly ONE flush. handleStop releases provenance before it writes the
+    // mic, so when that write commits - during the loop's first sleep - the
+    // ownership effect finds provenance already null and does not flush again.
+    // Release it after the write instead and this reads 2.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("F42: a stop that never takes toasts the MEETING copy, once", async () => {
+    // The probe, then every attempt reporting the capture still held.
+    seedStatus([false, true, true, true, true, true]);
+    await startMeeting();
+
+    await fireActed("meeting-ended");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(MEETING_STOP_FAILED_MESSAGE);
+    // Not the transcribing copy: it says "stop it manually", and after a
+    // meeting auto-stop the control it points at is not rendered at all.
+    expect(mocks.toast.error).not.toHaveBeenCalledWith(STOP_FAILED_MESSAGE);
+
+    // One poll per attempt, plus the probe. A single-query implementation
+    // reports 2 here - and would have toasted on the healthy stop of F41,
+    // because Rust holds is_capturing for 500ms after the stop is issued.
+    expect(statusCalls()).toBe(STOP_CONFIRM_ATTEMPTS + 1);
+    await drainStopConfirm();
+    expect(statusCalls()).toBe(STOP_CONFIRM_ATTEMPTS + 1);
+    expect(mocks.toast.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("F43: the loop exits early rather than polling to exhaustion", async () => {
+    seedStatus([false, true, false]); // probe, still up, then down
+    await startMeeting();
+
+    await fireActed("meeting-ended");
+
+    await waitFor(() => expect(statusCalls()).toBe(3));
+    await drainStopConfirm();
+    expect(statusCalls()).toBe(3); // not STOP_CONFIRM_ATTEMPTS + 1
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F44: an unreadable status is never read as stopped", async () => {
+    // H8: seed the DETECT probe, THEN swap in the rejecting implementation.
+    // Rejecting from the start defaults the probe to "held", which returns
+    // ignore-active ahead of the meeting fork - there would be no session to
+    // stop and the case would be unsatisfiable rather than failing.
+    seedStatus([false]);
+    const h = await startMeeting();
+
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_capture_status") throw new Error("ipc down");
+      return undefined;
+    });
+
+    await fireActed("meeting-ended");
+
+    await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
+    expect(mocks.toast.error).toHaveBeenCalledWith(MEETING_STOP_FAILED_MESSAGE);
+    // Every attempt was spent: a rejection defaults to "still active", so the
+    // loop runs to exhaustion instead of exiting on the first one.
+    expect(statusCalls()).toBe(STOP_CONFIRM_ATTEMPTS + 1);
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it("F45: capture-stopped does not disown a MEETING session", async () => {
+    seedStatus([false, false]); // probe, then one confirm poll
+    const audio = makeAudio();
+    const h = await startMeeting(audio);
+
+    // This event fires on ANY stop, including the mid-call useMeetingAudio
+    // deps re-run that a device or STT-language change triggers - so it
+    // arrives with the session very much alive. Clearing meeting provenance
+    // here would leave the mic open with decideOnEnded answering "ignore" for
+    // the rest of the call.
+    await fireActed("capture-stopped");
+    await fireActed("meeting-ended");
+
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(2));
+    expect(h.setEnableVAD).toHaveBeenLastCalledWith(false);
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    await drainStopConfirm(); // returns with a poll still scheduled
+  });
+
+  it("F46: a mic the USER closed is not stopped again, and is flushed once", async () => {
+    seedStatus([false]); // the probe, and nothing after it
+    const audio = makeAudio();
+    const h = await startMeeting(audio);
+
+    await h.setMicOpen(false); // the user, bypassing the spy - see F35
+
+    await fireActed("meeting-ended");
+    await drainStopConfirm();
+
+    // The release branch already disowned the session, so the stop is disarmed.
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1); // the claim, and no more
+    expect(statusCalls()).toBe(1); // no confirm loop ran at all
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+
+    // And the tail was saved on the way out. A release that skipped the flush
+    // is silent everywhere else on this path - the pill-off branch has its own
+    // flush assertions and would keep passing.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+
+  it("F47: a watcher death mid-MEETING points at the pill, not at a manual stop", async () => {
+    seedStatus([false]);
+    const audio = makeAudio();
+    const h = await startMeeting(audio);
+
+    await fireActed("meeting-watcher-stopped");
+
+    expect(mocks.toast.warning).toHaveBeenCalledTimes(1);
+    expect(mocks.toast.warning).toHaveBeenCalledWith(
+      MEETING_WATCHER_STOPPED_MESSAGE
+    );
+    // decideOnWatcherStopped carries no mode, so nothing but this assertion
+    // forces the fork - and the transcribing copy points the user at a manual
+    // stop for a capture they never started by hand.
+    expect(mocks.toast.warning).not.toHaveBeenCalledWith(
+      WATCHER_STOPPED_MESSAGE
+    );
+    // A dead watcher must not truncate a live call: warn and keep recording.
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+    expect(statusCalls()).toBe(1);
+  });
+
+  it("F48: turning the feature off mid-MEETING closes the mic it opened", async () => {
+    // meeting-detection-setting-changed routes to handleStop too, and here it
+    // is the ONLY exit: stop_meeting_watcher sets explicit_stop, which
+    // suppresses meeting-watcher-stopped, and no meeting-ended will ever
+    // arrive. A stop fork that only ever ran from meeting-ended would leave
+    // this user's mic open with the feature switched off.
+    seedStatus([false, false]); // probe, then one confirm poll
+    const h = await startMeeting();
+
+    await fireActed("meeting-detection-setting-changed", { enabled: false });
+
+    await waitFor(() => expect(statusCalls()).toBe(2));
+    await drainStopConfirm();
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(h.observedVAD).toEqual([false, true, false]);
+    expect(mocks.toast.error).not.toHaveBeenCalled();
     expect(h.flushTranscript).toHaveBeenCalledTimes(1);
   });
 });

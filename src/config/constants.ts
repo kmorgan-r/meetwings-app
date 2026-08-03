@@ -140,6 +140,19 @@ export const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
 // call would report nothing.
 export const STT_FAILURE_REPORT_THRESHOLD = 3;
 
+/**
+ * Bounded confirmation that a meeting-mode auto-stop really brought the capture
+ * down. Worst case 1500 ms, past Rust's 500 ms floor (a 300 ms sleep before
+ * is_capturing clears at src-tauri/src/speaker/commands.rs:478-484, 200 ms more
+ * before capture-stopped at :487-490) with headroom for a saturated main thread.
+ *
+ * Here rather than in useMeetingAutoRecord because a module's own const reads
+ * compile to a local binding: overriding its own export from a test is a silent
+ * no-op, while vi.mock("@/config/constants", …) works.
+ */
+export const STOP_CONFIRM_ATTEMPTS = 5;
+export const STOP_CONFIRM_INTERVAL_MS = 300;
+
 // Meeting Assist system prompt for contextual insights
 export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a live meeting/interview assistant feeding the user answers in real time. The transcript uses speaker labels: "You" is the user; other labels are the other participants.
 
