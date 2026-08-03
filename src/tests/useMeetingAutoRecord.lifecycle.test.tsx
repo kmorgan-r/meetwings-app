@@ -1128,6 +1128,179 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     expect(mocks.toast.error).not.toHaveBeenCalled();
     expect(h.flushTranscript).toHaveBeenCalledTimes(1);
   });
+
+  it("F55: turning the Meeting pill off mid-call runs the ordinary stop", async () => {
+    // useMeetingAudio is gated on `meetingAssistMode && enableVAD`
+    // (Audio.tsx:124), so the pill going off unmounts the GUEST half while the
+    // mic stays open - and AutoSpeechVad, which branches on the same pill, then
+    // starts auto-submitting the user's own speech to the AI. It is the same
+    // physical operation as meeting-ended, so it routes through the same
+    // handleStop rather than closing the mic inline.
+    seedStatus([false, false]); // the detect probe, then the first confirm poll
+    const audio = makeAudio();
+    const h = await startMeeting(audio);
+
+    await h.setMeetingAssistMode(false);
+
+    // Settle on the POLL, not on the mic write: at the instant of that write the
+    // first sleep has not elapsed, so an inline close and a real handleStop read
+    // identically and a build with no confirmation at all would pass.
+    await waitFor(() => expect(statusCalls()).toBe(2));
+    await drainStopConfirm();
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(h.observedVAD).toEqual([false, true, false]);
+    expect(statusCalls()).toBe(2); // it stopped polling the moment Rust agreed
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+    // Closing the mic IS the stop; the transcribing pipeline is never driven.
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+
+    // ONE flush here, from handleStop. PRODUCTION FLUSHES TWICE on this path
+    // and that is accepted: setMeetingAssistMode's wrapper
+    // (useCompletion.ts:481-485) flushes on the true->false transition, and
+    // handleStop's flush then sees unsavedCount <= 0. The harness OWNS
+    // meetingAssistMode and never runs that wrapper, so this count is 1 here -
+    // it is NOT evidence that the wrapper's flush is dead code.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+
+    // And the session really is over. handleStop released provenance, so the
+    // meeting-ended that ends the same call a moment later must be inert - a
+    // build that closed the mic inline without disowning the session flushes,
+    // writes the mic and polls all over again right here.
+    await fireActed("meeting-ended");
+    await drainStopConfirm();
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(2);
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(statusCalls()).toBe(2);
+  });
+
+  it("F56: repeated commits with the pill off still produce one stop", async () => {
+    seedStatus([false]); // the detect probe; everything after it is swapped in
+    const h = await startMeeting();
+
+    // PARK the chain first. The stopRequestedRef guard is only ever consulted
+    // while a pill-off stop is QUEUED but has not run: once it runs it nulls
+    // provenance, and every later commit returns at the
+    // `startedModeRef !== "meeting"` check without reaching the guard at all.
+    // Production blocks the chain this long routinely - a confirm loop holds it
+    // for up to STOP_CONFIRM_ATTEMPTS * STOP_CONFIRM_INTERVAL_MS.
+    let releaseProbe!: (held: boolean) => void;
+    let probes = 0;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "get_capture_status") return undefined;
+      probes += 1;
+      if (probes === 1) {
+        return new Promise<boolean>((resolve) => {
+          releaseProbe = resolve;
+        });
+      }
+      return false; // the confirm poll: Rust agrees the capture is down
+    });
+
+    await fireActed("meeting-detected"); // parks on its own probe
+    await waitFor(() => expect(statusCalls()).toBe(2));
+
+    await h.setMeetingAssistMode(false); // queues the stop behind the parked op
+    // Two more commits inside that window. The ownership effect has no
+    // dependency array and <Completion /> re-renders per streamed AI chunk, so
+    // production takes this path over and over; a fresh audio object is the
+    // cheapest commit that changes nothing else.
+    await h.setAudio(makeAudio());
+    await h.setAudio(makeAudio());
+
+    await act(async () => {
+      // HELD, deliberately: the parked detection read meetingMode before the
+      // pill moved, so releasing it with `false` would decide "start-meeting"
+      // and re-claim the mic the queued stop is about to close. "ignore-active"
+      // keeps this case about the queue.
+      releaseProbe(true);
+      await flush();
+    });
+
+    await waitFor(() => expect(statusCalls()).toBe(3));
+    await drainStopConfirm();
+
+    // One stop, however many commits.
+    //
+    // NOTE WHAT THIS DOES NOT KILL. Removing the `stopRequestedRef` raise
+    // leaves every count below unchanged: the extra handleStops are enqueued,
+    // but each reaches decideOnEnded after the first one's finally has nulled
+    // provenance and returns "ignore". MEASURED. The ref is a chain-length
+    // optimisation, not a correctness guard - correctness comes from that
+    // provenance clear - so a green run here is not evidence the ref is
+    // load-bearing. What this case does pin is the end-to-end property: one
+    // flush, one mic write and one confirm loop out of many commits.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+    expect(statusCalls()).toBe(3); // detect probe, parked probe, one poll
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
+  it("F57: a stop that decides ignore re-arms the pill-off branch", async () => {
+    // THE LATCH CASE. stopRequestedRef is raised by the pill-off branch and
+    // cleared by handleStop - and handleStop's "ignore" early return sits
+    // BEFORE the try, so a build that cleared it only in `finally` leaves it
+    // latched true and the pill-off branch is dead for the rest of the mount:
+    // the user turns the pill off, the mic stays open, and AutoSpeechVad starts
+    // submitting their speech to the AI.
+    //
+    // Reaching that requires the queued stop to decide "ignore", which means
+    // provenance must be nulled by something OTHER than handleStop while the
+    // stop is still queued - the only such path is the mic-close release
+    // branch. So: park the chain, turn the pill off, let the user close the mic
+    // by hand, then release.
+    seedStatus([false]); // the first detect probe
+    const h = await startMeeting();
+
+    let releaseProbe!: (held: boolean) => void;
+    let probes = 0;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "get_capture_status") return undefined;
+      probes += 1;
+      if (probes === 1) {
+        return new Promise<boolean>((resolve) => {
+          releaseProbe = resolve;
+        });
+      }
+      return false;
+    });
+
+    await fireActed("meeting-detected"); // parks, blocking the chain
+    await waitFor(() => expect(statusCalls()).toBe(2));
+
+    await h.setMeetingAssistMode(false); // raises the flag, queues the stop
+    await h.setMicOpen(false); // the USER, bypassing the spy - see F35
+
+    await act(async () => {
+      releaseProbe(true); // ignore-active, so the parked op claims nothing
+      await flush();
+    });
+
+    // The release branch already disowned the session, so the queued stop found
+    // provenance null and decided "ignore" - no second flush, no mic write.
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
+    expect(statusCalls()).toBe(2);
+
+    // Now the next call, which is where a latched flag shows. Pill back on, a
+    // fresh auto-start, and the pill off again.
+    await h.setMeetingAssistMode(true);
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(2));
+
+    await h.setMeetingAssistMode(false);
+
+    await waitFor(() => expect(statusCalls()).toBe(4));
+    await drainStopConfirm();
+
+    // Against a flag cleared only in `finally` this reads [[true], [true]]:
+    // the branch never fires, the mic is never closed and nothing is flushed.
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [true], [false]]);
+    expect(h.observedVAD).toEqual([false, true, false, true, false]);
+    expect(h.flushTranscript).toHaveBeenCalledTimes(2);
+    expect(statusCalls()).toBe(4);
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
 });
 
 describe("useMeetingAutoRecord - start failure", () => {

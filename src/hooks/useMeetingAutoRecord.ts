@@ -176,6 +176,28 @@ export const useMeetingAutoRecord = ({
       // did not perform.
       void flushRef.current?.().catch(reportFlushFailure);
       startedModeRef.current = null;
+    } else if (!meetingAssistMode && !stopRequestedRef.current) {
+      // Pill off mid-call: the guest half unmounts but the mic stays open and
+      // starts auto-submitting to the AI. Do NOT close it inline - enqueue the
+      // ordinary stop, so this path gets the same flush and the same
+      // confirmation as meeting-ended.
+      //
+      // stopRequestedRef is a chain-length optimisation, not a correctness
+      // guard: this effect has no dependency array and <Completion /> re-renders
+      // on every streamed AI chunk, so without it every commit until the queued
+      // op runs enqueues another handleStop. Correctness comes from handleStop
+      // nulling provenance, after which repeats decide "ignore".
+      //
+      // THIS PATH FLUSHES TWICE IN PRODUCTION, and that is accepted rather than
+      // an oversight. setMeetingAssistMode's wrapper already flushes on the
+      // true->false transition (useCompletion.ts:481-485) and handleStop flushes
+      // again; the second sees unsavedCount <= 0 and resolves without writing.
+      // F55 measures ONE flush only because the harness owns meetingAssistMode
+      // and never runs that wrapper - so a green suite is NOT licence to delete
+      // either flush. The wrapper covers every other way the pill goes off; this
+      // one covers a stop that was never a pill move at all.
+      stopRequestedRef.current = true;
+      enqueue(handleStop);
     }
   });
 
@@ -217,7 +239,10 @@ export const useMeetingAutoRecord = ({
   // tell "already stopping" from "nothing to stop" and not enqueue a second
   // one. handleStop clears it on EVERY exit - including the "ignore" early
   // return, which sits before the try and so is not covered by the finally.
-  // The branch that raises it lands with the pill-off routing.
+  // Raised in exactly ONE place - the ownership layout effect's pill-off branch
+  // - and always immediately followed by the enqueue of the handleStop that
+  // clears it again, which is why it cannot latch. F57 is the case that catches
+  // a clear that only ran in the finally.
   const stopRequestedRef = useRef(false);
 
   // One ref per message: sharing a single budget would let a user who fixes their

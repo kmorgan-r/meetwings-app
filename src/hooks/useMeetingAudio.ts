@@ -219,7 +219,9 @@ export function useMeetingAudio({
 
     isProcessingRef.current = false;
     setIsProcessing(false);
-  }, [sttProvider, selectedSttProvider, sttLanguage]);
+    // noteSttFailure is useCallback(…, []), so listing it costs nothing: this
+    // identity never changes and processQueue is not recreated by it.
+  }, [sttProvider, selectedSttProvider, sttLanguage, noteSttFailure]);
 
   // Log when processQueue changes
   useEffect(() => {
