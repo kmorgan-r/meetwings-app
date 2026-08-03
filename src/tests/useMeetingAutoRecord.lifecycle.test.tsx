@@ -767,6 +767,8 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     // forward guard rather than the killing clause - the meeting-mode stop has
     // not landed, so meeting-ended is inert whatever provenance says, and it is
     // the setEnableVAD assertion above that catches a hook claiming anyway.
+    // TODO(meeting-mode stop): live once handleStop grows its stop-meeting
+    // branch - tighten rather than assume it already discriminates.
     await fireActed("meeting-ended");
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(audio.stopCapture).not.toHaveBeenCalled();
@@ -812,6 +814,7 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(h.observedVAD).toEqual([false, true]); // the user's write, only
     expect(statusCalls()).toBe(1);
 
+    // TODO(meeting-mode stop): inert today for the reason spelled out in F37.
     await fireActed("meeting-ended");
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(audio.stopCapture).not.toHaveBeenCalled();
@@ -876,6 +879,17 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     // Releasing is not a mic write - the mic is already closed.
     expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
     expect(h.observedVAD).toEqual([false, true, false]);
+
+    // The RELEASE half, and it needs a second commit to be visible at all: the
+    // mirror effect has no dependency array, so it re-enters this branch on
+    // every render of <Completion /> - which re-renders per streamed AI chunk.
+    // A build that flushed but left provenance set would fire a transcript save
+    // on each one for the rest of the session, and the assertions above cannot
+    // tell it apart from a correct one. Any commit that changes nothing relevant
+    // will do; a fresh audio object is the cheapest.
+    await h.setAudio(makeAudio());
+
+    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
   });
 });
 
