@@ -15,8 +15,6 @@ export type DetectedDecision =
   | "ignore-busy" // useSystemAudio's own mirror says a session is open
   | "ignore-active" // Rust says the global capture is already held
   | "ignore-mic-open" // the mic is already listening - not ours to claim
-  | "ignore-undecided" // setup status has not finished loading
-  | "tell-setup" // no AI/STT provider, and not a cloud subscriber
   | "tell-vad"; // VAD disabled, so a transcribing start would record nothing
 
 /**
@@ -51,13 +49,15 @@ export type WatcherStoppedAction = "warn" | "ignore";
  * TRANSCRIBING pipeline only - useMeetingAudio hardcodes MEETING_VAD_CONFIG
  * with `enabled: true`. Testing it before the fork would refuse meeting starts
  * over a setting that does not apply.
+ *
+ * Setup status is deliberately absent: the caller mounts inside <Completion />,
+ * which the app page renders only once setup has settled and completed, so a
+ * branch here could never fire.
  */
 export const decideOnDetected = (s: {
   enabled: boolean;
   capturing: boolean;
   globalCaptureHeld: boolean;
-  setupLoading: boolean;
-  setupComplete: boolean;
   meetingMode: boolean;
   vadOpen: boolean;
   vadEnabled: boolean;
@@ -68,10 +68,6 @@ export const decideOnDetected = (s: {
     ? "ignore-busy"
     : s.globalCaptureHeld
     ? "ignore-active"
-    : s.setupLoading
-    ? "ignore-undecided"
-    : !s.setupComplete
-    ? "tell-setup"
     : s.meetingMode
     ? s.vadOpen
       ? "ignore-mic-open"

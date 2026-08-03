@@ -1,5 +1,12 @@
-import { StrictMode } from "react";
-import { renderHook, waitFor } from "@testing-library/react";
+import {
+  StrictMode,
+  useCallback,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
+import { flushSync } from "react-dom";
+import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // vi.mock is hoisted above the imports, so shared spies must come from vi.hoisted
@@ -44,6 +51,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
+// Spread the real module, or STORAGE_KEYS arrives undefined and the hook throws
+// on its first getItem. The override shortens the post-stop confirmation poll:
+// RTL's waitFor budget is 1000ms and the shipped interval blows through it.
+vi.mock("@/config/constants", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  STOP_CONFIRM_INTERVAL_MS: 5,
+}));
+
 let stored: Record<string, string> = {};
 vi.mock("@/lib", () => ({
   safeLocalStorage: {
@@ -59,7 +74,6 @@ vi.mock("@/lib", () => ({
 
 import {
   GENERIC_START_MESSAGE,
-  SETUP_MESSAGE,
   STOP_FAILED_MESSAGE,
   STUCK_MESSAGE,
   useMeetingAutoRecord,
@@ -73,6 +87,24 @@ const fire = async (event: string, payload?: any) => {
   const cbs = [...(listeners.get(event) ?? [])];
   for (const cb of cbs) cb(payload);
   await flush();
+};
+
+/**
+ * `fire` for any path that can make the hook WRITE state.
+ *
+ * `fire` only drains microtasks: the enqueued op resumes on a microtask but
+ * React commits on a macrotask, so a setEnableVAD issued by the op never
+ * commits, the ownership layout effect never runs, and React logs an act
+ * warning instead of failing. One act() containing both the callbacks and the
+ * drain closes that gap. Never nest this inside another act - overlapping acts
+ * leave later cases inert rather than failing.
+ */
+const fireActed = async (event: string, payload?: any) => {
+  const cbs = [...(listeners.get(event) ?? [])];
+  await act(async () => {
+    for (const cb of cbs) cb(payload);
+    await flush();
+  });
 };
 
 /** Drains the microtask queue. NOT a substitute for waitFor - see rule 1. */
@@ -112,20 +144,126 @@ const seedStatus = (queue: boolean[]) => {
 const statusCalls = () =>
   mocks.invoke.mock.calls.filter((c) => c[0] === "get_capture_status").length;
 
-const mount = (
-  audio: ReturnType<typeof makeAudio> = makeAudio(),
-  setupComplete = true,
-  setupLoading = false,
-  opts: { strict?: boolean } = {}
-) =>
-  renderHook(
-    ({ a, c, l }: { a: any; c: boolean; l: boolean }) =>
-      useMeetingAutoRecord(a, c, l),
-    {
-      initialProps: { a: audio, c: setupComplete, l: setupLoading },
-      ...(opts.strict ? { wrapper: StrictMode } : {}),
-    }
-  );
+type AudioFixture = ReturnType<typeof makeAudio>;
+
+type MountOptions = {
+  strict?: boolean;
+  enableVAD?: boolean;
+  meetingAssistMode?: boolean;
+};
+
+/**
+ * Mounts the hook inside a component that OWNS the props it reads, the way
+ * <Completion /> does - so `enableVAD` and `meetingAssistMode` are real state
+ * here rather than inert literals, and the hook's writes land in a real commit.
+ *
+ * `meetingAssistMode` defaults to false: every transcribing case predates the
+ * meeting fork and must keep its current path.
+ */
+const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
+  // The signature used to end in two positional booleans. A leftover one would
+  // autobox here, read every option as undefined and NOT throw - which would
+  // silently drop StrictMode from the only case that asks for it.
+  if (typeof opts !== "object" || opts === null) {
+    throw new TypeError(
+      "mount(audio, opts) takes an options OBJECT; the positional " +
+        "setupComplete/setupLoading booleans are gone."
+    );
+  }
+
+  // Hoisted ABOVE the component deliberately. `makeAudio()` evaluated in the
+  // render body would mint a fresh spy set on every render, so the ref mirror
+  // this file exists to exercise would have nothing stable to mirror.
+  let currentAudio = audio;
+  const observedVAD: boolean[] = [];
+  const flushTranscript = vi.fn(async () => {});
+
+  let applyAudio!: Dispatch<SetStateAction<AudioFixture>>;
+  let applyEnableVAD!: Dispatch<SetStateAction<boolean>>;
+  let applyMeetingAssistMode!: Dispatch<SetStateAction<boolean>>;
+
+  // Every write the HOOK makes goes through this spy, and only the hook's. The
+  // harness's own mic writes below bypass it, and passing the raw setter would
+  // record nothing at all - so a hook that writes `true` over an already-true
+  // value (a React bailout: no render, no change in observedVAD) is still
+  // visible here.
+  const setEnableVAD = vi.fn((value: SetStateAction<boolean>) => {
+    applyEnableVAD(value);
+  });
+
+  const Probe = () => {
+    const [systemAudio, setSystemAudio] = useState(audio);
+    const [enableVAD, setVADState] = useState(opts.enableVAD ?? false);
+    const [meetingAssistMode, setAssistState] = useState(
+      opts.meetingAssistMode ?? false
+    );
+
+    // useState setters are stable, so these assignments are idempotent.
+    applyAudio = setSystemAudio;
+    applyEnableVAD = setVADState;
+    applyMeetingAssistMode = setAssistState;
+    observedVAD.push(enableVAD);
+
+    // Stable identity: the hook mirrors it into a ref every commit, and a new
+    // function each render would hide a hook that captured one at mount.
+    const stableSetEnableVAD = useCallback<Dispatch<SetStateAction<boolean>>>(
+      (value) => setEnableVAD(value),
+      []
+    );
+
+    useMeetingAutoRecord({
+      systemAudio,
+      enableVAD,
+      setEnableVAD: stableSetEnableVAD,
+      meetingAssistMode,
+      flushUnsavedMeetingTranscript: flushTranscript,
+    });
+    return null;
+  };
+
+  const view = render(<Probe />, opts.strict ? { wrapper: StrictMode } : {});
+
+  return {
+    /** The audio object the hook is currently holding. */
+    get audio() {
+      return currentAudio;
+    },
+    observedVAD,
+    setEnableVAD,
+    flushTranscript,
+    unmount: () => view.unmount(),
+    /** Swaps the audio object, the way a useSystemAudio re-render would. */
+    setAudio: async (next: AudioFixture) => {
+      currentAudio = next;
+      await act(async () => {
+        applyAudio(next);
+      });
+    },
+    /**
+     * The same swap, committed SYNCHRONOUSLY. For callers already running
+     * inside an act() - a mock startCapture, say - where a nested act would
+     * overlap, and where a deferred commit would land after the hook has
+     * already read the ref.
+     */
+    setAudioSync: (next: AudioFixture) => {
+      currentAudio = next;
+      flushSync(() => {
+        applyAudio(next);
+      });
+    },
+    /** The USER opening or closing the mic. Bypasses the spy on purpose. */
+    setMicOpen: async (open: boolean) => {
+      await act(async () => {
+        applyEnableVAD(open);
+      });
+    },
+    setMeetingAssistMode: async (on: boolean) => {
+      await act(async () => {
+        applyMeetingAssistMode(on);
+      });
+    },
+  };
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -292,7 +430,7 @@ describe("useMeetingAutoRecord - decision branches", () => {
       capturing: true,
       vadConfig: { enabled: false },
     });
-    const view = mount(continuous);
+    const h = mount(continuous);
     await flush();
 
     await fire("meeting-detected"); // continuous ignore-busy: invokes nothing
@@ -300,7 +438,7 @@ describe("useMeetingAutoRecord - decision branches", () => {
     // Rule-1 sentinel: swap to a VAD-on busy session, whose ignore-busy DOES
     // query, and wait on that. The chain is FIFO, so once the sentinel is
     // observable the continuous op has already run.
-    view.rerender({ a: makeAudio({ capturing: true }), c: true, l: false });
+    await h.setAudio(makeAudio({ capturing: true }));
     await fire("meeting-detected");
 
     // Exactly one query - the sentinel's. The continuous detect made none.
@@ -354,8 +492,8 @@ describe("useMeetingAutoRecord - decision branches", () => {
     // The DEFAULT state for anyone who leaves the Meeting pill on: useMeetingAudio
     // needs `meetingAssistMode && enableVAD` to capture (Audio.tsx:124) and
     // enableVAD starts false (useCompletion.ts:120). Guarding on the bare setting
-    // disabled the feature outright for these users, silently - ignore-assist does
-    // not toast. This is the regression test for that.
+    // disabled the feature outright for these users, silently - ignore-active
+    // does not toast. This is the regression test for that.
     stored.meeting_assist_mode_enabled = "true";
     seedStatus([false, true]); // probe: idle. then the start confirmation.
     const audio = makeAudio();
@@ -397,7 +535,7 @@ describe("useMeetingAutoRecord - decision branches", () => {
     stored.meeting_assist_mode_enabled = "true";
     stored.meeting_auto_record_enabled = "false";
     const audio = makeAudio();
-    const view = mount(audio);
+    const h = mount(audio);
     await flush();
 
     await fire("meeting-detected"); // ignore-off: no probe
@@ -407,39 +545,10 @@ describe("useMeetingAutoRecord - decision branches", () => {
     // is FIFO, so observing the sentinel proves the off op already ran.
     stored.meeting_auto_record_enabled = "true";
     await fire("meeting-detection-setting-changed", { enabled: true });
-    view.rerender({ a: makeAudio({ capturing: true }), c: true, l: false });
+    await h.setAudio(makeAudio({ capturing: true }));
     await fire("meeting-detected"); // ignore-busy: one query, and no assist probe
 
     await waitFor(() => expect(statusCalls()).toBe(1));
-    expect(audio.startCapture).not.toHaveBeenCalled();
-  });
-
-  it("F10: stays silent while setup is loading, and keeps the toast budget", async () => {
-    const audio = makeAudio();
-    const view = mount(audio, false, true); // setupComplete false, loading true
-
-    await flush();
-    await fire("meeting-detected");
-    expect(mocks.toast.info).not.toHaveBeenCalled();
-
-    // Loading finishes and setup really is incomplete - NOW it may speak.
-    view.rerender({ a: audio, c: false, l: false });
-    await fire("meeting-detected");
-
-    await waitFor(() => expect(mocks.toast.info).toHaveBeenCalledTimes(1));
-    expect(mocks.toast.info).toHaveBeenCalledWith(SETUP_MESSAGE);
-  });
-
-  it("F11: explains incomplete setup exactly once per run", async () => {
-    const audio = makeAudio();
-
-    mount(audio, false, false);
-    await flush();
-    await fire("meeting-detected");
-    await fire("meeting-detected");
-
-    await waitFor(() => expect(mocks.toast.info).toHaveBeenCalledTimes(1));
-    expect(mocks.toast.info).toHaveBeenCalledWith(SETUP_MESSAGE);
     expect(audio.startCapture).not.toHaveBeenCalled();
   });
 
@@ -603,21 +712,22 @@ describe("useMeetingAutoRecord - start failure", () => {
   it("F17: the toast carries the real error set DURING startCapture", async () => {
     seedStatus([false]);
     const audio = makeAudio();
-    let view: ReturnType<typeof mount>;
+    let h: ReturnType<typeof mount>;
     // Setting `error` from inside the mock is what makes this discriminate: a
     // static mount prop passes even against a hook that snapshots systemAudio once
     // at the top of the op, which is the bug this guards.
+    //
+    // setAudioSync, not setAudio: this runs inside fireActed's act, where a
+    // nested act would overlap, and a commit deferred to a macrotask would land
+    // AFTER the hook has read the error - which toasts the generic message and
+    // passes against a correct hook.
     audio.startCapture = vi.fn(async () => {
-      view.rerender({
-        a: { ...audio, error: "Failed to access system audio" },
-        c: true,
-        l: false,
-      });
+      h.setAudioSync({ ...audio, error: "Failed to access system audio" });
     });
 
-    view = mount(audio);
+    h = mount(audio);
     await flush();
-    await fire("meeting-detected");
+    await fireActed("meeting-detected");
 
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
     expect(mocks.toast.error).toHaveBeenCalledWith(
@@ -875,7 +985,7 @@ describe("useMeetingAutoRecord - structure", () => {
     // Regression guard, not a live bug: stop_system_audio_capture (which emits
     // capture-stopped, commands.rs:490) is issued by startCapture at
     // useSystemAudio.ts:613, BEFORE the real start at :621 - so in production
-    // this event always lands before autoStartedRef is assigned, which happens
+    // this event always lands before startedModeRef is assigned, which happens
     // two further IPC round trips later (the real start, then the confirmation
     // query). If that ordering ever inverted - the event delivered AFTER
     // provenance is claimed - the capture-stopped listener would clear a live
@@ -912,7 +1022,7 @@ describe("useMeetingAutoRecord - structure", () => {
     seedStatus([true]);
     const audio = makeAudio();
 
-    mount(audio, true, false, { strict: true });
+    mount(audio, { strict: true });
     await flush();
 
     expect(registered("meeting-detected")).toBe(1);
@@ -921,30 +1031,27 @@ describe("useMeetingAutoRecord - structure", () => {
     await waitFor(() => expect(audio.startCapture).toHaveBeenCalledTimes(1));
   });
 
-  it("F13: all four toast budgets are independent", async () => {
+  it("F13: all three toast budgets are independent", async () => {
     const audio = makeAudio({ vadConfig: { enabled: false } });
-    const view = mount(audio);
+    const h = mount(audio);
     await flush();
 
     await fire("meeting-detected"); // 1: VAD
-    view.rerender({ a: makeAudio(), c: false, l: false });
-    await fire("meeting-detected"); // 2: setup
 
     const busy = makeAudio({ capturing: true });
     seedStatus([false]);
-    view.rerender({ a: busy, c: true, l: false });
-    await fire("meeting-detected"); // 3: stuck
+    await h.setAudio(busy);
+    await fire("meeting-detected"); // 2: stuck
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
 
     const failing = makeAudio();
     seedStatus([false]);
-    view.rerender({ a: failing, c: true, l: false });
-    await fire("meeting-detected"); // 4: start failure
+    await h.setAudio(failing);
+    await fire("meeting-detected"); // 3: start failure
 
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(2));
-    expect(mocks.toast.info).toHaveBeenCalledTimes(2);
+    expect(mocks.toast.info).toHaveBeenCalledTimes(1);
     expect(mocks.toast.info).toHaveBeenCalledWith(VAD_MESSAGE);
-    expect(mocks.toast.info).toHaveBeenCalledWith(SETUP_MESSAGE);
     expect(mocks.toast.error).toHaveBeenCalledWith(STUCK_MESSAGE);
     expect(mocks.toast.error).toHaveBeenCalledWith(GENERIC_START_MESSAGE);
   });
@@ -952,11 +1059,11 @@ describe("useMeetingAutoRecord - structure", () => {
   it("F32: uses the FRESH startCapture after a re-render", async () => {
     seedStatus([true]);
     const first = makeAudio();
-    const view = mount(first);
+    const h = mount(first);
     await flush();
 
     const second = makeAudio();
-    view.rerender({ a: second, c: true, l: false });
+    await h.setAudio(second);
     await flush();
     await fire("meeting-detected");
 
@@ -971,13 +1078,13 @@ describe("useMeetingAutoRecord - structure", () => {
     // captured stopCapture holds an empty conversation.
     seedStatus([true, false]);
     const first = makeAudio();
-    const view = mount(first);
+    const h = mount(first);
     await flush();
     await fire("meeting-detected");
     await waitFor(() => expect(first.startCapture).toHaveBeenCalledTimes(1));
 
     const second = makeAudio();
-    view.rerender({ a: second, c: true, l: false });
+    await h.setAudio(second);
     await flush();
     await fire("meeting-ended");
 

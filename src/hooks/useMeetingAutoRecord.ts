@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,8 +26,6 @@ import { STORAGE_KEYS } from "@/config/constants";
  */
 const LEGACY_DETECTION_KEY = "meeting_detection_enabled";
 
-export const SETUP_MESSAGE =
-  "Could not auto-record — finish setting up your AI and speech providers";
 export const VAD_MESSAGE =
   "Auto-record needs voice detection — enable it in audio settings to record future calls";
 export const STUCK_MESSAGE =
@@ -48,26 +53,41 @@ export type MeetingAutoRecordAudio = {
   stopCapture: () => Promise<void>;
 };
 
+export type MeetingAutoRecordOptions = {
+  systemAudio: MeetingAutoRecordAudio;
+  enableVAD: boolean;
+  setEnableVAD: Dispatch<SetStateAction<boolean>>;
+  meetingAssistMode: boolean;
+  flushUnsavedMeetingTranscript: () => Promise<void>;
+};
+
 /**
  * Starts and stops recording around detected Teams calls. VAD sessions only.
  *
  * Single-owner: Tauri events broadcast to every window, so only the main window
- * may drive the single global capture. Mount it once, in the app page, ABOVE
- * useMeetingDetection. The dashboard window is held off by the label check;
- * the capture-overlay windows never reach it at all, because main.tsx renders
- * Overlay instead of the routes for those labels.
+ * may drive the single global capture. The dashboard window is held off by the
+ * label check; the capture-overlay windows never reach it at all.
+ *
+ * Mount it inside <Completion />, NOT in the app page. It needs enableVAD and
+ * meetingAssistMode, which live in useCompletion, and reading them as props is
+ * what lets provenance be a local fact rather than a cross-mount protocol.
+ *
+ * The cost of that placement is stated rather than hidden: <Completion /> is
+ * gated on `!setupLoading && setupComplete`, so these listeners register AFTER
+ * useMeetingDetection starts its watcher, and a call already in progress at
+ * launch is not auto-recorded. See the design doc, "What the move costs".
  *
  * `systemAudio` is passed in rather than obtained by calling useSystemAudio()
- * here: a second call would create a second, independent copy of the capture
- * state, and this hook would drive one while the UI renders the other.
- * `setupComplete` / `setupLoading` are passed in because useSetupStatus reaches
- * for the app context, which throws outside its provider.
+ * here: `useApp` in @/hooks is a plain hook, not a context, so a second call
+ * would create a second, independent copy of the capture state.
  */
-export const useMeetingAutoRecord = (
-  systemAudio: MeetingAutoRecordAudio,
-  setupComplete: boolean,
-  setupLoading: boolean
-) => {
+export const useMeetingAutoRecord = ({
+  systemAudio,
+  enableVAD,
+  setEnableVAD,
+  meetingAssistMode,
+  flushUnsavedMeetingTranscript,
+}: MeetingAutoRecordOptions) => {
   const isOwner = useMemo(
     () => getCurrentWindow().label === "main" && isWindows(),
     []
@@ -97,12 +117,16 @@ export const useMeetingAutoRecord = (
   // green - F33 catches a captured-at-registration `stopCapture`, not a
   // one-commit-stale one. Keep it deliberately; do not "simplify" it back.
   const systemAudioRef = useRef(systemAudio);
-  const setupCompleteRef = useRef(setupComplete);
-  const setupLoadingRef = useRef(setupLoading);
+  const enableVADRef = useRef(enableVAD);
+  const meetingAssistModeRef = useRef(meetingAssistMode);
+  const setEnableVADRef = useRef(setEnableVAD);
+  const flushRef = useRef(flushUnsavedMeetingTranscript);
   useLayoutEffect(() => {
     systemAudioRef.current = systemAudio;
-    setupCompleteRef.current = setupComplete;
-    setupLoadingRef.current = setupLoading;
+    enableVADRef.current = enableVAD;
+    meetingAssistModeRef.current = meetingAssistMode;
+    setEnableVADRef.current = setEnableVAD;
+    flushRef.current = flushUnsavedMeetingTranscript;
   });
 
   // Never read on its own on a start path - every start goes through
@@ -129,7 +153,6 @@ export const useMeetingAutoRecord = (
 
   // One ref per message: sharing a single budget would let a user who fixes their
   // VAD setting never see a subsequent genuine capture failure.
-  const setupToastedRef = useRef(false);
   const vadToastedRef = useRef(false);
   const stuckToastedRef = useRef(false);
   const startFailToastedRef = useRef(false);
@@ -181,13 +204,12 @@ export const useMeetingAutoRecord = (
 
     // Meeting Assist Mode only OWNS the capture device while it is ACTUALLY
     // capturing. useMeetingAudio is gated on `meetingAssistMode && enableVAD`
-    // (Audio.tsx:124), and enableVAD is transient mic state held in
-    // useCompletion - below this hook's mount site, unpersisted, and invisible
-    // here. The setting alone is therefore far broader than the real conflict:
-    // with the pill on and the mic closed nothing is capturing, and standing
-    // down helps nobody. That combination is the DEFAULT (enableVAD starts
-    // false, useCompletion.ts:120), so the broad guard silently disabled the
-    // whole feature for anyone who left Meeting Assist on.
+    // (Audio.tsx:124), and enableVAD is transient, unpersisted mic state. The
+    // setting alone is therefore far broader than the real conflict: with the
+    // pill on and the mic closed nothing is capturing, and standing down helps
+    // nobody. That combination is the DEFAULT (enableVAD starts false,
+    // useCompletion.ts:120), so the broad guard silently disabled the whole
+    // feature for anyone who left Meeting Assist on.
     //
     // Ask Rust instead of inferring. useMeetingAudio drives the SAME global
     // capture (useMeetingAudio.ts:190 and useSystemAudio.ts:621 both invoke
@@ -209,17 +231,10 @@ export const useMeetingAutoRecord = (
       enabled,
       capturing: audio.capturing,
       globalCaptureHeld,
-      setupLoading: setupLoadingRef.current,
-      setupComplete: setupCompleteRef.current,
       meetingMode: false,
       vadOpen: false,
       vadEnabled: audio.vadConfig.enabled,
     });
-
-    if (decision === "tell-setup") {
-      toastOnce(setupToastedRef, SETUP_MESSAGE, "info");
-      return;
-    }
 
     if (decision === "tell-vad") {
       toastOnce(vadToastedRef, VAD_MESSAGE, "info");
@@ -255,8 +270,7 @@ export const useMeetingAutoRecord = (
       return;
     }
 
-    // ignore-off, ignore-active, ignore-mic-open and ignore-undecided are all
-    // silent.
+    // ignore-off, ignore-active and ignore-mic-open are all silent.
     if (decision !== "start") return;
 
     await systemAudioRef.current.startCapture();

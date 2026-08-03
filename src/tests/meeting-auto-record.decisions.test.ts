@@ -12,8 +12,6 @@ const ALL_CLEAR = {
   enabled: true,
   capturing: false,
   globalCaptureHeld: false,
-  setupLoading: false,
-  setupComplete: true,
   meetingMode: false,
   vadOpen: false,
   vadEnabled: true,
@@ -38,18 +36,6 @@ describe("decideOnDetected", () => {
     ).toBe("ignore-active");
   });
 
-  it("ignores while setup status is still loading", () => {
-    expect(decideOnDetected({ ...ALL_CLEAR, setupLoading: true })).toBe(
-      "ignore-undecided"
-    );
-  });
-
-  it("explains when setup is incomplete", () => {
-    expect(decideOnDetected({ ...ALL_CLEAR, setupComplete: false })).toBe(
-      "tell-setup"
-    );
-  });
-
   it("explains when VAD is disabled", () => {
     expect(decideOnDetected({ ...ALL_CLEAR, vadEnabled: false })).toBe("tell-vad");
   });
@@ -64,20 +50,6 @@ describe("decideOnDetected branch ordering", () => {
     expect(
       decideOnDetected({ ...ALL_CLEAR, capturing: true, vadEnabled: false })
     ).toBe("ignore-busy");
-  });
-
-  it("prefers ignore-busy over tell-setup", () => {
-    expect(
-      decideOnDetected({ ...ALL_CLEAR, capturing: true, setupComplete: false })
-    ).toBe("ignore-busy");
-  });
-
-  it("prefers ignore-undecided over tell-setup", () => {
-    // The cold-start case. Getting it backwards burns the once-per-run toast
-    // budget on a wrong diagnosis while the app is still initialising.
-    expect(
-      decideOnDetected({ ...ALL_CLEAR, setupLoading: true, setupComplete: false })
-    ).toBe("ignore-undecided");
   });
 
   it("prefers ignore-busy over the meeting fork", () => {
