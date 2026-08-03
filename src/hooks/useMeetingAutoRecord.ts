@@ -72,10 +72,24 @@ export type MeetingAutoRecordOptions = {
  * meetingAssistMode, which live in useCompletion, and reading them as props is
  * what lets provenance be a local fact rather than a cross-mount protocol.
  *
- * The cost of that placement is stated rather than hidden: <Completion /> is
- * gated on `!setupLoading && setupComplete`, so these listeners register AFTER
- * useMeetingDetection starts its watcher, and a call already in progress at
- * launch is not auto-recorded. See the design doc, "What the move costs".
+ * The cost of that placement is stated rather than hidden, and it runs in BOTH
+ * directions. <Completion /> is gated on `!setupLoading && setupComplete`
+ * (pages/app/index.tsx:84).
+ *
+ * Late registration: these listeners register AFTER useMeetingDetection starts
+ * its watcher, so a call already in progress at launch is not auto-recorded.
+ *
+ * Unmount: that gate is REACTIVE, not latched. useSetupStatus recomputes
+ * isComplete on every render (useSetupStatus.ts:185) and re-runs on
+ * verification-status-changed (:96-105), so a true->false flip UNMOUNTS
+ * <Completion /> - unregistering every listener here and discarding
+ * startedModeRef. A capture this hook auto-started then keeps running, with no
+ * meeting-ended able to stop it and no toast. It is reachable MID-CALL:
+ * app.context.tsx:490-509 reloads providers on a cross-window `storage` event,
+ * which feeds aiConfigured/sttConfigured and therefore isComplete, so another
+ * window changing the provider selection is enough. The unmount cleanup that
+ * flushes and enqueues the stop is what closes this; it lands with the
+ * meeting-mode stop path. See the design doc, "What the move costs".
  *
  * `systemAudio` is passed in rather than obtained by calling useSystemAudio()
  * here: `useApp` in @/hooks is a plain hook, not a context, so a second call

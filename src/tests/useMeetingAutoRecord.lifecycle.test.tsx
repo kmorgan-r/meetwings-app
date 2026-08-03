@@ -175,7 +175,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
   // render body would mint a fresh spy set on every render, so the ref mirror
   // this file exists to exercise would have nothing stable to mirror.
   let currentAudio = audio;
-  const observedVAD: boolean[] = [];
+  const renderedVAD: boolean[] = [];
   const flushTranscript = vi.fn(async () => {});
 
   let applyAudio!: Dispatch<SetStateAction<AudioFixture>>;
@@ -202,7 +202,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     applyAudio = setSystemAudio;
     applyEnableVAD = setVADState;
     applyMeetingAssistMode = setAssistState;
-    observedVAD.push(enableVAD);
+    renderedVAD.push(enableVAD);
 
     // Stable identity: the hook mirrors it into a ref every commit, and a new
     // function each render would hide a hook that captured one at mount.
@@ -228,7 +228,21 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     get audio() {
       return currentAudio;
     },
-    observedVAD,
+    /**
+     * The enableVAD TRANSITIONS, consecutive duplicates collapsed on read.
+     *
+     * The raw push happens in the render body, which StrictMode double-invokes
+     * - so a `{ strict: true }` case would otherwise read doubled entries and
+     * fail confusingly. Moving the push to a no-deps useEffect would not fix
+     * that: StrictMode double-invokes mount effects too (run, clean up, run).
+     * Collapsing on read is the shape that survives both, and it loses nothing
+     * real - a write of `true` over an already-true value is a React bailout
+     * that never renders at all, which is precisely why setEnableVAD below is
+     * a spy rather than the raw setter.
+     */
+    get observedVAD() {
+      return renderedVAD.filter((v, i) => i === 0 || v !== renderedVAD[i - 1]);
+    },
     setEnableVAD,
     flushTranscript,
     unmount: () => view.unmount(),
@@ -277,6 +291,65 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+// The harness's own smoke test. Everything below drives the hook; these two
+// drive the HARNESS, because `src/tests/**` is outside tsconfig - a typo or a
+// mis-wired setter in the mount helper is invisible to `npm run type-check`
+// AND to every case that never touches it. Nothing in this file reads
+// enableVAD or meetingAssistMode yet; the meeting-mode cases will, and they
+// should find these carries already proven.
+describe("useMeetingAutoRecord - harness carries", () => {
+  it("F35: the mic props are real state, and the harness's own writes bypass the spy", async () => {
+    const h = mount(makeAudio(), {
+      enableVAD: true,
+      meetingAssistMode: true,
+    });
+    await flush();
+
+    // The mount options reach state rather than being dropped on the floor.
+    expect(h.observedVAD).toEqual([true]);
+
+    // A USER closing the mic. It must commit, and it must NOT be recorded as a
+    // write by the hook - that bypass is the whole reason setEnableVAD is a
+    // spy delegating to the setter rather than the setter itself.
+    await h.setMicOpen(false);
+    expect(h.observedVAD).toEqual([true, false]);
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+
+    // The pill toggling mid-session. Nothing reads it yet, so the property
+    // under test is that the setter is wired at all: an unassigned
+    // applyMeetingAssistMode throws here rather than in the meeting cases.
+    await h.setMeetingAssistMode(false);
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+
+    // The other half of H4: the spy the HOOK holds records its argument and
+    // delegates to the setter. Called directly here because no shipped code
+    // path writes enableVAD yet.
+    await act(async () => {
+      h.setEnableVAD(true);
+    });
+    expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
+    expect(h.setEnableVAD).toHaveBeenCalledWith(true);
+    expect(h.observedVAD).toEqual([true, false, true]);
+
+    expect(h.flushTranscript).not.toHaveBeenCalled();
+  });
+
+  it("F35b: observedVAD reports transitions, not renders, under StrictMode", async () => {
+    // StrictMode double-invokes the render body, so the raw push happens twice
+    // per commit. Without the collapse-on-read a strict case would see
+    // [false, false] here and fail for a reason that has nothing to do with
+    // the hook.
+    const h = mount(makeAudio(), { strict: true });
+    await flush();
+
+    expect(h.observedVAD).toEqual([false]);
+
+    await h.setMicOpen(true);
+    expect(h.observedVAD).toEqual([false, true]);
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+  });
 });
 
 describe("useMeetingAutoRecord - enablement and consent", () => {
