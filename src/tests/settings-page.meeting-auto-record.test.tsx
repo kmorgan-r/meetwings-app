@@ -113,7 +113,6 @@ describe("app page mounts the detection hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection,
-      useMeetingAutoRecord: vi.fn(),
     }));
     mockAppRenderDeps();
 
@@ -128,29 +127,95 @@ describe("app page mounts the detection hook", () => {
   });
 });
 
-// F34/F34b - the auto-record hook mount site. Without this, deleting the
-// useMeetingAutoRecord(...) call from the app page leaves every other test
-// green (including the detection-hook test above, which stubs it as a no-op)
-// and the feature inert.
-describe("app page mounts the auto-record hook", () => {
-  it("F34: mounts useMeetingAutoRecord with the shared systemAudio and setup status", async () => {
-    vi.resetModules(); // or the cached @/pages/app ignores the factory below
+// F34/F34b - the auto-record hook mount site, which is now <Completion /> and
+// no longer the app page. Without these, deleting the useMeetingAutoRecord(...)
+// call leaves every other test green (including the detection-hook test above,
+// which stubs it as a no-op) and the feature inert.
+describe("<Completion /> mounts the auto-record hook", () => {
+  it("F34: mounts auto-record inside <Completion />, once, with every option", async () => {
+    vi.resetModules(); // or the cached module ignores the factories below
     const systemAudio = { capturing: false };
+    const useMeetingAutoRecord = vi.fn();
+    const setEnableVAD = vi.fn();
+    const flushUnsavedMeetingTranscript = vi.fn();
+
+    // Mock @/hooks wholesale: the real useCompletion reaches for the app
+    // context and the whole audio stack. mockAppRenderDeps() is deliberately
+    // NOT used here - it stubs Completion itself to `() => null`, so the
+    // component under test would never render and the spy never be called.
+    vi.doMock("@/hooks", () => ({
+      useCompletion: () => ({
+        enableVAD: false,
+        setEnableVAD,
+        meetingAssistMode: false,
+        meetingTranscript: "",
+        setMeetingAssistMode: vi.fn(),
+        submit: vi.fn(),
+        submitWithMeetingContext: vi.fn(),
+        flushUnsavedMeetingTranscript,
+      }),
+      useQuickActions: () => ({}),
+      useMeetingAutoRecord,
+    }));
+    // ABSOLUTE specifiers: vi.doMock resolves relative to THIS file, so
+    // "./Audio" would be a silent no-op and the real
+    // Audio -> AutoSpeechVad -> useApp() chain would run and throw.
+    vi.doMock("@/pages/app/components/completion/Audio", () => ({
+      Audio: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Input", () => ({
+      Input: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Screenshot", () => ({
+      Screenshot: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Files", () => ({
+      Files: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
+      MeetingAssistToggle: () => null,
+    }));
+
+    const { Completion } = await import("@/pages/app/components/completion");
+    render(<Completion isHidden systemAudio={systemAudio as any} />);
+
+    // Exactly once: two hooks driving one global capture would start and stop
+    // the same recording twice.
+    expect(useMeetingAutoRecord).toHaveBeenCalledTimes(1);
+    const options = useMeetingAutoRecord.mock.calls[0][0];
+    expect(Object.keys(options).sort()).toEqual([
+      "enableVAD",
+      "flushUnsavedMeetingTranscript",
+      "meetingAssistMode",
+      "setEnableVAD",
+      "systemAudio",
+    ]);
+    expect(options.enableVAD).toBe(false);
+    expect(options.meetingAssistMode).toBe(false);
+    expect(options.setEnableVAD).toBe(setEnableVAD);
+    expect(options.flushUnsavedMeetingTranscript).toBe(
+      flushUnsavedMeetingTranscript
+    );
+    // Reference identity, not deep equality: useMeetingAutoRecord.ts:80-82
+    // requires the SAME object the UI renders, because a second copy would
+    // drive independent capture state.
+    expect(options.systemAudio).toBe(systemAudio);
+  });
+
+  it("F34b: no longer mounts auto-record from the app page", async () => {
+    // The double-mount guard. noUnusedLocals only catches a leftover call site
+    // if the import goes too, and F34's identity assertion compares a prop the
+    // TEST supplied - so nothing else would notice a second live mount.
+    vi.resetModules();
     const useMeetingAutoRecord = vi.fn();
 
     vi.doMock("@/hooks", () => ({
-      useApp: () => ({ isHidden: false, systemAudio }),
-      // isComplete is true while aiConfigured/sttConfigured are both false: a
-      // real state, not a contrived one - cloud mode satisfies isComplete on
-      // its own (useSetupStatus.ts:68,185: `isComplete = cloudMode ||
-      // (aiConfigured && sttConfigured)`) with neither local provider
-      // configured. Chosen so a mount that substitutes either flag for
-      // setupComplete sends `false` where `true` is expected below, and fails.
+      useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
-        aiConfigured: false,
-        sttConfigured: false,
+        aiConfigured: true,
+        sttConfigured: true,
       }),
       useMeetingDetection: vi.fn(),
       useMeetingAutoRecord,
@@ -164,42 +229,6 @@ describe("app page mounts the auto-record hook", () => {
       </MemoryRouter>
     );
 
-    // Pins the two booleans (and that a substituted aiConfigured/sttConfigured
-    // would fail here - see the fixture comment above) plus that setupLoading
-    // isn't dropped.
-    expect(useMeetingAutoRecord).toHaveBeenCalledWith(systemAudio, true, false);
-    // toHaveBeenCalledWith is deep-equal, so it would also pass a `{ ...systemAudio }`
-    // copy. useMeetingAutoRecord.ts:57-59 requires the SAME object the UI
-    // renders (a second copy would drive independent capture state), so assert
-    // reference identity too.
-    expect(useMeetingAutoRecord.mock.calls[0][0]).toBe(systemAudio);
-  });
-
-  it("F34b: forwards a loading setup status", async () => {
-    vi.resetModules();
-    const systemAudio = { capturing: false };
-    const useMeetingAutoRecord = vi.fn();
-
-    vi.doMock("@/hooks", () => ({
-      useApp: () => ({ isHidden: false, systemAudio }),
-      useSetupStatus: () => ({
-        isComplete: false,
-        isLoading: true,
-        aiConfigured: false,
-        sttConfigured: false,
-      }),
-      useMeetingDetection: vi.fn(),
-      useMeetingAutoRecord,
-    }));
-    mockAppRenderDeps();
-
-    const { default: App } = await import("@/pages/app");
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>
-    );
-
-    expect(useMeetingAutoRecord).toHaveBeenCalledWith(systemAudio, false, true);
+    expect(useMeetingAutoRecord).not.toHaveBeenCalled();
   });
 });

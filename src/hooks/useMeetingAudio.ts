@@ -14,6 +14,10 @@ import { useEffect, useCallback, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { fetchSTT } from '@/lib';
+// Deep-imported, not via the @/lib barrel: this predicate is built from the
+// same literals stt.function.ts returns, so it has to come from that module.
+import { isUsableTranscription } from '@/lib/functions/stt.function';
+import { STT_FAILURE_REPORT_THRESHOLD } from '@/config';
 import type { TYPE_PROVIDER } from '@/types';
 import type { DiarizationAudioBuffer } from '@/lib/functions/audio-buffer';
 
@@ -79,6 +83,11 @@ export function useMeetingAudio({
   const onSystemAudioTranscriptRef = useRef(onSystemAudioTranscript);
   const onErrorRef = useRef(onError);
   const droppedCountRef = useRef(0);
+  // Consecutive segments that produced no usable transcription. Latched, not
+  // re-armed on report: onError lands on an unbudgeted toast in Audio.tsx, so
+  // a re-arming report turns an intermittent provider into a toast storm.
+  const consecutiveSttFailuresRef = useRef(0);
+  const sttFailureReportedRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => {
@@ -90,6 +99,21 @@ export function useMeetingAudio({
 
   // Track processQueue changes
   const processQueueCountRef = useRef(0);
+
+  const noteSttFailure = useCallback(() => {
+    consecutiveSttFailuresRef.current += 1;
+    if (
+      consecutiveSttFailuresRef.current >= STT_FAILURE_REPORT_THRESHOLD &&
+      !sttFailureReportedRef.current
+    ) {
+      sttFailureReportedRef.current = true;
+      onErrorRef.current?.(
+        new Error(
+          "Speech-to-text is failing for this meeting. Check your speech provider's API key and quota."
+        )
+      );
+    }
+  }, []);
 
   // Process queue of audio segments
   const processQueue = useCallback(async () => {
@@ -136,31 +160,50 @@ export function useMeetingAudio({
           language: sttLanguage,
         });
 
-        if (transcription?.trim() && enabledRef.current) {
-          // Use timestamp as entry ID (matches TranscriptEntry.timestamp)
+        if (!enabledRef.current) {
+          // The call ended while this segment was in fetchSTT, so whatever it
+          // resolved is discarded. Loud, so the drop is visible; binding it to
+          // its enqueue-time conversation id is a separate slice.
+          //
+          // Do NOT claim it was "billed" here: emitSTTUsage is only reached on
+          // the template path (stt.function.ts:406), and fetchMeetwingsSTT
+          // returns at :179-182 before it.
+          console.warn(
+            "[MeetingAudio] Discarding a segment that resolved after the session ended"
+          );
+        } else if (!transcription?.trim()) {
+          // Empty/whitespace is silence or noise, NOT a provider failure. The
+          // pre-change guard ignored these; counting them would raise
+          // "check your API key" after three quiet segments.
+          //
+          // isUsableTranscription() also returns false for empty input, so this
+          // branch looks redundant. It is not: hoisting the emptiness check
+          // ahead of the shared predicate is what routes silence to "do
+          // nothing" instead of to noteSttFailure() in the else. Collapsing the
+          // two makes three quiet segments look like a dead API key.
+        } else if (isUsableTranscription(transcription)) {
+          consecutiveSttFailuresRef.current = 0;
           const timestamp = Date.now();
-
-          // Add to transcript (displayed immediately as "Guest")
-          onSystemAudioTranscriptRef.current(transcription, timestamp);
-
-          // Phase 3: Buffer audio for diarization if buffer is provided
-          // The buffer will batch segments and trigger diarization after 30 seconds
-          // Diarization will then update "Guest" labels to "Speaker 1", "Speaker 2", etc.
+          onSystemAudioTranscriptRef.current(transcription!, timestamp);
           if (audioBufferRef.current) {
-            const entryId = `guest_${timestamp}`; // Matches speakerId format in addSystemAudioTranscript
-            audioBufferRef.current.addSegment(audioBlob, timestamp, entryId);
+            audioBufferRef.current.addSegment(audioBlob, timestamp, `guest_${timestamp}`);
           }
+        } else {
+          noteSttFailure();
         }
       } catch (err) {
         console.error('[MeetingAudio] STT failed:', err);
-        // Don't call onError for individual STT failures - just log
-        // This prevents flooding the user with errors during transient issues
+        // Guarded: a rejection after the session ended must not increment the
+        // counter, or the report can fire after the meeting is over.
+        if (enabledRef.current) noteSttFailure();
       }
     }
 
     isProcessingRef.current = false;
     setIsProcessing(false);
-  }, [sttProvider, selectedSttProvider, sttLanguage]);
+    // noteSttFailure is useCallback(…, []), so listing it costs nothing: this
+    // identity never changes and processQueue is not recreated by it.
+  }, [sttProvider, selectedSttProvider, sttLanguage, noteSttFailure]);
 
   // Log when processQueue changes
   useEffect(() => {
@@ -284,6 +327,8 @@ export function useMeetingAudio({
       setHasQueuedAudio(false);
       isSetupCompleteRef.current = false;
       droppedCountRef.current = 0; // Reset for next session
+      consecutiveSttFailuresRef.current = 0;
+      sttFailureReportedRef.current = false;
     };
   }, [enabled, processQueue, outputDeviceId]);
 

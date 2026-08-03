@@ -1,13 +1,34 @@
-import { useCompletion, useQuickActions } from "@/hooks";
+import {
+  useCompletion,
+  useMeetingAutoRecord,
+  useQuickActions,
+  type MeetingAutoRecordAudio,
+} from "@/hooks";
 import { Screenshot } from "./Screenshot";
 import { Files } from "./Files";
 import { Audio } from "./Audio";
 import { Input } from "./Input";
 import { MeetingAssistToggle } from "./MeetingAssistToggle";
 
-export const Completion = ({ isHidden }: { isHidden: boolean }) => {
+export const Completion = ({
+  isHidden,
+  systemAudio,
+}: {
+  isHidden: boolean;
+  systemAudio: MeetingAutoRecordAudio;
+}) => {
   const completion = useCompletion();
   const quickActions = useQuickActions();
+
+  // Mounted HERE, not in the app page: it needs enableVAD and meetingAssistMode,
+  // which useCompletion owns. See the hook's doc comment.
+  useMeetingAutoRecord({
+    systemAudio,
+    enableVAD: completion.enableVAD,
+    setEnableVAD: completion.setEnableVAD,
+    meetingAssistMode: completion.meetingAssistMode,
+    flushUnsavedMeetingTranscript: completion.flushUnsavedMeetingTranscript,
+  });
 
   // Use meeting-aware quick action handler when in Meeting Assist Mode
   const handleQuickAction = (action: string) => {
