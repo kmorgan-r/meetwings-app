@@ -175,6 +175,12 @@ export function useMeetingAudio({
           // Empty/whitespace is silence or noise, NOT a provider failure. The
           // pre-change guard ignored these; counting them would raise
           // "check your API key" after three quiet segments.
+          //
+          // isUsableTranscription() also returns false for empty input, so this
+          // branch looks redundant. It is not: hoisting the emptiness check
+          // ahead of the shared predicate is what routes silence to "do
+          // nothing" instead of to noteSttFailure() in the else. Collapsing the
+          // two makes three quiet segments look like a dead API key.
         } else if (isUsableTranscription(transcription)) {
           consecutiveSttFailuresRef.current = 0;
           const timestamp = Date.now();
