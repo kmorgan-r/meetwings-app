@@ -41,7 +41,14 @@ vi.mock("@tauri-apps/api/event", () => ({
   ),
 }));
 
-import { useMeetingAudio } from "@/hooks/useMeetingAudio";
+import {
+  useMeetingAudio,
+  EMPTY_TRANSCRIPTION_MESSAGE,
+} from "@/hooks/useMeetingAudio";
+import {
+  EMPTY_TRANSCRIPTION_REPORT_THRESHOLD,
+  STT_FAILURE_REPORT_THRESHOLD,
+} from "@/config";
 // The literals are imported, never re-typed here: a copy typed into this file
 // is exactly the desync the pinning is supposed to catch. Asserting on
 // `${STT_ERROR_PREFIX} ...` pins the SHAPE fetchSTT builds, whatever the text
@@ -269,6 +276,28 @@ describe("useMeetingAudio - failing STT provider visibility", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it("empty transcriptions never trip the provider-failure report", async () => {
+    // Pins the two counters apart in the direction that matters for a live
+    // call: a run of empties long enough to trip its OWN report must never
+    // reach for the "check your API key" copy, which is what the pre-existing
+    // "silence is not a failure" case guards at 3 segments. Deliberately
+    // driven past STT_FAILURE_REPORT_THRESHOLD so a shared counter is visible.
+    mocks.fetchSTT.mockResolvedValue("");
+    const onError = vi.fn();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mount(makeProps({ onError }));
+    await waitForSetup();
+
+    for (let i = 0; i < EMPTY_TRANSCRIPTION_REPORT_THRESHOLD; i++) {
+      await fire("speech-detected");
+    }
+
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0][0].message).toBe(EMPTY_TRANSCRIPTION_MESSAGE);
+
+    spy.mockRestore();
+  });
+
   it("the report re-arms per session", async () => {
     mocks.fetchSTT.mockRejectedValue(new Error("boom"));
     const onError = vi.fn();
@@ -293,5 +322,112 @@ describe("useMeetingAudio - failing STT provider visibility", () => {
       await fire("speech-detected");
     }
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(2));
+  });
+});
+
+// Rust's VAD has already decided a segment is speech before it reaches
+// processQueue (MEETING_VAD_CONFIG's min_speech_chunks / peak_threshold), so a
+// COMPLETED transcription that comes back empty is two detectors disagreeing,
+// not silence. Reported on its own counter and with its own copy: the
+// provider-failure ladder points at the API key, which is the wrong thing to
+// check when the provider is answering fine and the audio is the problem.
+describe("useMeetingAudio - audio captured but nothing transcribed", () => {
+  const warnSpy = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  it("reports once at the empty threshold and not before", async () => {
+    mocks.fetchSTT.mockResolvedValue("");
+    const onError = vi.fn();
+    const spy = warnSpy();
+    mount(makeProps({ onError }));
+    await waitForSetup();
+
+    for (let i = 0; i < EMPTY_TRANSCRIPTION_REPORT_THRESHOLD - 1; i++) {
+      await fire("speech-detected");
+    }
+    await waitFor(() =>
+      expect(mocks.fetchSTT).toHaveBeenCalledTimes(
+        EMPTY_TRANSCRIPTION_REPORT_THRESHOLD - 1
+      )
+    );
+    expect(onError).not.toHaveBeenCalled();
+
+    await fire("speech-detected");
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0][0].message).toBe(EMPTY_TRANSCRIPTION_MESSAGE);
+
+    // Latched for the session, matching the provider-failure report: onError
+    // lands on an unbudgeted toast in Audio.tsx, so re-arming turns a bad
+    // audio source into a toast storm for the rest of the call.
+    for (let i = 0; i < 5; i++) {
+      await fire("speech-detected");
+    }
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    spy.mockRestore();
+  });
+
+  it("a usable transcription resets the empty run", async () => {
+    const onError = vi.fn();
+    const spy = warnSpy();
+    // One short of the threshold, then real speech, then one short again.
+    // Asserting on segment index rather than "the Nth empty" for the same
+    // reason the provider-failure reset case does.
+    mocks.fetchSTT.mockImplementation(async () => {
+      const call = mocks.fetchSTT.mock.calls.length;
+      return call === EMPTY_TRANSCRIPTION_REPORT_THRESHOLD
+        ? "Let's move to the next agenda item."
+        : "";
+    });
+    mount(makeProps({ onError }));
+    await waitForSetup();
+
+    const segments = 2 * EMPTY_TRANSCRIPTION_REPORT_THRESHOLD - 1;
+    for (let i = 0; i < segments; i++) {
+      await fire("speech-detected");
+    }
+    await waitFor(() =>
+      expect(mocks.fetchSTT).toHaveBeenCalledTimes(segments)
+    );
+    expect(onError).not.toHaveBeenCalled();
+
+    await fire("speech-detected");
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+
+    spy.mockRestore();
+  });
+
+  it("logs every dropped segment so the loss is diagnosable from the console", async () => {
+    mocks.fetchSTT.mockResolvedValue("");
+    const spy = warnSpy();
+    mount(makeProps({}));
+    await waitForSetup();
+
+    await fire("speech-detected");
+    await fire("speech-detected");
+
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    expect(spy.mock.calls[0][0]).toContain("transcribed empty");
+
+    spy.mockRestore();
+  });
+
+  it("a provider failure is not counted as an empty segment", async () => {
+    // The mirror of the case above: rejections must keep reaching the
+    // provider-failure copy. A single shared counter would surface whichever
+    // report crossed its threshold first, which for a dead API key is the
+    // wrong one.
+    mocks.fetchSTT.mockRejectedValue(new Error("network error"));
+    const onError = vi.fn();
+    mount(makeProps({ onError }));
+    await waitForSetup();
+
+    for (let i = 0; i < STT_FAILURE_REPORT_THRESHOLD; i++) {
+      await fire("speech-detected");
+    }
+
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError.mock.calls[0][0].message).not.toBe(
+      EMPTY_TRANSCRIPTION_MESSAGE
+    );
   });
 });

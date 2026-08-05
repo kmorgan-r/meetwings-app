@@ -17,7 +17,10 @@ import { fetchSTT } from '@/lib';
 // Deep-imported, not via the @/lib barrel: this predicate is built from the
 // same literals stt.function.ts returns, so it has to come from that module.
 import { isUsableTranscription } from '@/lib/functions/stt.function';
-import { STT_FAILURE_REPORT_THRESHOLD } from '@/config';
+import {
+  EMPTY_TRANSCRIPTION_REPORT_THRESHOLD,
+  STT_FAILURE_REPORT_THRESHOLD,
+} from '@/config';
 import type { TYPE_PROVIDER } from '@/types';
 import type { DiarizationAudioBuffer } from '@/lib/functions/audio-buffer';
 
@@ -62,6 +65,17 @@ const MEETING_VAD_CONFIG = {
 // At ~50-200KB per segment, 50 segments = 2.5-10MB max memory usage (reasonable buffer)
 const MAX_QUEUE_SIZE = 50;
 
+/**
+ * Reported when segment after segment comes back with no text at all.
+ *
+ * Deliberately says nothing about the API key or quota: by the time this fires
+ * the provider has completed every request it was given. What it could not find
+ * was speech, so the two things worth checking are which output device is being
+ * captured and what language the audio is actually in.
+ */
+export const EMPTY_TRANSCRIPTION_MESSAGE =
+  "Meeting audio is being captured but nothing is being transcribed. Check the meeting audio source and the speech language setting.";
+
 export function useMeetingAudio({
   enabled,
   onSystemAudioTranscript,
@@ -88,6 +102,12 @@ export function useMeetingAudio({
   // a re-arming report turns an intermittent provider into a toast storm.
   const consecutiveSttFailuresRef = useRef(0);
   const sttFailureReportedRef = useRef(false);
+  // Consecutive segments that transcribed to nothing. Tracked apart from the
+  // failure counter above, not folded into it: a shared counter would surface
+  // whichever report crossed first, and the two point the user at different
+  // things. Latched on report for the same reason its sibling is.
+  const consecutiveEmptyRef = useRef(0);
+  const emptyReportedRef = useRef(false);
 
   // Keep refs in sync
   useEffect(() => {
@@ -112,6 +132,24 @@ export function useMeetingAudio({
           "Speech-to-text is failing for this meeting. Check your speech provider's API key and quota."
         )
       );
+    }
+  }, []);
+
+  const noteEmptyTranscription = useCallback((byteLength: number) => {
+    consecutiveEmptyRef.current += 1;
+    // Logged per segment, before any threshold. Recovering this after the fact
+    // otherwise means carving the SQLite file: the api_usage row proves the
+    // request was made and billed, and nothing anywhere records that its result
+    // was thrown away.
+    console.warn(
+      `[MeetingAudio] Segment transcribed empty after VAD reported speech (${byteLength} bytes, ${consecutiveEmptyRef.current} in a row)`
+    );
+    if (
+      consecutiveEmptyRef.current >= EMPTY_TRANSCRIPTION_REPORT_THRESHOLD &&
+      !emptyReportedRef.current
+    ) {
+      emptyReportedRef.current = true;
+      onErrorRef.current?.(new Error(EMPTY_TRANSCRIPTION_MESSAGE));
     }
   }, []);
 
@@ -172,17 +210,23 @@ export function useMeetingAudio({
             "[MeetingAudio] Discarding a segment that resolved after the session ended"
           );
         } else if (!transcription?.trim()) {
-          // Empty/whitespace is silence or noise, NOT a provider failure. The
-          // pre-change guard ignored these; counting them would raise
-          // "check your API key" after three quiet segments.
+          // Empty/whitespace is NOT a provider failure - the request completed.
+          // Routing it to noteSttFailure() would raise "check your API key"
+          // after three quiet segments, which is why the emptiness check is
+          // hoisted ahead of isUsableTranscription() (that predicate rejects
+          // empty input too, so collapsing the two would lose the distinction).
           //
-          // isUsableTranscription() also returns false for empty input, so this
-          // branch looks redundant. It is not: hoisting the emptiness check
-          // ahead of the shared predicate is what routes silence to "do
-          // nothing" instead of to noteSttFailure() in the else. Collapsing the
-          // two makes three quiet segments look like a dead API key.
+          // It is not "do nothing" either. Everything reaching this queue has
+          // already passed Rust's VAD (MEETING_VAD_CONFIG's min_speech_chunks /
+          // peak_threshold), so a completed transcription with no text is two
+          // detectors disagreeing about the same audio. One is unremarkable; a
+          // run of them is a meeting being lost a segment at a time, and used
+          // to be entirely invisible - no log, no counter, no report, while
+          // every one of those requests was still billed.
+          noteEmptyTranscription(audioBlob.size);
         } else if (isUsableTranscription(transcription)) {
           consecutiveSttFailuresRef.current = 0;
+          consecutiveEmptyRef.current = 0;
           const timestamp = Date.now();
           onSystemAudioTranscriptRef.current(transcription!, timestamp);
           if (audioBufferRef.current) {
@@ -201,9 +245,16 @@ export function useMeetingAudio({
 
     isProcessingRef.current = false;
     setIsProcessing(false);
-    // noteSttFailure is useCallback(…, []), so listing it costs nothing: this
-    // identity never changes and processQueue is not recreated by it.
-  }, [sttProvider, selectedSttProvider, sttLanguage, noteSttFailure]);
+    // noteSttFailure and noteEmptyTranscription are both useCallback(…, []), so
+    // listing them costs nothing: their identities never change and
+    // processQueue is not recreated by either.
+  }, [
+    sttProvider,
+    selectedSttProvider,
+    sttLanguage,
+    noteSttFailure,
+    noteEmptyTranscription,
+  ]);
 
   // Log when processQueue changes
   useEffect(() => {
@@ -329,6 +380,8 @@ export function useMeetingAudio({
       droppedCountRef.current = 0; // Reset for next session
       consecutiveSttFailuresRef.current = 0;
       sttFailureReportedRef.current = false;
+      consecutiveEmptyRef.current = 0;
+      emptyReportedRef.current = false;
     };
   }, [enabled, processQueue, outputDeviceId]);
 
