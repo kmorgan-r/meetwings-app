@@ -4,6 +4,7 @@ export * from "./assemblyai.function";
 export * from "./common.function";
 export * from "./meetwings.api";
 export * from "./meeting-summarizer";
+export * from "./meeting-summary-date";
 export * from "./conversation-title";
 export * from "./knowledge-compactor";
 export * from "./context-builder";
