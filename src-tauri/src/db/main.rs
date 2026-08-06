@@ -52,5 +52,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-context-v7.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 8: Record which speaker each message came from
+        Migration {
+            version: 8,
+            description: "add_speaker_to_messages",
+            sql: include_str!("migrations/chat-history-v8.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

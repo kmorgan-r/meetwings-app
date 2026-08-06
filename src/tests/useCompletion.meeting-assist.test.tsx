@@ -39,26 +39,37 @@ vi.mock("@/hooks/useWindow", () => ({
   useWindowResize: () => ({ resizeWindow: vi.fn() }),
 }));
 
-vi.mock("@/lib", () => ({
-  fetchAIResponse: vi.fn(),
-  saveConversation: vi.fn(),
-  appendMessagesToConversation: vi.fn(),
-  getConversationById: vi.fn(),
-  generateConversationTitle: vi.fn((message: string) => message),
-  shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
-  MESSAGE_ID_OFFSET: 1,
-  generateConversationId: vi.fn(() => "conversation-1"),
-  generateMessageId: vi.fn((role: string, timestamp: number) =>
-    `${role}-${timestamp}`
-  ),
-  generateRequestId: vi.fn(() => "request-1"),
-  getResponseSettings: vi.fn(() => ({ autoScroll: false })),
-  createUsageRecord: vi.fn(),
-  calculateCost: vi.fn(() => 0),
-  calculateSTTCost: vi.fn(() => 0),
-  setActiveConversationId: vi.fn(),
-  clearActiveConversationId: vi.fn(),
-}));
+vi.mock("@/lib", () => {
+  // The real generateMessageId appends a monotonic counter precisely so "no two
+  // messages can share an ID regardless of creation timing" — segments minted
+  // inside the same millisecond still differ. A mock keyed on role+timestamp
+  // alone breaks that guarantee, and since the autosave selects unwritten
+  // messages by id, colliding ids make it skip a real append. That surfaces as
+  // a machine-speed-dependent flake, not a clear failure, so keep the counter.
+  let messageIdSequence = 0;
+
+  return {
+    fetchAIResponse: vi.fn(),
+    saveConversation: vi.fn(),
+    appendMessagesToConversation: vi.fn(),
+    getConversationById: vi.fn(),
+    generateConversationTitle: vi.fn((message: string) => message),
+    shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
+    MESSAGE_ID_OFFSET: 1,
+    generateConversationId: vi.fn(() => "conversation-1"),
+    generateMessageId: vi.fn(
+      (role: string, timestamp: number) =>
+        `${role}-${timestamp}-${(messageIdSequence += 1)}`
+    ),
+    generateRequestId: vi.fn(() => "request-1"),
+    getResponseSettings: vi.fn(() => ({ autoScroll: false })),
+    createUsageRecord: vi.fn(),
+    calculateCost: vi.fn(() => 0),
+    calculateSTTCost: vi.fn(() => 0),
+    setActiveConversationId: vi.fn(),
+    clearActiveConversationId: vi.fn(),
+  };
+});
 
 vi.mock("@/lib/functions/meeting-summarizer", () => ({
   summarizeConversation: vi.fn(),
@@ -364,5 +375,131 @@ describe("useCompletion meeting assist mode", () => {
     expect(saveConversation).toHaveBeenCalledTimes(3);
     expect(appendMessagesToConversation).toHaveBeenCalledTimes(2);
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // Every case above drives addMeetingTranscript (the microphone half) and
+  // flushes by hand. Production does neither: guest audio arrives through
+  // addSystemAudioTranscript and is persisted by the PERIODIC autosave effect,
+  // which no case exercises. That is the exact asymmetry a real call showed -
+  // four microphone messages persisted, fifty-seven guest segments did not.
+  it("persists guest segments through the periodic autosave", async () => {
+    // vi.clearAllMocks() clears call records but NOT queued one-shot
+    // behaviours, and the case above leaves unconsumed mockRejectedValueOnce
+    // entries on both write mocks. Without this the first autosave here
+    // rejects with that leaked SQLITE_BUSY and the case passes on a later
+    // write instead of the one it means to observe.
+    vi.mocked(saveConversation).mockReset().mockResolvedValue({
+      id: "conversation-1",
+      title: "Guest line 1",
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    vi.mocked(appendMessagesToConversation).mockReset().mockResolvedValue();
+
+    const { result } = renderHook(() => useCompletion(), {
+      wrapper: strictModeWrapper,
+    });
+
+    act(() => {
+      result.current.setMeetingAssistMode(true);
+    });
+
+    // Two full autosave intervals' worth, with monotonic timestamps the way
+    // useMeetingAudio mints them (Date.now() once fetchSTT resolves). No
+    // manual flush anywhere - the periodic effect is the subject.
+    for (let i = 0; i < 2 * 4; i++) {
+      act(() => {
+        result.current.addSystemAudioTranscript(`Guest line ${i + 1}`, 5_000 + i);
+      });
+    }
+
+    await waitFor(() => {
+      const writes =
+        vi.mocked(saveConversation).mock.calls.length +
+        vi.mocked(appendMessagesToConversation).mock.calls.length;
+      expect(writes).toBeGreaterThan(0);
+    });
+
+    const persisted = [
+      ...vi.mocked(saveConversation).mock.calls.flatMap(
+        ([conversation]) => conversation.messages
+      ),
+      ...vi.mocked(appendMessagesToConversation).mock.calls.flatMap(
+        ([, , , messages]) => messages
+      ),
+    ].map((m) => m.content);
+
+    expect(persisted).toContain("Guest line 1");
+    expect(persisted).toContain("Guest line 8");
+  });
+
+  it("persists new segments when the message list has been reordered newest-first", async () => {
+    vi.mocked(saveConversation).mockReset().mockResolvedValue({
+      id: "conversation-1",
+      title: "Guest line 1",
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    vi.mocked(appendMessagesToConversation).mockReset().mockResolvedValue();
+
+    const { result } = renderHook(() => useCompletion(), {
+      wrapper: strictModeWrapper,
+    });
+
+    act(() => {
+      result.current.setMeetingAssistMode(true);
+    });
+
+    // MessageHistory and Input both render `conversationHistory.sort(...)`,
+    // and Array.prototype.sort reorders in place - so displaying the message
+    // list rewrites the very array the autosave reads, newest segment first.
+    // Reproduce that here after every segment, which is when a re-render would
+    // do it in the app.
+    const reorderTheWayTheRenderDoes = () =>
+      result.current.conversationHistory.sort(
+        (a, b) => b.timestamp - a.timestamp
+      );
+
+    const addSegments = async (from: number) => {
+      for (let i = from; i < from + 4; i++) {
+        act(() => {
+          result.current.addSystemAudioTranscript(
+            `Guest line ${i + 1}`,
+            5_000 + i
+          );
+        });
+        reorderTheWayTheRenderDoes();
+      }
+    };
+
+    // The first save creates the row and writes whatever exists, so it is
+    // immune to ordering. Let it settle before the second batch - the append
+    // that follows is the one that slices, and the one that loses segments.
+    await addSegments(0);
+    await waitFor(() => {
+      expect(vi.mocked(saveConversation)).toHaveBeenCalled();
+    });
+
+    await addSegments(4);
+    await waitFor(() => {
+      expect(vi.mocked(appendMessagesToConversation)).toHaveBeenCalled();
+    });
+
+    const appended = vi
+      .mocked(appendMessagesToConversation)
+      .mock.calls.flatMap(([, , , messages]) => messages.map((m) => m.content));
+
+    // Slicing by position hands back the already-persisted head instead of the
+    // new tail, and INSERT OR IGNORE then discards it without a word.
+    expect(appended).toEqual(
+      expect.arrayContaining([
+        "Guest line 5",
+        "Guest line 6",
+        "Guest line 7",
+        "Guest line 8",
+      ])
+    );
   });
 });

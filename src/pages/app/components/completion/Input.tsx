@@ -268,7 +268,10 @@ export const Input = ({
                 {/* Conversation History - Separate scroll, no auto-scroll */}
                 {keepEngaged && conversationHistory.length > 0 && (
                   <div className="space-y-3 pt-3">
-                    {conversationHistory
+                    {/* Copy before sorting: sort reorders in place, and this
+                        array is live state that the meeting autosave reads to
+                        decide what still needs writing. */}
+                    {[...conversationHistory]
                       .sort((a, b) => b?.timestamp - a?.timestamp)
                       .map((message, index) => {
                         // Only skip the first message if it's an assistant response already displayed above

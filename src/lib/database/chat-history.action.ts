@@ -25,6 +25,34 @@ interface DbMessage {
   content: string;
   timestamp: number;
   attached_files: string | null; // JSON string
+  speaker: string | null; // JSON string, null before migration 8
+  audio_source: string | null;
+}
+
+/**
+ * The columns recording who spoke, in the order every message INSERT lists
+ * them. Meeting segments carry a speaker; typed chat messages do not, so both
+ * are nullable — as are all rows written before migration 8.
+ */
+function speakerParams(
+  message: ChatConversation["messages"][number]
+): [string | null, string | null] {
+  return [
+    message.speaker ? JSON.stringify(message.speaker) : null,
+    message.audioSource ?? null,
+  ];
+}
+
+/**
+ * SQLite holds audio_source as free text, so a row can carry anything — an
+ * older build, a hand-edited database, a future value. Only the two the app
+ * understands are honoured; anything else reads back as absent rather than
+ * being asserted into the union.
+ */
+function parseAudioSource(
+  value: string | null
+): ChatConversation["messages"][number]["audioSource"] {
+  return value === "microphone" || value === "system" ? value : undefined;
 }
 
 /**
@@ -142,7 +170,7 @@ export async function createConversation(
         : null;
 
       await db.execute(
-        "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker, audio_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
           message.id,
           conversation.id,
@@ -150,6 +178,7 @@ export async function createConversation(
           message.content,
           message.timestamp,
           attachedFilesJson,
+          ...speakerParams(message),
         ]
       );
     }
@@ -209,6 +238,8 @@ async function attachMessages(
         content: msg.content,
         timestamp: msg.timestamp,
         attachedFiles: safeJsonParse(msg.attached_files, undefined),
+        speaker: safeJsonParse(msg.speaker, undefined),
+        audioSource: parseAudioSource(msg.audio_source),
       })) || [],
   }));
 }
@@ -301,6 +332,8 @@ export async function getConversationById(
         content: msg.content,
         timestamp: msg.timestamp,
         attachedFiles: safeJsonParse(msg.attached_files, undefined),
+        speaker: safeJsonParse(msg.speaker, undefined),
+        audioSource: parseAudioSource(msg.audio_source),
       })),
     };
   } catch (error) {
@@ -385,7 +418,7 @@ export async function updateConversation(
           : null;
 
         await db.execute(
-          "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+          "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker, audio_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
           [
             message.id,
             conversation.id,
@@ -393,6 +426,7 @@ export async function updateConversation(
             message.content,
             message.timestamp,
             attachedFilesJson,
+            ...speakerParams(message),
           ]
         );
       }
@@ -405,7 +439,7 @@ export async function updateConversation(
       for (const msg of existingMessages) {
         await db
           .execute(
-            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker, audio_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
               msg.id,
               msg.conversation_id,
@@ -413,6 +447,8 @@ export async function updateConversation(
               msg.content,
               msg.timestamp,
               msg.attached_files,
+              msg.speaker,
+              msg.audio_source,
             ]
           )
           .catch(() => {});
@@ -455,6 +491,8 @@ export async function appendMessagesToConversation(
       throw new Error("Conversation not found");
     }
 
+    let inserted = 0;
+
     const seenIds = new Set<string>();
     for (const message of newMessages) {
       if (!validateMessage(message)) {
@@ -471,8 +509,8 @@ export async function appendMessagesToConversation(
         ? JSON.stringify(message.attachedFiles)
         : null;
 
-      await db.execute(
-        "INSERT OR IGNORE INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+      const insertResult = await db.execute(
+        "INSERT OR IGNORE INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker, audio_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
           message.id,
           conversationId,
@@ -480,7 +518,22 @@ export async function appendMessagesToConversation(
           message.content,
           message.timestamp,
           attachedFilesJson,
+          ...speakerParams(message),
         ]
+      );
+      if (insertResult.rowsAffected > 0) {
+        inserted += 1;
+      }
+    }
+
+    // INSERT OR IGNORE swallows primary-key conflicts by design, so a caller
+    // that hands over only already-written rows gets a successful-looking save
+    // that stored nothing. That silence hid a bug where the meeting autosave
+    // re-offered the same messages for an entire meeting while reporting
+    // success, and every later segment was lost. Say so.
+    if (newMessages.length > 0 && inserted === 0) {
+      console.warn(
+        `[ChatHistory] append to ${conversationId} wrote none of its ${newMessages.length} message(s) — every id was already present`
       );
     }
   } catch (error) {
@@ -709,7 +762,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
               : null;
 
             await db.execute(
-              "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files) VALUES (?, ?, ?, ?, ?, ?)",
+              "INSERT INTO messages (id, conversation_id, role, content, timestamp, attached_files, speaker, audio_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
               [
                 message.id,
                 conversation.id,
@@ -717,6 +770,7 @@ export async function migrateLocalStorageToSQLite(): Promise<{
                 message.content,
                 message.timestamp || Date.now(),
                 attachedFilesJson,
+                ...speakerParams(message),
               ]
             );
           }

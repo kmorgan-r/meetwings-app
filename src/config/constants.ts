@@ -140,6 +140,17 @@ export const AUTOSAVE_FAILURE_REPORT_THRESHOLD = 3;
 // call would report nothing.
 export const STT_FAILURE_REPORT_THRESHOLD = 3;
 
+// Number of consecutive guest segments that transcribe to nothing before
+// useMeetingAudio reports that audio is being captured but not transcribed.
+//
+// Separate from the threshold above, and higher, because the two say different
+// things. A rejection is the provider failing outright; an empty result is a
+// COMPLETED transcription of audio the provider found no speech in, which one
+// stray cough through the VAD gate can produce legitimately. Five consecutive
+// (roughly a minute of a live call) is past what a run of odd segments
+// explains, and still early enough to save the meeting.
+export const EMPTY_TRANSCRIPTION_REPORT_THRESHOLD = 5;
+
 /**
  * Bounded confirmation that a meeting-mode auto-stop really brought the capture
  * down. Worst case 1500 ms, past Rust's 500 ms floor (a 300 ms sleep before

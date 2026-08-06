@@ -16,6 +16,7 @@ import {
   Trash2,
   SparklesIcon,
   UserIcon,
+  UsersIcon,
   SendIcon,
   Check,
   Loader2,
@@ -151,7 +152,14 @@ const View = () => {
       ) : (
         <div className="flex flex-col gap-4 pb-24 px-2">
           {messages?.messages.map((message, index, array) => {
-            const isUser = message.role === "user";
+            // Meeting segments are all role:"user" — the microphone is you,
+            // system audio is whoever else was on the call. Without splitting
+            // on audioSource a saved meeting reads as one person talking to
+            // themselves.
+            const isGuest = message.audioSource === "system";
+            const isUser = message.role === "user" && !isGuest;
+            const speakerLabel =
+              message.speaker?.speakerLabel ?? (isGuest ? "Guest" : undefined);
             const showDate =
               index === 0 ||
               moment(message.timestamp).format("YYYY-MM-DD") !==
@@ -175,11 +183,19 @@ const View = () => {
                     isUser ? "justify-end" : "justify-start"
                   }`}
                 >
-                  {/* Avatar - Left side for bot */}
+                  {/* Avatar - Left side for the AI and for other speakers */}
                   {!isUser && (
                     <div className="flex-shrink-0">
-                      <div className="size-7 lg:size-8 rounded-full bg-primary/10 flex items-center justify-center">
-                        <SparklesIcon className="size-3 lg:size-4 text-primary" />
+                      <div
+                        className={`size-7 lg:size-8 rounded-full flex items-center justify-center ${
+                          isGuest ? "bg-muted" : "bg-primary/10"
+                        }`}
+                      >
+                        {isGuest ? (
+                          <UsersIcon className="size-3 lg:size-4 text-muted-foreground" />
+                        ) : (
+                          <SparklesIcon className="size-3 lg:size-4 text-primary" />
+                        )}
                       </div>
                     </div>
                   )}
@@ -190,6 +206,11 @@ const View = () => {
                       isUser ? "items-end" : "items-start"
                     }`}
                   >
+                    {speakerLabel && (
+                      <span className="text-[10px] lg:text-xs font-medium text-muted-foreground px-1">
+                        {speakerLabel}
+                      </span>
+                    )}
                     <Card
                       className={`px-4 text-xs lg:text-sm py-0 transition-all select-none shadow-none ${
                         isUser
