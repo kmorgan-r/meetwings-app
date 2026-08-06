@@ -97,7 +97,10 @@ export const MessageHistory = ({
 
         <ScrollArea className="h-[calc(100vh-10rem)]">
           <div className="p-4 space-y-4">
-            {conversationHistory
+            {/* Copy before sorting: sort reorders in place, and this array is
+                live state that the meeting autosave reads to decide what still
+                needs writing. */}
+            {[...conversationHistory]
               .sort((a, b) => b?.timestamp - a?.timestamp)
               .map((message) => (
                 <div

@@ -177,13 +177,18 @@ export const useCompletion = () => {
   // leaving a later permanent failure silent.
   const consecutiveAutosaveFailuresRef = useRef(0);
   const transcriptLossReportedRef = useRef(false);
-  // How many of conversationHistoryRef.current's messages (from the start)
-  // are already persisted for the current conversation. Lets the periodic
-  // autosave append only the new tail instead of redoing a full
-  // delete+reinsert of every message each time. Any full-rewrite save
-  // (quick action, normal submit, initial creation) advances this to cover
-  // everything it just wrote.
-  const persistedMessageCountRef = useRef(0);
+  // Which of conversationHistoryRef.current's messages are already persisted
+  // for the current conversation. Lets the periodic autosave append only what
+  // is new instead of redoing a full delete+reinsert of every message each
+  // time. Any full-rewrite save (quick action, normal submit, initial
+  // creation) adds everything it just wrote.
+  //
+  // Identity, NOT a count of a leading prefix. conversationHistory is rendered
+  // through `.sort(...)`, which reorders in place, so the array this reads is
+  // routinely newest-first rather than append-ordered. A positional slice then
+  // selects the already-written head, INSERT OR IGNORE silently discards it,
+  // and every later segment is lost while the save reports success.
+  const persistedMessageIdsRef = useRef<Set<string>>(new Set());
   // Cached title/createdAt for the conversation currently being auto-saved, so
   // repeated autosaves don't re-read the row just to recover fields that never
   // change after the first save. Keyed by id: a mismatched/absent id means a
@@ -299,7 +304,7 @@ export const useCompletion = () => {
         // contains — not whatever the live ref has advanced to by the time
         // the save finishes.
         const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
-        const persistedCountAtSnapshot = persistedMessageCountRef.current;
+        const persistedIdsAtSnapshot = new Set(persistedMessageIdsRef.current);
 
         const conversationId =
           currentConversationIdRef.current || generateConversationId("chat");
@@ -337,11 +342,13 @@ export const useCompletion = () => {
         }
 
         try {
-          if (persistedCountAtSnapshot > 0) {
-            // Row already exists — append just the new tail instead of a
+          if (persistedIdsAtSnapshot.size > 0) {
+            // Row already exists — append just what is new instead of a
             // full delete+reinsert, so autosave cost stays proportional to
             // what changed rather than the whole conversation's size.
-            const newTailMessages = messages.slice(persistedCountAtSnapshot);
+            const newTailMessages = messages.filter(
+              (message) => !persistedIdsAtSnapshot.has(message.id)
+            );
             if (newTailMessages.length > 0) {
               await appendMessagesToConversation(
                 conversationId,
@@ -369,7 +376,9 @@ export const useCompletion = () => {
           setActiveConversationId(conversationId);
           const savedCount = transcriptLengthAtSnapshot;
           lastAutoSavedTranscriptCountRef.current = savedCount;
-          persistedMessageCountRef.current = messages.length;
+          for (const message of messages) {
+            persistedMessageIdsRef.current.add(message.id);
+          }
           const latestMeta = conversationMetaCacheRef.current;
           conversationMetaCacheRef.current = {
             id: conversationId,
@@ -720,7 +729,7 @@ export const useCompletion = () => {
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
-    persistedMessageCountRef.current = 0;
+    persistedMessageIdsRef.current = new Set();
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -1190,7 +1199,9 @@ export const useCompletion = () => {
           lastAutoSavedTranscriptCountRef.current = transcriptLengthAtSnapshot;
           // This was a full rewrite of every message, so all of them are now
           // persisted — the next periodic autosave can append from here.
-          persistedMessageCountRef.current = newMessages.length;
+          persistedMessageIdsRef.current = new Set(
+            newMessages.map((message) => message.id)
+          );
           // Same rule as the title above: name a conversation that has none,
           // never rename one.
           if (!existingConversation?.title) {
@@ -1323,7 +1334,9 @@ export const useCompletion = () => {
     // newly added segments start a fresh count toward the next auto-save.
     lastAutoSavedTranscriptCountRef.current = meetingTranscript.length;
     // Everything in the loaded conversation is already in the DB.
-    persistedMessageCountRef.current = conversation.messages.length;
+    persistedMessageIdsRef.current = new Set(
+      conversation.messages.map((message) => message.id)
+    );
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
@@ -1353,7 +1366,7 @@ export const useCompletion = () => {
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
-    persistedMessageCountRef.current = 0;
+    persistedMessageIdsRef.current = new Set();
     setState((prev) => ({
       ...prev,
       currentConversationId: null,
@@ -1448,7 +1461,9 @@ export const useCompletion = () => {
         lastAutoSavedTranscriptCountRef.current = transcriptLengthAtSnapshot;
         // This was a full rewrite of every message, so all of them are now
         // persisted — the next periodic autosave can append from here.
-        persistedMessageCountRef.current = newMessages.length;
+        persistedMessageIdsRef.current = new Set(
+          newMessages.map((message) => message.id)
+        );
         // The conversation had no name before this save, so the title stored
         // above is the raw first message — hand it to the AI titler.
         if (!existingConversation?.title) {
