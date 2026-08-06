@@ -24,8 +24,11 @@ import {
   Target,
   ArrowRight,
   MessageSquare,
+  MessageCircleReplyIcon,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { updateMeetingSummary, getEntitiesForSummary } from "@/lib/database";
+import { meetingTimestamp } from "@/lib/functions/meeting-summary-date";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
 
 interface SummaryDetailProps {
@@ -44,6 +47,7 @@ export const SummaryDetail = ({
   const [isSaving, setIsSaving] = useState(false);
   const [entities, setEntities] = useState<KnowledgeEntity[]>([]);
   const [copied, setCopied] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (summary) {
@@ -87,7 +91,8 @@ export const SummaryDetail = ({
     if (!summary) return;
 
     let markdown = `# Meeting Summary\n\n`;
-    markdown += `**Date:** ${formatDate(summary.createdAt)} at ${formatTime(summary.createdAt)}\n\n`;
+    const meetingAt = meetingTimestamp(summary);
+    markdown += `**Date:** ${formatDate(meetingAt)} at ${formatTime(meetingAt)}\n\n`;
 
     if (summary.title) {
       markdown += `**Title:** ${summary.title}\n\n`;
@@ -214,7 +219,8 @@ export const SummaryDetail = ({
           <div>
             <CardTitle className="text-base">Summary Details</CardTitle>
             <CardDescription>
-              {formatDate(summary.createdAt)} at {formatTime(summary.createdAt)}
+              {formatDate(meetingTimestamp(summary))} at{" "}
+              {formatTime(meetingTimestamp(summary))}
             </CardDescription>
           </div>
           <div className="flex gap-1">
@@ -245,6 +251,18 @@ export const SummaryDetail = ({
               </>
             ) : (
               <>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() =>
+                    navigate(`/chats/view/${summary.conversationId}`)
+                  }
+                  title="Open this conversation"
+                  disabled={!summary.conversationId}
+                >
+                  <MessageCircleReplyIcon className="h-4 w-4" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
