@@ -581,6 +581,44 @@ export async function updateConversationTitle(
 }
 
 /**
+ * Gives a conversation the name its summary was given.
+ *
+ * Until this runs, the same meeting carries two unrelated names. A conversation
+ * is titled at creation by `generateConversationTitle` from whatever text
+ * started it — for a quick action that's the action's own label, which is why
+ * 26 conversations in a real profile are all called "What should I say?" — and
+ * the AI titler may later replace that using only the opening few messages, so
+ * a ten-hour call becomes "Casual Greeting and Check-In". The summary title is
+ * derived from the whole conversation and is simply the better name.
+ *
+ * It therefore wins outright rather than only filling in placeholders. That is
+ * safe because every title in the system is machine-generated: the only writer
+ * besides conversation creation is the AI titler. If a manual rename is ever
+ * added, this needs a provenance check so it can't overwrite one.
+ *
+ * Returns whether a row was renamed. Never throws — a summary that was written
+ * successfully must not be reported as failed because its cosmetic rename was.
+ */
+export async function applySummaryTitleToConversation(
+  conversationId: string,
+  title: string
+): Promise<boolean> {
+  if (!conversationId || !title?.trim()) {
+    return false;
+  }
+
+  try {
+    return await updateConversationTitle(conversationId, title.trim());
+  } catch (error) {
+    console.error(
+      `Failed to adopt summary title for conversation ${conversationId}:`,
+      error
+    );
+    return false;
+  }
+}
+
+/**
  * Save or update a conversation (upsert operation)
  */
 export async function saveConversation(

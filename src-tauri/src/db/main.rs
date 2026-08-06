@@ -66,5 +66,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-context-v9.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 10: Name each summarized conversation after its summary
+        Migration {
+            version: 10,
+            description: "adopt_summary_titles_for_conversations",
+            sql: include_str!("migrations/meeting-context-v10.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

@@ -10,6 +10,7 @@ import {
   createOrUpdateKnowledgeEntity,
   createEntityMention,
   getMeetingSummaryByConversation,
+  applySummaryTitleToConversation,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
@@ -340,6 +341,18 @@ export async function saveSummarizationResult(
     };
 
     const summary = await createMeetingSummary(summaryInput);
+
+    // Give the conversation the name the summary just earned, so the same
+    // meeting reads the same way in Chats and in Context Memory. No-op unless
+    // the conversation is still titled with its raw first message.
+    // Kept off this function's failure path on purpose: the summary row is
+    // already written, and reporting failure here would tell callers the
+    // conversation is still unsummarized when it isn't.
+    if (result.title) {
+      await applySummaryTitleToConversation(conversationId, result.title).catch(
+        (error) => console.error("Failed to adopt summary title:", error)
+      );
+    }
 
     // Create/update entities and link them to the summary
     for (const entity of result.entities) {
