@@ -39,26 +39,37 @@ vi.mock("@/hooks/useWindow", () => ({
   useWindowResize: () => ({ resizeWindow: vi.fn() }),
 }));
 
-vi.mock("@/lib", () => ({
-  fetchAIResponse: vi.fn(),
-  saveConversation: vi.fn(),
-  appendMessagesToConversation: vi.fn(),
-  getConversationById: vi.fn(),
-  generateConversationTitle: vi.fn((message: string) => message),
-  shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
-  MESSAGE_ID_OFFSET: 1,
-  generateConversationId: vi.fn(() => "conversation-1"),
-  generateMessageId: vi.fn((role: string, timestamp: number) =>
-    `${role}-${timestamp}`
-  ),
-  generateRequestId: vi.fn(() => "request-1"),
-  getResponseSettings: vi.fn(() => ({ autoScroll: false })),
-  createUsageRecord: vi.fn(),
-  calculateCost: vi.fn(() => 0),
-  calculateSTTCost: vi.fn(() => 0),
-  setActiveConversationId: vi.fn(),
-  clearActiveConversationId: vi.fn(),
-}));
+vi.mock("@/lib", () => {
+  // The real generateMessageId appends a monotonic counter precisely so "no two
+  // messages can share an ID regardless of creation timing" — segments minted
+  // inside the same millisecond still differ. A mock keyed on role+timestamp
+  // alone breaks that guarantee, and since the autosave selects unwritten
+  // messages by id, colliding ids make it skip a real append. That surfaces as
+  // a machine-speed-dependent flake, not a clear failure, so keep the counter.
+  let messageIdSequence = 0;
+
+  return {
+    fetchAIResponse: vi.fn(),
+    saveConversation: vi.fn(),
+    appendMessagesToConversation: vi.fn(),
+    getConversationById: vi.fn(),
+    generateConversationTitle: vi.fn((message: string) => message),
+    shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
+    MESSAGE_ID_OFFSET: 1,
+    generateConversationId: vi.fn(() => "conversation-1"),
+    generateMessageId: vi.fn(
+      (role: string, timestamp: number) =>
+        `${role}-${timestamp}-${(messageIdSequence += 1)}`
+    ),
+    generateRequestId: vi.fn(() => "request-1"),
+    getResponseSettings: vi.fn(() => ({ autoScroll: false })),
+    createUsageRecord: vi.fn(),
+    calculateCost: vi.fn(() => 0),
+    calculateSTTCost: vi.fn(() => 0),
+    setActiveConversationId: vi.fn(),
+    clearActiveConversationId: vi.fn(),
+  };
+});
 
 vi.mock("@/lib/functions/meeting-summarizer", () => ({
   summarizeConversation: vi.fn(),
