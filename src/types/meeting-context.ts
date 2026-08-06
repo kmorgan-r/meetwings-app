@@ -18,6 +18,15 @@ export interface MeetingSummary {
   participants: string[];
   exchangeCount: number;
   durationSeconds: number | null;
+  /**
+   * When the meeting itself started/ended, taken from its messages. Distinct
+   * from createdAt, which is when the summary row was written: the knowledge
+   * backfill summarizes months-old conversations today, so createdAt says
+   * nothing about when the conversation happened. Null for summaries of
+   * conversations with no messages left to read.
+   */
+  meetingStartedAt: number | null;
+  meetingEndedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -108,6 +117,8 @@ export interface DbMeetingSummary {
   participants: string | null;
   exchange_count: number | null;
   duration_seconds: number | null;
+  meeting_started_at: number | null;
+  meeting_ended_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -153,7 +164,11 @@ export interface CreateMeetingSummaryInput {
   teamUpdates?: string[];
   participants?: string[];
   exchangeCount?: number;
+  /** Overrides the duration otherwise derived from the meeting window. */
   durationSeconds?: number;
+  /** Override the window otherwise read from the conversation's messages. */
+  meetingStartedAt?: number | null;
+  meetingEndedAt?: number | null;
 }
 
 export interface CreateKnowledgeEntityInput {

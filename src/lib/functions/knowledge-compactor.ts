@@ -20,6 +20,7 @@ import {
   shouldSummarize,
 } from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
+import { meetingTimestamp } from "./meeting-summary-date";
 import {
   getUserIdentity,
   hasUserIdentity,
@@ -199,12 +200,19 @@ function getUserIdentityCompactionInstruction(): string {
 }
 
 /**
- * Formats summaries for compaction
+ * Formats summaries for compaction.
+ *
+ * Dated by the meeting rather than by the summary row's write time: the prompt
+ * asks the model to weigh recency and drop outdated entries, and a backfilled
+ * batch all carries today's createdAt, which would present months-old meetings
+ * as this week's.
  */
-function formatSummariesForCompaction(summaries: MeetingSummary[]): string {
+export function formatSummariesForCompaction(
+  summaries: MeetingSummary[]
+): string {
   return summaries
     .map((s, i) => {
-      const date = new Date(s.createdAt).toLocaleDateString();
+      const date = new Date(meetingTimestamp(s)).toLocaleDateString();
       let text = `[${i + 1}] ${date}\n`;
       if (s.title) {
         text += `Title: ${s.title}\n`;

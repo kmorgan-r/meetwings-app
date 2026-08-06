@@ -46,6 +46,8 @@ export const MOCK_ENHANCED_SUMMARIES: MeetingSummary[] = [
     ],
     exchangeCount: 24,
     durationSeconds: 2700, // NEW: 45 minutes
+    meetingStartedAt: Date.now() - 2700000,
+    meetingEndedAt: Date.now(),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   },
@@ -82,6 +84,8 @@ export const MOCK_ENHANCED_SUMMARIES: MeetingSummary[] = [
     ],
     exchangeCount: 18,
     durationSeconds: 1800, // 30 minutes
+    meetingStartedAt: Date.now() - 3600000,
+    meetingEndedAt: Date.now() - 1800000,
     createdAt: Date.now() - 1800000,
     updatedAt: Date.now() - 1800000,
   },
@@ -118,6 +122,8 @@ export const MOCK_ENHANCED_SUMMARIES: MeetingSummary[] = [
     ],
     exchangeCount: 32,
     durationSeconds: 3600, // 60 minutes
+    meetingStartedAt: Date.now() - 7200000,
+    meetingEndedAt: Date.now() - 3600000,
     createdAt: Date.now() - 3600000,
     updatedAt: Date.now() - 3600000,
   },

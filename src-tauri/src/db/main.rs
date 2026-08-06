@@ -59,5 +59,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history-v8.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 9: Record when each summarized meeting actually happened
+        Migration {
+            version: 9,
+            description: "add_meeting_window_to_summaries",
+            sql: include_str!("migrations/meeting-context-v9.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

@@ -52,9 +52,48 @@ function dbRowToMeetingSummary(row: DbMeetingSummary): MeetingSummary {
     participants: safeJsonParse<string[]>(row.participants, []),
     exchangeCount: row.exchange_count || 0,
     durationSeconds: row.duration_seconds || null,
+    meetingStartedAt: row.meeting_started_at ?? null,
+    meetingEndedAt: row.meeting_ended_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * When the conversation's messages start and end. This is the meeting's own
+ * clock, which is what the UI dates a summary by — the summary row's created_at
+ * is only when it happened to be written, and the knowledge backfill writes
+ * summaries for months-old conversations at today's timestamp.
+ *
+ * Read here rather than threaded in from the callers because both summarization
+ * paths drop message timestamps before they get this far (the backfill maps to
+ * `{role, content}`), and because this is the same expression the v9 migration
+ * backfills existing rows with — one definition of "when did this meeting
+ * happen", not two.
+ */
+async function readMeetingWindow(
+  conversationId: string
+): Promise<{ startedAt: number | null; endedAt: number | null }> {
+  const db = await getDatabase();
+
+  try {
+    const rows = await db.select<
+      { started_at: number | null; ended_at: number | null }[]
+    >(
+      `SELECT MIN(timestamp) AS started_at, MAX(timestamp) AS ended_at
+       FROM messages WHERE conversation_id = ?`,
+      [conversationId]
+    );
+    return {
+      startedAt: rows[0]?.started_at ?? null,
+      endedAt: rows[0]?.ended_at ?? null,
+    };
+  } catch (error) {
+    // A summary without a window still beats no summary; it falls back to
+    // created_at for display.
+    console.error("Failed to read meeting window:", error);
+    return { startedAt: null, endedAt: null };
+  }
 }
 
 // ============================================================================
@@ -67,6 +106,16 @@ export async function createMeetingSummary(
   const db = await getDatabase();
   const now = Date.now();
   const id = generateId();
+
+  const window = await readMeetingWindow(input.conversationId);
+  const meetingStartedAt = input.meetingStartedAt ?? window.startedAt;
+  const meetingEndedAt = input.meetingEndedAt ?? window.endedAt;
+  const derivedDuration =
+    meetingStartedAt !== null &&
+    meetingEndedAt !== null &&
+    meetingEndedAt > meetingStartedAt
+      ? Math.round((meetingEndedAt - meetingStartedAt) / 1000)
+      : null;
 
   const record: MeetingSummary = {
     id,
@@ -81,7 +130,9 @@ export async function createMeetingSummary(
     teamUpdates: input.teamUpdates || [],
     participants: input.participants || [],
     exchangeCount: input.exchangeCount || 0,
-    durationSeconds: input.durationSeconds || null,
+    durationSeconds: input.durationSeconds || derivedDuration,
+    meetingStartedAt,
+    meetingEndedAt,
     createdAt: now,
     updatedAt: now,
   };
@@ -91,8 +142,9 @@ export async function createMeetingSummary(
       `INSERT INTO meeting_summaries (
         id, conversation_id, summary, title, topics, goals, action_items,
         next_steps, decisions, team_updates, participants, exchange_count,
-        duration_seconds, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        duration_seconds, meeting_started_at, meeting_ended_at,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         record.id,
         record.conversationId,
@@ -107,6 +159,8 @@ export async function createMeetingSummary(
         JSON.stringify(record.participants),
         record.exchangeCount,
         record.durationSeconds,
+        record.meetingStartedAt,
+        record.meetingEndedAt,
         record.createdAt,
         record.updatedAt,
       ]
@@ -209,8 +263,13 @@ export async function getAllMeetingSummaries(): Promise<MeetingSummary[]> {
   const db = await getDatabase();
 
   try {
+    // Ordered by the meeting's own clock, not the row's write time: the
+    // knowledge backfill stamps a whole batch of months-old conversations with
+    // one created_at, which scrambles the list chronologically. COALESCE keeps
+    // pre-v9 rows (and message-less conversations) in place at their write time.
     const rows = await db.select<DbMeetingSummary[]>(
-      `SELECT * FROM meeting_summaries ORDER BY created_at DESC`
+      `SELECT * FROM meeting_summaries
+       ORDER BY COALESCE(meeting_started_at, created_at) DESC`
     );
     return rows.map(dbRowToMeetingSummary);
   } catch (error) {
@@ -242,6 +301,13 @@ export async function updateMeetingSummary(
       teamUpdates: updates.teamUpdates ?? existing.teamUpdates,
       participants: updates.participants ?? existing.participants,
       durationSeconds: updates.durationSeconds ?? existing.durationSeconds,
+      // The meeting window belongs to the conversation, not to the editable
+      // summary text, so edits never move it. Pinning it to `existing` also
+      // keeps the returned record honest: the UPDATE below doesn't write these
+      // columns, so accepting an override here would hand back a value the
+      // database doesn't hold.
+      meetingStartedAt: existing.meetingStartedAt,
+      meetingEndedAt: existing.meetingEndedAt,
       updatedAt: now,
     };
 

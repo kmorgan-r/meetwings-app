@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Trash2, ChevronRight, MessageSquare, Loader2 } from "lucide-react";
 import { getAllMeetingSummaries, deleteMeetingSummary } from "@/lib/database";
+import { meetingTimestamp } from "@/lib/functions/meeting-summary-date";
 import type { MeetingSummary } from "@/types";
 
 interface SummaryListProps {
@@ -178,10 +179,10 @@ export const SummaryList = ({
                         </Badge>
                       )}
                       <span className="text-xs text-muted-foreground">
-                        {formatDate(summary.createdAt)}
+                        {formatDate(meetingTimestamp(summary))}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {formatTime(summary.createdAt)}
+                        {formatTime(meetingTimestamp(summary))}
                       </span>
                     </div>
                     <p className="text-sm text-muted-foreground line-clamp-2">{summary.summary}</p>
