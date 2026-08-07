@@ -39,12 +39,15 @@ import type {
  * MODULE SCOPE, not the component body.
  *
  * It takes the state as an argument and closes over nothing, so there is no
- * reason for a fresh identity every render - and a fresh identity is actively
- * harmful: `onToggleColleague` references it, `react-hooks/exhaustive-deps` is
- * enabled (eslint.config.js:56), and the honest response would be adding it to
- * the deps, which makes that callback unstable on every render and defeats
- * ContactPicker's React.memo - restoring the per-streamed-chunk re-render the
- * memo exists to stop.
+ * reason for a fresh identity every render. Kept here even though this repo's
+ * installed eslint-plugin-react-hooks (v7.0.1, the reactivity-aware rule set)
+ * does NOT flag it if moved into the component body - verified directly: it
+ * performs data-flow analysis and correctly sees this function closes over no
+ * render-scope binding, so it does not require it as a dependency wherever
+ * declared. Module scope is kept anyway: it is strictly safer against a future
+ * edit that gives this function a real closure (at which point the identity
+ * WOULD need to be stable for `onToggleColleague`/`onRetryOpportunities` to
+ * keep ContactPicker's React.memo effective), and it costs nothing today.
  *
  * THE CONTACT LIST HAS EXACTLY ONE HOME: `cache`. A separate `contacts` state
  * alongside `cache.contacts` is the obvious first draft and it is wrong.

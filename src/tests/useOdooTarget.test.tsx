@@ -381,6 +381,41 @@ describe("persisting a selection", () => {
     });
     expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null });
   });
+
+  // Added during self-review: pin the exact scenario the hook's own doc
+  // comment on commit()'s rejection path describes, and which no other test
+  // here exercises. Pick Ada (token 1, saveTarget hangs); pick Bea (token 2,
+  // saveTarget resolves - the row now names Bea); THEN Ada's write rejects.
+  // Without re-checking the token in the rejection path, the rollback would
+  // restore `previous` (null, captured before Ada's commit) over Bea's
+  // already-persisted selection - the picker would show nothing chosen while
+  // SQLite still holds Bea, silently reintroducing the unassigned-meeting
+  // failure through the error handling meant to prevent it.
+  it("does not let a stale commit's rejection roll back a newer, already-persisted selection", async () => {
+    let rejectAdaSave: (err: unknown) => void = () => {};
+    action.saveTarget.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectAdaSave = reject;
+        })
+    );
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada); // token 1, saveTarget pending
+    });
+    await act(async () => {
+      await result.current.pickerProps.onSelect(colleague); // token 2, saveTarget resolves
+    });
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+
+    await act(async () => {
+      rejectAdaSave(new Error("database is locked"));
+    });
+
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+  });
 });
 
 describe("the opportunity panel", () => {
