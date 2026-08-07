@@ -56,6 +56,31 @@ describe("runSync", () => {
     expect(sync.syncContacts).toHaveBeenCalledTimes(1);
   });
 
+  // Guard POSITION, not guard presence. "syncContacts called once" (above)
+  // cannot discriminate where the guard sits: JS's run-to-completion
+  // microtask semantics make a synchronous check-and-assign atomic wherever
+  // it is, so two synchronous callers can never both start a sync no matter
+  // how many awaits precede the check - see the comment above `runSync`.
+  //
+  // What guard position DOES change is how many times the reads before it
+  // run. With the guard first, a joining caller returns before ever calling
+  // `requireOdooConfig`; move the guard after it and BOTH callers call it -
+  // each fetching its own copy of the credentials - before either can join.
+  // That duplicate credential/sync-state read is real: needless config I/O
+  // on every overlapping caller, not just the winner. This assertion is what
+  // actually distinguishes "guard first" from "guard moved after the first
+  // await," which the syncContacts-count assertion above does not.
+  it("calls requireOdooConfig only once across two concurrent callers, and joins one run", async () => {
+    const a = runSync("refresh");
+    const b = runSync("refresh");
+
+    expect(storage.requireOdooConfig).toHaveBeenCalledTimes(1);
+
+    await expect(a).resolves.toEqual({ ran: true, ...RESULT });
+    await expect(b).resolves.toEqual({ ran: true, ...RESULT });
+    expect(sync.syncContacts).toHaveBeenCalledTimes(1);
+  });
+
   // The guard must be released. If `.finally` did not clear `inFlight`, one
   // completed sync would make every later Refresh a no-op returning a stale
   // result forever.

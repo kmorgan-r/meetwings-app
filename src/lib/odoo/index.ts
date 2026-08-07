@@ -48,14 +48,26 @@ export type SyncOutcome =
  * The guard is the FIRST thing this function does, and `inFlight` is assigned
  * synchronously with the check.
  *
- * Reading `inFlight` after `await requireOdooConfig()` / `await getSyncState()`
- * is racy: two callers that reach the check at different await depths - an
- * app-start sync mid-`getSyncState` and a Refresh click, say - both see `null`,
- * both assign, and the second is then refused by `claimSync` with
- * ODOO_SYNC_BUSY instead of joining the first. Worse, the first run's
- * `.finally` clears `inFlight` while the second is still live. Everything that
- * can await now lives INSIDE the wrapped run, so nothing separates the test
- * from the assignment.
+ * That does NOT mean a later guard would let two syncs start - it can't.
+ * JS's single-threaded, run-to-completion microtask semantics make a
+ * synchronous check-and-assign atomic at ANY position: two callers launched
+ * back to back can never both observe `inFlight` as null and both assign it,
+ * because whichever caller's continuation resumes first always finishes its
+ * entire check-and-assign span before the other's parallel continuation for
+ * the same await is even dequeued. A genuine double *sync* would require an
+ * actual yield BETWEEN the check and the assignment, which this function
+ * never has, wherever the check sits.
+ *
+ * What guard position actually controls is how many times the READS BEFORE
+ * IT run on concurrent callers. With the guard first, a joining caller
+ * returns before ever calling `requireOdooConfig()` / `getSyncState()`. Move
+ * the guard after those awaits and BOTH callers call them - each fetching and
+ * discarding its own copy of the credentials/sync state - before either can
+ * join. That duplicate read, not a duplicate sync, is the regression the
+ * guard's position prevents; see the `requireOdooConfig` call-count
+ * assertion in src/tests/odoo-run-sync.test.ts, which is what actually
+ * discriminates guard position (asserting `syncContacts` was called once
+ * cannot, for the reason above).
  */
 export async function runSync(trigger: SyncTrigger, meetingMode = false): Promise<SyncOutcome> {
   // A joiner gets the SAME outcome the in-flight run produces, skip included -
