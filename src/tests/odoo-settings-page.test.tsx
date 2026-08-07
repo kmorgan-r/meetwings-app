@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -119,6 +119,41 @@ describe("saving credentials", () => {
     expect(await screen.findByText(/ODOO_INTERNAL/)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("i9j0");
   });
+
+  // Review finding 1: the credentials were already written by the time
+  // `emit` runs. A rejecting `emit` must not relabel that as a failed save -
+  // the user would re-enter credentials that are already stored, or worse,
+  // conclude Odoo is unconfigured. `saveStatus` has no positive text of its
+  // own (it is cleared to null on success - see the deferred "no positive
+  // Saved confirmation" finding), so the strongest available proof that the
+  // save is still treated as successful is that the ODOO_INTERNAL failure
+  // text this handler's OWN catch would render never appears, even after the
+  // rejection has had a full turn to propagate.
+  it("keeps the save successful when the cross-window notification itself fails", async () => {
+    storage.saveOdooConfig.mockResolvedValue({ instanceChanged: true, becameUsable: false });
+    let rejectEmit: (err: unknown) => void = () => {};
+    emit.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectEmit = reject;
+      })
+    );
+
+    render(<OdooSettings />);
+    await fillAndSave();
+    await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
+
+    // `act` so React has flushed any state update the rejection triggers
+    // before the assertion below runs - without it, a still-pending
+    // microtask from a buggy outer catch could land after we've already
+    // checked.
+    await act(async () => {
+      rejectEmit(new Error("no listeners"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText(/ODOO_INTERNAL/)).not.toBeInTheDocument();
+  });
 });
 
 describe("the Odoo settings page", () => {
@@ -219,5 +254,33 @@ describe("the Odoo settings page", () => {
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/already running/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/failed/i);
+  });
+
+  // Review finding 2: worse than finding 1, because by the time `emit` runs
+  // the sync's DB writes are already committed and the watermark already
+  // advanced. A rejecting `emit` must not erase the true "N contacts
+  // updated" text and replace it with "Sync failed" - the user would then
+  // hit Refresh again for work that already succeeded.
+  it("keeps the sync result visible when the cross-window notification itself fails", async () => {
+    let rejectEmit: (err: unknown) => void = () => {};
+    emit.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectEmit = reject;
+      })
+    );
+
+    render(<OdooSettings />);
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    expect(await screen.findByText(/3 contacts updated/i)).toBeInTheDocument();
+
+    await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
+    await act(async () => {
+      rejectEmit(new Error("no listeners"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(/3 contacts updated/i)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/sync failed/i);
   });
 });

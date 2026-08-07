@@ -23,6 +23,28 @@ function describe(report: OdooErrorReport): string {
   return `${report.code}: ${report.message}`;
 }
 
+/**
+ * Best-effort. By the time this is called, the credentials are already
+ * written or the sync has already completed - this window's own state is
+ * correct regardless of whether the other window hears about it. A failure
+ * here must never relabel an already-successful save or sync as a failure,
+ * which is why it has its own try/catch rather than sharing the caller's.
+ *
+ * The failure is swallowed, not reported: this is best-effort cross-window
+ * IPC, not a user-facing operation, so it does not warrant its own toast -
+ * and there is no other logging path in this file to route it through
+ * instead (every other catch here reports a REAL operation failure to a
+ * status the user reads). Inventing a log line whose only reader would be a
+ * test is worse than a documented no-op.
+ */
+async function notifyOtherWindows(): Promise<void> {
+  try {
+    await emit("odoo-instance-changed");
+  } catch {
+    // best-effort; see doc comment above.
+  }
+}
+
 export default function OdooSettings() {
   const [config, setConfig] = useState<OdooConfig>(EMPTY);
   const [loadStatus, setLoadStatus] = useState<string | null>(null);
@@ -61,7 +83,7 @@ export default function OdooSettings() {
       // url+db), and without becameUsable the picker sits on "not set up" - a
       // state with no Refresh button - until the app restarts.
       if (result.instanceChanged || result.becameUsable) {
-        await emit("odoo-instance-changed");
+        await notifyOtherWindows();
       }
     } catch (err) {
       setSaveStatus(describe(reportOdooError(err, "save odoo config")));
@@ -97,7 +119,7 @@ export default function OdooSettings() {
       // window's picker keeps rendering the stale lastError banner over rows
       // that were just refreshed, because reload() runs only on mount, on
       // Refresh, and on this event.
-      await emit("odoo-instance-changed");
+      await notifyOtherWindows();
     } catch (err) {
       const report = reportOdooError(err, "sync contacts");
       // Another window syncing is a normal outcome, not a fault - it must not
