@@ -34,4 +34,27 @@ mod tests {
             "a .sql file in src/db/migrations is not registered in migrations()"
         );
     }
+
+    /// The two checks above only bound the shape of the migrations() vec
+    /// (unique/ascending versions, count matching files on disk) - neither
+    /// one ties the Odoo migration to its specific version or its specific
+    /// file. A migration mistakenly registered as version 20, or one that
+    /// points at the wrong existing .sql file, would pass both of them
+    /// silently. Comparing `sql` against `include_str!` of the real file
+    /// binds the registration to that exact file, since include_str!
+    /// resolves at compile time - a pointer at the wrong file would embed
+    /// different content and fail this comparison.
+    #[test]
+    fn odoo_migration_is_version_11_and_points_at_its_own_file() {
+        let odoo = migrations()
+            .into_iter()
+            .find(|m| m.description == "create_odoo_contact_tables")
+            .expect("odoo migration must be registered");
+        assert_eq!(odoo.version, 11, "odoo migration must be version 11");
+        assert_eq!(
+            odoo.sql,
+            include_str!("migrations/odoo-contacts.sql"),
+            "odoo migration must embed migrations/odoo-contacts.sql"
+        );
+    }
 }
