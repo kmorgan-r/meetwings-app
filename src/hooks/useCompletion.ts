@@ -1382,6 +1382,15 @@ export const useCompletion = () => {
       isLoading: false,
       attachedFiles: [],
     }));
+
+    // Every path that starts a new chat (the "newConversation" request event
+    // below, a deleted-conversation fallback, and the keepEngaged close
+    // button in Input.tsx) funnels through this one function, so this is the
+    // single place to announce that a chat actually started - as opposed to
+    // "newConversation", which only requests one. Odoo's contact target is
+    // scoped to a conversation and must not survive into the next one; see
+    // useOdooTarget's listener for "newConversationStarted".
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [summarizeCurrentConversation, flushUnsavedMeetingTranscript]);
 
   const saveCurrentConversation = useCallback(

@@ -312,11 +312,31 @@ export function useOdooTarget({
   // window) emits "odoo-instance-changed" on either, and this listener - which
   // lives in `main` - re-resolves and re-syncs.
   const handleInstanceChanged = useCallback(async () => {
+    selectionToken.current += 1;
     const token = selectionToken.current;
     instanceRef.current = null;
+
+    // The row this hook is about to synchronize against belongs to a
+    // DIFFERENT Odoo database. `runSync` below purges
+    // `odoo_selected_target` rows for every OTHER instance
+    // (purgeOtherInstances), so the DB half of the old selection is already
+    // gone by the time reload() runs - but `target`/`targetRef` still hold
+    // it in memory. Left uncleared, the picker would keep rendering a
+    // contactId that resolves to nothing in the new cache, and a later
+    // onSelectOpportunity would commit that stale id under the NEW
+    // instance's fingerprint, writing a poisoned row. Bumping the token
+    // first also supersedes any selection still in flight from before the
+    // switch, exactly like onSelect does for its own stale writes.
+    setTarget(null);
+    targetRef.current = null;
+
     try {
-      await resolveInstance();
+      const instance = await resolveInstance();
       await runSync("refresh", meetingAssistModeRef.current);
+      const persisted = await loadTarget(instance);
+      if (token === selectionToken.current && persisted) {
+        setTarget(persisted);
+      }
       await reload(token);
     } catch (err) {
       await triageSyncFailure(err, token);
@@ -342,6 +362,33 @@ export function useOdooTarget({
       un?.();
     };
   }, [handleInstanceChanged]);
+
+  /**
+   * "Starting a new chat" is one of the three DB-deletion triggers the spec
+   * names for `odoo_selected_target` (the other two: an instance change, and
+   * a sync that archives the selected partner - both handled above). A
+   * finished meeting with customer A must not silently carry its target into
+   * a fresh chat with customer B.
+   *
+   * `newConversationStarted` is a WINDOW event, not a Tauri one: unlike
+   * odoo-instance-changed (dashboard window -> main window),
+   * useCompletion.ts's startNewConversation and this hook both live in the
+   * `main` webview, so `window.addEventListener` is the bus already used
+   * there for conversationSelected/newConversation/conversationDeleted -
+   * this is one more listener on it, not a new one. It is emitted from
+   * startNewConversation() itself so every path that starts a new chat
+   * (the newConversation request event, a deleted-conversation fallback, and
+   * Input.tsx's keepEngaged close button) is covered from a single place.
+   */
+  const handleNewChat = useCallback(() => {
+    selectionToken.current += 1;
+    void commit(null, selectionToken.current);
+  }, [commit]);
+
+  useEffect(() => {
+    window.addEventListener("newConversationStarted", handleNewChat);
+    return () => window.removeEventListener("newConversationStarted", handleNewChat);
+  }, [handleNewChat]);
 
   const onSelect = useCallback(
     async (contact: OdooContact) => {

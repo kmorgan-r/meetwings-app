@@ -563,6 +563,30 @@ describe("cross-window credential changes", () => {
   // A save that leaves the config still unusable is the routine case. The
   // handler must triage it the same way the mount effect does, not let the
   // rejection escape as an unhandled rejection.
+  // Finding 2: purgeOtherInstances deletes the DB row for the OLD instance's
+  // target as part of the sync this handler triggers, but nothing previously
+  // cleared the in-memory target to match - so `target`/`targetRef` kept
+  // naming a contact from the database that is no longer the active one. A
+  // subsequent onSelectOpportunity would then commit that stale contactId
+  // under the NEW instance's fingerprint, writing a poisoned row.
+  it("clears the in-memory target when the instance changes, matching the DB purge", async () => {
+    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    const { result } = mount();
+    await waitFor(() =>
+      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null })
+    );
+
+    action.loadTarget.mockClear();
+    action.loadTarget.mockResolvedValue(null);
+    await act(async () => {
+      await emitInstanceChanged();
+    });
+
+    expect(result.current.targetRef.current).toBeNull();
+    // Re-resolved for the NEW instance, not just cleared and left stale.
+    expect(action.loadTarget).toHaveBeenCalled();
+  });
+
   it("triages a still-unconfigured instance rather than rejecting", async () => {
     const { OdooError } = await vi.importActual<typeof import("@/lib/odoo/errors")>(
       "@/lib/odoo/errors"
@@ -780,5 +804,51 @@ describe("a sync that archives the selected partner", () => {
 
     await waitFor(() => expect(result.current.targetRef.current).toBeNull());
     expect(action.clearTarget).toHaveBeenCalled();
+  });
+});
+
+// Finding 3: the third DB-deletion trigger the spec names. Emitted by
+// useCompletion's startNewConversation, which every "start a new chat" path
+// (the newConversation request event, a deleted-conversation fallback, and
+// Input.tsx's keepEngaged close button) funnels through.
+describe("starting a new chat", () => {
+  it("clears both the in-memory target and the persisted row", async () => {
+    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    const { result } = mount();
+    await waitFor(() =>
+      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null })
+    );
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(result.current.targetRef.current).toBeNull();
+    expect(action.clearTarget).toHaveBeenCalled();
+  });
+});
+
+// Finding 1: ContactPicker's open state must be observable by useCompletion's
+// resize effect (the overlay window is 600x54 and grows only through that
+// effect). This hook does not own the state - it is threaded through from
+// the caller, exactly like `meetingAssistMode` already is, and handed
+// straight to ContactPicker via pickerProps.
+describe("the picker's open state", () => {
+  it("passes the caller's isPickerOpen/setIsPickerOpen straight through to pickerProps", async () => {
+    const setIsPickerOpen = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ open }) => useOdooTarget({ meetingAssistMode: false, isPickerOpen: open, setIsPickerOpen }),
+      { initialProps: { open: false } }
+    );
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    expect(result.current.pickerProps.open).toBe(false);
+
+    rerender({ open: true });
+    expect(result.current.pickerProps.open).toBe(true);
+
+    result.current.pickerProps.onOpenChange(true);
+    expect(setIsPickerOpen).toHaveBeenCalledWith(true);
   });
 });
