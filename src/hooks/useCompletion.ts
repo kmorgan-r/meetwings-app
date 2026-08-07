@@ -741,6 +741,22 @@ export const useCompletion = () => {
       conversationHistory: [],
       response: "",
     }));
+
+    // A FOURTH, independent path to the same blank-slate signature
+    // startNewConversation announces: MeetingTranscriptPanel's Clear button
+    // and Input.tsx's X button (non-keepEngaged, meeting-assist branch) both
+    // call this directly, without going through startNewConversation. Ending
+    // a meeting with customer A and clearing the transcript to start the
+    // next one must not leave the Odoo target pinned to A - see
+    // useOdooTarget's listener for "newConversationStarted".
+    //
+    // In the keepEngaged close-button branch (Input.tsx), startNewConversation
+    // and this function are BOTH awaited in sequence, so this dispatches a
+    // second time there. That is safe, not a bug to guard against: the
+    // listener's clear is commit(null, ++token), and both setTarget(null) and
+    // clearTarget() are idempotent - a second clear of an already-null target
+    // is a harmless no-op DELETE, not a stale write.
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [flushUnsavedMeetingTranscript]);
 
   /**
