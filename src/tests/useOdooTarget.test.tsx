@@ -126,8 +126,10 @@ beforeEach(() => {
   });
 });
 
-function mount(meetingAssistMode = false) {
-  return renderHook(() => useOdooTarget({ meetingAssistMode }));
+function mount(meetingAssistMode = false, isPickerOpen = false, setIsPickerOpen = vi.fn()) {
+  return renderHook(() =>
+    useOdooTarget({ meetingAssistMode, isPickerOpen, setIsPickerOpen })
+  );
 }
 
 describe("the app-start sync", () => {

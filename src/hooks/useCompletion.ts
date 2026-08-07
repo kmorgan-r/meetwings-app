@@ -122,6 +122,11 @@ export const useCompletion = () => {
   const [enableVAD, setEnableVAD] = useState(false);
   const [messageHistoryOpen, setMessageHistoryOpen] = useState(false);
   const [isFilesPopoverOpen, setIsFilesPopoverOpen] = useState(false);
+  // Mirrors isFilesPopoverOpen: threaded to useOdooTarget (see
+  // src/pages/app/components/completion/index.tsx) so ContactPicker's
+  // Popover is controlled from here, and this hook's resize effect below can
+  // see it open/close. See Finding 1 in the odoo-contact-picker review.
+  const [isContactPickerOpen, setIsContactPickerOpen] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
 
@@ -1829,7 +1834,11 @@ export const useCompletion = () => {
 
   useEffect(() => {
     resizeWindow(
-      isPopoverOpen || micOpen || messageHistoryOpen || isFilesPopoverOpen
+      isPopoverOpen ||
+        micOpen ||
+        messageHistoryOpen ||
+        isFilesPopoverOpen ||
+        isContactPickerOpen
     );
   }, [
     isPopoverOpen,
@@ -1837,6 +1846,7 @@ export const useCompletion = () => {
     messageHistoryOpen,
     resizeWindow,
     isFilesPopoverOpen,
+    isContactPickerOpen,
   ]);
 
   // Auto scroll to bottom when response updates
@@ -2208,6 +2218,8 @@ export const useCompletion = () => {
     resizeWindow,
     isFilesPopoverOpen,
     setIsFilesPopoverOpen,
+    isContactPickerOpen,
+    setIsContactPickerOpen,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,

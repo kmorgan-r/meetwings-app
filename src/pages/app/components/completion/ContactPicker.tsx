@@ -46,6 +46,17 @@ export interface ContactPickerProps {
   onRetryOpportunities: () => Promise<void>; // the hook owns the contact, not us
   onRefresh: () => Promise<void>;
   onOpenSettings: () => void; // opens the dashboard webview; sync
+  // CONTROLLED, not local state. The main window is 600x54 and non-resizable
+  // (src-tauri/tauri.conf.json), and grows only through useCompletion's
+  // resize effect - the one caller of resizeWindow(true), driven by a fixed
+  // flag list mirroring isFilesPopoverOpen (see Files.tsx). A popover that
+  // owns its own `open` state is invisible to that effect: Radix portals
+  // several hundred pixels of content into a 54px-tall webview with nothing
+  // to grow it first. The caller (useCompletion, via <Completion />) must be
+  // able to observe every open/close so it can resize around this exact
+  // popover the same way it already does for Files/mic/message-history.
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
 export const ContactPicker = memo(function ContactPicker({
@@ -62,8 +73,9 @@ export const ContactPicker = memo(function ContactPicker({
   onRetryOpportunities,
   onRefresh,
   onOpenSettings,
+  open,
+  onOpenChange,
 }: ContactPickerProps) {
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
   const visible = useMemo(() => {
@@ -72,7 +84,7 @@ export const ContactPicker = memo(function ContactPicker({
   }, [cache, query]);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"

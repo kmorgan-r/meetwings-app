@@ -35,8 +35,15 @@ vi.mock("@/hooks", () => ({
   }),
 }));
 
+// `vi.hoisted`, not a plain module-scope const returned fresh from the
+// factory: useCompletion calls useWindowResize() on every render, and a
+// factory that returns `{ resizeWindow: vi.fn() }` mints a NEW mock function
+// each call, so any assertion on calls made before the render that produced
+// the currently-held `resizeWindow` reference would silently see nothing.
+// One stable instance is required to assert on it at all.
+const resizeWindow = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@/hooks/useWindow", () => ({
-  useWindowResize: () => ({ resizeWindow: vi.fn() }),
+  useWindowResize: () => ({ resizeWindow }),
 }));
 
 vi.mock("@/lib", () => {
@@ -501,5 +508,32 @@ describe("useCompletion meeting assist mode", () => {
         "Guest line 8",
       ])
     );
+  });
+
+  // Finding 1 (odoo-contact-picker review): the main window is 600x54 and
+  // non-resizable (src-tauri/tauri.conf.json), and grows ONLY through this
+  // effect - resizeWindow is never called with `true` from anywhere else in
+  // the overlay. ContactPicker's popover used to own its own `open` state,
+  // invisible to this effect, so opening it never grew the window around it.
+  // isContactPickerOpen is threaded to useOdooTarget/ContactPicker in
+  // src/pages/app/components/completion/index.tsx; this test only proves
+  // useCompletion's OWN half of that wiring - that flipping the flag this
+  // hook exposes actually calls resizeWindow(true), the same way
+  // isFilesPopoverOpen already does for Files.tsx. It cannot prove
+  // ContactPicker calls setIsContactPickerOpen correctly (pinned separately
+  // in odoo-contact-picker.test.tsx) or that the resized window is actually
+  // visible on screen - jsdom has no window bounds.
+  it("grows the window when the Odoo contact picker opens", () => {
+    const { result } = renderHook(() => useCompletion());
+
+    act(() => {
+      result.current.setIsContactPickerOpen(true);
+    });
+    expect(resizeWindow).toHaveBeenCalledWith(true);
+
+    act(() => {
+      result.current.setIsContactPickerOpen(false);
+    });
+    expect(resizeWindow).toHaveBeenLastCalledWith(false);
   });
 });

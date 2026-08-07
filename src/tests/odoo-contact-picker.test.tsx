@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -25,6 +26,27 @@ function contact(over: Partial<OdooContact> = {}): OdooContact {
   };
 }
 
+// ContactPicker is a CONTROLLED component (Finding 1: the caller's resize
+// effect must observe every open/close, so ContactPicker cannot own that
+// state itself). This harness plays the caller's role for every other test
+// in this file, which cares about the CONTENTS of the popover, not who owns
+// `open` - it mirrors `open` back through onOpenChange so openPopover() below
+// still opens it, while still forwarding calls to the spy under test so the
+// dedicated "open state" tests can assert on them.
+function Harness(props: ContactPickerProps) {
+  const [open, setOpen] = useState(props.open);
+  return (
+    <ContactPicker
+      {...props}
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        props.onOpenChange(next);
+      }}
+    />
+  );
+}
+
 function setup(over: Partial<ContactPickerProps> = {}) {
   const props: ContactPickerProps = {
     contactId: null,
@@ -41,9 +63,11 @@ function setup(over: Partial<ContactPickerProps> = {}) {
     onRetryOpportunities: vi.fn(async () => {}),
     onRefresh: vi.fn(async () => {}),
     onOpenSettings: vi.fn(),
+    open: false,
+    onOpenChange: vi.fn(),
     ...over,
   };
-  render(<ContactPicker {...props} />);
+  render(<Harness {...props} />);
   return props;
 }
 
@@ -311,5 +335,60 @@ describe("refresh", () => {
     await openPopover();
     await userEvent.click(screen.getByRole("button", { name: /refresh/i }));
     expect(props.onRefresh).toHaveBeenCalled();
+  });
+});
+
+// Finding 1: the overlay window is 600x54 and non-resizable, and grows ONLY
+// through useCompletion's resize effect - the sole caller of
+// resizeWindow(true) - driven by a fixed flag list ContactPicker must
+// participate in, exactly as Files.tsx's isFilesPopoverOpen already does.
+// A popover that owns its own `open` state (the ORIGINAL implementation
+// here) is invisible to that effect: Radix would portal several hundred
+// pixels of popover content into a 54px-tall webview with nothing having
+// ever asked the window to grow first.
+//
+// jsdom has no window bounds and cannot prove the popover is actually
+// visible on screen - it can only prove ContactPicker no longer owns `open`
+// itself and instead reports every change to its caller. The other half of
+// the fix - that the caller's resize effect actually reacts to that report -
+// is pinned in useCompletion.meeting-assist.test.tsx ("grows the window when
+// the Odoo contact picker opens"), since ContactPicker and useCompletion are
+// separate hooks with no shared test surface.
+describe("the popover open state", () => {
+  it("is CONTROLLED: opening reports through onOpenChange rather than owning its own state", async () => {
+    const props = setup();
+    await openPopover();
+    expect(props.onOpenChange).toHaveBeenCalledWith(true);
+  });
+
+  it("renders nothing open when the caller holds `open` at false, even after a click", async () => {
+    // No Harness here: this asserts what a caller that ignores onOpenChange
+    // (a bug) would see, which is the actual guarantee "controlled" makes -
+    // an UNcontrolled popover would open regardless of what `open` says.
+    const onOpenChange = vi.fn();
+    render(
+      <ContactPicker
+        {...{
+          contactId: null,
+          leadId: null,
+          contactName: null,
+          cache: { kind: "ready", contacts: [contact()], lastError: null },
+          opportunities: null,
+          opportunityError: null,
+          isLookingUp: false,
+          onSelect: vi.fn(async () => {}),
+          onSelectOpportunity: vi.fn(async () => {}),
+          onToggleColleague: vi.fn(async () => {}),
+          onRetryOpportunities: vi.fn(async () => {}),
+          onRefresh: vi.fn(async () => {}),
+          onOpenSettings: vi.fn(),
+        }}
+        open={false}
+        onOpenChange={onOpenChange}
+      />
+    );
+    await openPopover();
+    expect(onOpenChange).toHaveBeenCalledWith(true);
+    expect(screen.queryByPlaceholderText(/search/i)).not.toBeInTheDocument();
   });
 });

@@ -34,7 +34,17 @@ export const Completion = ({
 
   // Mounted HERE, beside useMeetingAutoRecord, because slice 2's useMeetingLog
   // reads targetRef from the same component.
-  const odoo = useOdooTarget({ meetingAssistMode: completion.meetingAssistMode });
+  //
+  // isContactPickerOpen/setIsContactPickerOpen come from useCompletion, not
+  // from this hook - they are threaded through so useCompletion's resize
+  // effect can see the picker open, exactly like isFilesPopoverOpen already
+  // does for Files.tsx. The main window is 600x54 and non-resizable; without
+  // this the popover has no way to make the window grow around it.
+  const odoo = useOdooTarget({
+    meetingAssistMode: completion.meetingAssistMode,
+    isPickerOpen: completion.isContactPickerOpen,
+    setIsPickerOpen: completion.setIsContactPickerOpen,
+  });
 
   // Use meeting-aware quick action handler when in Meeting Assist Mode
   const handleQuickAction = (action: string) => {

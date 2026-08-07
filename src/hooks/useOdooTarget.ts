@@ -87,8 +87,19 @@ export interface UseOdooTargetReturn {
 
 export function useOdooTarget({
   meetingAssistMode,
+  isPickerOpen,
+  setIsPickerOpen,
 }: {
   meetingAssistMode: boolean;
+  // Threaded through from useCompletion (see Files.tsx's isFilesPopoverOpen
+  // for the identical pattern), NOT owned here. This hook is mounted in the
+  // `main` overlay window, which is 600x54 and grows only through
+  // useCompletion's resize effect - the sole caller of resizeWindow(true) -
+  // watching a fixed flag list. `pickerProps.open`/`onOpenChange` below pass
+  // these straight through to ContactPicker so that effect can observe this
+  // popover exactly like it already observes the Files popover.
+  isPickerOpen: boolean;
+  setIsPickerOpen: (open: boolean) => void;
 }): UseOdooTargetReturn {
   const [target, setTarget] = useState<ResolvedTarget | null>(null);
   const [cache, setCache] = useState<PickerCacheState>({ kind: "never-synced" });
@@ -498,6 +509,8 @@ export function useOdooTarget({
     onRetryOpportunities,
     onRefresh,
     onOpenSettings,
+    open: isPickerOpen,
+    onOpenChange: setIsPickerOpen,
   };
 
   return { targetRef, pickerProps };
