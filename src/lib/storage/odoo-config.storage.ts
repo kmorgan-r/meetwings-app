@@ -128,7 +128,19 @@ export async function saveOdooConfig(
   // risk.
   setOdooRedactor([config.apiKey, config.login]);
 
-  const previous = await secureGet(SECURE_ODOO_CONFIG_KEY);
+  // Wrapped for the same reason as loadOdooConfigState's secureGet (:60-64):
+  // a raw plugin-store rejection is not an OdooError, so `err instanceof
+  // OdooError` sees no code, and - the sharper point here - the redactor is
+  // only consulted when an OdooError is CONSTRUCTED via odooError()/
+  // toOdooError(). A raw Error that echoes back the value it failed to read
+  // or write would otherwise escape unredacted no matter how early the
+  // redactor above was armed.
+  let previous: string | null;
+  try {
+    previous = await secureGet(SECURE_ODOO_CONFIG_KEY);
+  } catch (err) {
+    throw toOdooError(err);
+  }
   let previousFingerprint: string | null = null;
   let previousUsable = false;
   if (previous) {
@@ -143,7 +155,11 @@ export async function saveOdooConfig(
       previousFingerprint = null;
     }
   }
-  await secureSet(SECURE_ODOO_CONFIG_KEY, JSON.stringify(config));
+  try {
+    await secureSet(SECURE_ODOO_CONFIG_KEY, JSON.stringify(config));
+  } catch (err) {
+    throw toOdooError(err);
+  }
 
   // TWO flags, because the cross-window notification must fire on either.
   //

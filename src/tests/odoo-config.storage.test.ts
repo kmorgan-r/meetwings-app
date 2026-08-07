@@ -9,6 +9,7 @@ vi.mock("@/lib/secure-storage", () => ({
 
 import { OdooError } from "@/lib/odoo/errors";
 import { resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
+import { secureGet } from "@/lib/secure-storage";
 import {
   clearOdooConfig,
   instanceFingerprint,
@@ -144,11 +145,12 @@ describe("odoo-config.storage", () => {
     });
   });
 
-  // The brief's "Interfaces" section names only `instanceChanged`, but the
-  // Context and Ambiguity Resolution sections are explicit: saveOdooConfig
-  // returns BOTH flags, and Tasks 8/10/11/12 depend on both. toEqual is
-  // shape-strict, so the assertions include becameUsable rather than
-  // silently accepting a return value one field short of the mandate.
+  // The brief's "Interfaces" section (task-5-brief.md:17) names only
+  // `instanceChanged`, but the Step 3 code block (task-5-brief.md:312-352)
+  // is explicit: saveOdooConfig returns BOTH flags, with its own comment
+  // explaining why. toEqual is shape-strict, so the assertions include
+  // becameUsable rather than silently accepting a return value one field
+  // short of the mandatory block.
   it("reports whether the instance changed on save", async () => {
     await expect(saveOdooConfig(CONFIG)).resolves.toEqual({
       instanceChanged: true,
@@ -176,5 +178,38 @@ describe("odoo-config.storage", () => {
       instanceChanged: false,
       becameUsable: true,
     });
+  });
+
+  // saveOdooConfig arms the redactor with the config's OWN apiKey/login
+  // before its first await, specifically so that a rejection from the
+  // secureGet/secureSet that follow is redacted before it can reach a
+  // caller. A raw plugin-store error can echo back the value it failed to
+  // read or write, so this proves the raw key never survives that path -
+  // and, by construction, that saveOdooConfig wraps the rejection into an
+  // OdooError rather than letting a bare Error escape uncoded.
+  //
+  // The assertion checks for the "store read failed" prefix surviving
+  // alongside the missing key, not just the key's absence. getRedactor()
+  // fail-closes to a function that blanks an ENTIRE unredacted string, so an
+  // arm-too-late mutant that never reaches setOdooRedactor before the throw
+  // would still make ".not.toContain(KEY)" pass by luck - the whole detail
+  // collapses to "[REDACTED]" with no prefix left standing. Requiring the
+  // prefix to survive proves substring redaction actually ran, which only
+  // happens when the redactor was armed from THIS config before the throw.
+  it("redacts a raw api key that leaks through a rejected secureGet, without collapsing the whole message", async () => {
+    vi.mocked(secureGet).mockRejectedValueOnce(new Error(`store read failed: ${KEY}`));
+
+    let caught: unknown;
+    try {
+      await saveOdooConfig(CONFIG);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(OdooError);
+    const odooErr = caught as OdooError;
+    const text = `${odooErr.message}${JSON.stringify(odooErr.details)}`;
+    expect(text).not.toContain("i9j0");
+    expect(text).toContain("store read failed");
   });
 });
