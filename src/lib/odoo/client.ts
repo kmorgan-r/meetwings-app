@@ -87,8 +87,8 @@ export function createOdooClient(config: OdooConfig): OdooClient {
       if (thrown instanceof OdooError) throw thrown;
       throw odooError("ODOO_UNREACHABLE", "Odoo is unreachable", {
         reason: controller.signal.aborted ? "timeout" : "network",
-        // `endpoint` is in the port (odooClient.ts:70) and was dropped in the
-        // first draft. Without it a multi-endpoint failure cannot be placed.
+        // `endpoint` distinguishes which XML-RPC endpoint (common vs. object)
+        // failed. Without it a multi-endpoint failure cannot be placed.
         // odooError() redacts it at construction like every other detail.
         endpoint,
         detail: thrown instanceof Error ? thrown.message : String(thrown),

@@ -1,7 +1,7 @@
 /**
- * Credential scrubbing (§8.3).
+ * Credential scrubbing.
  *
- * ODOO_API_KEY is parameter #3 of every execute_kw envelope, so the request
+ * The API key is parameter #3 of every execute_kw envelope, so the request
  * body carries it in plaintext. Redaction must cover BOTH forms: the raw value,
  * and the xmlEscape()d value that actually appears in the envelope. A key
  * containing & < > " ' shows up as &amp; / &lt; / ... and a naive
@@ -30,10 +30,9 @@ function escapeRegExp(s: string): string {
  * Returns a function stripping every configured secret from a string, in both
  * raw and XML-escaped form.
  *
- * Undefined and empty secrets are skipped. That is not defensive noise: a
- * missing env var is a realistic input (it becomes QUOTE_ENV_MISSING later, but
- * redaction can run first on the error path), and replacing '' would blank the
- * entire string.
+ * Undefined and empty secrets are skipped. That is not defensive noise: an
+ * unconfigured credential is a realistic input, and replacing '' would blank
+ * the entire string.
  */
 export function buildRedactor(
   secrets: ReadonlyArray<string | undefined>,
@@ -44,10 +43,11 @@ export function buildRedactor(
     needles.add(secret);
     // The XML-escaped form: what the key looks like inside an execute_kw envelope.
     needles.add(xmlEscape(secret));
-    // The JSON-escaped form: createDraftQuote redacts the SERIALIZED envelope
-    // (§8.3), where a key containing `"` appears as `\"` and a `\` as `\\`.
-    // Without this the raw needle misses it entirely — and a partial match on a
-    // backslash would leave a dangling escape, producing invalid JSON on stdout.
+    // The JSON-escaped form: callers may redact a SERIALIZED envelope (e.g. an
+    // error logged as JSON), where a key containing `"` appears as `\"` and a
+    // `\` as `\\`. Without this the raw needle misses it entirely — and a
+    // partial match on a backslash would leave a dangling escape, producing
+    // invalid JSON on stdout.
     needles.add(JSON.stringify(secret).slice(1, -1));
     // And the composition of the two: an XML-escaped envelope body that is then
     // JSON-serialized into an error context. Differs from the XML form only

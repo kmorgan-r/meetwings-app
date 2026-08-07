@@ -23,11 +23,11 @@ function many2one(value: unknown): { id: number; name: string } | null {
  * The asymmetry is deliberate, not an oversight. In the sync, failing the run
  * leaves the watermark unadvanced, so one malformed partner among thousands
  * wedges syncing permanently with no way past it. Here nothing is wedged: the
- * target is already committed to the contact BEFORE this call runs (Task 12
- * Step 3, item 5), the failure lands in `opportunityError` beside a Retry button, and
- * the user keeps a working contact-only selection. Loud beats partial when a
- * partial list means "no open deals" - which is the sentence that sends slice 2
- * to the wrong record.
+ * target is already committed to the contact BEFORE this call runs, the
+ * failure lands in `opportunityError` beside a Retry button, and the user
+ * keeps a working contact-only selection. Loud beats partial when a partial
+ * list means "no open deals" - which is the sentence that sends slice 2 to
+ * the wrong record.
  */
 export async function fetchOpportunities(
   client: OdooClient,
