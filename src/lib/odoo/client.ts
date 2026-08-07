@@ -28,6 +28,8 @@ export interface OdooClient {
     args: XmlRpcValue[],
     kwargs?: Record<string, XmlRpcValue>
   ): Promise<XmlRpcValue>;
+  /** The HTTP `Date` header of the last successful response, or `null` if none has landed yet. */
+  serverDate: string | null;
 }
 
 export function createOdooClient(config: OdooConfig): OdooClient {
@@ -41,6 +43,7 @@ export function createOdooClient(config: OdooConfig): OdooClient {
 
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let cachedUid: number | null = null;
+  let lastServerDate: string | null = null;
 
   async function post(endpoint: string, body: string): Promise<string> {
     const controller = new AbortController();
@@ -58,6 +61,7 @@ export function createOdooClient(config: OdooConfig): OdooClient {
           status: response.status,
         });
       }
+      lastServerDate = response.headers.get("date");
       // The abort only covers the REQUEST phase: once headers arrive,
       // plugin-http streams the body through a channel that checks the signal
       // only when a message arrives, so a host that returns headers and then
@@ -150,5 +154,11 @@ export function createOdooClient(config: OdooConfig): OdooClient {
     ]);
   }
 
-  return { authenticate, execute };
+  return {
+    authenticate,
+    execute,
+    get serverDate() {
+      return lastServerDate;
+    },
+  };
 }
