@@ -155,6 +155,27 @@ describe("the rows", () => {
     expect(props.onSelect).not.toHaveBeenCalled();
   });
 
+  // The label text is static ("Mark X as a colleague") regardless of current
+  // state, so aria-pressed is the ONLY way a screen reader can tell whether a
+  // contact is already a colleague - without it the control is a toggle whose
+  // state is conveyed by a CSS class alone.
+  it("exposes the colleague star's state via aria-pressed", async () => {
+    setup({
+      cache: {
+        kind: "ready",
+        contacts: [contact({ id: 1, name: "Ann", isColleague: false }), contact({ id: 2, name: "Bob", isColleague: true })],
+        lastError: null,
+      },
+    });
+    await openPopover();
+    const rows = screen.getAllByTestId("contact-row");
+    // compareContacts sorts colleagues first, so Bob (isColleague: true) is row 0.
+    const bobStar = within(rows[0]).getAllByRole("button")[1];
+    const annStar = within(rows[1]).getAllByRole("button")[1];
+    expect(bobStar).toHaveAttribute("aria-pressed", "true");
+    expect(annStar).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("orders colleagues above everyone else", async () => {
     setup({
       cache: {

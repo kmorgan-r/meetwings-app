@@ -147,6 +147,7 @@ export const ContactPicker = memo(function ContactPicker({
                       <button
                         type="button"
                         aria-label={`Mark ${contact.name} as a colleague`}
+                        aria-pressed={contact.isColleague}
                         onClick={() => onToggleColleague(contact)}
                         className="p-1 rounded-md hover:bg-muted/50"
                       >
