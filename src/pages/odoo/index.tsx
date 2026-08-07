@@ -52,6 +52,14 @@ export default function OdooSettings() {
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
 
+  // "Saved" is only true of the config that was actually written. The next
+  // keystroke makes it stale, so it is cleared on every field edit rather
+  // than left to read as confirmation of unsaved changes.
+  function updateField<K extends keyof OdooConfig>(key: K, value: OdooConfig[K]) {
+    setConfig((c) => ({ ...c, [key]: value }));
+    setSaveStatus(null);
+  }
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -77,7 +85,7 @@ export default function OdooSettings() {
     // handler and the user sees nothing.
     try {
       const result = await saveOdooConfig(config);
-      setSaveStatus(null);
+      setSaveStatus("Saved");
       // Fires on EITHER flag, not instanceChanged alone. instanceChanged is
       // false for the common repair case (fixing a blank login on the same
       // url+db), and without becameUsable the picker sits on "not set up" - a
@@ -143,7 +151,7 @@ export default function OdooSettings() {
           <Input
             id="odoo-url"
             value={config.url}
-            onChange={(e) => setConfig((c) => ({ ...c, url: e.target.value }))}
+            onChange={(e) => updateField("url", e.target.value)}
           />
         </div>
 
@@ -152,7 +160,7 @@ export default function OdooSettings() {
           <Input
             id="odoo-db"
             value={config.db}
-            onChange={(e) => setConfig((c) => ({ ...c, db: e.target.value }))}
+            onChange={(e) => updateField("db", e.target.value)}
           />
         </div>
 
@@ -161,7 +169,7 @@ export default function OdooSettings() {
           <Input
             id="odoo-login"
             value={config.login}
-            onChange={(e) => setConfig((c) => ({ ...c, login: e.target.value }))}
+            onChange={(e) => updateField("login", e.target.value)}
           />
         </div>
 
@@ -171,7 +179,7 @@ export default function OdooSettings() {
             id="odoo-api-key"
             type="password"
             value={config.apiKey}
-            onChange={(e) => setConfig((c) => ({ ...c, apiKey: e.target.value }))}
+            onChange={(e) => updateField("apiKey", e.target.value)}
           />
           <p className="text-xs text-muted-foreground">
             Stored via Tauri's secure store - a plaintext JSON file in the app-data directory. It

@@ -123,12 +123,10 @@ describe("saving credentials", () => {
   // Review finding 1: the credentials were already written by the time
   // `emit` runs. A rejecting `emit` must not relabel that as a failed save -
   // the user would re-enter credentials that are already stored, or worse,
-  // conclude Odoo is unconfigured. `saveStatus` has no positive text of its
-  // own (it is cleared to null on success - see the deferred "no positive
-  // Saved confirmation" finding), so the strongest available proof that the
-  // save is still treated as successful is that the ODOO_INTERNAL failure
-  // text this handler's OWN catch would render never appears, even after the
-  // rejection has had a full turn to propagate.
+  // conclude Odoo is unconfigured. This pins that the "Saved" confirmation
+  // survives the rejection and the ODOO_INTERNAL failure text this handler's
+  // OWN catch would render never appears, even after the rejection has had a
+  // full turn to propagate.
   it("keeps the save successful when the cross-window notification itself fails", async () => {
     storage.saveOdooConfig.mockResolvedValue({ instanceChanged: true, becameUsable: false });
     let rejectEmit: (err: unknown) => void = () => {};
@@ -153,6 +151,24 @@ describe("saving credentials", () => {
     });
 
     expect(screen.queryByText(/ODOO_INTERNAL/)).not.toBeInTheDocument();
+    expect(screen.getByText(/saved/i)).toBeInTheDocument();
+  });
+
+  // Finding 4: the only prior observable difference between a successful save
+  // and a click that did nothing was the absence of an error line. Credential
+  // entry is the one screen where "did that work?" must be answerable.
+  it("shows a success confirmation after a successful save", async () => {
+    render(<OdooSettings />);
+    await fillAndSave();
+    expect(await screen.findByText(/saved/i)).toBeInTheDocument();
+  });
+
+  it("clears the success confirmation on the next edit", async () => {
+    render(<OdooSettings />);
+    await fillAndSave();
+    expect(await screen.findByText(/saved/i)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.queryByText(/saved/i)).not.toBeInTheDocument();
   });
 });
 
