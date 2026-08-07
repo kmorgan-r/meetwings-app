@@ -401,7 +401,13 @@ export function useOdooTarget({
       contactRef.current ??
       contactsOf(cacheRef.current).find((c) => c.id === targetRef.current?.contactId) ??
       null;
-    if (!contact) return;
+    // Mirrors onSelect's own guard: a colleague has no crm.lead lookup to
+    // retry. Without this, ContactPicker's "Look up" button - which renders
+    // whenever opportunities === null with no isColleague signal of its own -
+    // is reachable for a colleague (onSelect leaves opportunities === null
+    // for them, by design) and would fire the lookup this feature states
+    // colleagues skip entirely.
+    if (!contact || contact.isColleague) return;
 
     const token = selectionToken.current;
     setOpportunityError(null);

@@ -628,6 +628,25 @@ describe("selecting", () => {
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
   });
 
+  // A colleague selection leaves opportunities === null (onSelect never looks
+  // up their deals), which is the exact state ContactPicker's "Look up"
+  // button renders for - it carries no isColleague signal of its own. Without
+  // a guard in onRetryOpportunities itself, that button silently reaches the
+  // crm.lead lookup the design states colleagues skip entirely.
+  it("does not run the crm.lead lookup for a colleague reached through retry", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(colleague);
+    });
+    expect(result.current.pickerProps.opportunities).toBeNull();
+
+    await act(async () => {
+      await result.current.pickerProps.onRetryOpportunities();
+    });
+    expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
+  });
+
   it("searches the parent company as well as the contact", async () => {
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
