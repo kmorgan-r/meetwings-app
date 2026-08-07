@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { compareContacts, filterContacts } from "@/lib/odoo/contact-ordering";
+import { OdooError } from "@/lib/odoo/errors";
 import { decideSync } from "@/lib/odoo/sync-decisions";
 import { computeWatermark, minusOneSecond } from "@/lib/odoo/watermark";
 import type { OdooContact } from "@/types";
@@ -28,6 +29,19 @@ describe("minusOneSecond", () => {
       // normally unset on Windows, so that is the common path, not the edge.
       if (original === undefined) delete process.env.TZ;
       else process.env.TZ = original;
+    }
+  });
+
+  // Everything in src/lib/odoo/ throws OdooError, never a plain Error - a
+  // plain Error has no `code`, which reportOdooError's redaction path cannot
+  // render without first falling through toOdooError's generic wrapping.
+  it("throws an OdooError, coded ODOO_INTERNAL, on a malformed datetime", () => {
+    expect.assertions(2);
+    try {
+      minusOneSecond("not-a-date");
+    } catch (err) {
+      expect(err).toBeInstanceOf(OdooError);
+      expect((err as OdooError).code).toBe("ODOO_INTERNAL");
     }
   });
 });

@@ -7,11 +7,19 @@
  * written inside that window.
  */
 
+import { odooError } from "./errors";
+
 const ODOO_DATETIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 function toDate(odooUtc: string): Date {
   if (!ODOO_DATETIME.test(odooUtc)) {
-    throw new Error(`Not an Odoo UTC datetime: ${odooUtc}`);
+    // ODOO_INTERNAL, not ODOO_MALFORMED_RESPONSE: by the time a string
+    // reaches this pure module it has already been extracted from whatever
+    // response or header produced it, so a mismatch here is an invariant
+    // violation in our own code, not evidence of a malformed wire response.
+    // ODOO_MALFORMED_RESPONSE is reserved for the codec, which parses the
+    // raw response body itself (src/lib/odoo/xmlrpc-codec.ts).
+    throw odooError("ODOO_INTERNAL", "Not an Odoo UTC datetime", { input: odooUtc });
   }
   // The explicit Z is the whole point.
   return new Date(`${odooUtc.replace(" ", "T")}Z`);
