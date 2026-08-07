@@ -1,6 +1,7 @@
 import {
   useCompletion,
   useMeetingAutoRecord,
+  useOdooTarget,
   useQuickActions,
   type MeetingAutoRecordAudio,
 } from "@/hooks";
@@ -9,6 +10,7 @@ import { Files } from "./Files";
 import { Audio } from "./Audio";
 import { Input } from "./Input";
 import { MeetingAssistToggle } from "./MeetingAssistToggle";
+import { ContactPicker } from "./ContactPicker";
 
 export const Completion = ({
   isHidden,
@@ -30,6 +32,10 @@ export const Completion = ({
     flushUnsavedMeetingTranscript: completion.flushUnsavedMeetingTranscript,
   });
 
+  // Mounted HERE, beside useMeetingAutoRecord, because slice 2's useMeetingLog
+  // reads targetRef from the same component.
+  const odoo = useOdooTarget({ meetingAssistMode: completion.meetingAssistMode });
+
   // Use meeting-aware quick action handler when in Meeting Assist Mode
   const handleQuickAction = (action: string) => {
     if (completion.meetingAssistMode) {
@@ -48,6 +54,7 @@ export const Completion = ({
         setMeetingAssistMode={completion.setMeetingAssistMode}
         meetingTranscript={completion.meetingTranscript}
       />
+      <ContactPicker {...odoo.pickerProps} />
       <Audio {...completion} />
       <Input
         {...completion}
