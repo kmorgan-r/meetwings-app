@@ -75,6 +75,33 @@ describe("fetchOpportunities", () => {
     ]);
   });
 
+  // A many2one is `[id, name]` or `false` - nothing else. A parser that
+  // assumes a tuple without checking Array.isArray + element types still
+  // "works" on a plain string, because strings have numeric indices too:
+  // "ab"[0] and "ab"[1] read as "a" and "b" instead of throwing, so a
+  // guardless parser quietly returns { id: "a", name: "b" } - a string
+  // leaking into a field typed number | null - instead of null.
+  it("treats a many2one string as unreadable, not a tuple", async () => {
+    const { client } = clientReturning([lead({ partner_id: "ab" })]);
+    const [result] = await fetchOpportunities(client, 1, null);
+    expect(result.partnerId).toBeNull();
+    expect(result.partnerName).toBeNull();
+  });
+
+  // A single-element array has a real value at index 0 and `undefined` at
+  // index 1. Deliberately asserted on partnerId, not stageName: a truncated
+  // array's missing index 1 collapses to `undefined` whether or not the
+  // guard runs, and `?? null` masks that identically either way, so a
+  // stageName-only assertion cannot tell a guarded parser from a guardless
+  // one. The id at index 0 is real, though, so it leaks into `partnerId`
+  // (typed number | null) for a value that was never a valid [id, name] pair.
+  it("treats a truncated many2one array as unreadable, not a tuple", async () => {
+    const { client } = clientReturning([lead({ partner_id: [5] })]);
+    const [result] = await fetchOpportunities(client, 1, null);
+    expect(result.partnerId).toBeNull();
+    expect(result.partnerName).toBeNull();
+  });
+
   it("throws ODOO_UNEXPECTED_ROW for a lead with no usable id", async () => {
     const { client } = clientReturning([{ name: "no id" }]);
     await expect(fetchOpportunities(client, 1, null)).rejects.toMatchObject({
