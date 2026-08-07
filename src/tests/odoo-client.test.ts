@@ -17,7 +17,7 @@ global.fetch = vi.fn(() => {
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { createOdooClient } from "@/lib/odoo/client";
 import { OdooError } from "@/lib/odoo/errors";
-import { resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
+import { isRedactorInitialised, resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
 
 const mockFetch = vi.mocked(tauriFetch);
 
@@ -225,10 +225,18 @@ describe("createOdooClient", () => {
   // the exact secrets this client sends.
   it("arms the redactor from its own config, with no help from storage", async () => {
     resetOdooRedactor();
+    // Proves the precondition is real: nothing armed yet.
+    expect(isRedactorInitialised()).toBe(false);
     mockFetch.mockRejectedValueOnce(new Error(`POST body <string>${KEY}</string> as ${LOGIN}`));
+    const client = createOdooClient(CONFIG);
+    // The assertion that actually binds this test to client.ts's arming call:
+    // the fail-closed default in getRedactor() blanks the whole message
+    // regardless of whether arming happened, so the string assertions below
+    // cannot by themselves detect a missing `setOdooRedactor(...)` call.
+    expect(isRedactorInitialised()).toBe(true);
     let caught: OdooError | null = null;
     try {
-      await createOdooClient(CONFIG).authenticate();
+      await client.authenticate();
     } catch (err) {
       caught = err as OdooError;
     }
