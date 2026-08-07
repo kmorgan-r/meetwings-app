@@ -223,6 +223,26 @@ describe("syncContacts", () => {
     expect(action.releaseSync).not.toHaveBeenCalled();
   });
 
+  // Distinct from a REFUSED claim (claimSync resolving false): here the DB
+  // write itself rejects - disk I/O, plugin-sql failure. Everything in
+  // src/lib/odoo/ throws OdooError, so a raw driver error must not escape.
+  // No claim was ever taken, so nothing may be released or marked failed
+  // either - same as the refused-claim case above.
+  it("normalizes a claimSync rejection to an OdooError instead of leaking it raw", async () => {
+    action.claimSync.mockRejectedValue(new Error("disk I/O error"));
+    const { client, execute } = clientReturning([[]]);
+    let caught: unknown;
+    try {
+      await syncContacts({ client, instance: INSTANCE, now: NOW });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(OdooError);
+    expect(execute).not.toHaveBeenCalled();
+    expect(action.failSync).not.toHaveBeenCalled();
+    expect(action.releaseSync).not.toHaveBeenCalled();
+  });
+
   // The bookkeeping writes must never become the reported failure. If failSync
   // rejects, the ODOO_FAULT the user actually needs to see is replaced by a
   // database error and the real cause is lost.

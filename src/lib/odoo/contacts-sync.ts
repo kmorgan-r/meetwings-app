@@ -91,12 +91,24 @@ export async function syncContacts(deps: {
 }): Promise<SyncResult> {
   const { client, instance, now } = deps;
 
+  // claimSync's own DB write can reject (disk I/O, plugin-sql failure) rather
+  // than merely resolve false. That is a distinct outcome from a REFUSED claim
+  // and must not surface as a raw driver error - everything in this module
+  // throws OdooError. No claim was taken either way, so this is deliberately
+  // its own try: it must not trip the finally below, which releases a claim
+  // that was never held.
+  let claimed: boolean;
+  try {
+    claimed = await claimSync(instance, now);
+  } catch (err) {
+    throw toOdooError(err);
+  }
   // ODOO_SYNC_BUSY, not ODOO_INTERNAL. Another window syncing is a normal
   // outcome, not a fault: the caller must be able to ignore it rather than
   // paint the picker's cache red and tell the user Odoo is broken. Note this
   // throws BEFORE the try, so failSync is not called and no error marker is
   // written for it.
-  if (!(await claimSync(instance, now))) {
+  if (!claimed) {
     throw odooError("ODOO_SYNC_BUSY", "A sync is already running in another window");
   }
 
