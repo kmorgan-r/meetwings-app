@@ -122,6 +122,11 @@ export const useCompletion = () => {
   const [enableVAD, setEnableVAD] = useState(false);
   const [messageHistoryOpen, setMessageHistoryOpen] = useState(false);
   const [isFilesPopoverOpen, setIsFilesPopoverOpen] = useState(false);
+  // Mirrors isFilesPopoverOpen: threaded to useOdooTarget (see
+  // src/pages/app/components/completion/index.tsx) so ContactPicker's
+  // Popover is controlled from here, and this hook's resize effect below can
+  // see it open/close. See Finding 1 in the odoo-contact-picker review.
+  const [isContactPickerOpen, setIsContactPickerOpen] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
 
@@ -736,6 +741,22 @@ export const useCompletion = () => {
       conversationHistory: [],
       response: "",
     }));
+
+    // A FOURTH, independent path to the same blank-slate signature
+    // startNewConversation announces: MeetingTranscriptPanel's Clear button
+    // and Input.tsx's X button (non-keepEngaged, meeting-assist branch) both
+    // call this directly, without going through startNewConversation. Ending
+    // a meeting with customer A and clearing the transcript to start the
+    // next one must not leave the Odoo target pinned to A - see
+    // useOdooTarget's listener for "newConversationStarted".
+    //
+    // In the keepEngaged close-button branch (Input.tsx), startNewConversation
+    // and this function are BOTH awaited in sequence, so this dispatches a
+    // second time there. That is safe, not a bug to guard against: the
+    // listener's clear is commit(null, ++token), and both setTarget(null) and
+    // clearTarget() are idempotent - a second clear of an already-null target
+    // is a harmless no-op DELETE, not a stale write.
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [flushUnsavedMeetingTranscript]);
 
   /**
@@ -1377,6 +1398,15 @@ export const useCompletion = () => {
       isLoading: false,
       attachedFiles: [],
     }));
+
+    // Every path that starts a new chat (the "newConversation" request event
+    // below, a deleted-conversation fallback, and the keepEngaged close
+    // button in Input.tsx) funnels through this one function, so this is the
+    // single place to announce that a chat actually started - as opposed to
+    // "newConversation", which only requests one. Odoo's contact target is
+    // scoped to a conversation and must not survive into the next one; see
+    // useOdooTarget's listener for "newConversationStarted".
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [summarizeCurrentConversation, flushUnsavedMeetingTranscript]);
 
   const saveCurrentConversation = useCallback(
@@ -1829,7 +1859,11 @@ export const useCompletion = () => {
 
   useEffect(() => {
     resizeWindow(
-      isPopoverOpen || micOpen || messageHistoryOpen || isFilesPopoverOpen
+      isPopoverOpen ||
+        micOpen ||
+        messageHistoryOpen ||
+        isFilesPopoverOpen ||
+        isContactPickerOpen
     );
   }, [
     isPopoverOpen,
@@ -1837,6 +1871,7 @@ export const useCompletion = () => {
     messageHistoryOpen,
     resizeWindow,
     isFilesPopoverOpen,
+    isContactPickerOpen,
   ]);
 
   // Auto scroll to bottom when response updates
@@ -2208,6 +2243,8 @@ export const useCompletion = () => {
     resizeWindow,
     isFilesPopoverOpen,
     setIsFilesPopoverOpen,
+    isContactPickerOpen,
+    setIsContactPickerOpen,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,

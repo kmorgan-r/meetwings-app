@@ -156,6 +156,30 @@ describe("<Completion /> mounts the auto-record hook", () => {
       }),
       useQuickActions: () => ({}),
       useMeetingAutoRecord,
+      // <Completion /> also mounts useOdooTarget (index.tsx:43) and spreads
+      // odoo.pickerProps into the real (unmocked) ContactPicker, so this
+      // needs the full ContactPickerProps shape or that render throws before
+      // the useMeetingAutoRecord assertions below ever run.
+      useOdooTarget: () => ({
+        targetRef: { current: null },
+        pickerProps: {
+          contactId: null,
+          leadId: null,
+          contactName: null,
+          cache: { kind: "never-synced" },
+          opportunities: null,
+          opportunityError: null,
+          isLookingUp: false,
+          onSelect: vi.fn(),
+          onSelectOpportunity: vi.fn(),
+          onToggleColleague: vi.fn(),
+          onRetryOpportunities: vi.fn(),
+          onRefresh: vi.fn(),
+          onOpenSettings: vi.fn(),
+          open: false,
+          onOpenChange: vi.fn(),
+        },
+      }),
     }));
     // ABSOLUTE specifiers: vi.doMock resolves relative to THIS file, so
     // "./Audio" would be a silent no-op and the real
@@ -174,6 +198,23 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
       MeetingAssistToggle: () => null,
+    }));
+    // ContactPicker (index.tsx:67) is NOT stubbed here - F34b's app-page path
+    // stubs Completion itself, but F34 mounts the real Completion, and
+    // Completion renders the real ContactPicker straight from @/components.
+    // The F29 case above already left a "@/components" factory registered via
+    // vi.doMock (it is not undone by vi.resetModules()), and that one lacks
+    // Popover/Button/Input - so without redeclaring it here, ContactPicker
+    // throws the same "no export defined on the mock" error the useMeetingAutoRecord
+    // fix above was written to eliminate. Passthrough stubs only: this test's
+    // assertions are about useMeetingAutoRecord's call, not ContactPicker's own
+    // behaviour (that is covered by odoo-contact-picker.test.tsx).
+    vi.doMock("@/components", () => ({
+      Popover: ({ children }: any) => <>{children}</>,
+      PopoverTrigger: ({ children }: any) => <>{children}</>,
+      PopoverContent: ({ children }: any) => <>{children}</>,
+      Button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
+      Input: (props: any) => <input {...props} />,
     }));
 
     const { Completion } = await import("@/pages/app/components/completion");

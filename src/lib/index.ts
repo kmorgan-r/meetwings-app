@@ -5,6 +5,7 @@ export * from "./functions";
 export * from "./curl-validator";
 export * from "./platform-instructions";
 export * from "./database";
+export * from "./odoo";
 export * from "./chat-constants";
 export * from "./platform";
 export * from "./analytics";

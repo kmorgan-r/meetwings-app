@@ -121,6 +121,12 @@ export interface UseCompletionReturn {
   /** Function to remove all files and close the files popover */
   onRemoveAllFiles: () => void;
 
+  // Odoo contact picker popover management
+  /** Whether the Odoo contact picker popover is open (see useOdooTarget) */
+  isContactPickerOpen: boolean;
+  /** Function to control the Odoo contact picker's popover visibility */
+  setIsContactPickerOpen: Dispatch<SetStateAction<boolean>>;
+
   /** Ref for the input element */
   inputRef: RefObject<HTMLInputElement | null>;
   /** Function to capture a screenshot */

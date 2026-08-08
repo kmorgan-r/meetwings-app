@@ -16,6 +16,7 @@ import {
   UsersIcon,
   LanguagesIcon,
   KeyRound,
+  Building2Icon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useApp } from "@/contexts";
@@ -52,6 +53,12 @@ export const useMenuItems = () => {
       label: "API Setup",
       href: "/api-setup",
       showWarning: gateOnSetup,
+    },
+    {
+      icon: Building2Icon,
+      label: "Odoo",
+      href: "/odoo",
+      disabled: gateOnSetup,
     },
     {
       icon: MessagesSquare,

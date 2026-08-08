@@ -73,5 +73,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-context-v10.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 11: Odoo contact cache, sync state and selected target
+        Migration {
+            version: 11,
+            description: "create_odoo_contact_tables",
+            sql: include_str!("migrations/odoo-contacts.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
