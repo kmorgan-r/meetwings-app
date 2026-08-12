@@ -368,6 +368,126 @@ describe("<Completion /> mounts the auto-record hook", () => {
     });
   });
 
+  it("F34d: closes the contact picker in the layout phase - before ANY passive effect in the same commit can observe it open", async () => {
+    // Round-1 fix for Task 11's review Important: the picker-close effect was
+    // a passive useEffect and lost the ordering race against useCompletion's
+    // OWN resize effect, which is registered first because `completion =
+    // useCompletion()` runs before it. jsdom cannot observe the resulting
+    // window resize (there are no real window bounds), but the ORDERING
+    // property is observable: a useLayoutEffect flushes before every passive
+    // effect in the same commit, regardless of hook declaration order within
+    // the component. This test proves it using effects that already exist in
+    // index.tsx rather than inventing a stand-in for the real resize effect -
+    // the pre-existing shouldUseMeetwingsAPI effect (declared BEFORE the
+    // picker-close effect in source, and still a plain passive useEffect) is
+    // the probe: it calls the mocked shouldUseMeetwingsAPI() synchronously on
+    // every mount, so recording setIsContactPickerOpen's call count at that
+    // instant pins which phase ran first.
+    //
+    // Mounting with holding: true from the first render (rather than
+    // toggling it on a later rerender) puts both effects in the SAME commit
+    // without needing a second act() pass - render() already flushes layout
+    // effects before passive effects within one commit.
+    vi.resetModules();
+    const systemAudio = { capturing: false };
+    const setIsContactPickerOpen = vi.fn();
+    const order: string[] = [];
+    const shouldUseMeetwingsAPI = vi.fn(async () => {
+      order.push(
+        setIsContactPickerOpen.mock.calls.length > 0
+          ? "passive-effect-after-close"
+          : "passive-effect-before-close"
+      );
+      return false;
+    });
+
+    vi.doMock("@/hooks", () => ({
+      useCompletion: () => ({
+        enableVAD: false,
+        setEnableVAD: vi.fn(),
+        meetingAssistMode: false,
+        meetingTranscript: [],
+        currentConversationId: null,
+        setMeetingAssistMode: vi.fn(),
+        submit: vi.fn(),
+        submitWithMeetingContext: vi.fn(),
+        flushUnsavedMeetingTranscript: vi.fn(),
+        isContactPickerOpen: true,
+        setIsContactPickerOpen,
+      }),
+      useQuickActions: () => ({}),
+      useMeetingAutoRecord: vi.fn(),
+      useOdooTarget: () => ({
+        targetRef: { current: null },
+        pickerProps: {
+          contactId: null,
+          leadId: null,
+          contactName: null,
+          cache: { kind: "never-synced" },
+          opportunities: null,
+          opportunityError: null,
+          isLookingUp: false,
+          onSelect: vi.fn(),
+          onSelectOpportunity: vi.fn(),
+          onToggleColleague: vi.fn(),
+          onRetryOpportunities: vi.fn(),
+          onRefresh: vi.fn(),
+          onOpenSettings: vi.fn(),
+          open: true,
+          onOpenChange: vi.fn(),
+        },
+      }),
+      // holding true from mount, so the picker-close effect has work to do
+      // (and something to race the shouldUseMeetwingsAPI probe against) on
+      // the very first commit.
+      useMeetingLog: () => ({
+        holding: true,
+        onUndo: vi.fn(),
+        undoBlockedMessage: null,
+      }),
+    }));
+    vi.doMock("@/contexts", () => ({
+      useApp: () => ({
+        customizable: { cursor: { type: "default" } },
+        allAiProviders: [{ id: "openai" }],
+        selectedAIProvider: { provider: "openai", variables: {} },
+      }),
+    }));
+    vi.doMock("@/lib", () => ({
+      getPlatform: () => "windows",
+      shouldUseMeetwingsAPI,
+    }));
+    vi.doMock("@/pages/app/components/completion/Audio", () => ({
+      Audio: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Input", () => ({
+      Input: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Screenshot", () => ({
+      Screenshot: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Files", () => ({
+      Files: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
+      MeetingAssistToggle: () => null,
+    }));
+    vi.doMock("@/components", () => ({
+      Popover: ({ children }: any) => <>{children}</>,
+      PopoverTrigger: ({ children }: any) => <>{children}</>,
+      PopoverContent: ({ children }: any) => <>{children}</>,
+      Button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
+      Input: (props: any) => <input {...props} />,
+    }));
+
+    const { Completion } = await import("@/pages/app/components/completion");
+    render(<Completion isHidden={false} systemAudio={systemAudio as any} />);
+
+    expect(shouldUseMeetwingsAPI).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["passive-effect-after-close"]);
+    expect(setIsContactPickerOpen).toHaveBeenCalledWith(false);
+  });
+
   it("F34b: no longer mounts auto-record from the app page", async () => {
     // The double-mount guard. noUnusedLocals only catches a leftover call site
     // if the import goes too, and F34's identity assertion compares a prop the

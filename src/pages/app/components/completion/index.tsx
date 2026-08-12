@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   useCompletion,
   useMeetingAutoRecord,
@@ -68,7 +68,17 @@ export const Completion = ({
   // stuck at undefined and the "Summarization failed" body on every meeting
   // thereafter.
   useEffect(() => {
-    void shouldUseMeetwingsAPI().then(setUseMeetwingsAPI);
+    // shouldUseMeetwingsAPI does a Tauri round-trip (check_license_status), so
+    // two toggles in quick succession can resolve out of order without this -
+    // the same reason useMeetingLog.ts:349-350 and :423-425 guard their own
+    // async effects.
+    let cancelled = false;
+    void shouldUseMeetwingsAPI().then((value) => {
+      if (!cancelled) setUseMeetwingsAPI(value);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [meetwingsApiEnabled]);
   const providerConfig = useMemo(() => {
     if (useMeetwingsAPI) return undefined;
@@ -95,7 +105,18 @@ export const Completion = ({
   // with nothing in it on its next dep change, and when the hold ends and
   // <ContactPicker> remounts with open={true} the popover would spring open
   // unbidden. Closing it as the hold begins is the whole fix.
-  useEffect(() => {
+  //
+  // useLayoutEffect, not useEffect: `completion = useCompletion()` runs first
+  // in this component, so useCompletion's own resize effect is registered in
+  // this fiber BEFORE this one, and React flushes passive effects in
+  // registration order. On the commit where `holding` flips true, a passive
+  // effect here would run AFTER the resize effect already read the stale
+  // `true` and expanded the window - a transient version of the exact bug
+  // this effect exists to prevent. A layout effect flushes before every
+  // passive effect in the same commit, so the flag is cleared strictly before
+  // the resize effect can observe it. Same convention as useCompletion.ts:444
+  // and useMeetingLog.ts:105.
+  useLayoutEffect(() => {
     if (meetingLog.holding) completion.setIsContactPickerOpen(false);
   }, [meetingLog.holding, completion.setIsContactPickerOpen]);
 
