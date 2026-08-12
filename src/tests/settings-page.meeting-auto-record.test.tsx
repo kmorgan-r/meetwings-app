@@ -148,7 +148,8 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD,
         meetingAssistMode: false,
-        meetingTranscript: "",
+        meetingTranscript: [],
+        currentConversationId: null,
         setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
@@ -180,6 +181,29 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onOpenChange: vi.fn(),
         },
       }),
+      // Returns the RENDER PROPS shape, not a bare vi.fn(). <Completion />
+      // destructures holding/onUndo/undoBlockedMessage, so an undefined return
+      // throws before any assertion - byte-for-byte the failure slice 1 hit with
+      // useOdooTarget, which is why its stub at :163-182 spells the shape out.
+      useMeetingLog: vi.fn(() => ({
+        holding: false,
+        onUndo: vi.fn(),
+        undoBlockedMessage: null,
+      })),
+    }));
+    vi.doMock("@/contexts", () => ({
+      useApp: () => ({
+        customizable: { cursor: { type: "default" } },
+        allAiProviders: [{ id: "openai" }],
+        selectedAIProvider: { provider: "openai", variables: {} },
+      }),
+    }));
+    vi.doMock("@/lib", () => ({
+      getPlatform: () => "windows",
+      // Must be an async fn: the mount effect does
+      // `void shouldUseMeetwingsAPI().then(...)`, and a bare vi.fn() returns
+      // undefined, which throws on .then.
+      shouldUseMeetwingsAPI: vi.fn(async () => false),
     }));
     // ABSOLUTE specifiers: vi.doMock resolves relative to THIS file, so
     // "./Audio" would be a silent no-op and the real
@@ -241,6 +265,107 @@ describe("<Completion /> mounts the auto-record hook", () => {
     // requires the SAME object the UI renders, because a second copy would
     // drive independent capture state.
     expect(options.systemAudio).toBe(systemAudio);
+  });
+
+  it("F34c: <Completion /> mounts useMeetingLog exactly once, with the target ref and a provider config", async () => {
+    // Without this, deleting the useMeetingLog(...) call leaves every meeting
+    // log test in the suite green while the feature is completely inert - the
+    // same reason F34/F34b exist for useMeetingAutoRecord.
+    vi.resetModules();
+    const systemAudio = { capturing: false };
+    const useMeetingLog = vi.fn(() => ({
+      holding: false,
+      onUndo: vi.fn(),
+      undoBlockedMessage: null,
+    }));
+
+    vi.doMock("@/hooks", () => ({
+      useCompletion: () => ({
+        enableVAD: false,
+        setEnableVAD: vi.fn(),
+        meetingAssistMode: false,
+        meetingTranscript: [],
+        currentConversationId: null,
+        setMeetingAssistMode: vi.fn(),
+        submit: vi.fn(),
+        submitWithMeetingContext: vi.fn(),
+        flushUnsavedMeetingTranscript: vi.fn(),
+      }),
+      useQuickActions: () => ({}),
+      useMeetingAutoRecord: vi.fn(),
+      useOdooTarget: () => ({
+        targetRef: { current: null },
+        pickerProps: {
+          contactId: null,
+          leadId: null,
+          contactName: null,
+          cache: { kind: "never-synced" },
+          opportunities: null,
+          opportunityError: null,
+          isLookingUp: false,
+          onSelect: vi.fn(),
+          onSelectOpportunity: vi.fn(),
+          onToggleColleague: vi.fn(),
+          onRetryOpportunities: vi.fn(),
+          onRefresh: vi.fn(),
+          onOpenSettings: vi.fn(),
+          open: false,
+          onOpenChange: vi.fn(),
+        },
+      }),
+      useMeetingLog,
+    }));
+    vi.doMock("@/contexts", () => ({
+      useApp: () => ({
+        customizable: { cursor: { type: "default" } },
+        allAiProviders: [{ id: "openai" }],
+        selectedAIProvider: { provider: "openai", variables: {} },
+      }),
+    }));
+    vi.doMock("@/lib", () => ({
+      getPlatform: () => "windows",
+      shouldUseMeetwingsAPI: vi.fn(async () => false),
+    }));
+    vi.doMock("@/pages/app/components/completion/Audio", () => ({
+      Audio: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Input", () => ({
+      Input: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Screenshot", () => ({
+      Screenshot: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/Files", () => ({
+      Files: () => null,
+    }));
+    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
+      MeetingAssistToggle: () => null,
+    }));
+    vi.doMock("@/components", () => ({
+      Popover: ({ children }: any) => <>{children}</>,
+      PopoverTrigger: ({ children }: any) => <>{children}</>,
+      PopoverContent: ({ children }: any) => <>{children}</>,
+      Button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
+      Input: (props: any) => <input {...props} />,
+    }));
+
+    const { Completion } = await import("@/pages/app/components/completion");
+    render(<Completion isHidden={false} systemAudio={systemAudio as any} />);
+
+    expect(useMeetingLog).toHaveBeenCalledTimes(1);
+    expect(useMeetingLog.mock.calls[0][0]).toMatchObject({
+      targetRef: expect.any(Object),
+      meetingTranscript: [],
+      meetingAssistMode: expect.any(Boolean),
+    });
+    // The provider config must RESOLVE, not merely be spelled.
+    // `toHaveProperty("providerConfig")` would pass on a key holding
+    // `undefined` - which IS the failure case: every BYO-provider user then
+    // gets the "Summarization failed" body on every meeting, and nothing else
+    // in this plan would catch it.
+    expect(useMeetingLog.mock.calls[0][0].providerConfig).toMatchObject({
+      provider: { id: "openai" },
+    });
   });
 
   it("F34b: no longer mounts auto-record from the app page", async () => {
