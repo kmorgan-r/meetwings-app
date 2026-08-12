@@ -158,6 +158,34 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
   }
 
   try {
+    // Built ONCE, before the summarize branch, and reused for the
+    // attachment/note body below. An earlier draft built a SEPARATE, empty
+    // `{ entries: [] }` slice just for `deps.summarize` - every real
+    // summarizer treats an empty transcript as nothing to summarize and
+    // returns null, so the AI summary never reached Odoo and every meeting
+    // silently took the "Summarization failed" fallback body, regardless of
+    // whether summarization actually worked.
+    //
+    // One entry PER LINE, not one entry for the whole transcript.
+    // buildNoteBody's fallback caps at FALLBACK_LINES entries, so a single
+    // synthetic entry caps nothing and the whole transcript lands in a
+    // customer-visible note under body text promising only its first lines.
+    // renderTranscript round-trips this exactly: it joins on "\n", and an
+    // entry with no speaker and no audioSource renders as its bare text - so
+    // the "You: "/"Guest: " prefixes already baked into the stored transcript
+    // text are rendered exactly once, not doubled by a label renderTranscript
+    // would otherwise add.
+    const slice: TranscriptSlice = {
+      entries: row.transcript
+        ? row.transcript.split("\n").map((line, i) => ({
+            original: line,
+            timestamp: row.transcript_start_at + i,
+          }))
+        : [],
+      startAt: row.transcript_start_at,
+      endAt: row.transcript_end_at,
+    };
+
     // ---- Summarize. Its own try/catch, walled off from last_error. --------
     let summary: SummarizationResult | null = null;
     if (row.summary_json) {
@@ -167,11 +195,6 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
         summary = null; // a corrupt blob takes the fallback body, not a failure
       }
     } else {
-      const slice: TranscriptSlice = {
-        entries: [],
-        startAt: row.transcript_start_at,
-        endAt: row.transcript_end_at,
-      };
       try {
         summary = await deps.summarize(slice);
       } catch {
@@ -194,23 +217,6 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
         }
       }
     }
-
-    const slice: TranscriptSlice = {
-      // One entry PER LINE, not one entry for the whole transcript.
-      // buildNoteBody's fallback caps at FALLBACK_LINES entries, so a single
-      // synthetic entry caps nothing and the whole transcript lands in a
-      // customer-visible note under body text promising only its first lines.
-      // renderTranscript round-trips this exactly: it joins on "\n", and an
-      // entry with no speaker and no audioSource renders as its bare text.
-      entries: row.transcript
-        ? row.transcript.split("\n").map((line, i) => ({
-            original: line,
-            timestamp: row.transcript_start_at + i,
-          }))
-        : [],
-      startAt: row.transcript_start_at,
-      endAt: row.transcript_end_at,
-    };
 
     // ---- Step 1: the attachment. ----------------------------------------
     let attachmentId = row.attachment_id;

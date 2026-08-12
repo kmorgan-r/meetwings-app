@@ -222,6 +222,36 @@ describe("the happy path", () => {
     await pushQueuedRow(stored, d);
     expect(d.summarize).not.toHaveBeenCalled();
   });
+
+  it("puts the AI summary in the note body instead of the fallback", async () => {
+    // Regression: `deps.summarize` used to be handed a slice with
+    // `entries: []` regardless of the row's actual transcript, so any real
+    // summarizer's own empty-transcript guard returned null and the note
+    // ALWAYS took the "Summarization failed" fallback body - even on a
+    // completely healthy summarization run. Every fallback-path test before
+    // this one only asserted the fallback text was present, which it always
+    // was; nothing asserted a summary should have replaced it instead. This
+    // is both real callers' common path (a freshly enqueued row has no
+    // summary_json yet), not an edge case.
+    const row = seedRow({ transcript: "You: hello\nGuest: hi there" });
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(intResponse(555))
+      .mockResolvedValueOnce(intResponse(999));
+    const d = deps({
+      summarize: vi.fn(async () => summary({ summary: "They agreed to start the pilot." })),
+    });
+    await pushQueuedRow(row, d);
+
+    const body = String(tauriFetch.mock.calls[2][1].body);
+    expect(body).toContain("They agreed to start the pilot.");
+    expect(body).not.toContain("Summarization failed");
+
+    // The slice handed to the summarizer must carry the actual transcript,
+    // not an empty placeholder.
+    const passedSlice = (d.summarize as ReturnType<typeof vi.fn>).mock.calls[0][0] as { entries: unknown[] };
+    expect(passedSlice.entries.length).toBeGreaterThan(0);
+  });
 });
 
 describe("model discrimination", () => {
