@@ -3,16 +3,30 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import {
+  cancelHeldRow,
+  findHeldRow,
+  getQueueRow,
   getTranscriptWatermark,
   insertQueueRow,
   readMeetingMessages,
 } from "@/lib/database/meeting-log.action";
 import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
-import { renderTranscript, sessionKeyFor, sliceTranscript } from "@/lib/odoo/meeting-log";
-import { runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
+import { createOdooClient } from "@/lib/odoo/client";
+import {
+  HOLD_MS,
+  UNDO_BLOCKED_MS,
+  renderTranscript,
+  sessionKeyFor,
+  sliceTranscript,
+} from "@/lib/odoo/meeting-log";
+import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
-import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
+import {
+  instanceFingerprint,
+  loadOdooConfigState,
+  requireOdooConfig,
+} from "@/lib/storage/odoo-config.storage";
 import type { ResolvedTarget, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
 
@@ -116,17 +130,64 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   );
 
   /**
-   * Task 10 replaces this stub with the real timer.
+   * Fires the push for a held row.
    *
-   * It already flips `holding` so `tsconfig`'s `noUnusedLocals` is satisfied at
-   * Task 9's commit - a task must never commit a tree where `npm run type-check`
-   * fails.
+   * Detached from the component on purpose: an unmount clears the TIMER but a
+   * push already under way keeps running, owned by the module. Its entry in
+   * meeting-log-push's `claimed` set is what keeps a concurrent sweep off it.
    */
-  const startHold = useCallback((rowId: string) => {
-    heldRowIdRef.current = rowId;
-    setHolding(true);
-    setUndoBlockedMessage(null);
-  }, []);
+  const pushHeldRow = useCallback(async (rowId: string) => {
+    try {
+      const row = await getQueueRow(rowId);
+      if (!row || row.status !== "held") return; // undone, or someone else claimed it
+      const config = await requireOdooConfig();
+      await pushQueuedRow(row, {
+        client: createOdooClient(config),
+        instance: instanceFingerprint(config.url, config.db),
+        now: Date.now(),
+        summarize: (slice) => summarize(slice.entries),
+      });
+    } catch (err) {
+      // pushQueuedRow never throws; this catches the reads around it. The row
+      // stays `held` and the sweep's stale-held rescue owns it.
+      console.error("[Odoo] held-row push failed:", err);
+    }
+  }, [summarize]);
+
+  /**
+   * Only ONE row is undoable at a time - but a displaced row must never be
+   * stranded.
+   *
+   * Two meetings can end inside one 30s window (a detection false-positive
+   * followed by a real end, or `meeting-ended` then a manual pill-off). The
+   * strip can only show one, so the DISPLACED row is pushed immediately rather
+   * than left `held` with no timer: stranded, it would wait for a sweep, and
+   * the sweep runs once per process - in practice the next app start.
+   */
+  const startHold = useCallback(
+    (rowId: string, remainingMs = HOLD_MS) => {
+      const displaced = heldRowIdRef.current;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      if (displaced && displaced !== rowId) void pushHeldRow(displaced);
+
+      heldRowIdRef.current = rowId;
+      setHolding(true);
+      if (blockedTimerRef.current) {
+        clearTimeout(blockedTimerRef.current);
+        blockedTimerRef.current = null;
+      }
+      setUndoBlockedMessage(null);
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        setHolding(false);
+        void pushHeldRow(rowId);
+      }, remainingMs);
+    },
+    [pushHeldRow]
+  );
 
   const trigger = useCallback(async () => {
     if (!isOwner || inFlightRef.current) return;
@@ -346,6 +407,46 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       });
   }, [isOwner, summarize]);
 
+  /**
+   * A <Completion /> remount mid-hold must not strand the row.
+   *
+   * It does NOT register in meeting-log-push's `claimed` set: the sweep never
+   * selects an in-window `held` row, and if a stale-held row is ever contested
+   * the CAS arbitrates - one writer gets rowsAffected 1, the other 0.
+   */
+  useEffect(() => {
+    if (!isOwner) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const config = await loadOdooConfigState();
+        if (config.state !== "complete" || cancelled) return;
+        const instance = instanceFingerprint(config.config.url, config.config.db);
+        const now = Date.now();
+        const row = await findHeldRow(instance, now);
+        if (!row || cancelled) return;
+        // NEVER displace through the rehydrate. This effect has two awaits, and
+        // a meeting-ended firing in that gap can complete first and arm a hold
+        // on a brand-new row. Calling startHold here would then treat that
+        // fresh row as `displaced` and push it immediately - posting a
+        // just-finished meeting with a ZERO-second undo window, the one thing
+        // the hold exists to guarantee. If a hold is already running, the
+        // rehydrated row simply goes straight to the push it was owed.
+        if (heldRowIdRef.current) {
+          void pushHeldRow(row.id);
+          return;
+        }
+        const remaining = Math.max(0, row.created_at + HOLD_MS - now);
+        startHold(row.id, remaining);
+      } catch (err) {
+        console.error("[Odoo] hold rehydrate failed:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOwner, startHold, pushHeldRow]);
+
   // Closes over the stable ref OBJECTS, not their values, so teardown reads
   // whatever the latest startHold wrote.
   useEffect(() => () => {
@@ -353,7 +454,45 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     if (blockedTimerRef.current) clearTimeout(blockedTimerRef.current);
   }, []);
 
-  const onUndo = useCallback(() => {}, []); // Task 10
+  /**
+   * The blocked message is TRANSIENT.
+   *
+   * <Completion /> renders the strip whenever `holding || undoBlockedMessage`
+   * and swaps out the ContactPicker trigger to do it. A message that never
+   * cleared would therefore replace the picker PERMANENTLY - the user could not
+   * choose a contact for the next meeting, and the only thing that clears it
+   * would be a new hold, which requires a target already selected. The 54px bar
+   * has no other route back.
+   */
+  const showUndoBlocked = useCallback(() => {
+    setUndoBlockedMessage("This meeting is already being sent to Odoo.");
+    if (blockedTimerRef.current) clearTimeout(blockedTimerRef.current);
+    blockedTimerRef.current = setTimeout(() => {
+      blockedTimerRef.current = null;
+      setUndoBlockedMessage(null);
+    }, UNDO_BLOCKED_MS);
+  }, []);
+
+  const onUndo = useCallback(() => {
+    const rowId = heldRowIdRef.current;
+    if (!rowId) return;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setHolding(false);
+    void (async () => {
+      try {
+        // CAS. Whichever writer wins, the loser's rowsAffected is 0 - and the
+        // loser here is the USER, who clicked Undo and whose meeting posts
+        // anyway. Saying so is the whole point of the window.
+        if (!(await cancelHeldRow(rowId))) showUndoBlocked();
+      } catch (err) {
+        console.error("[Odoo] undo failed:", err);
+        showUndoBlocked();
+      }
+    })();
+  }, [showUndoBlocked]);
 
   return { holding, onUndo, undoBlockedMessage };
 }
