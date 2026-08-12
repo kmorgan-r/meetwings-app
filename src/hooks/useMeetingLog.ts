@@ -11,6 +11,7 @@ import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
 import { renderTranscript, sessionKeyFor, sliceTranscript } from "@/lib/odoo/meeting-log";
 import { runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
+import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
 import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
 import type { ResolvedTarget, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
@@ -130,18 +131,56 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const trigger = useCallback(async () => {
     if (!isOwner || inFlightRef.current) return;
     inFlightRef.current = true;
-    try {
-      // Snapshot SYNCHRONOUSLY, before any await. Without it a user clearing
-      // the transcript or re-picking a contact mid-push splices two meetings.
-      const entries = transcriptRef.current;
-      const target = targetRef.current;
-      const conversationId = conversationIdRef.current;
+    // Snapshot SYNCHRONOUSLY, before any await. Without it a user clearing
+    // the transcript or re-picking a contact mid-push splices two meetings.
+    const entries = transcriptRef.current;
+    const target = targetRef.current;
+    const conversationId = conversationIdRef.current;
 
+    // The consumed span, from the SAME synchronous snapshot.
+    //
+    // `meetingTranscript` is never cleared when a meeting ends, so two
+    // consecutive meetings live in one array and the DB watermark - which
+    // only advances when a row is actually WRITTEN - is the only thing that
+    // separates them. A trigger that reads this far and then bails (Odoo not
+    // fully configured, or any throw) has consumed this span without writing
+    // a row for it: left alone, the NEXT trigger slices from the same old
+    // watermark, picks these entries back up, and posts THIS meeting's
+    // transcript as a chatter note on whatever contact is selected for the
+    // NEXT one. `skipUnwritten` closes that gap on every exit that reaches
+    // it - see meeting-log-watermark.storage.ts.
+    const consumedTo = entries.length ? Math.max(...entries.map((e) => e.timestamp)) : 0;
+    const skipUnwritten = () => {
+      if (consumedTo > 0) setSkipWatermark(consumedTo);
+    };
+
+    try {
       const state = await loadOdooConfigState();
-      if (state.state !== "complete") return; // instance is NOT NULL
+      if (state.state === "incomplete") {
+        // Set up, then a field got cleared. The sweep already goes out of its
+        // way to recordErrorOnUnsent for exactly this state "because nothing
+        // else can" - here there is no row to record it on at all, so the
+        // user is told directly instead of the meeting vanishing with no
+        // trace anywhere.
+        toast.error(
+          `Odoo is set up but incomplete - fill in ${state.missing.join(", ")} in Settings > Odoo`
+        );
+        skipUnwritten();
+        return;
+      }
+      if (state.state === "absent") {
+        // Odoo was never set up. Nothing to tell the user that isn't already
+        // obvious from the picker never having offered Odoo at all.
+        skipUnwritten();
+        return;
+      }
 
       const instance = instanceFingerprint(state.config.url, state.config.db);
-      const watermark = await getTranscriptWatermark();
+      // The skip watermark can only ever push this FORWARD of the real one: a
+      // row that IS written always advances getTranscriptWatermark() past
+      // whatever an earlier skip recorded, so max() never resurrects a span a
+      // written row already covers.
+      const watermark = Math.max(await getTranscriptWatermark(), getSkipWatermark());
 
       // The remount recovery. Keyed on the PERSISTED id, because a remount
       // re-initialises state.currentConversationId to null
@@ -171,8 +210,23 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       const rowId = crypto.randomUUID();
       const created = await insertQueueRow({
         id: rowId,
-        sessionKey: sessionKeyFor(conversationId, slice.startAt),
-        conversationId,
+        // Keyed on recoveryId, NOT the raw conversationId. A mid-meeting
+        // remount is documented reachable (useOdooTarget.ts:73-80): trigger A
+        // (pre-remount) sees conversationId "c1", trigger B (post-remount,
+        // recovering through getActiveConversationId()) sees a mirrored null
+        // that resolves to the SAME "c1" as its recoveryId. Keying on the raw
+        // id would give "c1:1000" and "1000" for one meeting - two different
+        // session keys, so ON CONFLICT(session_key) DO NOTHING never catches
+        // the duplicate and two `held` rows get written for it. Keying both
+        // on recoveryId makes them collide as intended. This cannot falsely
+        // collide two DIFFERENT meetings: slice.startAt is always strictly
+        // above the watermark, and every already-stored row's
+        // transcript_start_at <= transcript_end_at <= that same watermark.
+        sessionKey: sessionKeyFor(recoveryId, slice.startAt),
+        // Stored as recoveryId too - the fallback path used to persist NULL
+        // here even when it had just recovered the conversation via
+        // getActiveConversationId(), losing the link slice 3 needs.
+        conversationId: recoveryId,
         instance,
         contactId: target?.contactId ?? null,
         leadId: target?.leadId ?? null,
@@ -185,6 +239,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       });
 
       // The other trigger won. Normal outcome: no hold, no push, no error.
+      // No skip-mark either: the row THAT trigger wrote already advanced the
+      // real watermark past this span.
       if (!created) return;
       // An unassigned row has no hold and no push - slice 3 owns it. Telling
       // the user a meeting is being logged when nothing will be sent is worse
@@ -202,6 +258,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // The repo already toasts transcript loss from useCompletion.ts:415.
       console.error("[Odoo] meeting log trigger failed:", err);
       toast.error("This meeting could not be queued for Odoo.");
+      skipUnwritten();
     } finally {
       inFlightRef.current = false;
     }

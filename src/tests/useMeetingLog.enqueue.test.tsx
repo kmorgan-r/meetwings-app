@@ -13,6 +13,17 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel.value }),
 }));
 
+// Mocked (not left real, unlike Task 9) so the incomplete-vs-absent config
+// test can assert on the missing-fields message. sonner is already mounted in
+// this app; the precedent is src/tests/useOdooTarget.test.tsx:45-48.
+const toastMock = vi.hoisted(() => ({
+  error: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  success: vi.fn(),
+}));
+vi.mock("sonner", () => ({ toast: toastMock }));
+
 const action = vi.hoisted(() => ({
   getTranscriptWatermark: vi.fn(async () => 0),
   insertQueueRow: vi.fn(async () => true),
@@ -47,6 +58,44 @@ const summarizer = vi.hoisted(() => ({
   generateMeetingLogSummary: vi.fn(async () => null),
 }));
 vi.mock("@/lib/functions/meeting-summarizer", () => summarizer);
+
+// STATEFUL, not a static return value - mocked (rather than left real) because
+// src/tests/setup.ts replaces the GLOBAL `localStorage` with an inert
+// `vi.fn()` stub that never actually stores anything: `getItem` always
+// returns `undefined` and `setItem` is a no-op. The real modules would
+// silently "work" (every read returns the empty default) without ever
+// proving a write round-trips, which is exactly the behavior these two
+// findings are about. `state` is a plain object, not a mockReturnValue,
+// so a write from inside the hook is visible to a later read in the SAME
+// test - required to prove the skip watermark set by one trigger is seen by
+// the next, and that a remount's recovered conversation id is seen by the
+// hook's getActiveConversationId() call.
+const watermarkStorage = vi.hoisted(() => {
+  const state = { skip: 0 };
+  return {
+    state,
+    getSkipWatermark: vi.fn(() => state.skip),
+    setSkipWatermark: vi.fn((ts: number) => {
+      state.skip = ts;
+    }),
+  };
+});
+vi.mock("@/lib/storage/meeting-log-watermark.storage", () => watermarkStorage);
+
+const conversationStorage = vi.hoisted(() => {
+  const state = { id: null as string | null };
+  return {
+    state,
+    getActiveConversationId: vi.fn(() => state.id),
+    setActiveConversationId: vi.fn((id: string) => {
+      state.id = id;
+    }),
+    clearActiveConversationId: vi.fn(() => {
+      state.id = null;
+    }),
+  };
+});
+vi.mock("@/lib/storage/active-conversation.storage", () => conversationStorage);
 
 import { resetMeetingLogSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
 import type { ResolvedTarget, TranscriptEntry } from "@/types";
@@ -117,6 +166,13 @@ beforeEach(() => {
   windowLabel.value = "main";
   resetMeetingLogSweepGuard();
   listeners.clear();
+  // Reset the STATE behind the stateful storage mocks, not just their call
+  // history - vi.clearAllMocks() in afterEach clears .mock.calls but the
+  // plain `state` objects these mocks close over are not mocks themselves,
+  // so a skip-mark or a seeded conversation id from one test would otherwise
+  // leak into the next in file order.
+  watermarkStorage.state.skip = 0;
+  conversationStorage.state.id = null;
   listen.mockImplementation(async (name: string, handler: (e: unknown) => void) => {
     listeners.set(name, handler);
     // Models real deregistration. A bare `unlisten` spy that left the handler
@@ -403,5 +459,92 @@ describe("the window-ownership gate", () => {
     rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
     await vi.advanceTimersByTimeAsync(50);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+});
+
+// --- Round 1 review fixes ---------------------------------------------
+
+describe("the skip watermark", () => {
+  it("CRITICAL: advances on a write failure, so the NEXT meeting does not inherit the lost one's entries", async () => {
+    // meetingTranscript is never cleared at meeting end, and the DB watermark
+    // only advances when a row is actually WRITTEN. Without a second,
+    // independent watermark that also advances on a trigger that consumed a
+    // snapshot and then failed to write, meeting two's row would splice in
+    // meeting one's entries too - one customer's transcript, posted as a
+    // chatter note on whichever contact is selected for the NEXT meeting.
+    action.insertQueueRow.mockRejectedValueOnce(new Error("db down"));
+    const { rerender } = render({ meetingTranscript: [entry(1000, "meeting one")] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+
+    rerender({
+      meetingTranscript: [entry(1000, "meeting one"), entry(9000, "meeting two")],
+    });
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
+
+    const secondRow = action.insertQueueRow.mock.calls[1][0];
+    expect(secondRow.transcript).toContain("meeting two");
+    expect(secondRow.transcript).not.toContain("meeting one");
+    expect(secondRow.transcriptStartAt).toBe(9000);
+  });
+});
+
+describe("the odoo-not-configured branches", () => {
+  it("IMPORTANT: toasts the missing fields when Odoo is set up but incomplete, and writes no row", async () => {
+    // The sweep already recordErrorOnUnsent's for exactly this state,
+    // "because nothing else can" - the trigger has no row to record it on at
+    // all, so silence here means the meeting vanishes with no trace
+    // anywhere, unlike `absent` where silence is the right call.
+    config.loadOdooConfigState.mockResolvedValue({
+      state: "incomplete",
+      config: null,
+      missing: ["db", "apiKey"],
+    });
+    render();
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled());
+    expect(toastMock.error.mock.calls[0][0]).toContain("db, apiKey");
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when Odoo was never set up", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    render();
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(toastMock.error).not.toHaveBeenCalled();
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+});
+
+describe("session-key remount stability", () => {
+  it("IMPORTANT: keys a null-conversationId trigger by the recovered id, matching the pre-remount trigger's key", async () => {
+    // A mid-meeting remount is documented reachable (useOdooTarget.ts:73-80).
+    // Pre-remount, the hook has the live conversationId; post-remount,
+    // useCompletion re-initialises it to null, and this hook can only
+    // recover it through getActiveConversationId(). Keying the row on the
+    // raw conversationId instead of the recovered id gives the two triggers
+    // DIFFERENT session keys for the SAME meeting - "c1:1000" vs "1000" -
+    // so ON CONFLICT(session_key) DO NOTHING never catches the duplicate and
+    // two `held` rows get written for one meeting.
+    const first = render({ currentConversationId: "c1", meetingTranscript: [entry(1000)] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    conversationStorage.state.id = "c1";
+    render({ currentConversationId: null, meetingTranscript: [entry(1000)] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
+
+    const [preRemountRow, postRemountRow] = action.insertQueueRow.mock.calls.map((c) => c[0]);
+    expect(postRemountRow.sessionKey).toBe(preRemountRow.sessionKey);
+    expect(postRemountRow.conversationId).toBe("c1");
   });
 });
