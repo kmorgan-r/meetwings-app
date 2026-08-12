@@ -2,13 +2,20 @@ import {
   claimRow,
   failRow,
   markSent,
+  reclaimStaleSending,
+  recordErrorOnUnsent,
   releaseRowToPending,
+  selectSweepable,
   setAttachmentId,
   setMessageId,
   setSummaryJson,
 } from "@/lib/database/meeting-log.action";
+import {
+  instanceFingerprint,
+  requireOdooConfig,
+} from "@/lib/storage/odoo-config.storage";
 import type { DbMeetingLogRow, SummarizationResult } from "@/types";
-import type { OdooClient } from "./client";
+import { createOdooClient, type OdooClient } from "./client";
 import { OdooError, odooError, toOdooError } from "./errors";
 import {
   attachmentNameFor,
@@ -302,4 +309,93 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
   } finally {
     if (claimedHere) claimed.delete(row.id);
   }
+}
+
+export interface SweepOutcome {
+  ran: boolean;
+  pushed: number;
+}
+
+/**
+ * Module-level single flight, mirroring runSync (src/lib/odoo/index.ts:20-33).
+ *
+ * The latch is owned by the RUN, not the component: the promise clears ITSELF
+ * in .finally(), so it is never re-armed in an effect create body. Re-arming it
+ * there would discard the promise the first StrictMode create armed and start
+ * exactly the second concurrent run it exists to prevent.
+ */
+let sweepInFlight: Promise<SweepOutcome> | null = null;
+
+/**
+ * Retries queued meetings. Called once at app start from useMeetingLog, in the
+ * `main` window only.
+ *
+ * SEQUENTIAL by design - a parallel sweep against a rate-limited Odoo turns one
+ * bad morning into a thundering herd. ONE client for the whole run, because a
+ * per-row client re-authenticates on every row.
+ */
+export async function runMeetingLogSweep(
+  summarize: PushDeps["summarize"]
+): Promise<SweepOutcome> {
+  if (sweepInFlight) return sweepInFlight;
+
+  const run = (async (): Promise<SweepOutcome> => {
+    let config;
+    try {
+      config = await requireOdooConfig();
+    } catch (err) {
+      // Not set up, or half-filled. The rows keep their status - this is not a
+      // rejection by Odoo - but the REASON is recorded on each of them, because
+      // nothing else can: this path never claims, so `attempts` never
+      // increments and no row can escalate into "needs attention" on its own.
+      // Without it a user whose credentials went half-filled has N meetings
+      // stuck with no explanation anywhere.
+      const { code, text } = queueErrorText(err);
+      try {
+        await recordErrorOnUnsent(code, text);
+      } catch {
+        // The database is what failed. Nothing more to try.
+      }
+      return { ran: false, pushed: 0 };
+    }
+    const instance = instanceFingerprint(config.url, config.db);
+
+    let rows;
+    try {
+      // FIRST. Age-gated, and excluding anything this process is pushing right
+      // now - see reclaimStaleSending's doc comment for why both halves matter.
+      await reclaimStaleSending(Date.now(), [...claimed]);
+      rows = await selectSweepable(instance, Date.now());
+    } catch (err) {
+      // Aborting is right - if the database is down there is nothing to
+      // iterate - but it must not REJECT: the only production caller is a
+      // `void` inside a React effect.
+      console.error("[Odoo] meeting log sweep could not read the queue:", err);
+      return { ran: false, pushed: 0 };
+    }
+    if (rows.length === 0) return { ran: true, pushed: 0 };
+
+    const client = createOdooClient(config);
+    let pushed = 0;
+    for (const row of rows) {
+      // pushQueuedRow never throws, but the loop is defensive anyway: a row
+      // failure must never abandon the rows behind it.
+      //
+      // Date.now() PER ROW, not one stamp for the run: against a slow Odoo (30s
+      // per call, client.ts:21) a shared stamp would write claimed_at/sent_at
+      // values minutes in the past for the later rows.
+      try {
+        await pushQueuedRow(row, { client, instance, now: Date.now(), summarize });
+        pushed += 1;
+      } catch {
+        // already recorded on the row
+      }
+    }
+    return { ran: true, pushed };
+  })();
+
+  sweepInFlight = run.finally(() => {
+    sweepInFlight = null;
+  });
+  return sweepInFlight;
 }
