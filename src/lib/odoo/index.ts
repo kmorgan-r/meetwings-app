@@ -4,6 +4,7 @@ export * from "./contacts-sync";
 export * from "./errors";
 export * from "./many2one";
 export * from "./meeting-log";
+export * from "./meeting-log-push";
 export * from "./opportunities";
 export * from "./redact";
 export * from "./redactor";
