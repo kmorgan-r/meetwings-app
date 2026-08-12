@@ -4,6 +4,7 @@ import {
   ExtractedEntity,
   CreateMeetingSummaryInput,
   CreateKnowledgeEntityInput,
+  TranscriptEntry,
 } from "@/types";
 import {
   createMeetingSummary,
@@ -15,6 +16,7 @@ import {
 import { fetchAIResponse } from "./ai-response.function";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
+import { renderTranscript } from "@/lib/odoo/meeting-log";
 
 // Minimum number of exchanges (user+assistant pairs) required to trigger summarization
 const MIN_EXCHANGES_FOR_SUMMARY = 2;
@@ -53,7 +55,7 @@ function getUserIdentityInstruction(): string {
 }
 
 // Summarization prompt template
-const SUMMARIZATION_PROMPT = `You are a meeting/conversation summarizer. Analyze the conversation and extract key information.
+export const SUMMARIZATION_PROMPT = `You are a meeting/conversation summarizer. Analyze the conversation and extract key information.
 
 Respond ONLY with a valid JSON object in this exact format (no markdown, no code blocks, just raw JSON):
 {
@@ -199,7 +201,7 @@ export function extractJsonObject(response: string): string {
 /**
  * Parses the AI response into a SummarizationResult
  */
-function parseSummarizationResponse(response: string): SummarizationResult | null {
+export function parseSummarizationResponse(response: string): SummarizationResult | null {
   try {
     const parsed = JSON.parse(extractJsonObject(response));
 
@@ -417,4 +419,61 @@ export async function summarizeConversation(
  */
 export function shouldSummarize(messages: Message[]): boolean {
   return countExchanges(messages) >= MIN_EXCHANGES_FOR_SUMMARY;
+}
+
+/** The provider shape every caller in this file already threads through. */
+type ProviderConfig = {
+  provider: any;
+  selectedProvider: { provider: string; variables: Record<string, string> };
+};
+
+/**
+ * Summarizes a MEETING for the Odoo log.
+ *
+ * Deliberately not generateConversationSummary: that path enforces
+ * MIN_EXCHANGES_FOR_SUMMARY (:263-266), and a short meeting still gets logged;
+ * and it returns any EXISTING summary for the conversation (:269-273), when the
+ * log wants a summary of THIS meeting.
+ *
+ * Deliberately not formatConversationForSummary (:96) either - it labels lines
+ * User/Assistant from msg.role, which is meaningless for a meeting where both
+ * sides are human. renderTranscript uses speaker/audioSource instead.
+ *
+ * NEVER THROWS. The push module treats a null exactly like a rejection, and
+ * both take the fallback-body path: losing a customer record because an AI
+ * provider returned 429 is the wrong trade.
+ */
+export async function generateMeetingLogSummary(
+  entries: TranscriptEntry[],
+  providerConfig?: ProviderConfig
+): Promise<SummarizationResult | null> {
+  if (entries.length === 0) return null;
+
+  try {
+    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+    if (!useMeetwingsAPI && !providerConfig) {
+      console.log("No AI provider configured for meeting log summarization");
+      return null;
+    }
+
+    const userMessage =
+      `MEETING TRANSCRIPT:\n${renderTranscript(entries)}\n\nProvide the JSON summary:`;
+
+    let fullResponse = "";
+    for await (const chunk of fetchAIResponse({
+      provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
+      selectedProvider: providerConfig?.selectedProvider || { provider: "", variables: {} },
+      systemPrompt: SUMMARIZATION_PROMPT + getUserIdentityInstruction(),
+      history: [],
+      userMessage,
+      imagesBase64: [],
+    })) {
+      fullResponse += chunk;
+    }
+
+    return parseSummarizationResponse(fullResponse);
+  } catch (error) {
+    console.error("Error generating meeting log summary:", error);
+    return null;
+  }
 }
