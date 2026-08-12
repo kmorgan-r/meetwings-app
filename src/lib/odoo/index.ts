@@ -3,6 +3,7 @@ export * from "./contact-ordering";
 export * from "./contacts-sync";
 export * from "./errors";
 export * from "./many2one";
+export * from "./meeting-log";
 export * from "./opportunities";
 export * from "./redact";
 export * from "./redactor";
