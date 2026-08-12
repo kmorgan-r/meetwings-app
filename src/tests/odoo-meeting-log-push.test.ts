@@ -351,6 +351,22 @@ describe("the instance re-check", () => {
   });
 });
 
+describe("the claim CAS", () => {
+  it("does nothing when the row is already terminal and the claim is refused", async () => {
+    // claimRow's WHERE clause only matches ('pending','held'), so a row some
+    // OTHER attempt already finished - here, 'sent' - must refuse the CAS and
+    // pushQueuedRow must return before any wire call. Every other test in this
+    // file leaves seedRow's default status: "pending", so the claim always
+    // succeeds and this guard was previously unfalsifiable: a mutant that
+    // discarded claimRow's return value and pushed unconditionally passed
+    // every other case in this file.
+    const row = seedRow({ status: "sent", attachment_id: 555, message_id: 999 });
+    await pushQueuedRow(row, deps());
+    expect(tauriFetch).not.toHaveBeenCalled();
+    expect(await getQueueRow("row-1")).toMatchObject({ status: "sent", attempts: 0 });
+  });
+});
+
 describe("the code table", () => {
   it("keeps the row pending on a 5xx", async () => {
     const row = seedRow();
@@ -488,6 +504,28 @@ describe("summarization is walled off from the push", () => {
     await pushQueuedRow(row, deps({ summarize: vi.fn(async () => null) }));
     expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent" });
+  });
+
+  it("caps the fallback body at FALLBACK_LINES instead of inlining the whole transcript", async () => {
+    // Regression: the slice built for buildNoteBody used to be a SINGLE
+    // synthetic entry wrapping the entire stored transcript, so
+    // `slice.entries.slice(0, FALLBACK_LINES)` capped nothing - one entry is
+    // one entry - and the full verbatim transcript landed in a
+    // customer-visible chatter note under body text that promises only the
+    // first lines. This is the COMMON path, not an exotic one:
+    // parseSummarizationResponse returns null rather than throwing, so any
+    // unparseable model output takes it. One entry per transcript LINE is
+    // what makes the FALLBACK_LINES cap actually cap.
+    const lines = Array.from({ length: 12 }, (_, i) => `line-${i}`);
+    const row = seedRow({ transcript: lines.join("\n") });
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(intResponse(555))
+      .mockResolvedValueOnce(intResponse(999));
+    await pushQueuedRow(row, deps({ summarize: vi.fn(async () => null) }));
+    const body = String(tauriFetch.mock.calls[2][1].body);
+    expect(body).toContain("line-0");
+    expect(body).not.toContain("line-11");
   });
 
   it("takes the same path for a result with an empty summary", async () => {

@@ -136,16 +136,16 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
     }
   };
   try {
-    if (row.status !== "sending") {
-      if (!(await claimRow(row.id, now))) return; // someone else owns it
-    } else if (!claimed.has(row.id)) {
-      // A `sending` row this process does not already own. Skipping the CAS
-      // for it would issue Odoo writes with no mutual exclusion at all - the
-      // one thing "no Odoo write without a claim" forbids. No current caller
-      // does this (selectSweepable excludes `sending`, pushHeldRow filters on
-      // `held`), and this guard keeps a future one from opening the hole.
-      return;
-    }
+    // The CAS runs UNCONDITIONALLY, regardless of row.status. `claimed` tracks
+    // pushes this process has in flight, for the stale-claim reclaim
+    // (reclaimStaleSending) to consult - it is not evidence of ownership.
+    // Checking it here instead of claiming would grant an Odoo write with no
+    // CAS precisely when another push of the same row is already in flight,
+    // and that concurrent call's `finally` clears the id from `claimed` while
+    // this one is still running, dropping the exclusion mid-push.
+    // claimRow's own `WHERE status IN ('pending','held')` already refuses
+    // every `sending` row, which is what actually prevents the double push.
+    if (!(await claimRow(row.id, now))) return; // someone else owns it, or it is already in flight
     claimed.add(row.id);
     claimedHere = true;
   } catch (err) {
@@ -196,7 +196,18 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
     }
 
     const slice: TranscriptSlice = {
-      entries: row.transcript ? [{ original: row.transcript, timestamp: row.transcript_start_at }] : [],
+      // One entry PER LINE, not one entry for the whole transcript.
+      // buildNoteBody's fallback caps at FALLBACK_LINES entries, so a single
+      // synthetic entry caps nothing and the whole transcript lands in a
+      // customer-visible note under body text promising only its first lines.
+      // renderTranscript round-trips this exactly: it joins on "\n", and an
+      // entry with no speaker and no audioSource renders as its bare text.
+      entries: row.transcript
+        ? row.transcript.split("\n").map((line, i) => ({
+            original: line,
+            timestamp: row.transcript_start_at + i,
+          }))
+        : [],
       startAt: row.transcript_start_at,
       endAt: row.transcript_end_at,
     };
