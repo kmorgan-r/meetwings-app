@@ -74,3 +74,37 @@ export interface SyncResult {
   skipped: number;
   clampSkipped: boolean;
 }
+
+/** Every state a queued meeting can be in. See meeting-log-queue.sql. */
+export type MeetingLogStatus =
+  | "held"        // inside the 30s undo window
+  | "pending"     // ready to push or retry
+  | "sending"     // an Odoo call is in flight
+  | "unassigned"  // ended with no contact selected; slice 3 owns it
+  | "sent"        // terminal
+  | "failed"      // terminal until slice 3's manual retry
+  | "cancelled";  // undone
+
+/** The snake_case shape SQLite actually returns for a queued meeting. */
+export interface DbMeetingLogRow {
+  id: string;
+  session_key: string;
+  conversation_id: string | null;
+  instance: string;
+  contact_id: number | null;
+  lead_id: number | null;
+  transcript: string;
+  transcript_start_at: number;
+  transcript_end_at: number;
+  summary_json: string | null;
+  attachment_id: number | null;
+  message_id: number | null;
+  status: MeetingLogStatus;
+  attempts: number;
+  claimed_at: number | null;
+  last_error: string | null;
+  last_error_code: string | null;
+  meeting_started_at: number | null;
+  created_at: number;
+  sent_at: number | null;
+}
