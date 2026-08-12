@@ -37,6 +37,7 @@ import {
   readMeetingMessages,
   reclaimStaleSending,
   recordAttemptError,
+  recordErrorOnUnsent,
   releaseRowToPending,
   selectSweepable,
 } from "@/lib/database/meeting-log.action";
@@ -151,11 +152,15 @@ describe("getTranscriptWatermark", () => {
     expect(await getTranscriptWatermark()).toBe(900);
   });
 
-  it("counts cancelled and unassigned rows too", async () => {
-    // A cancelled row CONSUMED its entries. Excluding it would re-slice an
-    // undone meeting into the next one and log it after all.
-    seed({ id: "a", session_key: "a", status: "cancelled", transcript_end_at: 900 });
-    seed({ id: "b", session_key: "b", status: "sent", transcript_end_at: 100 });
+  it("counts cancelled, sent and unassigned rows too", async () => {
+    // Every one of these CONSUMED its slice of entries. Excluding any of them
+    // would re-slice an already-handled meeting into the next one. `sent` -
+    // the terminal, common case - is given the highest transcript_end_at so
+    // the assertion can only pass if a terminal row is actually included; the
+    // other two would otherwise let a naive per-status filter through unseen.
+    seed({ id: "a", session_key: "a", status: "cancelled", transcript_end_at: 700 });
+    seed({ id: "b", session_key: "b", status: "sent", transcript_end_at: 900 });
+    seed({ id: "c", session_key: "c", status: "unassigned", transcript_end_at: 500 });
     expect(await getTranscriptWatermark()).toBe(900);
   });
 });
@@ -216,6 +221,15 @@ describe("markSent", () => {
       status: "sent", sent_at: NOW, last_error: null, last_error_code: null,
     });
   });
+
+  it("is a CAS: refuses to move a row that already left 'sending'", async () => {
+    // A zombie writer - an attempt whose row was reclaimed after
+    // STALE_CLAIM_MS and re-claimed by a later attempt - must not flip an
+    // already-terminal row back, handing the sweep a second chatter note.
+    seed({ id: "s", session_key: "s", status: "cancelled" });
+    await markSent("s", NOW);
+    expect(await getQueueRow("s")).toMatchObject({ status: "cancelled", sent_at: null });
+  });
 });
 
 describe("failRow and releaseRowToPending", () => {
@@ -227,11 +241,27 @@ describe("failRow and releaseRowToPending", () => {
     });
   });
 
+  it("failRow is a CAS: refuses to move a row that already left 'sending'", async () => {
+    seed({ id: "s", session_key: "s", status: "cancelled" });
+    await failRow("s", "ODOO_FAULT", "ODOO_FAULT: rejected");
+    expect(await getQueueRow("s")).toMatchObject({
+      status: "cancelled", last_error_code: null, last_error: null,
+    });
+  });
+
   it("releaseRowToPending records the reason so an escalated row is explicable", async () => {
     seed({ id: "s", session_key: "s", status: "sending" });
     await releaseRowToPending("s", "ODOO_UNREACHABLE", "ODOO_UNREACHABLE: down");
     expect(await getQueueRow("s")).toMatchObject({
       status: "pending", last_error_code: "ODOO_UNREACHABLE",
+    });
+  });
+
+  it("releaseRowToPending is a CAS: refuses to move a row that already left 'sending'", async () => {
+    seed({ id: "s", session_key: "s", status: "cancelled" });
+    await releaseRowToPending("s", "ODOO_UNREACHABLE", "ODOO_UNREACHABLE: down");
+    expect(await getQueueRow("s")).toMatchObject({
+      status: "cancelled", last_error_code: null, last_error: null,
     });
   });
 });
@@ -365,6 +395,31 @@ describe("recordAttemptError", () => {
     expect(await getQueueRow("row-1")).toMatchObject({
       status: "held", attempts: 0, last_error_code: "ODOO_NOT_CONFIGURED",
     });
+  });
+});
+
+describe("recordErrorOnUnsent", () => {
+  it("stamps every still-sendable row and leaves failed/sent rows untouched", async () => {
+    // The sweep's not-configured case. Scoped away from 'failed' so it cannot
+    // overwrite the actionable error a user is already trying to diagnose, and
+    // away from 'sent' because that row is done.
+    seed({ id: "h", session_key: "h", status: "held" });
+    seed({ id: "p", session_key: "p", status: "pending" });
+    seed({
+      id: "f", session_key: "f", status: "failed",
+      last_error: "ODOO_FAULT: rejected", last_error_code: "ODOO_FAULT",
+    });
+    seed({
+      id: "sent", session_key: "sent", status: "sent",
+      last_error: null, last_error_code: null,
+    });
+    await recordErrorOnUnsent("ODOO_NOT_CONFIGURED", "ODOO_NOT_CONFIGURED");
+    expect(await getQueueRow("h")).toMatchObject({ last_error_code: "ODOO_NOT_CONFIGURED" });
+    expect(await getQueueRow("p")).toMatchObject({ last_error_code: "ODOO_NOT_CONFIGURED" });
+    expect(await getQueueRow("f")).toMatchObject({
+      last_error_code: "ODOO_FAULT", last_error: "ODOO_FAULT: rejected",
+    });
+    expect(await getQueueRow("sent")).toMatchObject({ last_error_code: null, last_error: null });
   });
 });
 

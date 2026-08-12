@@ -72,15 +72,22 @@ UPDATE meeting_log_queue
   cancelHeld: `
 UPDATE meeting_log_queue SET status = 'cancelled' WHERE id = ? AND status = 'held'`,
 
+  // CAS, not an unconditional write. Every caller reaches this only after
+  // successfully claiming the row, so the predicate never refuses a
+  // legitimate write - what it refuses is a zombie writer whose claim was
+  // reclaimed by the stale-claim sweep and re-claimed by a later attempt,
+  // flipping an already-terminal row back to 'pending'. A refused write
+  // leaves the row 'sending', which the stale-claim reclaim already recovers.
   toPending: `
 UPDATE meeting_log_queue
    SET status = 'pending', last_error_code = ?, last_error = ?, claimed_at = NULL
- WHERE id = ?`,
+ WHERE id = ? AND status = 'sending'`,
 
+  // CAS. See toPending's comment - same zombie-writer rationale.
   toFailed: `
 UPDATE meeting_log_queue
    SET status = 'failed', last_error_code = ?, last_error = ?, claimed_at = NULL
- WHERE id = ?`,
+ WHERE id = ? AND status = 'sending'`,
 
   // Records WHY without moving the status. The pre-wire path needs this: it
   // never claims, so `attempts` never increments and the row can never reach
@@ -104,12 +111,13 @@ UPDATE meeting_log_queue SET last_error_code = ?, last_error = ?
 UPDATE meeting_log_queue SET status = 'pending'
  WHERE status = 'sending' AND claimed_at < ?`,
 
-  // Clears the error columns, like finishSync does (odoo-contacts.action.ts:190-221).
+  // CAS, like toPending and toFailed. Clears the error columns, like
+  // finishSync does (odoo-contacts.action.ts:190-221).
   toSent: `
 UPDATE meeting_log_queue
    SET status = 'sent', sent_at = ?, last_error = NULL, last_error_code = NULL,
        claimed_at = NULL
- WHERE id = ?`,
+ WHERE id = ? AND status = 'sending'`,
 
   setAttachment: `UPDATE meeting_log_queue SET attachment_id = ? WHERE id = ?`,
   setMessage: `UPDATE meeting_log_queue SET message_id = ? WHERE id = ?`,
