@@ -183,6 +183,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       timerRef.current = setTimeout(() => {
         timerRef.current = null;
         setHolding(false);
+        // Only if nothing newer has taken the ref since this timer was
+        // armed - startHold and onUndo both clear timerRef before writing
+        // it, so reaching here with a stale rowId is not possible, but the
+        // guard is the same one onUndo needs anyway, so it is kept explicit
+        // rather than assumed.
+        if (heldRowIdRef.current === rowId) heldRowIdRef.current = null;
         void pushHeldRow(rowId);
       }, remainingMs);
     },
@@ -433,7 +439,13 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // the hold exists to guarantee. If a hold is already running, the
         // rehydrated row simply goes straight to the push it was owed.
         if (heldRowIdRef.current) {
-          void pushHeldRow(row.id);
+          // Only push a row we are NOT already holding. findHeldRow orders
+          // newest-first, so in the very scenario this guard exists for - a
+          // meeting-ended completing inside this effect's await gap - the row
+          // it returns IS the fresh one, and pushing it would post a
+          // just-finished meeting with a zero-second undo window. The armed
+          // timer hides it: at t=30s the row reads `sent` and pushHeldRow bails.
+          if (row.id !== heldRowIdRef.current) void pushHeldRow(row.id);
           return;
         }
         const remaining = Math.max(0, row.created_at + HOLD_MS - now);
@@ -464,8 +476,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * would be a new hold, which requires a target already selected. The 54px bar
    * has no other route back.
    */
-  const showUndoBlocked = useCallback(() => {
-    setUndoBlockedMessage("This meeting is already being sent to Odoo.");
+  const showUndoBlocked = useCallback((message: string) => {
+    setUndoBlockedMessage(message);
     if (blockedTimerRef.current) clearTimeout(blockedTimerRef.current);
     blockedTimerRef.current = setTimeout(() => {
       blockedTimerRef.current = null;
@@ -486,10 +498,25 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // CAS. Whichever writer wins, the loser's rowsAffected is 0 - and the
         // loser here is the USER, who clicked Undo and whose meeting posts
         // anyway. Saying so is the whole point of the window.
-        if (!(await cancelHeldRow(rowId))) showUndoBlocked();
+        if (await cancelHeldRow(rowId)) {
+          // Only if nothing newer has taken the ref since this undo started -
+          // a hold that started while this cancel was in flight owns it now,
+          // and clearing unconditionally would lie about THAT row's state.
+          // Without this at all, a second onUndo() after a successful cancel
+          // re-runs cancelHeldRow on an already-cancelled row, gets 0 rows
+          // back, and tells the user "already being sent to Odoo" - the
+          // opposite of the truth.
+          if (heldRowIdRef.current === rowId) heldRowIdRef.current = null;
+        } else {
+          showUndoBlocked("This meeting is already being sent to Odoo.");
+        }
       } catch (err) {
+        // The CAS write itself failed - this is not a lost race. The timer
+        // is already cleared, so nothing is sending this row; it stays
+        // `held`, durable, for the sweep's stale-held rescue to pick up
+        // later. "Already being sent" would be false here.
         console.error("[Odoo] undo failed:", err);
-        showUndoBlocked();
+        showUndoBlocked("Undo could not be saved - this meeting will be sent later.");
       }
     })();
   }, [showUndoBlocked]);

@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useRef } from "react";
 
@@ -364,7 +364,45 @@ describe("the mount rehydrate", () => {
   it("does not rehydrate when there is no held row", async () => {
     action.findHeldRow.mockResolvedValue(null);
     const { result } = render();
-    await vi.advanceTimersByTimeAsync(50);
+    // NOT waitFor: waitFor resolves on the FIRST success, so against a
+    // broken implementation that armed a hold, a synchronous read here could
+    // pass vacuously - setHolding(true) fires from an async continuation
+    // outside act(), and whether the render has committed by the time this
+    // line runs is scheduler-dependent, not guaranteed false. The explicit
+    // act() flush forces every pending state update to commit before the
+    // read, so this stays a real negative assertion.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
     expect(result.current.holding).toBe(false);
+  });
+
+  it("does not push the row it is already holding when the rehydrate races meeting-ended", async () => {
+    // This is the CRITICAL scenario: findHeldRow orders newest-first, so a
+    // meeting-ended that completes inside this effect's own await gap makes
+    // findHeldRow resolve with the SAME row this effect is racing to
+    // rehydrate. Without the identity check, "if a hold is already running,
+    // push the rehydrated row" pushes the row it is ALREADY holding - posting
+    // a just-finished meeting with a zero-second undo window, the one thing
+    // the hold exists to guarantee. The armed 30s timer masks it in
+    // production: by the time it would fire, the row already reads `sent`.
+    let resolveFindHeldRow: (value: unknown) => void = () => {};
+    action.findHeldRow.mockReturnValue(
+      new Promise((resolve) => {
+        resolveFindHeldRow = resolve;
+      })
+    );
+    action.getQueueRow.mockResolvedValue({ id: "row-1", status: "held" });
+    const { result } = render();
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(result.current.holding).toBe(true));
+
+    resolveFindHeldRow({ id: "row-1", status: "held", created_at: Date.now() });
+    // Short advance only - long enough to flush the rehydrate's resumed
+    // continuation, well short of the legitimate 30s timer, so a push here
+    // can only be the bug's premature one.
+    await vi.advanceTimersByTimeAsync(10);
+    expect(push.pushQueuedRow).not.toHaveBeenCalled();
   });
 });
