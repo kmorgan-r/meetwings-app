@@ -4,10 +4,29 @@ import { Button, Input, Label } from "@/components";
 import { PageLayout } from "@/layouts";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
 import { runSync, testOdooConnection } from "@/lib/odoo";
-import { loadOdooConfig, saveOdooConfig } from "@/lib/storage/odoo-config.storage";
+import {
+  countAllQueued,
+  getQueueCounts,
+  type QueueCounts,
+} from "@/lib/database/meeting-log.action";
+import {
+  instanceFingerprint,
+  loadOdooConfig,
+  loadOdooConfigState,
+  saveOdooConfig,
+} from "@/lib/storage/odoo-config.storage";
 import type { OdooConfig } from "@/types";
 
 const EMPTY: OdooConfig = { url: "", db: "", login: "", apiKey: "" };
+
+/**
+ * Agrees with the count on both the noun and the verb: "1 meeting waiting" /
+ * "2 meetings waiting", "1 meeting needs attention" / "2 meetings need
+ * attention" - a fixed noun form can't be right for both.
+ */
+function plural(n: number): string {
+  return `${n} ${n === 1 ? "meeting" : "meetings"}`;
+}
 
 /**
  * ODOO_NOT_CONFIGURED gets the page's OWN copy rather than the report's
@@ -51,6 +70,13 @@ export default function OdooSettings() {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [testStatus, setTestStatus] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [queue, setQueue] = useState<QueueCounts | null>(null);
+  const [strandedTotal, setStrandedTotal] = useState(0);
+  // Bumped by handleSave. Without it the stranded line still says "finish
+  // setting Odoo up above" - with a stale count - immediately after the user
+  // has done exactly that, on the same page, which is the one flow that line
+  // exists to serve.
+  const [queueReadKey, setQueueReadKey] = useState(0);
 
   // "Saved" is only true of the config that was actually written. The next
   // keystroke makes it stale, so it is cleared on every field edit rather
@@ -77,6 +103,44 @@ export default function OdooSettings() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      // Reset so a config that just became complete does not leave the
+      // stranded line behind from a previous read.
+      setStrandedTotal(0);
+      try {
+        // NOT currentInstance(): it wraps requireOdooConfig, which THROWS for
+        // exactly the half-filled config a user comes to this page to fix - so
+        // the one surface that would show their backlog would be the one that
+        // renders nothing. loadOdooConfigState returns a state instead of
+        // throwing.
+        const state = await loadOdooConfigState();
+        if (state.state === "complete") {
+          const counts = await getQueueCounts(
+            instanceFingerprint(state.config.url, state.config.db)
+          );
+          if (!cancelled) setQueue(counts);
+          return;
+        }
+        // Incomplete or absent: there is no fingerprint to scope by, and every
+        // queued row is stuck for the same reason - the credentials on this
+        // page. Counting them all is the honest answer, and without it the
+        // backlog is invisible precisely when it is largest, since a
+        // not-configured push never claims and so never escalates either.
+        const total = await countAllQueued();
+        if (!cancelled) setStrandedTotal(total);
+      } catch (err) {
+        // Diagnostic only. A failed count must not take down the credentials
+        // form the user came here to fix.
+        console.error("[Odoo] could not read the meeting log queue counts:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [queueReadKey]);
+
   async function handleSave() {
     // The one action that can silently convince a user their credentials are
     // stored when they are not: saveOdooConfig awaits secureGet, secureSet and
@@ -86,6 +150,7 @@ export default function OdooSettings() {
     try {
       const result = await saveOdooConfig(config);
       setSaveStatus("Saved");
+      setQueueReadKey((k) => k + 1);
       // Fires on EITHER flag, not instanceChanged alone. instanceChanged is
       // false for the common repair case (fixing a blank login on the same
       // url+db), and without becameUsable the picker sits on "not set up" - a
@@ -206,6 +271,38 @@ export default function OdooSettings() {
         </Button>
         {syncStatus && <p>{syncStatus}</p>}
       </div>
+
+      {strandedTotal > 0 && (
+        <p data-testid="meeting-log-stranded" className="mt-6 text-sm">
+          {plural(strandedTotal)} waiting to be logged. Finish setting Odoo up above and they
+          will be sent.
+        </p>
+      )}
+
+      {queue &&
+        queue.waiting + queue.needsAttention + queue.unassigned + queue.otherInstance > 0 && (
+          <div data-testid="meeting-log-queue-status" className="space-y-1 mt-6 text-sm">
+            {/* Four groups, separately worded: "Odoo rejected this", "you never
+                told me who this was with" and "this retries on its own" need
+                three different user actions, and one number fits none of them.
+                Without this block a failed row is invisible until slice 3 ships
+                and the user believes every meeting was logged. */}
+            {queue.waiting > 0 && <p>{plural(queue.waiting)} waiting to be logged</p>}
+            {queue.needsAttention > 0 && (
+              <>
+                <p>
+                  {plural(queue.needsAttention)}{" "}
+                  {queue.needsAttention === 1 ? "needs" : "need"} attention
+                </p>
+                {queue.lastError && <p className="text-muted-foreground">{queue.lastError}</p>}
+              </>
+            )}
+            {queue.unassigned > 0 && <p>{plural(queue.unassigned)} not assigned to a contact</p>}
+            {queue.otherInstance > 0 && (
+              <p>{plural(queue.otherInstance)} queued for a different Odoo database</p>
+            )}
+          </div>
+        )}
     </PageLayout>
   );
 }
