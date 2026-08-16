@@ -381,7 +381,13 @@ describe("the listen() cleanup", () => {
 
 describe("the messages fallback", () => {
   it("recovers a remount-emptied transcript from the messages table", async () => {
-    action.readMeetingMessages.mockResolvedValue([entry(3000, "said before the remount")]);
+    // Timestamp anchored to Date.now(), not a bare small literal: the
+    // recovery read is now floored at PROCESS_STARTED_AT (see useMeetingLog.ts),
+    // which under this suite's fake timers is a real epoch millis value. A
+    // fixture below that floor would be recovering a span the fix is
+    // supposed to exclude, which is not what THIS test is checking.
+    const recoveredAt = Date.now() + 10_000;
+    action.readMeetingMessages.mockResolvedValue([entry(recoveredAt, "said before the remount")]);
     render({ meetingTranscript: [] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
@@ -393,14 +399,19 @@ describe("the messages fallback", () => {
     // NOT gated on "the slice is empty": if the meeting continued after the
     // remount, the new entries make the slice non-empty and the pre-remount
     // entries would be silently dropped from the push.
-    action.readMeetingMessages.mockResolvedValue([entry(1000, "before"), entry(3000, "dup")]);
-    render({ meetingTranscript: [entry(3000, "dup"), entry(5000, "after")] });
+    //
+    // Timestamps anchored to Date.now() for the same reason as the test
+    // above - they must clear the PROCESS_STARTED_AT floor to still exercise
+    // "recovery found something", not the containment this fix adds.
+    const base = Date.now() + 10_000;
+    action.readMeetingMessages.mockResolvedValue([entry(base, "before"), entry(base + 2000, "dup")]);
+    render({ meetingTranscript: [entry(base + 2000, "dup"), entry(base + 4000, "after")] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     const row = action.insertQueueRow.mock.calls[0][0];
-    expect(row.transcriptStartAt).toBe(1000);
-    expect(row.transcriptEndAt).toBe(5000);
+    expect(row.transcriptStartAt).toBe(base);
+    expect(row.transcriptEndAt).toBe(base + 4000);
     expect(row.transcript.match(/dup/g)).toHaveLength(1);
   });
 
@@ -546,5 +557,63 @@ describe("session-key remount stability", () => {
     const [preRemountRow, postRemountRow] = action.insertQueueRow.mock.calls.map((c) => c[0]);
     expect(postRemountRow.sessionKey).toBe(preRemountRow.sessionKey);
     expect(postRemountRow.conversationId).toBe("c1");
+  });
+});
+
+// --- Final review fix: cross-process recovery containment ---------------
+
+describe("the recovery floor", () => {
+  it("CRITICAL: does not recover a span from a previous process, and writes no row when the in-memory transcript is empty", async () => {
+    // Mirrors the real messages table: a real `readMeetingMessages` filters
+    // by `timestamp > watermark` in SQL, so unlike the static mock used
+    // elsewhere in this file, this one must actually apply whatever
+    // watermark argument the hook passes - that argument is exactly what
+    // this test is checking. A span at timestamp 1000 stands in for a
+    // meeting that finished (and was autosaved) in an EARLIER run of the
+    // app, before this process's PROCESS_STARTED_AT.
+    const priorRunSpan = [entry(1000, "said in a previous run of the app")];
+    action.readMeetingMessages.mockImplementation(async (_id: string, wm: number) =>
+      priorRunSpan.filter((e) => e.timestamp > wm)
+    );
+
+    // The actual post-restart shape: the in-memory mirror is null (a fresh
+    // mount never had a live conversationId to begin with) and the id is
+    // recovered only through the persisted getActiveConversationId(), which
+    // - per the review - is never cleared on mount or app start and so
+    // survives a killed process.
+    conversationStorage.state.id = "c1";
+    render({ currentConversationId: null, meetingTranscript: [] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(10);
+
+    // readMeetingMessages was still called (recoveryId is present) but with
+    // a floor well above the prior run's span, so it returned nothing and no
+    // row was ever queued - the excluded meeting is a deliberate silent
+    // loss, not a mis-post onto whatever contact is selected in this run.
+    expect(action.readMeetingMessages).toHaveBeenCalled();
+    const [, floorArg] = action.readMeetingMessages.mock.calls[0];
+    expect(floorArg).toBeGreaterThan(priorRunSpan[0].timestamp);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("still recovers a span recorded after this process started", async () => {
+    // The companion positive case: a span timestamped comfortably after
+    // Date.now() at test time (which, under this suite's fake timers, is
+    // always >= PROCESS_STARTED_AT - see useMeetingLog.ts) must still come
+    // back through the same recovery path. This is the legitimate mid-call
+    // remount the floor is not supposed to touch.
+    const afterStart = Date.now() + 10_000;
+    action.readMeetingMessages.mockImplementation(async (_id: string, wm: number) =>
+      [entry(afterStart, "said after this process started")].filter((e) => e.timestamp > wm)
+    );
+    conversationStorage.state.id = "c1";
+    render({ currentConversationId: null, meetingTranscript: [] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
+    expect(action.insertQueueRow.mock.calls[0][0].transcript).toContain(
+      "said after this process started"
+    );
   });
 });

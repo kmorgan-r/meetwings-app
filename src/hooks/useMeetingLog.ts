@@ -44,6 +44,42 @@ type ProviderConfig = {
  */
 let sweptThisProcess = false;
 
+/**
+ * The floor below which the remount-recovery read (readMeetingMessages,
+ * below) refuses to reach - evaluated ONCE, at module import, so it survives
+ * a <Completion /> remount mid-session and still means "this run of the app".
+ *
+ * `getActiveConversationId()` is a bare localStorage read with no clear site
+ * on mount or app start - it survives a killed process. `readMeetingMessages`'
+ * SQL has no session bound and no LIMIT, only `timestamp > watermark`. And on
+ * a fresh install the queue is empty, so that watermark is 0. Put those three
+ * together and an app killed mid-meeting, before `meeting-ended` ever wrote a
+ * row, leaves that meeting's entries sitting in `messages` with nothing
+ * marking them consumed. The NEXT run's first empty-transcript trigger -
+ * any pill toggled on then off with no speech - would otherwise recover that
+ * entire prior meeting and stamp it with WHATEVER contact is selected now,
+ * not the one it was said to. That is a cross-customer mis-post, not a bug
+ * that degrades gracefully.
+ *
+ * Flooring the recovery read at process start closes it: a legitimate
+ * mid-call remount is the same process, so its entries were written after
+ * this constant was captured and stay above the floor. A prior run's
+ * unwritten meeting was written before it and drops out. The excluded span
+ * is not silently swallowed alongside a written one - the in-memory
+ * transcript is empty in exactly this case (that is WHY recovery ran at
+ * all), so there is no live meeting to attach it to. It was already outside
+ * the write-ahead guarantee by construction: no row was ever queued for it,
+ * so there is nothing here to roll back or retry - this is a deliberate
+ * silent loss of an orphaned span, not a mis-post.
+ *
+ * Deliberately NOT applied to `sliceTranscript` below: that reads the
+ * in-memory `entries` snapshot alone, which cannot contain anything from a
+ * previous process (the array does not survive one), so flooring it would
+ * only risk dropping a real meeting that happens to start near process
+ * launch for no safety benefit.
+ */
+const PROCESS_STARTED_AT = Date.now();
+
 /** Test-only. Lets a suite start each case from a clean process state. */
 export function resetMeetingLogSweepGuard(): void {
   sweptThisProcess = false;
@@ -260,11 +296,17 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       const recoveryId = conversationId ?? getActiveConversationId();
       let all = entries;
       if (recoveryId) {
+        // Floored at PROCESS_STARTED_AT (see its own comment above) for this
+        // call ONLY - sliceTranscript below keeps the plain `watermark`. The
+        // in-memory snapshot can never hold a previous run's entries, so
+        // there is nothing there to protect against; only this DB read can
+        // reach back across a process boundary into a different meeting.
+        const recoveryFloor = Math.max(watermark, PROCESS_STARTED_AT);
         // A THROW here is not an empty result. Letting it collapse into
         // "no meeting" loses the meeting silently, which is the exact failure
         // this path was added to close - so it propagates to the catch below
         // and writes no row rather than a wrong one.
-        const recovered = await readMeetingMessages(recoveryId, watermark);
+        const recovered = await readMeetingMessages(recoveryId, recoveryFloor);
         if (recovered.length > 0) {
           const seen = new Set(entries.map((e) => e.timestamp));
           all = [...recovered.filter((e) => !seen.has(e.timestamp)), ...entries];
