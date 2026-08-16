@@ -68,7 +68,10 @@ mod tests {
             .into_iter()
             .find(|m| m.description == "create_meeting_log_queue")
             .expect("meeting log queue migration must be registered");
-        assert_eq!(queue.version, 12, "meeting log queue migration must be version 12");
+        assert_eq!(
+            queue.version, 12,
+            "meeting log queue migration must be version 12"
+        );
         assert_eq!(
             queue.sql,
             include_str!("migrations/meeting-log-queue.sql"),
