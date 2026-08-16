@@ -106,9 +106,15 @@ export default function OdooSettings() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      // Reset so a config that just became complete does not leave the
-      // stranded line behind from a previous read.
+      // Reset BOTH, not just strandedTotal: saveOdooConfig does not validate
+      // completeness, so a complete config can go complete -> incomplete on
+      // save (e.g. clearing the api key) without ever passing through
+      // "absent". Without clearing queue too, the previous instance's
+      // four-group block survives into the incomplete branch below and
+      // renders stale counts for credentials the page no longer has, right
+      // next to the stranded line telling the user to finish setting up.
       setStrandedTotal(0);
+      setQueue(null);
       try {
         // NOT currentInstance(): it wraps requireOdooConfig, which THROWS for
         // exactly the half-filled config a user comes to this page to fix - so

@@ -379,4 +379,31 @@ describe("the queue status block", () => {
     render(<OdooSettings />);
     expect(await screen.findByLabelText("URL")).toBeInTheDocument();
   });
+
+  // Review finding (Critical, round 1): the effect reset strandedTotal at the
+  // top of every run but never reset queue. A save that makes a previously
+  // complete config incomplete (e.g. clearing the api key) takes the effect's
+  // else branch and populates strandedTotal, but the PREVIOUS instance's
+  // queue object survives - so the four-group block kept rendering stale
+  // counts for an instance the page no longer has credentials for, at the
+  // same time as the stranded line telling the user to finish setting Odoo
+  // up. Neither six existing case exercises a state transition on an
+  // already-mounted component; each renders once against a fixed mock.
+  it("clears the previous instance's queue counts when a save makes the config incomplete", async () => {
+    getQueueCounts.mockResolvedValue({
+      waiting: 2, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+    });
+    render(<OdooSettings />);
+    await screen.findByTestId("meeting-log-queue-status");
+
+    storage.loadOdooConfigState.mockResolvedValue({
+      state: "incomplete", config: null, missing: ["apiKey"],
+    });
+    countAllQueued.mockResolvedValue(2);
+
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByTestId("meeting-log-stranded")).toBeInTheDocument();
+    expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
+  });
 });
