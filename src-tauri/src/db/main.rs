@@ -80,5 +80,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/odoo-contacts.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 12: Write-ahead queue for meetings logged to Odoo
+        Migration {
+            version: 12,
+            description: "create_meeting_log_queue",
+            sql: include_str!("migrations/meeting-log-queue.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

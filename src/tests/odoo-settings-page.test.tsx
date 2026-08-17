@@ -9,11 +9,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // tests" rather than failures. See src/tests/useMeetingAutoRecord.lifecycle.test.tsx:12-15.
 const storage = vi.hoisted(() => ({
   loadOdooConfig: vi.fn(async () => null as unknown),
+  loadOdooConfigState: vi.fn(async () => ({ state: "absent", config: null }) as unknown),
   saveOdooConfig: vi.fn(async () => ({ instanceChanged: false, becameUsable: false })),
   clearOdooConfig: vi.fn(async () => {}),
   instanceFingerprint: vi.fn(() => "http://h:8069|odoo"),
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => storage);
+
+// Task 12's queue status block. Mocked here (not left to reach a real
+// getDatabase()) for the same reason as the odoo-contacts.action mock below:
+// without it every test in this file fails at render, not just the new ones.
+const { getQueueCounts, countAllQueued } = vi.hoisted(() => ({
+  getQueueCounts: vi.fn(),
+  countAllQueued: vi.fn(async () => 0),
+}));
+vi.mock("@/lib/database/meeting-log.action", () => ({ getQueueCounts, countAllQueued }));
 
 // The EMITTING half of the cross-window notification. Task 12 covers the
 // listening half; without this suite covering the emit, a save handler that
@@ -70,7 +80,14 @@ beforeEach(() => {
   odoo.runSync.mockResolvedValue(SYNCED_3);
   odoo.testOdooConnection.mockResolvedValue(7);
   storage.loadOdooConfig.mockResolvedValue(null);
+  storage.loadOdooConfigState.mockResolvedValue({
+    state: "complete",
+    config: { url: "http://h:8069", db: "odoo", login: "l", apiKey: "k" },
+  });
   storage.saveOdooConfig.mockResolvedValue({ instanceChanged: false, becameUsable: false });
+  getQueueCounts.mockResolvedValue({
+    waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+  });
   setOdooRedactor([KEY]);
 });
 
@@ -298,5 +315,95 @@ describe("the Odoo settings page", () => {
 
     expect(screen.getByText(/3 contacts updated/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/sync failed/i);
+  });
+});
+
+describe("the queue status block", () => {
+  it("renders nothing when the queue is empty", async () => {
+    render(<OdooSettings />);
+    await waitFor(() => expect(getQueueCounts).toHaveBeenCalled());
+    expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
+  });
+
+  it("words each group separately", async () => {
+    getQueueCounts.mockResolvedValue({
+      waiting: 2, needsAttention: 1, unassigned: 3, otherInstance: 4,
+      lastError: "ODOO_FAULT: partner deleted",
+    });
+    render(<OdooSettings />);
+    const block = await screen.findByTestId("meeting-log-queue-status");
+    expect(block).toHaveTextContent("2 meetings waiting to be logged");
+    expect(block).toHaveTextContent("1 meeting needs attention");
+    expect(block).toHaveTextContent("3 meetings not assigned to a contact");
+    expect(block).toHaveTextContent("4 meetings queued for a different Odoo database");
+  });
+
+  it("surfaces the most recent redacted error beside the attention group", async () => {
+    getQueueCounts.mockResolvedValue({
+      waiting: 0, needsAttention: 1, unassigned: 0, otherInstance: 0,
+      lastError: "ODOO_FAULT: partner deleted",
+    });
+    render(<OdooSettings />);
+    expect(await screen.findByText(/ODOO_FAULT: partner deleted/)).toBeInTheDocument();
+  });
+
+  it("omits a group whose count is zero", async () => {
+    getQueueCounts.mockResolvedValue({
+      waiting: 1, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+    });
+    const block = await (render(<OdooSettings />), screen.findByTestId("meeting-log-queue-status"));
+    expect(block).toHaveTextContent("waiting to be logged");
+    expect(block).not.toHaveTextContent("needs attention");
+    expect(block).not.toHaveTextContent("not assigned");
+  });
+
+  it("shows the stranded total when the credentials are half-filled", async () => {
+    // A not-configured push never claims, so `attempts` never moves and no row
+    // can ever escalate into "needs attention". Without this line the backlog
+    // is invisible exactly when it is largest - on the page the user opened to
+    // fix it.
+    storage.loadOdooConfigState.mockResolvedValue({
+      state: "incomplete", config: null, missing: ["apiKey"],
+    });
+    countAllQueued.mockResolvedValue(3);
+    render(<OdooSettings />);
+    expect(await screen.findByTestId("meeting-log-stranded")).toHaveTextContent(
+      "3 meetings waiting to be logged"
+    );
+  });
+
+  it("does not blow up the page when the count read fails", async () => {
+    // A queue count is diagnostic. Failing it must not take the credentials
+    // form - the thing the user came here to fix - down with it.
+    getQueueCounts.mockRejectedValue(new Error("db locked"));
+    render(<OdooSettings />);
+    expect(await screen.findByLabelText("URL")).toBeInTheDocument();
+  });
+
+  // Review finding (Critical, round 1): the effect reset strandedTotal at the
+  // top of every run but never reset queue. A save that makes a previously
+  // complete config incomplete (e.g. clearing the api key) takes the effect's
+  // else branch and populates strandedTotal, but the PREVIOUS instance's
+  // queue object survives - so the four-group block kept rendering stale
+  // counts for an instance the page no longer has credentials for, at the
+  // same time as the stranded line telling the user to finish setting Odoo
+  // up. Neither six existing case exercises a state transition on an
+  // already-mounted component; each renders once against a fixed mock.
+  it("clears the previous instance's queue counts when a save makes the config incomplete", async () => {
+    getQueueCounts.mockResolvedValue({
+      waiting: 2, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+    });
+    render(<OdooSettings />);
+    await screen.findByTestId("meeting-log-queue-status");
+
+    storage.loadOdooConfigState.mockResolvedValue({
+      state: "incomplete", config: null, missing: ["apiKey"],
+    });
+    countAllQueued.mockResolvedValue(2);
+
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(await screen.findByTestId("meeting-log-stranded")).toBeInTheDocument();
+    expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
   });
 });

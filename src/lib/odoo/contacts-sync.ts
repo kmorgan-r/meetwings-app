@@ -10,6 +10,7 @@ import {
 import type { OdooContact, SyncResult } from "@/types";
 import type { OdooClient } from "./client";
 import { odooError, OdooError, toOdooError } from "./errors";
+import { many2one } from "./many2one";
 import { computeWatermark } from "./watermark";
 import type { XmlRpcValue } from "./xmlrpc-codec";
 
@@ -30,17 +31,6 @@ export const PARTNER_FIELDS = [
 /** Odoo returns `false` for an unset field of any type. */
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-/**
- * A many2one is `[id, display_name]` or `false`. Nothing else is readable, and
- * guessing would put the wrong company name beside a contact.
- */
-function many2one(value: unknown): { id: number; name: string } | null {
-  if (Array.isArray(value) && typeof value[0] === "number" && typeof value[1] === "string") {
-    return { id: value[0], name: value[1] };
-  }
-  return null;
 }
 
 export function parsePartnerRow(raw: unknown): OdooContact {

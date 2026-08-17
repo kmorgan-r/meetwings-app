@@ -239,6 +239,13 @@ export async function failSync(
 
 export async function purgeOtherInstances(instance: string): Promise<void> {
   const db = await getDatabase();
+  // meeting_log_queue is DELIBERATELY NOT PURGED HERE. It is the one table
+  // whose other-instance rows must survive a credentials change: a queued
+  // meeting is unlogged WORK, not a cache, and this function runs on every sync
+  // (contacts-sync.ts:106). Deleting those rows would destroy exactly what the
+  // write-ahead queue exists to protect, on a routine credentials edit. The
+  // push re-checks `instance` before every write instead, and the /odoo page
+  // surfaces the stranded rows under their own wording.
   await db.execute("DELETE FROM odoo_contacts WHERE instance <> ?", [instance]);
   await db.execute("DELETE FROM odoo_sync_state WHERE instance <> ?", [instance]);
   await db.execute("DELETE FROM odoo_selected_target WHERE instance <> ?", [instance]);

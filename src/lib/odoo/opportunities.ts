@@ -1,16 +1,10 @@
 import type { OdooOpportunity } from "@/types";
 import type { OdooClient } from "./client";
 import { odooError } from "./errors";
+import { many2one } from "./many2one";
 import type { XmlRpcValue } from "./xmlrpc-codec";
 
 export const OPPORTUNITY_LIMIT = 20;
-
-function many2one(value: unknown): { id: number; name: string } | null {
-  if (Array.isArray(value) && typeof value[0] === "number" && typeof value[1] === "string") {
-    return { id: value[0], name: value[1] };
-  }
-  return null;
-}
 
 /**
  * The one live call the picker makes when you select a client.

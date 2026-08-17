@@ -57,4 +57,25 @@ mod tests {
             "odoo migration must embed migrations/odoo-contacts.sql"
         );
     }
+
+    /// Same reasoning as the version-11 test above: the two generic checks
+    /// bound only the SHAPE of the vec. A queue migration mistakenly
+    /// registered as version 11 would collide with an already-applied
+    /// checksum and brick Database.load for every existing user.
+    #[test]
+    fn meeting_log_queue_migration_is_version_12_and_points_at_its_own_file() {
+        let queue = migrations()
+            .into_iter()
+            .find(|m| m.description == "create_meeting_log_queue")
+            .expect("meeting log queue migration must be registered");
+        assert_eq!(
+            queue.version, 12,
+            "meeting log queue migration must be version 12"
+        );
+        assert_eq!(
+            queue.sql,
+            include_str!("migrations/meeting-log-queue.sql"),
+            "meeting log queue migration must embed migrations/meeting-log-queue.sql"
+        );
+    }
 }
