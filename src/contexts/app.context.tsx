@@ -10,7 +10,7 @@ import {
 import { getResponseSettings, updateLanguage } from "@/lib/storage/response-settings.storage";
 import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
-import { getShortcutsConfig } from "@/lib/storage";
+import { pushShortcutsConfig } from "@/lib/functions/shortcuts.function";
 import {
   loadSecureAIConfigs,
   loadSecureSTTConfigs,
@@ -214,8 +214,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           hasLicense: hasActiveLicense,
         });
 
-        const config = getShortcutsConfig();
-        await invoke("update_shortcuts", { config });
+        // Sole startup owner of the shortcut registration - see
+        // pushShortcutsConfig for why only the main window pushes.
+        await pushShortcutsConfig();
       } catch (error) {
         console.error("Failed to synchronize license state:", error);
       }
