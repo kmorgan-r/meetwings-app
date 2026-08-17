@@ -49,9 +49,21 @@ jobs:
 
             Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
 
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+            Post your review as a PR comment like this, and only like this:
+            1. Write the review body to a file with the Write tool, e.g. `/tmp/review.md`.
+            2. Run `gh pr comment <PR NUMBER> --body-file /tmp/review.md` with your Bash tool.
+
+            Do NOT pass the review inline via `--body "..."`. Markdown tables (`|`) and code
+            fences (backticks) in the body trip the Bash permission matcher, the call is
+            denied, and the review is silently lost even though the job reports success.
 
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-          claude_args: '--allowed-tools "Read,Grep,Glob,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+          # Write is required: it is the only way to build the review body as a file for
+          # `gh pr comment --body-file`. Without it the agent can only try an inline
+          # `--body "..."`, which the Bash permission matcher denies on any review
+          # containing tables or code fences (16 denials, 0 comments posted, on PR #41).
+          # The inline-comment MCP tool feeds the action's own "Post buffered inline
+          # comments" step, a second delivery path that was previously unreachable.
+          claude_args: '--allowed-tools "Read,Grep,Glob,Write,mcp__github_inline_comment__create_inline_comment,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
 
