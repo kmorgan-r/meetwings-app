@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { useTitles, useSystemAudio } from "@/hooks";
 import { listen } from "@tauri-apps/api/event";
 import { safeLocalStorage, migrateLocalStorageToSQLite } from "@/lib";
-import { getShortcutsConfig } from "@/lib/storage";
-import { invoke } from "@tauri-apps/api/core";
 
 export const useApp = () => {
   const systemAudio = useSystemAudio();
@@ -11,19 +9,8 @@ export const useApp = () => {
   // Initialize title management
   useTitles();
 
-  // Initialize shortcuts from localStorage on app startup
-  useEffect(() => {
-    const initializeShortcuts = async () => {
-      try {
-        const config = getShortcutsConfig();
-        await invoke("update_shortcuts", { config });
-      } catch (error) {
-        console.error("Failed to initialize shortcuts:", error);
-      }
-    };
-
-    initializeShortcuts();
-  }, []);
+  // Shortcuts are pushed once by AppProvider, which mounts above every route.
+  // Doing it here too made the main window register the whole set twice over.
 
   // Migrate localStorage chat history to SQLite on app startup
   useEffect(() => {
