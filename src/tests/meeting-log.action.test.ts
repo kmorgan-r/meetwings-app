@@ -674,6 +674,43 @@ describe("listActionableRows", () => {
 
     expect(rows[0]).toMatchObject({ id: "old-failed" });
   });
+
+  it("ranks an ESCALATED PENDING row above newer rows too, not just failed", async () => {
+    // The "failed" sibling above only exercises the CASE's first needs-attention
+    // arm (`status = 'failed' THEN 0`). This is the second: `status = 'pending'
+    // AND attempts >= ?2 THEN 0`. Nothing else in the suite seeds an escalated
+    // pending row into a starvation scenario, so a mutant deleting that WHEN
+    // line survives every other case. 210 newer rows, not 200, for the same
+    // reason as the sibling case: at exactly 200 the total is 201 = LIMIT 201,
+    // so the row comes back regardless of the CASE. This also proves `?2`
+    // (ESCALATE_AFTER_ATTEMPTS) is bound correctly inside the ORDER BY, which
+    // nothing else in the suite proves.
+    seed({
+      id: "old-escalated", session_key: "oe", status: "pending",
+      attempts: ESCALATE_AFTER_ATTEMPTS, created_at: NOW,
+    });
+    for (let i = 0; i < 210; i += 1) {
+      seed({ id: `v${i}`, session_key: `vk${i}`, status: "unassigned", created_at: NOW + 1 + i });
+    }
+
+    const rows = await listActionableRows(INSTANCE);
+
+    expect(rows[0]).toMatchObject({ id: "old-escalated" });
+  });
+
+  it("orders same-group rows newest-first", async () => {
+    // Group placement and the cap length are both covered elsewhere, but
+    // nothing asserts WHICH rows come back within a single group - a mutant
+    // flipping the trailing `created_at DESC` to ASC survives every other
+    // case in this file.
+    seed({ id: "u-old", session_key: "uo", status: "unassigned", created_at: NOW });
+    seed({ id: "u-mid", session_key: "um", status: "unassigned", created_at: NOW + 10 });
+    seed({ id: "u-new", session_key: "un", status: "unassigned", created_at: NOW + 20 });
+
+    const rows = await listActionableRows(INSTANCE);
+
+    expect(rows.map((r) => r.id)).toEqual(["u-new", "u-mid", "u-old"]);
+  });
 });
 
 describe("a deleted row is excluded by every shipped predicate", () => {
@@ -763,6 +800,23 @@ describe("pruneTranscripts", () => {
       expect(await getQueueRow("r")).toMatchObject({ transcript: "text" });
     }
   );
+
+  it("blanks a past-cutoff row whose transcript is ALREADY blank but summary_json is not", async () => {
+    // The predicate is `(transcript <> '' OR summary_json IS NOT NULL)`. Every
+    // other case here has both columns non-empty together, so a mutant
+    // dropping the OR arm entirely (leaving only `transcript <> ''`) survives
+    // them all. That mutant would strand the AI digest - title, summary,
+    // decisions, action items, participants, named people - on a row the user
+    // believes was pruned.
+    seed({
+      id: "digest-only", session_key: "digest-only", status: "sent",
+      transcript: "", summary_json: '{"title":"Q3 renewal"}', created_at: OLD,
+    });
+
+    expect(await pruneTranscripts(NOW)).toBe(1);
+
+    expect(await getQueueRow("digest-only")).toMatchObject({ summary_json: null });
+  });
 
   it("leaves a past-cutoff DELETED row alone", async () => {
     // The deliberate negative. `deleted` is absent from the predicate because
