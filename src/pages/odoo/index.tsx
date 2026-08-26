@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { emit } from "@tauri-apps/api/event";
 import { Button, Input, Label } from "@/components";
 import { PageLayout } from "@/layouts";
@@ -307,6 +308,9 @@ export default function OdooSettings() {
             {queue.otherInstance > 0 && (
               <p>{plural(queue.otherInstance)} queued for a different Odoo database</p>
             )}
+            <Link to="/meeting-log" className="underline">
+              Open the meeting log
+            </Link>
           </div>
         )}
     </PageLayout>

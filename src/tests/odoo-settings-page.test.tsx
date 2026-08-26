@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // `vi.hoisted`, not a bare `const`. Vitest hoists every `vi.mock` call above the
@@ -69,6 +70,16 @@ import OdooSettings from "@/pages/odoo";
 
 const KEY = 'a1b2&c3d4<e5f6>g7h8"i9j0';
 
+// The counts block now links to /meeting-log, and <Link> throws outside a
+// Router exactly as useNavigate does. See the @/layouts stub above.
+function renderPage() {
+  return render(
+    <MemoryRouter>
+      <OdooSettings />
+    </MemoryRouter>
+  );
+}
+
 const SYNCED_3 = { ran: true, changed: 3, fetched: 3, skipped: 0, clampSkipped: false };
 
 beforeEach(() => {
@@ -104,7 +115,7 @@ describe("saving credentials", () => {
   // is the only thing that tells it to re-resolve.
   it("notifies the other window when the instance changed", async () => {
     storage.saveOdooConfig.mockResolvedValue({ instanceChanged: true, becameUsable: false });
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
   });
@@ -114,13 +125,13 @@ describe("saving credentials", () => {
   // a state that deliberately offers no Refresh, until the app restarts.
   it("notifies when a half-filled config became usable, fingerprint unchanged", async () => {
     storage.saveOdooConfig.mockResolvedValue({ instanceChanged: false, becameUsable: true });
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
   });
 
   it("does not notify when nothing meaningful changed", async () => {
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     await waitFor(() => expect(storage.saveOdooConfig).toHaveBeenCalled());
     expect(emit).not.toHaveBeenCalled();
@@ -131,7 +142,7 @@ describe("saving credentials", () => {
   // of which throw raw, and it has no try of its own.
   it("reports a failed save instead of rejecting out of the click handler", async () => {
     storage.saveOdooConfig.mockRejectedValue(new Error("store is locked"));
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     expect(await screen.findByText(/ODOO_INTERNAL/)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("i9j0");
@@ -153,7 +164,7 @@ describe("saving credentials", () => {
       })
     );
 
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
 
@@ -175,13 +186,13 @@ describe("saving credentials", () => {
   // and a click that did nothing was the absence of an error line. Credential
   // entry is the one screen where "did that work?" must be answerable.
   it("shows a success confirmation after a successful save", async () => {
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     expect(await screen.findByText(/saved/i)).toBeInTheDocument();
   });
 
   it("clears the success confirmation on the next edit", async () => {
-    render(<OdooSettings />);
+    renderPage();
     await fillAndSave();
     expect(await screen.findByText(/saved/i)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText(/url/i), "1");
@@ -191,7 +202,7 @@ describe("saving credentials", () => {
 
 describe("the Odoo settings page", () => {
   it("warns that the store is plaintext on disk, where the key is entered", async () => {
-    render(<OdooSettings />);
+    renderPage();
     expect(await screen.findByText(/not encrypted at rest/i)).toBeInTheDocument();
   });
 
@@ -202,7 +213,7 @@ describe("the Odoo settings page", () => {
       login: "bob",
       apiKey: KEY,
     });
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
     expect(await screen.findByText(/uid 7/i)).toBeInTheDocument();
   });
@@ -213,7 +224,7 @@ describe("the Odoo settings page", () => {
     odoo.testOdooConnection.mockRejectedValue(
       odooError("ODOO_AUTH_FAILED", "Odoo rejected the credentials")
     );
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
     expect(await screen.findByText(/ODOO_AUTH_FAILED/)).toBeInTheDocument();
   });
@@ -222,14 +233,14 @@ describe("the Odoo settings page", () => {
     odoo.testOdooConnection.mockRejectedValue(
       odooError("ODOO_FAULT", `traceback with ${KEY} inside`)
     );
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
     await screen.findByText(/ODOO_FAULT/);
     expect(document.body.textContent).not.toContain("i9j0");
   });
 
   it("reports what a manual sync did", async () => {
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     await waitFor(() => expect(odoo.runSync).toHaveBeenCalledWith("settings"));
     expect(await screen.findByText(/3 contacts updated/i)).toBeInTheDocument();
@@ -243,7 +254,7 @@ describe("the Odoo settings page", () => {
       skipped: 0,
       clampSkipped: false,
     });
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/no contacts changed/i)).toBeInTheDocument();
   });
@@ -256,7 +267,7 @@ describe("the Odoo settings page", () => {
       skipped: 2,
       clampSkipped: false,
     });
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/2 could not be read/i)).toBeInTheDocument();
   });
@@ -271,7 +282,7 @@ describe("the Odoo settings page", () => {
   // covered on the app-start path in useOdooTarget.test.tsx.
   it("does not describe a sync that never ran as a completed one", async () => {
     odoo.runSync.mockResolvedValue({ ran: false, reason: "skip-in-meeting" });
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/did not run/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/contacts updated/i);
@@ -283,7 +294,7 @@ describe("the Odoo settings page", () => {
     odoo.runSync.mockRejectedValue(
       new OdooError("ODOO_SYNC_BUSY", "A sync is already running in another window", {})
     );
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/already running/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/failed/i);
@@ -302,7 +313,7 @@ describe("the Odoo settings page", () => {
       })
     );
 
-    render(<OdooSettings />);
+    renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/3 contacts updated/i)).toBeInTheDocument();
 
@@ -320,7 +331,7 @@ describe("the Odoo settings page", () => {
 
 describe("the queue status block", () => {
   it("renders nothing when the queue is empty", async () => {
-    render(<OdooSettings />);
+    renderPage();
     await waitFor(() => expect(getQueueCounts).toHaveBeenCalled());
     expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
   });
@@ -330,7 +341,7 @@ describe("the queue status block", () => {
       waiting: 2, needsAttention: 1, unassigned: 3, otherInstance: 4,
       lastError: "ODOO_FAULT: partner deleted",
     });
-    render(<OdooSettings />);
+    renderPage();
     const block = await screen.findByTestId("meeting-log-queue-status");
     expect(block).toHaveTextContent("2 meetings waiting to be logged");
     expect(block).toHaveTextContent("1 meeting needs attention");
@@ -343,7 +354,7 @@ describe("the queue status block", () => {
       waiting: 0, needsAttention: 1, unassigned: 0, otherInstance: 0,
       lastError: "ODOO_FAULT: partner deleted",
     });
-    render(<OdooSettings />);
+    renderPage();
     expect(await screen.findByText(/ODOO_FAULT: partner deleted/)).toBeInTheDocument();
   });
 
@@ -351,7 +362,7 @@ describe("the queue status block", () => {
     getQueueCounts.mockResolvedValue({
       waiting: 1, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
     });
-    const block = await (render(<OdooSettings />), screen.findByTestId("meeting-log-queue-status"));
+    const block = await (renderPage(), screen.findByTestId("meeting-log-queue-status"));
     expect(block).toHaveTextContent("waiting to be logged");
     expect(block).not.toHaveTextContent("needs attention");
     expect(block).not.toHaveTextContent("not assigned");
@@ -366,7 +377,7 @@ describe("the queue status block", () => {
       state: "incomplete", config: null, missing: ["apiKey"],
     });
     countAllQueued.mockResolvedValue(3);
-    render(<OdooSettings />);
+    renderPage();
     expect(await screen.findByTestId("meeting-log-stranded")).toHaveTextContent(
       "3 meetings waiting to be logged"
     );
@@ -376,7 +387,7 @@ describe("the queue status block", () => {
     // A queue count is diagnostic. Failing it must not take the credentials
     // form - the thing the user came here to fix - down with it.
     getQueueCounts.mockRejectedValue(new Error("db locked"));
-    render(<OdooSettings />);
+    renderPage();
     expect(await screen.findByLabelText("URL")).toBeInTheDocument();
   });
 
@@ -393,7 +404,7 @@ describe("the queue status block", () => {
     getQueueCounts.mockResolvedValue({
       waiting: 2, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
     });
-    render(<OdooSettings />);
+    renderPage();
     await screen.findByTestId("meeting-log-queue-status");
 
     storage.loadOdooConfigState.mockResolvedValue({

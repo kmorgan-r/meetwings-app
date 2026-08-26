@@ -16,6 +16,7 @@ import {
   Speakers,
   Language,
   Odoo,
+  MeetingLog,
 } from "@/pages";
 import { DashboardLayout } from "@/layouts";
 
@@ -40,6 +41,7 @@ export default function AppRoutes() {
           <Route path="/language" element={<Language />} />
           <Route path="/api-setup" element={<DevSpace />} />
           <Route path="/odoo" element={<Odoo />} />
+          <Route path="/meeting-log" element={<MeetingLog />} />
           {/* Redirect old route for backward compatibility */}
           <Route path="/dev-space" element={<Navigate to="/api-setup" replace />} />
         </Route>
