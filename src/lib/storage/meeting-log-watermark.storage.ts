@@ -31,6 +31,16 @@ export function getSkipWatermark(): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * Monotonic. `Math.max` against the stored value rather than an unconditional
+ * write: a caller that snapshots a SUB-RANGE would otherwise walk this
+ * watermark backward, and the next trigger would re-slice entries a previous
+ * trigger already consumed - posting one customer's transcript onto whatever
+ * contact is selected for a LATER meeting. Safe today only because the single
+ * caller derives its value from a snapshot that grows monotonically within a
+ * session; this guard costs nothing and removes the assumption.
+ */
 export function setSkipWatermark(ts: number): void {
-  safeLocalStorage.setItem(STORAGE_KEYS.MEETING_LOG_SKIP_WATERMARK, String(ts));
+  const next = Math.max(getSkipWatermark(), ts);
+  safeLocalStorage.setItem(STORAGE_KEYS.MEETING_LOG_SKIP_WATERMARK, String(next));
 }
