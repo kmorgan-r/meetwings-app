@@ -253,6 +253,10 @@ function noticeElement(id: string): HTMLElement {
 }
 
 beforeEach(() => {
+  // Any test that installs fake timers restores them itself; this is the net
+  // for one that throws before its restore runs. A leaked fake clock makes
+  // every later `waitFor` in the file hang until the suite times out.
+  vi.useRealTimers();
   // clearAllMocks wipes the CALL LOG and leaves implementations, so a
   // mockResolvedValue from one test would still be in force for every test
   // after it. Re-establish every default explicitly.
@@ -431,6 +435,46 @@ describe("which actions a row offers", () => {
     // Recovery is reclaimStaleSending in the main window; an age-gated Delete
     // here would race a live push that already holds its row in memory.
     expect(stale.getByRole("button", { name: "Delete" })).toBeDisabled();
+  });
+
+  it("flips a fresh claim to interrupted with no re-read and no user action", async () => {
+    // `shouldAdvanceTime` so renderPage's waitFor still polls under a fake
+    // clock. The clock has to be faked at all because advanceTimersByTime must
+    // move `Date.now()` as well as fire the interval - a build whose `toFake`
+    // excluded Date would run the tick and read the same instant straight back,
+    // and the assertion below would pass while proving nothing. Hence the
+    // explicit check that the clock moved.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      db.listActionableRows.mockResolvedValue([
+        row({ id: "live", status: "sending", claimed_at: Date.now() }),
+      ]);
+      await renderPage();
+
+      const startedAt = Date.now();
+      const live = await findRow("live");
+      expect(live.getByText("Sending…")).toBeInTheDocument();
+      const readsBefore = db.listActionableRows.mock.calls.length;
+
+      await act(async () => {
+        vi.advanceTimersByTime(STALE_CLAIM_MS + 60_000);
+      });
+
+      expect(Date.now() - startedAt).toBeGreaterThan(STALE_CLAIM_MS);
+      expect(
+        rowOf("live").getByText(
+          "Interrupted. This will be retried the next time Meetwings starts."
+        )
+      ).toBeInTheDocument();
+      expect(rowOf("live").queryByText("Sending…")).toBeNull();
+      // THE MUTANT THIS KILLS: delete the page's STALE_TICK_MS interval, or
+      // hand QueueRow a `now` it computes itself behind the memo, and this row
+      // keeps saying "Sending…" indefinitely. Nothing else could have repainted
+      // it - the row object never changed and the list was never re-read.
+      expect(db.listActionableRows).toHaveBeenCalledTimes(readsBefore);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

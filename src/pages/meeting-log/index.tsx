@@ -11,7 +11,7 @@ import {
 } from "@/lib/database/meeting-log.action";
 import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { reportOdooError } from "@/lib/odoo/errors";
-import { groupOf, type QueueGroup } from "@/lib/odoo/meeting-log";
+import { groupOf, isClaimStale, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
   assignMeetingLog,
   deleteMeetingLog,
@@ -45,6 +45,17 @@ import { meetingDateOf, type TranscriptView } from "./components/QueueRow";
 
 /** LIMIT 201 in the SQL: 200 render, and the 201st proves more are hidden. */
 const PAGE_CAP = 200;
+
+/**
+ * How often the page re-reads the clock while a claim is outstanding.
+ *
+ * Nothing here polls the database - the tick exists solely so a row whose claim
+ * has already expired stops saying "Sending..." while the window sits
+ * untouched. STALE_CLAIM_MS is minutes, so the delay this adds to the sentence
+ * is a rounding error against it, and the tick stops the moment no row is
+ * `sending`.
+ */
+const STALE_TICK_MS = 30_000;
 
 const REMAINDER_LINE = "Showing 200 of the meetings waiting — more are hidden.";
 
@@ -575,6 +586,34 @@ export default function MeetingLog() {
     return merged;
   }, [rows, pinned]);
 
+  /**
+   * A clock, ticking only while some row holds a claim.
+   *
+   * The row cannot do this itself: `Date.now()` is not a prop, so
+   * `propsAreEqual` never sees it move and a memoised row freezes its verdict
+   * at whatever the clock read on its last DB-driven render. Before this, a
+   * claim that expired while the dashboard sat in the foreground kept
+   * rendering "Sending..." until an unrelated reload - a focus event, or an
+   * action on some other row - happened to repaint it.
+   *
+   * Gated on `hasClaim` so the common case (nothing sending) runs no timer at
+   * all. It keeps ticking once a row IS stale, which is wasted work for one
+   * row's worth of already-correct text; stopping it would mean tracking which
+   * rows have already flipped, and the timer is one setState every 30s.
+   */
+  const hasClaim = useMemo(
+    () => rendered.some((row) => row.status === "sending" && row.claimed_at !== null),
+    [rendered]
+  );
+
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!hasClaim) return;
+    const id = setInterval(() => setNow(Date.now()), STALE_TICK_MS);
+    return () => clearInterval(id);
+  }, [hasClaim]);
+
   const grouped = useMemo(() => {
     const buckets = new Map<Exclude<QueueGroup, null>, MeetingLogListRow[]>(
       GROUPS.map((g) => [g.key, []])
@@ -696,6 +735,7 @@ export default function MeetingLog() {
                     targetName={targetNameOf(row, contacts)}
                     instance={instance}
                     busy={busy.has(row.id)}
+                    stale={isClaimStale(row, now)}
                     outcome={results.get(row.id)?.text ?? null}
                     transcript={transcript?.id === row.id ? transcript.view : null}
                     onRetry={handleRetry}

@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import { Button } from "@/components";
-import { ESCALATE_AFTER_ATTEMPTS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
+import { ESCALATE_AFTER_ATTEMPTS } from "@/lib/odoo/meeting-log";
 import type { MeetingLogListRow } from "@/types";
 
 /**
@@ -26,6 +26,12 @@ export interface QueueRowProps {
   /** The fingerprint the page resolved this cycle, not the one it mounted with. */
   instance: string;
   busy: boolean;
+  /**
+   * Whether this row's claim has outlived STALE_CLAIM_MS, as of the page's
+   * ticking clock. A boolean rather than the clock itself: a `now` prop changes
+   * on every tick and would re-render all 200 rows to move one row's sentence.
+   */
+  stale: boolean;
   /**
    * The last action's outcome line, or `null`.
    *
@@ -55,21 +61,13 @@ export function meetingDateOf(row: MeetingLogListRow): string {
   return new Date(row.meeting_started_at ?? row.transcript_start_at).toLocaleString();
 }
 
-function isStale(row: MeetingLogListRow, now: number): boolean {
-  return (
-    row.status === "sending" &&
-    row.claimed_at !== null &&
-    now - row.claimed_at > STALE_CLAIM_MS
-  );
-}
-
-function statusLine(row: MeetingLogListRow, busy: boolean, now: number): string {
+function statusLine(row: MeetingLogListRow, busy: boolean, stale: boolean): string {
   if (busy) return "Sending…";
   // Closing the dashboard window mid-push destroys the JS context with no
   // `finally` reached. Recovery is the main window's reclaim at next launch,
   // which this page is forbidden to call - so "Sending…" here would be untrue
   // until the app restarts.
-  if (isStale(row, now)) {
+  if (stale) {
     return "Interrupted. This will be retried the next time Meetwings starts.";
   }
   switch (row.status) {
@@ -124,6 +122,7 @@ function QueueRowInner({
   targetName,
   instance,
   busy,
+  stale,
   outcome,
   transcript,
   onRetry,
@@ -133,7 +132,6 @@ function QueueRowInner({
   onReloadTranscript,
 }: QueueRowProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const now = Date.now();
 
   const otherDatabase = row.instance !== instance;
   const sending = row.status === "sending";
@@ -161,7 +159,7 @@ function QueueRowInner({
         <span className="text-xs text-muted-foreground">{meetingDate}</span>
       </div>
 
-      <p className="text-xs text-muted-foreground">{statusLine(row, busy, now)}</p>
+      <p className="text-xs text-muted-foreground">{statusLine(row, busy, stale)}</p>
 
       {/*
         Rendered from the COLUMN, verbatim, and in every group. queueErrorText
@@ -274,6 +272,7 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.targetName === b.targetName &&
     a.instance === b.instance &&
     a.busy === b.busy &&
+    a.stale === b.stale &&
     a.outcome === b.outcome &&
     sameTranscript(a.transcript, b.transcript) &&
     a.onRetry === b.onRetry &&

@@ -30,6 +30,25 @@ export const UNDO_BLOCKED_MS = 6_000;
  */
 export const STALE_CLAIM_MS = 5 * 60 * 1000;
 
+/**
+ * Whether a `sending` row's claim has outlived STALE_CLAIM_MS as of `now`.
+ *
+ * Takes the clock rather than reading it, because the only caller that matters
+ * is the queue page: QueueRow is memoised on its props, `Date.now()` is not one
+ * of them, and a row reading the clock itself freezes its verdict at whatever
+ * it read on its last DB-driven render. The page ticks and passes the answer
+ * down. Named for the claim, not just "stale", because src/lib/index.ts star-
+ * exports this module and ./database into one flat namespace.
+ */
+export function isClaimStale(
+  row: Pick<MeetingLogListRow, "status" | "claimed_at">,
+  now: number
+): boolean {
+  return (
+    row.status === "sending" && row.claimed_at !== null && now - row.claimed_at > STALE_CLAIM_MS
+  );
+}
+
 /** Above this, a `pending` row stops being "waiting" and starts being visible. */
 export const ESCALATE_AFTER_ATTEMPTS = 5;
 
