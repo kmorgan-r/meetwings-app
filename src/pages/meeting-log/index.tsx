@@ -13,6 +13,7 @@ import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { reportOdooError } from "@/lib/odoo/errors";
 import { groupOf, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
+  assignMeetingLog,
   deleteMeetingLog,
   retryMeetingLog,
   type ActionOutcome,
@@ -23,7 +24,7 @@ import {
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
 import type { MeetingLogListRow, OdooContact } from "@/types";
-import { ProviderConfigReader, QueueRow } from "./components";
+import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
 // nullable column lets the notice, the row and the customer's chatter disagree
@@ -215,10 +216,17 @@ export default function MeetingLog() {
     null
   );
 
-  // Task 9 mounts <AssignDialog /> from this and owns the handler that calls
-  // assignMeetingLog. Task 8 builds no dialog, so the id is recorded and
-  // nothing reads it yet - the value half is elided rather than left unused.
-  const [, setAssignRowId] = useState<string | null>(null);
+  /**
+   * The row the dialog is open for, as an OBJECT rather than an id.
+   *
+   * `null` IS the closed state - the dialog is mounted only while open, so
+   * creation and disposal bracket exactly one session and its one client
+   * cannot outlive it. The snapshot is what `runRowAction` needs for its
+   * pre-action label; a re-read that dropped the row while the dialog sat open
+   * would otherwise leave Confirm with nothing to name, and a stale snapshot is
+   * harmless because the CAS matches on id and status, not on this object.
+   */
+  const [assignRow, setAssignRow] = useState<MeetingLogListRow | null>(null);
 
   const providerConfigRef = useRef<ProviderConfigLike | null>(null);
 
@@ -473,7 +481,42 @@ export default function MeetingLog() {
   );
 
   const handleAssign = useCallback((row: MeetingLogListRow) => {
-    setAssignRowId(row.id);
+    setAssignRow(row);
+  }, []);
+
+  /**
+   * The push the dialog deliberately does not own.
+   *
+   * The dialog unmounts FIRST, then the action runs on the page - so the busy
+   * `Set`, the status line and both re-reads all live in the surface that
+   * outlives the push, and the dialog's "disposal" means only dropping its ref.
+   * `payload.providerConfig` is used rather than `providerConfigRef.current`:
+   * the dialog is what pre-flighted the provider and told the user about it, so
+   * confirming must push with the config that warning was about.
+   */
+  const handleAssignConfirm = useCallback(
+    (row: MeetingLogListRow, payload: AssignPayload) => {
+      setAssignRow(null);
+      void runRowAction(
+        row,
+        () =>
+          assignMeetingLog(row.id, payload.contactId, payload.leadId, {
+            providerConfig: payload.providerConfig,
+            // `summary_json` is null on an unassigned row, so this push makes
+            // the AI call - up to 210s for a reassign. Without this hook the
+            // row renders its pre-click status for all of it.
+            onCommitted: () => void loaderRef.current(),
+          }),
+        SENT_COPY
+      );
+    },
+    [runRowAction]
+  );
+
+  const handleAssignCancel = useCallback(() => {
+    // Cancel writes nothing. The dialog closing is not a state change, and in
+    // particular it does not mark the row busy - busy is set at Confirm.
+    setAssignRow(null);
   }, []);
 
   const readTranscript = useCallback((row: MeetingLogListRow) => {
@@ -675,6 +718,22 @@ export default function MeetingLog() {
       */}
       {configState === "complete" && rows.length > PAGE_CAP && (
         <p className="text-xs text-muted-foreground">{REMAINDER_LINE}</p>
+      )}
+
+      {/*
+        MOUNTED ONLY WHILE OPEN, and keyed on the row. Rendered unconditionally
+        behind an `open` prop, its one-client-per-session ref would live as long
+        as this page does - and the page stays mounted, because the dashboard
+        webview is hidden rather than destroyed.
+      */}
+      {assignRow !== null && (
+        <AssignDialog
+          key={assignRow.id}
+          row={assignRow}
+          instance={instance}
+          onConfirm={(payload) => handleAssignConfirm(assignRow, payload)}
+          onCancel={handleAssignCancel}
+        />
       )}
     </PageLayout>
   );

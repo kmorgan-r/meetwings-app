@@ -42,6 +42,23 @@ vi.mock("@/lib/storage/odoo-config.storage", () => storage);
 const contacts = vi.hoisted(() => ({ listContacts: vi.fn() }));
 vi.mock("@/lib/database/odoo-contacts.action", () => contacts);
 
+// AssignDialog's own two live dependencies. Mocked at the LEAF, not at
+// `@/lib/odoo`: the barrel re-exports both, so the mock is what every importer
+// sees, and mocking the barrel would have to restate a dozen unrelated exports.
+// `DEFAULT_TIMEOUT_MS` and `OPPORTUNITY_LIMIT` are restated because
+// `@/lib/odoo/index.ts` does `export * from` both modules.
+const client = vi.hoisted(() => ({
+  createOdooClient: vi.fn(),
+  DEFAULT_TIMEOUT_MS: 30_000,
+}));
+vi.mock("@/lib/odoo/client", () => client);
+
+const opportunities = vi.hoisted(() => ({
+  fetchOpportunities: vi.fn(),
+  OPPORTUNITY_LIMIT: 20,
+}));
+vi.mock("@/lib/odoo/opportunities", () => opportunities);
+
 // `@/lib/functions/meetwings.api` exports shouldUseMeetwingsAPI and NOTHING
 // else, so mocking the leaf is complete - and `@/lib`'s barrel re-exports the
 // mock. Mocking `@/lib` itself would break @/components/GetLicense.tsx:5, which
@@ -81,7 +98,7 @@ vi.mock("@/layouts", () => ({
 import { ESCALATE_AFTER_ATTEMPTS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { setOdooRedactor } from "@/lib/odoo/redactor";
 import MeetingLog from "@/pages/meeting-log";
-import type { MeetingLogListRow, OdooContact } from "@/types";
+import type { MeetingLogListRow, OdooContact, OdooOpportunity } from "@/types";
 
 const INSTANCE = "http://h:8069|odoo";
 const OTHER = "http://elsewhere:8069|other";
@@ -137,6 +154,24 @@ function contact(over: Partial<OdooContact> = {}): OdooContact {
   };
 }
 
+function opportunity(over: Partial<OdooOpportunity> = {}): OdooOpportunity {
+  return {
+    id: 500,
+    name: "Heat pumps for the north wing",
+    stageName: "Proposal",
+    partnerId: 7,
+    partnerName: "Ada Lovelace",
+    ...over,
+  };
+}
+
+/**
+ * The object `createOdooClient` returns, held module-wide so a test can assert
+ * the SAME instance reached both opportunity lookups. A fresh object per call
+ * would make "at most one client" pass on identity by accident.
+ */
+const CLIENT = { authenticate: vi.fn(), execute: vi.fn() };
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -189,6 +224,27 @@ async function findRow(id: string) {
   return rowOf(id);
 }
 
+/**
+ * Radix PORTALS the dialog to `document.body`, so it is never inside the row
+ * that opened it - `within(rowElement(id))` finds nothing. Everything the
+ * dialog owns is queried through here.
+ */
+function dialog() {
+  return within(screen.getByRole("dialog"));
+}
+
+async function openAssign(id: string, label: "Assign" | "Reassign" = "Assign") {
+  await findRow(id);
+  await userEvent.click(rowOf(id).getByRole("button", { name: label }));
+  await screen.findByRole("dialog");
+}
+
+/** Opens and waits for step 0 to settle, so the picker is live. */
+async function openAssignReady(id: string, label: "Assign" | "Reassign" = "Assign") {
+  await openAssign(id, label);
+  await screen.findByPlaceholderText("Search contacts");
+}
+
 /** A promoted notice, addressed the same way and for the same reason. */
 function noticeElement(id: string): HTMLElement {
   const el = document.querySelector(`[data-notice-id="${id}"]`);
@@ -209,9 +265,15 @@ beforeEach(() => {
   };
   meetwings.shouldUseMeetwingsAPI.mockResolvedValue(false);
   storage.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
+  // AssignDialog's step 0. Re-established every test for the reason above: a
+  // `mockRejectedValue` left in force by the poisoned-ref case would make every
+  // later dialog open on a credentials failure.
+  storage.requireOdooConfig.mockResolvedValue(CONFIG);
   storage.instanceFingerprint.mockImplementation(
     (url: string, database: string) => `${url}|${database}`
   );
+  client.createOdooClient.mockReturnValue(CLIENT);
+  opportunities.fetchOpportunities.mockResolvedValue([]);
   db.listActionableRows.mockResolvedValue([]);
   db.countActionableQueued.mockResolvedValue(0);
   db.getQueueTranscript.mockResolvedValue("");
@@ -1034,5 +1096,533 @@ describe("refreshing", () => {
       await Promise.resolve();
     });
     expect(db.listActionableRows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the assign dialog's client", () => {
+  it("builds ONE client across two opportunity lookups in one session", async () => {
+    // Slice 1's open follow-up: useOdooTarget.ts:162-167 builds a fresh client
+    // per selection, costing an extra `authenticate` each time. The naive
+    // `if (!ref.current) ref.current = createOdooClient(await requireOdooConfig())`
+    // repeats it - the check-and-assign spans a yield, so two quick selections
+    // both observe null and both build.
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik", parentId: 9 }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
+
+    expect(client.createOdooClient).toHaveBeenCalledTimes(1);
+    expect(storage.requireOdooConfig).toHaveBeenCalledTimes(1);
+    // The SAME instance, not merely the same call count: a per-lookup build
+    // that happened to be memoised on the config would pass a count assertion.
+    expect(opportunities.fetchOpportunities.mock.calls[0][0]).toBe(CLIENT);
+    expect(opportunities.fetchOpportunities.mock.calls[1][0]).toBe(CLIENT);
+    // The parent is carried through, or a company's deals never surface.
+    expect(opportunities.fetchOpportunities.mock.calls[1].slice(1)).toEqual([8, 9]);
+  });
+
+  it("builds a fresh client for a SECOND dialog session", async () => {
+    // "One client per dialog session" only means anything if the dialog is
+    // mounted only while open. Rendered once at page level behind an `open`
+    // prop, the ref outlives every session and this count stays at 1 - the
+    // exact silent widening the spec's lifecycle clause exists to prevent.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+
+    await openAssignReady("un");
+    await userEvent.click(dialog().getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await openAssignReady("un");
+    expect(client.createOdooClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not poison the ref when requireOdooConfig rejects: the retry succeeds", async () => {
+    // THE MUTANT IS `??=`. It caches a permanently REJECTED promise for the
+    // whole dialog session the moment requireOdooConfig rejects - which is
+    // exactly the half-filled config this page exists to fix - so the failure
+    // state's retry control could never succeed.
+    storage.requireOdooConfig.mockRejectedValueOnce(new Error("no credentials yet"));
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssign("un");
+
+    expect(
+      await screen.findByText(/Your Odoo contacts could not be loaded \(ODOO_INTERNAL\)/)
+    ).toBeInTheDocument();
+    // No picker while the pre-flight is down.
+    expect(screen.queryByPlaceholderText("Search contacts")).toBeNull();
+
+    await userEvent.click(dialog().getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByPlaceholderText("Search contacts")).toBeInTheDocument();
+    expect(await dialog().findByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+    // The second attempt really re-resolved rather than reusing a cached
+    // promise: under `??=` this stays at 1 and the contacts never appear.
+    expect(storage.requireOdooConfig).toHaveBeenCalledTimes(2);
+  });
+
+  it("attaches a handler to the rejection: open-then-Cancel raises nothing unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const record = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", record);
+    try {
+      storage.requireOdooConfig.mockRejectedValue(new Error("no credentials yet"));
+      db.listActionableRows.mockResolvedValue([
+        row({ id: "un", status: "unassigned", contact_id: null }),
+      ]);
+      await renderPage();
+      await openAssign("un");
+
+      // Half one: the rejection DRIVES the pre-flight UI, which is only true
+      // if the open effect awaits getClient() rather than firing and forgetting.
+      expect(
+        await screen.findByText(/Your Odoo contacts could not be loaded/)
+      ).toBeInTheDocument();
+
+      await userEvent.click(dialog().getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+      // Half two. Node classifies a rejection as unhandled only once the
+      // microtask queue has drained, so the macrotask hop is load-bearing.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", record);
+    }
+  });
+
+  it("keeps a credential secret out of the DOM when step 0 fails", async () => {
+    // A PLAIN Error on purpose. `odooError` redacts at construction, so an
+    // odooError fixture arrives already clean and would pass even against a
+    // component that re-derived its text with `String(err)` - the mutant the
+    // fail-closed rule exists to stop.
+    storage.requireOdooConfig.mockRejectedValue(new Error(`login rejected for ${SECRET}`));
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssign("un");
+
+    // Both directions: the page's own copy is present AND the secret is gone.
+    // An absence-only assertion passes whether or not anything was suppressed.
+    expect(
+      await screen.findByText(/Your Odoo contacts could not be loaded/)
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(SECRET);
+    expect(document.body.textContent).not.toContain("login rejected");
+  });
+});
+
+describe("the assign dialog's contact list", () => {
+  it("reads the contacts when it OPENS, not the page's mount-time map", async () => {
+    // The dashboard webview is hidden rather than destroyed, so a long-mounted
+    // page outlives every main-window runSync. A dialog fed the page's map
+    // cannot offer a contact synced after this page mounted - and the fixture
+    // has to CHANGE between the two reads or the case proves nothing.
+    contacts.listContacts.mockResolvedValueOnce([contact()]);
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    expect(dialog().getByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+    expect(dialog().getByRole("button", { name: /Bea Nordvik/ })).toBeInTheDocument();
+    // Scoped to the live instance, or another database's contacts are offered.
+    expect(contacts.listContacts).toHaveBeenLastCalledWith(INSTANCE);
+  });
+
+  it("filters the list from the search box", async () => {
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.type(screen.getByPlaceholderText("Search contacts"), "bea");
+    expect(dialog().getByRole("button", { name: /Bea Nordvik/ })).toBeInTheDocument();
+    expect(dialog().queryByRole("button", { name: /Ada Lovelace/ })).toBeNull();
+  });
+
+  it("refuses an archived contact, which is the target Reassign exists to escape", async () => {
+    contacts.listContacts.mockResolvedValue([
+      contact({ id: 8, name: "Gone Partner", active: false }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "na", status: "failed", attempts: 3 }),
+    ]);
+    await renderPage();
+    await openAssignReady("na", "Reassign");
+
+    expect(dialog().getByRole("button", { name: /Gone Partner/ })).toBeDisabled();
+  });
+});
+
+describe("the assign dialog's opportunity step", () => {
+  it("renders a DISTINCT failure state with a retry, never an empty list", async () => {
+    // fetchOpportunities throws on the first unreadable row and on any
+    // transport failure. Rendering that as an empty list is indistinguishable
+    // from "this contact has no open deals", so the user confirms contact-only
+    // and the meeting lands on the res.partner instead of the crm.lead -
+    // silently, and irreversibly once it is `sent`.
+    opportunities.fetchOpportunities.mockRejectedValueOnce(new Error("crm.lead blew up"));
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity()]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+
+    expect(
+      await screen.findByText(/The opportunities for this contact could not be read/)
+    ).toBeInTheDocument();
+    // THE KILLER ASSERTION. A failed fetch must never read as "no open deals".
+    expect(screen.queryByText("No open opportunities for this contact.")).toBeNull();
+    // The code only - never the raw thrown text.
+    expect(document.body.textContent).not.toContain("crm.lead blew up");
+
+    await userEvent.click(dialog().getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText(/Heat pumps for the north wing/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  it("says so plainly when a contact genuinely has no open deals", async () => {
+    // The other half of the pair. If both states rendered the same nothing,
+    // the case above would pass against a component that shows neither.
+    opportunities.fetchOpportunities.mockResolvedValue([]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    expect(
+      await screen.findByText("No open opportunities for this contact.")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  it("is token-ordered on the RESOLVE path: a slow lookup cannot paint under a newer contact", async () => {
+    const gateA = deferred<OdooOpportunity[]>();
+    const gateB = deferred<OdooOpportunity[]>();
+    opportunities.fetchOpportunities.mockImplementation(
+      (_client: unknown, contactId: number) =>
+        contactId === 7 ? gateA.promise : gateB.promise
+    );
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      gateB.resolve([opportunity({ id: 501, name: "Bea's deal" })]);
+    });
+    expect(await screen.findByText(/Bea's deal/)).toBeInTheDocument();
+
+    // Contact A's slower lookup lands LAST. Without the token it repaints
+    // A's deals under B's selection, and Confirm then writes lead_id for the
+    // wrong customer - with no undo, because the push is immediate.
+    await act(async () => {
+      gateA.resolve([opportunity({ id: 502, name: "Ada's deal" })]);
+    });
+    expect(screen.queryByText(/Ada's deal/)).toBeNull();
+    expect(screen.getByText(/Bea's deal/)).toBeInTheDocument();
+  });
+
+  it("is token-ordered on the REJECT path too: a stale failure cannot paint under a newer contact", async () => {
+    // The rejection path matters as much as the resolve path - a stale
+    // setOpportunityError paints the WRONG contact's failure, and the user
+    // retreats to contact-only for a customer whose deals loaded fine.
+    const gateA = deferred<OdooOpportunity[]>();
+    const gateB = deferred<OdooOpportunity[]>();
+    opportunities.fetchOpportunities.mockImplementation(
+      (_client: unknown, contactId: number) =>
+        contactId === 7 ? gateA.promise : gateB.promise
+    );
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      gateB.resolve([opportunity({ id: 501, name: "Bea's deal" })]);
+    });
+    expect(await screen.findByText(/Bea's deal/)).toBeInTheDocument();
+
+    await act(async () => {
+      gateA.reject(new Error("crm.lead blew up"));
+    });
+    expect(screen.queryByText(/could not be read/)).toBeNull();
+    expect(screen.getByText(/Bea's deal/)).toBeInTheDocument();
+  });
+});
+
+describe("what the assign dialog hands up", () => {
+  it("passes the provider config derived from @/contexts, never null", async () => {
+    // This is the case that kills "wired to the wrong useApp", "missing
+    // providerConfig" and "wired to nothing" - none of which the actions-module
+    // suite can see, because there the config arrives as an argument.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    const [id, contactId, leadId, deps] = actions.assignMeetingLog.mock.calls[0];
+    expect(id).toBe("un");
+    expect(contactId).toBe(7);
+    expect(leadId).toBeNull();
+    expect(deps.providerConfig).toEqual({ provider: PROVIDER, selectedProvider: SELECTED });
+    // The page owns the push, so it - not the dialog - supplies the CAS hook.
+    expect(deps.onCommitted).toBeTypeOf("function");
+    // The dialog owns NO push: the payload went up and nothing was built here.
+    expect(deps.client).toBeUndefined();
+  });
+
+  it("carries the chosen opportunity's id, and lets it be taken back off", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
+    expect(
+      await screen.findByText(/will be logged on the opportunity/)
+    ).toBeInTheDocument();
+
+    await userEvent.click(dialog().getByRole("button", { name: "Contact record only" }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    expect(actions.assignMeetingLog.mock.calls[0][2]).toBeNull();
+  });
+
+  it("keeps the opportunity when it is the one confirmed", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    expect(actions.assignMeetingLog.mock.calls[0].slice(1, 3)).toEqual([7, 500]);
+  });
+
+  it("drops a stale opportunity when the contact is changed after picking one", async () => {
+    // lead_id and contact_id are written by ONE statement. A leadId left over
+    // from the previous contact would file the meeting on a deal that belongs
+    // to somebody else.
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
+    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    expect(actions.assignMeetingLog.mock.calls[0].slice(1, 3)).toEqual([8, null]);
+  });
+
+  it("is offered on a current-instance FAILED row as Reassign, and assigns it", async () => {
+    // Reassign, owner-approved 2026-08-25. A meeting whose Odoo target was
+    // archived is otherwise unrecoverable except by deleting the transcript:
+    // isRetryable calls the fault final, so Retry reproduces it forever.
+    contacts.listContacts.mockResolvedValue([
+      contact(),
+      contact({ id: 8, name: "Bea Nordvik" }),
+    ]);
+    db.listActionableRows.mockResolvedValueOnce([
+      row({ id: "na", status: "failed", attempts: 3, last_error: "ODOO_FAULT: partner deleted" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+    await openAssignReady("na", "Reassign");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    expect(actions.assignMeetingLog.mock.calls[0].slice(0, 3)).toEqual(["na", 8, null]);
+    // The row left the list on `sent`, so its outcome is promoted rather than
+    // lost with the unmounting row.
+    const notice = await waitFor(() => noticeElement("na"));
+    expect(notice.textContent).toContain("Sent to Odoo.");
+  });
+
+  it("surfaces a zero-row assign CAS instead of swallowing it", async () => {
+    actions.assignMeetingLog.mockResolvedValue({ kind: "conflict" });
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    expect(
+      await screen.findByText("This meeting changed in another window.")
+    ).toBeInTheDocument();
+  });
+
+  it("refuses to confirm before a contact is chosen", async () => {
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    expect(dialog().getByRole("button", { name: "Log this meeting" })).toBeDisabled();
+    expect(actions.assignMeetingLog).not.toHaveBeenCalled();
+  });
+});
+
+describe("cancelling the assign dialog", () => {
+  it("writes nothing and leaves the row NON-BUSY", async () => {
+    // Busy is set at Confirm, in the click handler, before the first await -
+    // never at open. Marking at open leaves a cancelled dialog's row rendering
+    // "Sending…" with all three actions disabled until a remount, because
+    // Cancel writes nothing by design.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    const item = rowOf("un");
+    // The row is still rendered and still says what it said before the dialog
+    // opened. ("No contact chosen" is both the target name and the status line
+    // for an `unassigned` row, hence the All variant.)
+    expect(item.getAllByText("No contact chosen")).toHaveLength(2);
+    expect(item.queryByText("Sending…")).toBeNull();
+    expect(item.getByRole("button", { name: "Assign" })).toBeEnabled();
+    expect(item.getByRole("button", { name: "Delete" })).toBeEnabled();
+    expect(actions.assignMeetingLog).not.toHaveBeenCalled();
+  });
+});
+
+describe("the assign dialog's provider pre-flight", () => {
+  it("warns when no provider is usable, and still lets the user go ahead deliberately", async () => {
+    // generateMeetingLogSummary returns null for a MISSING provider and
+    // pushQueuedRow swallows it, so without this the row reaches `sent` with
+    // last_error cleared while a "Summarization failed" note is live on the
+    // customer's record. Say so first; let them choose it.
+    appState.current = {
+      allAiProviders: [],
+      selectedAIProvider: SELECTED,
+      meetwingsApiEnabled: false,
+    };
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    expect(
+      await screen.findByText(/No AI provider is set up/)
+    ).toBeInTheDocument();
+    // Opening warns. It does not push.
+    expect(actions.assignMeetingLog).not.toHaveBeenCalled();
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
+    expect(actions.assignMeetingLog.mock.calls[0][3].providerConfig).toBeNull();
+  });
+
+  it("does NOT warn when the Meetwings API is the provider", async () => {
+    // useProviderConfig returns null in exactly this case too, and that is
+    // CORRECT - generateMeetingLogSummary routes through the Meetwings API
+    // instead. The mutant is warning whenever the config is null, which would
+    // tell every licensed user their summaries are broken.
+    meetwings.shouldUseMeetwingsAPI.mockResolvedValue(true);
+    appState.current = {
+      allAiProviders: [],
+      selectedAIProvider: SELECTED,
+      meetwingsApiEnabled: true,
+    };
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    expect(screen.queryByText(/No AI provider is set up/)).toBeNull();
+    expect(dialog().getByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
   });
 });
