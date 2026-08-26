@@ -6,6 +6,10 @@ const action = vi.hoisted(() => ({
   deleteQueueRow: vi.fn(async () => true),
   getQueueRow: vi.fn(async () => null as unknown),
   pruneTranscripts: vi.fn(async () => 0),
+  // Where reclaimStaleSending ACTUALLY lives (meeting-log.action.ts:385). The
+  // push module merely imports it, and an import is not a re-export - so this
+  // is the key a real violation routes through. See the cross-window case.
+  reclaimStaleSending: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 
@@ -314,6 +318,22 @@ describe("the cross-window rule", () => {
     await deleteMeetingLog("r");
 
     expect(push.runMeetingLogSweep).not.toHaveBeenCalled();
+
+    // TWO reclaim assertions, and NEITHER is redundant - do not delete one.
+    //
+    // reclaimStaleSending is DEFINED in the DB layer (meeting-log.action.ts:385)
+    // and merely IMPORTED by meeting-log-push.ts:5. An import is not a
+    // re-export, so the push module does not export the name at all: the `push.`
+    // assertion below reads a mock key wired to nothing and cannot fail today.
+    // An earlier pass added that key believing it made the ban assertable; it
+    // did not, because it went on the wrong mock. The `action.` assertion is the
+    // one a real violation routes through, and it is proven to fail - a call
+    // added to deleteMeetingLog trips it.
+    //
+    // The `push.` assertion stays as a tripwire: if reclaimStaleSending is ever
+    // relocated to or re-exported from meeting-log-push, it starts failing and
+    // the `action.` one stops. Together they cover both homes.
+    expect(action.reclaimStaleSending).not.toHaveBeenCalled();
     expect(push.reclaimStaleSending).not.toHaveBeenCalled();
   });
 });
