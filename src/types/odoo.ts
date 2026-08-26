@@ -75,15 +75,24 @@ export interface SyncResult {
   clampSkipped: boolean;
 }
 
-/** Every state a queued meeting can be in. See meeting-log-queue.sql. */
+/**
+ * Every state a queued meeting can be in.
+ *
+ * THIS UNION IS THE LIST OF RECORD, not the migration. `meeting-log-queue.sql`
+ * enumerates seven statuses in its header and is FROZEN - sqlx checksums
+ * applied migrations - so it cannot be updated and is stale as of `deleted`.
+ * The column has no CHECK constraint, which is why adding a status needs no
+ * migration at all.
+ */
 export type MeetingLogStatus =
   | "held"        // inside the 30s undo window
   | "pending"     // ready to push or retry
   | "sending"     // an Odoo call is in flight
-  | "unassigned"  // ended with no contact selected; slice 3 owns it
+  | "unassigned"  // ended with no contact selected
   | "sent"        // terminal
-  | "failed"      // terminal until slice 3's manual retry
-  | "cancelled";  // undone
+  | "failed"      // terminal until a manual retry
+  | "cancelled"   // undone
+  | "deleted";    // terminal. Transcript and summary blanked; the row survives.
 
 /** The snake_case shape SQLite actually returns for a queued meeting. */
 export interface DbMeetingLogRow {
@@ -108,3 +117,15 @@ export interface DbMeetingLogRow {
   created_at: number;
   sent_at: number | null;
 }
+
+/**
+ * What the queue page's list query returns: every column EXCEPT `transcript`.
+ *
+ * A distinct type, and load-bearing. Typing list rows as `DbMeetingLogRow`
+ * would let one be handed straight to `pushQueuedRow` and still compile - and
+ * `toRow` is a bare cast, so nothing else objects. At runtime `row.transcript`
+ * is then `undefined`, the slice is empty, and the push uploads an EMPTY
+ * attachment plus the "Summarization failed" fallback note to a customer
+ * record. The compiler should refuse that, not a test.
+ */
+export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript">;
