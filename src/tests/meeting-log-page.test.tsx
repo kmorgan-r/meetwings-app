@@ -805,6 +805,47 @@ describe("outcomes whose row leaves the list", () => {
     expect(document.querySelectorAll("[data-notice-id]")).toHaveLength(2);
   });
 
+  it("promotes both rows when their two reloads OVERLAP", async () => {
+    // The serialized case above cannot see this: it awaits notice A before
+    // resolving B, so the two reload round trips never overlap.
+    //
+    // Here both actions settle before either outcome is read, so A's
+    // token-ordered reload is still in flight when B's starts and bumps the
+    // token past it. A's read then commits NOTHING, while B's commits a list
+    // that already excludes A - because A pushed successfully and `sent` is
+    // outside listActionable's WHERE clause. A's pin and busy flag clear
+    // regardless, so any implementation that decides promotion from its own
+    // reload's result drops A's message entirely.
+    const gateA = deferred<{ kind: string }>();
+    const gateB = deferred<{ kind: string }>();
+    actions.retryMeetingLog.mockImplementation((id: string) =>
+      id === "a" ? gateA.promise : gateB.promise
+    );
+    db.listActionableRows.mockResolvedValueOnce([
+      row({ id: "a", status: "failed" }),
+      row({ id: "b", status: "failed" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+
+    await findRow("a");
+    await userEvent.click(rowOf("a").getByRole("button", { name: "Retry" }));
+    await userEvent.click(rowOf("b").getByRole("button", { name: "Retry" }));
+
+    await act(async () => {
+      gateA.resolve({ kind: "degraded" });
+      gateB.resolve({ kind: "ok" });
+    });
+
+    await waitFor(() => noticeElement("a"));
+    await waitFor(() => noticeElement("b"));
+    expect(noticeElement("a").textContent).toContain(
+      "because the summary could not be generated"
+    );
+    expect(noticeElement("b").textContent).toContain("Sent to Odoo.");
+    expect(document.querySelector('[data-row-id="a"]')).toBeNull();
+  });
+
   it("says a deleted meeting was removed, never that it was sent", async () => {
     // deleteMeetingLog returns {kind:"ok"} like every other action, but the
     // module's own comment is "No push, ever" - so one shared `ok` string tells
@@ -942,6 +983,24 @@ describe("the contact map", () => {
     ]);
     await renderPage();
     expect(await screen.findByText("Ada Lovelace (opportunity)")).toBeInTheDocument();
+  });
+});
+
+describe("a queue that cannot be read", () => {
+  it("says so, and does not claim a meeting was left unchanged", async () => {
+    db.listActionableRows.mockRejectedValue(new Error("database is locked"));
+    await renderPage();
+
+    expect(
+      await screen.findByText("The meetings waiting to be logged could not be read.")
+    ).toBeInTheDocument();
+    // describeFailure's trailing clause is about an ACTION that stopped before
+    // its CAS. This path never named a meeting, so the clause is off-key here.
+    expect(document.body.textContent).not.toContain("Nothing on this meeting changed.");
+    // And a read that failed must not look like a queue that is empty.
+    expect(screen.queryByText("No meetings waiting to be logged.")).toBeNull();
+    // Never the raw thrown text: the page renders the CODE's copy only.
+    expect(document.body.textContent).not.toContain("database is locked");
   });
 });
 

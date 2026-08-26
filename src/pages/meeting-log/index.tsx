@@ -184,25 +184,33 @@ export default function MeetingLog() {
    * with its outcome message nowhere to go.
    */
   const [pinned, setPinned] = useState<Map<string, MeetingLogListRow>>(new Map());
-  const [outcomes, setOutcomes] = useState<Map<string, string>>(new Map());
   /**
-   * Outcomes whose row has LEFT the list, promoted out of the unmounting row.
+   * ONE record per row id. Where it renders is DERIVED, never decided.
    *
    * A successful retry writes `status = 'sent'`, which is not in
    * `listActionable`'s WHERE clause - so the row leaves on the very next read,
-   * QueueRow unmounts, and the inline line goes with it about one DB round trip
-   * after it appeared. That destroys the one sentence the whole summarize
-   * plumbing exists to produce: "Sent - but the note shows the transcript's
-   * first lines". Assign vanishes identically, `unassigned` -> `sent`.
+   * QueueRow unmounts, and an inline-only message goes with it about one DB
+   * round trip after it appeared. That destroys the one sentence the whole
+   * summarize plumbing exists to produce: "Sent - but the note shows the
+   * transcript's first lines". Assign vanishes identically, `unassigned` ->
+   * `sent`.
    *
-   * A LIST keyed by row id, never a single slot: the busy Set is plural by
-   * design, so a newest-replaces slot would silently drop one `degraded`
-   * message and reintroduce exactly this failure. Persistent until dismissed -
-   * an auto-dismissing toast is this same bug on a shorter timer.
+   * The fix is NOT a point-in-time promotion check. Deciding in the action's
+   * `finally` whether the row survived RACES the loader: with two rows in
+   * flight, row A's token-ordered reload is superseded by row B's and reports
+   * nothing, while B's reload commits a list that already excludes A - so A
+   * unmounts with no message anywhere, which is the same loss by another route.
+   * Instead the record is stored once and rendered inline while its row is on
+   * screen, in the notice region when it is not. There is no ordering to get
+   * wrong and it re-derives on every commit, including B's.
+   *
+   * Keyed by id, never a single slot: the busy Set is plural by design, so a
+   * newest-replaces slot would silently drop one `degraded` message. Persistent
+   * until dismissed - an auto-dismissing toast is this same bug on a timer.
    */
-  const [notices, setNotices] = useState<
-    ReadonlyArray<{ id: string; label: string; text: string }>
-  >([]);
+  const [results, setResults] = useState<Map<string, { label: string; text: string }>>(
+    new Map()
+  );
   const [transcript, setTranscript] = useState<{ id: string; view: TranscriptView } | null>(
     null
   );
@@ -225,22 +233,21 @@ export default function MeetingLog() {
   const loadToken = useRef(0);
 
   /**
-   * Returns the rows this read actually committed, or `null` when it did not
-   * commit one - superseded by a newer token, or failed.
-   *
-   * The return value is what the promotion check reads. `null` must NOT be
-   * treated as "the row is gone": on the error path `rows` keeps its previous
-   * value, so the row is still on screen and its inline line is still the right
-   * place for the outcome.
+   * Returns nothing on purpose. An earlier revision returned the committed
+   * rows so an action could decide, in its `finally`, whether its row had
+   * survived - which races: a concurrent action's reload supersedes this one,
+   * this one reports nothing, and the winner commits a list that already
+   * dropped the row. Where a result renders is derived from state at render
+   * time instead, so there is no result here worth reading.
    */
-  const reload = useCallback(async (): Promise<MeetingLogListRow[] | null> => {
+  const reload = useCallback(async (): Promise<void> => {
     const token = ++loadToken.current;
     try {
       // NOT currentInstance(): it wraps requireOdooConfig, which THROWS for
       // exactly the half-filled config a user comes here to fix - so the one
       // surface showing their backlog would render nothing.
       const state = await loadOdooConfigState();
-      if (token !== loadToken.current) return null;
+      if (token !== loadToken.current) return;
 
       if (state.state !== "complete") {
         // countActionableQueued, NOT countAllQueued: that statement is scoped
@@ -249,16 +256,13 @@ export default function MeetingLog() {
         // `unassigned`. Reusing it would show a user whose backlog is entirely
         // those two a count of zero, i.e. a blank page while rows are queued.
         const total = await countActionableQueued();
-        if (token !== loadToken.current) return null;
+        if (token !== loadToken.current) return;
         setConfigState(state.state);
         setInstance("");
         setRows([]);
         setStranded(total);
         setLoadError(null);
-        // No groups render at all now, so a pending outcome has no inline home
-        // either - an empty list is the honest answer to "is the row still
-        // rendered".
-        return [];
+        return;
       }
 
       const fingerprint = instanceFingerprint(state.config.url, state.config.db);
@@ -270,22 +274,20 @@ export default function MeetingLog() {
         listActionableRows(fingerprint),
         listContacts(fingerprint),
       ]);
-      if (token !== loadToken.current) return null;
+      if (token !== loadToken.current) return;
       setConfigState("complete");
       setInstance(fingerprint);
       setRows(list);
       setContacts(new Map(cached.map((c) => [c.id, c])));
       setStranded(0);
       setLoadError(null);
-      return list;
     } catch (err) {
-      if (token !== loadToken.current) return null;
+      if (token !== loadToken.current) return;
       // Reported, never swallowed - a queue that cannot be read must not look
       // like an empty queue. The code only, for the reason the copy map states.
       setLoadError(
         describeLoadFailure(reportOdooError(err, "read the meeting log queue").code)
       );
-      return null;
     }
   }, []);
 
@@ -334,38 +336,34 @@ export default function MeetingLog() {
     };
   }, []);
 
-  const setOutcome = useCallback((id: string, text: string | null) => {
-    setOutcomes((prev) => {
+  const setResult = useCallback(
+    (id: string, record: { label: string; text: string } | null) => {
+      setResults((prev) => {
+        const next = new Map(prev);
+        if (record === null) next.delete(id);
+        else next.set(id, record);
+        return next;
+      });
+    },
+    []
+  );
+
+  /**
+   * Rewrites a record's text, keeping the label it was captured with.
+   *
+   * Delete's conflict branch refines its copy AFTER the action has settled.
+   * With one store there is nowhere else the message could have gone, so this
+   * no longer has to work out where it currently lives.
+   */
+  const refineResult = useCallback((id: string, text: string) => {
+    setResults((prev) => {
+      const current = prev.get(id);
+      if (!current) return prev;
       const next = new Map(prev);
-      if (text === null) next.delete(id);
-      else next.set(id, text);
+      next.set(id, { ...current, text });
       return next;
     });
   }, []);
-
-  const dismissNotice = useCallback((id: string) => {
-    setNotices((prev) => prev.filter((n) => n.id !== id));
-  }, []);
-
-  /**
-   * Replaces a row's message wherever it currently lives.
-   *
-   * Delete's conflict branch refines its copy AFTER the action has settled, by
-   * which point the outcome may already have been promoted - writing the
-   * refinement inline would file it against a row nothing renders.
-   */
-  const refineOutcome = useCallback((id: string, text: string) => {
-    let promoted = false;
-    setNotices((prev) => {
-      const next = prev.map((n) => {
-        if (n.id !== id) return n;
-        promoted = true;
-        return { ...n, text };
-      });
-      return promoted ? next : prev;
-    });
-    if (!promoted) setOutcome(id, text);
-  }, [setOutcome]);
 
   const runRowAction = useCallback(
     async (
@@ -391,37 +389,30 @@ export default function MeetingLog() {
       // "changed in another window" - false, about a row nothing else touched.
       setBusy((prev) => new Set(prev).add(row.id));
       setPinned((prev) => new Map(prev).set(row.id, row));
-      setOutcome(row.id, null);
-      dismissNotice(row.id);
+      // A new action on this row replaces that row's record.
+      setResult(row.id, null);
 
-      let text: string | null = null;
       try {
         const outcome = await run();
-        text = outcomeCopy(outcome, successCopy);
-        setOutcome(row.id, text);
+        setResult(row.id, { label, text: outcomeCopy(outcome, successCopy) });
         return outcome;
       } catch (err) {
         // Unreachable today: runAction catches at both boundaries and
         // pushQueuedRow never throws. Kept so a future change cannot strand the
         // row busy with no explanation.
-        text = describeFailure(reportOdooError(err, "meeting log action").code);
-        setOutcome(row.id, text);
+        setResult(row.id, {
+          label,
+          text: describeFailure(reportOdooError(err, "meeting log action").code),
+        });
         return null;
       } finally {
-        // AWAITED, because its result is the promotion test. The generic
-        // condition - "the row is not in the fresh list" - rather than an
-        // ok/degraded special case, so it also covers moved-unknown on a
-        // re-read that returned null and a row another window deleted mid
-        // action. `null` means the read never committed, so the row is still on
-        // screen and the inline line is still the right place.
-        const fresh = await loaderRef.current();
-        if (text !== null && fresh !== null && !fresh.some((r) => r.id === row.id)) {
-          setNotices((prev) => [
-            ...prev.filter((n) => n.id !== row.id),
-            { id: row.id, label, text: text as string },
-          ]);
-          setOutcome(row.id, null);
-        }
+        // Awaited so the pin outlives the read that decides this row's fate:
+        // clearing it first would unmount the row, flash its record into the
+        // notice region, and move it back inline if the row turned out to still
+        // be actionable. NOTHING HERE DECIDES WHERE THE RECORD RENDERS - that
+        // is derived at render time, which is what makes a superseded reload
+        // harmless.
+        await loaderRef.current();
         setBusy((prev) => {
           const next = new Set(prev);
           next.delete(row.id);
@@ -434,7 +425,7 @@ export default function MeetingLog() {
         });
       }
     },
-    [dismissNotice, setOutcome]
+    [setResult]
   );
 
   const handleRetry = useCallback(
@@ -471,14 +462,14 @@ export default function MeetingLog() {
         try {
           const after = await getQueueRow(row.id);
           if (after?.status === "sending") {
-            refineOutcome(row.id, "This meeting is being sent to Odoo right now.");
+            refineResult(row.id, "This meeting is being sent to Odoo right now.");
           }
         } catch (err) {
           console.error("[Odoo] could not re-read a conflicting queue row:", err);
         }
       })();
     },
-    [runRowAction, refineOutcome]
+    [runRowAction, refineResult]
   );
 
   const handleAssign = useCallback((row: MeetingLogListRow) => {
@@ -552,6 +543,36 @@ export default function MeetingLog() {
     return buckets;
   }, [rendered, instance]);
 
+  /**
+   * The ids that actually mount a QueueRow this commit.
+   *
+   * Derived from the GROUPED buckets, not from `rows`: a busy row the read
+   * dropped is merged back by the pin and does render, and a row past the cap
+   * does not - so `rows` would put a record in both places at once, or in
+   * neither.
+   */
+  const inlineIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const list of grouped.values()) {
+      for (const row of list) ids.add(row.id);
+    }
+    return ids;
+  }, [grouped]);
+
+  /**
+   * Every stored record whose row is not on screen. No promotion step, no
+   * point-in-time check, and nothing to get wrong when two reloads overlap:
+   * this recomputes on the commit that dropped the row, whichever action's
+   * reload produced it.
+   */
+  const notices = useMemo(
+    () =>
+      [...results]
+        .filter(([id]) => !inlineIds.has(id))
+        .map(([id, record]) => ({ id, ...record })),
+    [results, inlineIds]
+  );
+
   const isEmpty = rendered.length === 0;
 
   return (
@@ -569,8 +590,8 @@ export default function MeetingLog() {
       {loadError !== null && <p className="text-sm text-destructive">{loadError}</p>}
 
       {/*
-        Outcomes whose row has left the list. Rendered ABOVE the groups so the
-        one sentence `degraded` exists to produce is not below 200 rows, and
+        Records whose row is not on screen. Rendered ABOVE the groups so the one
+        sentence `degraded` exists to produce is not below 200 rows, and
         persistent until dismissed - a toast here would be the same
         disappearing-message bug on a shorter timer.
       */}
@@ -590,7 +611,7 @@ export default function MeetingLog() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => dismissNotice(notice.id)}
+                  onClick={() => setResult(notice.id, null)}
                   aria-label={`Dismiss the result for ${notice.label}`}
                 >
                   Dismiss
@@ -632,7 +653,7 @@ export default function MeetingLog() {
                     targetName={targetNameOf(row, contacts)}
                     instance={instance}
                     busy={busy.has(row.id)}
-                    outcome={outcomes.get(row.id) ?? null}
+                    outcome={results.get(row.id)?.text ?? null}
                     transcript={transcript?.id === row.id ? transcript.view : null}
                     onRetry={handleRetry}
                     onAssign={handleAssign}
