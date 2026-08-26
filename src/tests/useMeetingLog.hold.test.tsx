@@ -32,6 +32,10 @@ const action = vi.hoisted(() => ({
   cancelHeldRow: vi.fn(async () => true),
   claimRow: vi.fn(async () => true),
   getQueueRow: vi.fn(async () => null),
+  pruneTranscripts: vi.fn(async () => 0),
+  retryQueueRow: vi.fn(async () => true),
+  assignQueueRow: vi.fn(async () => true),
+  deleteQueueRow: vi.fn(async () => true),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 
@@ -99,6 +103,10 @@ vi.mock("@/lib/storage/active-conversation.storage", () => conversationStorage);
 
 import { resetMeetingLogSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
 import { HOLD_MS, UNDO_BLOCKED_MS } from "@/lib/odoo/meeting-log";
+// resetTranscriptPruneGuard ONLY. runTranscriptPrune is never referenced in
+// this suite - the actions module is not mocked here, so the real prune
+// latch stays under test.
+import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
 import type { ResolvedTarget, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
@@ -166,6 +174,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   windowLabel.value = "main";
   resetMeetingLogSweepGuard();
+  resetTranscriptPruneGuard();
   listeners.clear();
   // Reset the STATE behind the stateful storage mocks, not just their call
   // history - vi.clearAllMocks() in afterEach clears .mock.calls but the
@@ -195,6 +204,10 @@ beforeEach(() => {
   action.cancelHeldRow.mockResolvedValue(true);
   action.claimRow.mockResolvedValue(true);
   action.getQueueRow.mockResolvedValue(null);
+  action.pruneTranscripts.mockResolvedValue(0);
+  action.retryQueueRow.mockResolvedValue(true);
+  action.assignQueueRow.mockResolvedValue(true);
+  action.deleteQueueRow.mockResolvedValue(true);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
   summarizer.generateMeetingLogSummary.mockResolvedValue(null);

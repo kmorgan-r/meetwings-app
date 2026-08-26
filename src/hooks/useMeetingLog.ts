@@ -19,6 +19,7 @@ import {
   sessionKeyFor,
   sliceTranscript,
 } from "@/lib/odoo/meeting-log";
+import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
@@ -452,7 +453,21 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       })
       .catch((err) => {
         console.error("[Odoo] meeting log sweep failed:", err);
-      });
+      })
+      // Retention. UNCONDITIONAL and outside the `if (outcome.ran)` guard:
+      // `ran` is false whenever the config is absent or half-filled, so a
+      // prune inside that guard means a user who removes their credentials
+      // keeps every stored transcript and digest forever. It takes no config
+      // and does not care whether Odoo is reachable.
+      //
+      // Its OWN catch, not the sweep's: one shared chain would log a prune
+      // failure under "[Odoo] meeting log sweep failed" and make the two
+      // indistinguishable.
+      .then(() => runTranscriptPrune(Date.now()));
+    // NO trailing .catch here. `runTranscriptPrune` swallows and logs its own
+    // failure, so a second catch carrying the SAME message would be dead code
+    // in production and two copies of one string that can drift. The `void`
+    // plus the sweep's catch above already cover the sweep leg.
   }, [isOwner, summarize]);
 
   /**

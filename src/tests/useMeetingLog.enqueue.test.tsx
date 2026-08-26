@@ -32,6 +32,10 @@ const action = vi.hoisted(() => ({
   cancelHeldRow: vi.fn(async () => true),
   claimRow: vi.fn(async () => true),
   getQueueRow: vi.fn(async () => null),
+  pruneTranscripts: vi.fn(async () => 0),
+  retryQueueRow: vi.fn(async () => true),
+  assignQueueRow: vi.fn(async () => true),
+  deleteQueueRow: vi.fn(async () => true),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 
@@ -98,6 +102,11 @@ const conversationStorage = vi.hoisted(() => {
 vi.mock("@/lib/storage/active-conversation.storage", () => conversationStorage);
 
 import { resetMeetingLogSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
+// resetTranscriptPruneGuard ONLY. runTranscriptPrune is never referenced in
+// this suite - every prune assertion targets action.pruneTranscripts, the DB
+// wrapper the real runTranscriptPrune calls - and the actions module is not
+// mocked here, so the real single-flight latch stays under test.
+import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
 import type { ResolvedTarget, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
@@ -165,6 +174,7 @@ beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   windowLabel.value = "main";
   resetMeetingLogSweepGuard();
+  resetTranscriptPruneGuard();
   listeners.clear();
   // Reset the STATE behind the stateful storage mocks, not just their call
   // history - vi.clearAllMocks() in afterEach clears .mock.calls but the
@@ -194,6 +204,10 @@ beforeEach(() => {
   action.cancelHeldRow.mockResolvedValue(true);
   action.claimRow.mockResolvedValue(true);
   action.getQueueRow.mockResolvedValue(null);
+  action.pruneTranscripts.mockResolvedValue(0);
+  action.retryQueueRow.mockResolvedValue(true);
+  action.assignQueueRow.mockResolvedValue(true);
+  action.deleteQueueRow.mockResolvedValue(true);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
   summarizer.generateMeetingLogSummary.mockResolvedValue(null);
@@ -453,6 +467,78 @@ describe("the sweep kickoff", () => {
     render();
     await vi.advanceTimersByTimeAsync(50);
     expect(push.runMeetingLogSweep).toHaveBeenCalledTimes(1);
+  });
+
+  it("prunes once on mount, after the sweep", async () => {
+    render();
+
+    await waitFor(() => expect(action.pruneTranscripts).toHaveBeenCalledTimes(1));
+    // ORDERING, not just both-were-called: two independent count checks pass in
+    // either order, so "after the sweep" would be untested.
+    expect(push.runMeetingLogSweep.mock.invocationCallOrder[0]).toBeLessThan(
+      action.pruneTranscripts.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("STILL prunes when the sweep reports it did not run", async () => {
+    // The mutant this kills is the prune placed inside `if (outcome.ran)`.
+    // `ran` is false whenever the config is absent or half-filled, so that
+    // placement means a user who removes their Odoo credentials keeps every
+    // stored transcript and every AI digest forever. Retention takes no config
+    // and must not depend on Odoo being reachable.
+    push.runMeetingLogSweep.mockResolvedValue({ ran: false, pushed: 0 });
+
+    render();
+
+    await waitFor(() => expect(action.pruneTranscripts).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not prune from the dashboard window", async () => {
+    // isOwner is derived from the window label inside the hook, NOT passed in.
+    windowLabel.value = "dashboard";
+
+    render();
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(action.pruneTranscripts).not.toHaveBeenCalled();
+  });
+
+  it("survives a rejecting prune and logs it under its OWN message", async () => {
+    // The mutant is a prune chained into the sweep's terminal catch. Asserting
+    // only that the sweep still ran cannot see that - the sweep already ran
+    // before the prune. Pin the prune-specific log line instead, which also pins
+    // the "its own catch, not the sweep's" requirement.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    action.pruneTranscripts.mockRejectedValueOnce(new Error("db down"));
+
+    render();
+
+    await waitFor(() =>
+      expect(err).toHaveBeenCalledWith(
+        "[Odoo] meeting log retention prune failed:",
+        expect.any(Error)
+      )
+    );
+    err.mockRestore();
+  });
+
+  it("does not prune twice across two mounts in one process", async () => {
+    // MUST stub ran:false on BOTH runs. With the suite's default {ran:true} stub
+    // the first mount latches sweptThisProcess and the second mount returns early
+    // before the prune is ever reached - so this case would be measuring the
+    // SWEEP guard and would pass against an implementation with no prune latch at
+    // all. This asserts the REAL latch, which is why this suite must not mock
+    // @/lib/odoo/meeting-log-actions.
+    push.runMeetingLogSweep.mockResolvedValue({ ran: false, pushed: 0 });
+
+    const first = render();
+    await waitFor(() => expect(action.pruneTranscripts).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    render();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(action.pruneTranscripts).toHaveBeenCalledTimes(1);
   });
 });
 
