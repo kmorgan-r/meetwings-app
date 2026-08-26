@@ -24,25 +24,32 @@ vi.mock("@/lib/database/config", () => ({
 
 import {
   QUEUE_SQL,
+  assignQueueRow,
   cancelHeldRow,
   claimRow,
+  countActionableQueued,
   countAllQueued,
+  deleteQueueRow,
   failRow,
   findHeldRow,
   getQueueCounts,
   getQueueRow,
+  getQueueTranscript,
   getTranscriptWatermark,
   insertQueueRow,
+  listActionableRows,
   markSent,
+  pruneTranscripts,
   readMeetingMessages,
   reclaimStaleSending,
   recordAttemptError,
   recordErrorOnUnsent,
   releaseRowToPending,
+  retryQueueRow,
   selectSweepable,
 } from "@/lib/database/meeting-log.action";
 import { purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
-import { HOLD_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
+import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 
 const MIGRATIONS = path.resolve(__dirname, "../../src-tauri/src/db/migrations");
 const INSTANCE = "http://h:8069|odoo";
@@ -476,5 +483,327 @@ describe("readMeetingMessages", () => {
     const entries = await readMeetingMessages("conv-1", 1000);
     expect(entries[0].speaker).toBeUndefined();
     expect(entries[0].original).toBe("hello");
+  });
+});
+
+describe("retryQueueRow", () => {
+  it("moves a failed row to pending, clears the error, and LEAVES attempts alone", async () => {
+    // The positive assertions are the point. A refusal-only test lets the
+    // mutant that drops `SET status = 'pending'` survive: the statement still
+    // affects one row, the wrapper still returns true, the mocked "then pushes"
+    // case still passes - and in production claimRow refuses the still-`failed`
+    // row and the push does nothing, permanently.
+    seed({ id: "r", status: "failed", attempts: 3, last_error: "boom", last_error_code: "ODOO_FAULT" });
+
+    expect(await retryQueueRow("r")).toBe(true);
+
+    expect(await getQueueRow("r")).toMatchObject({
+      status: "pending",
+      last_error: null,
+      last_error_code: null,
+      attempts: 3, // NOT reset - the escalation record survives a retry
+    });
+  });
+
+  it("accepts an escalated pending row", async () => {
+    seed({ id: "r", status: "pending", attempts: ESCALATE_AFTER_ATTEMPTS });
+    expect(await retryQueueRow("r")).toBe(true);
+  });
+
+  it("refuses a sent row", async () => {
+    seed({ id: "r", status: "sent" });
+    expect(await retryQueueRow("r")).toBe(false);
+    expect(await getQueueRow("r")).toMatchObject({ status: "sent" });
+  });
+});
+
+describe("assignQueueRow", () => {
+  it("writes target and status in ONE statement", async () => {
+    // A row can never be `pending` with no target - the exact collision the
+    // `unassigned` status exists to prevent.
+    seed({ id: "r", status: "unassigned", contact_id: null, lead_id: null });
+
+    expect(await assignQueueRow("r", 42, 7)).toBe(true);
+
+    expect(await getQueueRow("r")).toMatchObject({
+      status: "pending",
+      contact_id: 42,
+      lead_id: 7,
+    });
+  });
+
+  it("accepts a failed row and CLEARS both Odoo ids", async () => {
+    // Reassign. Clearing the ids is not tidying: a failed row legitimately
+    // holds an attachment_id when ir.attachment.create succeeded and
+    // message_post then faulted. Retargeting without clearing makes
+    // pushQueuedRow skip the create and post a note on the NEW partner that
+    // links a file living on the OLD partner's record - one customer's
+    // transcript reachable from another customer's chatter.
+    seed({
+      id: "r", status: "failed", contact_id: 1, lead_id: null,
+      attachment_id: 99, message_id: null, last_error: "gone", last_error_code: "ODOO_FAULT",
+    });
+
+    expect(await assignQueueRow("r", 42, null)).toBe(true);
+
+    expect(await getQueueRow("r")).toMatchObject({
+      status: "pending",
+      contact_id: 42,
+      lead_id: null,
+      attachment_id: null,
+      message_id: null,
+      last_error: null,
+      last_error_code: null,
+    });
+  });
+
+  it("refuses a pending row", async () => {
+    seed({ id: "r", status: "pending" });
+    expect(await assignQueueRow("r", 42, null)).toBe(false);
+  });
+});
+
+describe("deleteQueueRow", () => {
+  it("blanks transcript AND summary_json while every timestamp survives", async () => {
+    seed({
+      id: "r", status: "failed", transcript: "You: secrets",
+      summary_json: '{"title":"Q3 renewal","participants":["Ada"]}',
+      transcript_start_at: 1000, transcript_end_at: 2000,
+      session_key: "conv:1000", created_at: 1234, contact_id: 42, lead_id: 7,
+    });
+
+    expect(await deleteQueueRow("r")).toBe(true);
+
+    // summary_json is not optional to clear: it holds title, summary,
+    // decisions, action items, next steps, participants and entities - the
+    // meeting's content in condensed form, including named people. Blanking
+    // the transcript and keeping the digest defeats the promise the confirm
+    // step made.
+    expect(await getQueueRow("r")).toMatchObject({
+      status: "deleted",
+      transcript: "",
+      summary_json: null,
+      transcript_start_at: 1000,
+      transcript_end_at: 2000,
+      session_key: "conv:1000",
+      created_at: 1234,
+      contact_id: 42,
+      lead_id: 7,
+    });
+  });
+
+  it.each(["failed", "unassigned", "held", "pending", "sent", "cancelled"])(
+    "accepts a %s row",
+    async (status) => {
+      seed({ id: "r", status });
+      expect(await deleteQueueRow("r")).toBe(true);
+    }
+  );
+
+  it("refuses a sending row", async () => {
+    seed({ id: "r", status: "sending" });
+    expect(await deleteQueueRow("r")).toBe(false);
+    expect(await getQueueRow("r")).toMatchObject({ status: "sending" });
+  });
+
+  it("LEAVES THE WATERMARK UNCHANGED after deleting the newest row", async () => {
+    // THE regression test for this slice's headline defect, named in the spec
+    // and required to exist by name. A hard DELETE regresses
+    // MAX(transcript_end_at); because meetingTranscript is never cleared when a
+    // meeting ends, the next trigger re-slices the entries the deleted row had
+    // consumed and reposts that meeting under whatever contact is selected by
+    // then. The skip watermark does not cover it - that one advances only for a
+    // span that wrote NO row.
+    seed({ id: "old", session_key: "a", transcript_end_at: 1000, status: "sent" });
+    seed({ id: "new", session_key: "b", transcript_end_at: 9999, status: "failed" });
+
+    expect(await getTranscriptWatermark()).toBe(9999);
+
+    await deleteQueueRow("new");
+
+    expect(await getTranscriptWatermark()).toBe(9999);
+  });
+
+  it("keeps the session_key dedup backstop alive", async () => {
+    seed({ id: "r", session_key: "conv:1000", status: "failed" });
+    await deleteQueueRow("r");
+
+    // A hard delete would free the key and drop the UNIQUE race backstop.
+    expect(await insertQueueRow(newRow({ id: "other", sessionKey: "conv:1000" }))).toBe(false);
+  });
+});
+
+describe("listActionableRows", () => {
+  it("omits the transcript column entirely", async () => {
+    seed({ id: "r", status: "failed", transcript: "You: hello" });
+    const [row] = await listActionableRows(INSTANCE);
+    expect(row).not.toHaveProperty("transcript");
+    expect(row).toMatchObject({ id: "r", status: "failed" });
+  });
+
+  it.each(["sent", "cancelled", "deleted"])("excludes a %s row", async (status) => {
+    seed({ id: "r", status });
+    expect(await listActionableRows(INSTANCE)).toHaveLength(0);
+  });
+
+  it("includes an other-instance failed row", async () => {
+    // Under QUEUE_SQL.counts such a row matches no arm and is invisible,
+    // unsendable, undeletable and never pruned - transcript retained forever
+    // with no user-reachable surface.
+    seed({ id: "r", status: "failed", instance: OTHER });
+    expect(await listActionableRows(INSTANCE)).toHaveLength(1);
+  });
+
+  it("returns 201 rows when 250 exist", async () => {
+    for (let i = 0; i < 250; i += 1) {
+      seed({ id: `r${i}`, session_key: `k${i}`, status: "pending", created_at: NOW + i });
+    }
+    expect(await listActionableRows(INSTANCE)).toHaveLength(201);
+  });
+
+  it("ranks needs-attention above newer rows so the cap cannot starve it", async () => {
+    // 210 newer rows, not 200. With exactly 200 the total is 201 = LIMIT 201,
+    // so the needs-attention row comes back with or WITHOUT the group-rank
+    // CASE and the case kills no mutant.
+    seed({ id: "old-failed", session_key: "of", status: "failed", created_at: NOW });
+    for (let i = 0; i < 210; i += 1) {
+      seed({ id: `u${i}`, session_key: `uk${i}`, status: "unassigned", created_at: NOW + 1 + i });
+    }
+
+    const rows = await listActionableRows(INSTANCE);
+
+    expect(rows[0]).toMatchObject({ id: "old-failed" });
+  });
+});
+
+describe("a deleted row is excluded by every shipped predicate", () => {
+  beforeEach(() => {
+    // TWO rows, one per instance, BOTH with a non-null last_error and an
+    // escalated attempts count. A single current-instance row with a null error
+    // passes two arms vacuously: `lastError` filters `last_error IS NOT NULL`
+    // BEFORE the status predicate is ever reached, so a NOT IN rewrite of that
+    // status list survives; and the counts fourth arm is `instance <> ?1`,
+    // which a current-instance row cannot exercise at all. The fixture must
+    // make status the only clause that can exclude them.
+    seed({
+      id: "d-here", session_key: "dh", status: "deleted", instance: INSTANCE,
+      last_error: "was a failure", last_error_code: "ODOO_FAULT",
+      attempts: ESCALATE_AFTER_ATTEMPTS, transcript: "", created_at: 1,
+    });
+    seed({
+      id: "d-there", session_key: "dt", status: "deleted", instance: OTHER,
+      last_error: "was a failure", last_error_code: "ODOO_FAULT",
+      attempts: ESCALATE_AFTER_ATTEMPTS, transcript: "", created_at: 1,
+    });
+  });
+
+  it("is never swept", async () => {
+    expect(await selectSweepable(INSTANCE, NOW)).toHaveLength(0);
+  });
+
+  it("cannot be claimed", async () => {
+    // The failure this would miss: the sweep posting an empty attachment and a
+    // chatter note for the one meeting the user explicitly destroyed.
+    expect(await claimRow("d-here", NOW)).toBe(false);
+  });
+
+  it("is counted by no arm of getQueueCounts", async () => {
+    expect(await getQueueCounts(INSTANCE)).toMatchObject({
+      waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+    });
+  });
+
+  it("is counted by neither countAllQueued nor countActionableQueued", async () => {
+    expect(await countAllQueued()).toBe(0);
+    expect(await countActionableQueued()).toBe(0);
+  });
+});
+
+describe("countActionableQueued", () => {
+  it("counts the failed and unassigned rows countAllQueued deliberately omits", async () => {
+    // countAll's predicate feeds /odoo's promise "finish setting Odoo up and
+    // they will be sent", which is false for `failed` (terminal until a manual
+    // retry) and `unassigned` (needs a contact, not credentials). This page
+    // needs its own count or a user whose backlog is entirely those two sees a
+    // BLANK page - no groups because the config is incomplete, no stranded line
+    // because the count is zero.
+    seed({ id: "f", session_key: "f", status: "failed" });
+    seed({ id: "u", session_key: "u", status: "unassigned" });
+
+    expect(await countAllQueued()).toBe(0);
+    expect(await countActionableQueued()).toBe(2);
+  });
+
+  it("ignores instance entirely", async () => {
+    seed({ id: "o", session_key: "o", status: "pending", instance: OTHER });
+    expect(await countActionableQueued()).toBe(1);
+  });
+});
+
+describe("pruneTranscripts", () => {
+  const OLD = NOW - RETENTION_MS - 1;
+
+  it("blanks transcript and summary on sent and cancelled rows past the cutoff", async () => {
+    seed({ id: "s", session_key: "s", status: "sent", transcript: "text", summary_json: "{}", created_at: OLD });
+    seed({ id: "c", session_key: "c", status: "cancelled", transcript: "text", summary_json: "{}", created_at: OLD });
+
+    expect(await pruneTranscripts(NOW)).toBe(2);
+
+    expect(await getQueueRow("s")).toMatchObject({ transcript: "", summary_json: null });
+    expect(await getQueueRow("c")).toMatchObject({ transcript: "", summary_json: null });
+  });
+
+  it.each(["failed", "unassigned", "pending", "held", "sending"])(
+    "leaves a %s row untouched at ANY age",
+    async (status) => {
+      // Those five may all still be pushed, and a pushed row with a blanked
+      // transcript uploads an EMPTY attachment to a customer record.
+      seed({ id: "r", session_key: "r", status, transcript: "text", created_at: OLD });
+      expect(await pruneTranscripts(NOW)).toBe(0);
+      expect(await getQueueRow("r")).toMatchObject({ transcript: "text" });
+    }
+  );
+
+  it("leaves a past-cutoff DELETED row alone", async () => {
+    // The deliberate negative. `deleted` is absent from the predicate because
+    // the delete action blanks both columns in the same statement that sets the
+    // status, so the clause would be dead. Delete, not retention, blanks those.
+    seed({ id: "d", session_key: "d", status: "deleted", transcript: "leftover", created_at: OLD });
+    expect(await pruneTranscripts(NOW)).toBe(0);
+    expect(await getQueueRow("d")).toMatchObject({ transcript: "leftover" });
+  });
+
+  it("leaves a recent sent row alone", async () => {
+    seed({ id: "s", session_key: "s", status: "sent", transcript: "text", created_at: NOW });
+    expect(await pruneTranscripts(NOW)).toBe(0);
+  });
+
+  it("is idempotent and never touches a timestamp", async () => {
+    seed({
+      id: "s", session_key: "s", status: "sent", transcript: "text", summary_json: null,
+      created_at: OLD, transcript_start_at: 11, transcript_end_at: 22, sent_at: 33,
+    });
+
+    expect(await pruneTranscripts(NOW)).toBe(1);
+    expect(await pruneTranscripts(NOW)).toBe(0); // rowsAffected stays meaningful
+
+    expect(await getQueueRow("s")).toMatchObject({
+      transcript_start_at: 11, transcript_end_at: 22, sent_at: 33, created_at: OLD,
+    });
+  });
+});
+
+describe("getQueueTranscript", () => {
+  it("returns the stored text", async () => {
+    seed({ id: "r", status: "failed", transcript: "You: hello" });
+    expect(await getQueueTranscript("r")).toBe("You: hello");
+  });
+
+  it("distinguishes a blanked transcript from a missing row", async () => {
+    // "" means removed; null means no row. Collapsing them tells a user their
+    // meeting text was deliberately destroyed when the row simply is not there.
+    seed({ id: "r", status: "deleted", transcript: "" });
+    expect(await getQueueTranscript("r")).toBe("");
+    expect(await getQueueTranscript("nope")).toBeNull();
   });
 });
