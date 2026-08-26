@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const action = vi.hoisted(() => ({
   retryQueueRow: vi.fn(async () => true),
@@ -38,10 +38,18 @@ const config = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
-vi.mock("@/lib/odoo/client", () => ({ createOdooClient: vi.fn(() => ({ execute: vi.fn() })) }));
+// A distinguishable SENTINEL, not a plausible client shape. `runAction` must
+// hand the push the client it built from the config it just resolved, and the
+// only way to tell that apart from the caller's is to make the two objects
+// visibly different.
+const odooClient = vi.hoisted(() => ({
+  createOdooClient: vi.fn(() => ({ id: "fresh" })),
+}));
+vi.mock("@/lib/odoo/client", () => odooClient);
 
+import { SUMMARIZE_TIMEOUT_MS } from "@/lib/odoo/meeting-log";
 import {
-  assignMeetingLog, deleteMeetingLog, retryMeetingLog,
+  assignMeetingLog, boundedSummarize, deleteMeetingLog, retryMeetingLog,
 } from "@/lib/odoo/meeting-log-actions";
 
 const INSTANCE = "http://h:8069|odoo";
@@ -138,6 +146,61 @@ describe("retryMeetingLog", () => {
 
     expect(action.retryQueueRow).not.toHaveBeenCalled();
     expect(out.kind).toBe("failed");
+  });
+
+  it("pushes with a client REBUILT from the fresh config, never the caller's", async () => {
+    // `runAction` deliberately ignores deps.client. The mutant
+    // `deps.client ?? createOdooClient(config)` is invisible until Task 9's
+    // AssignDialog starts passing one - and then it pushes on the client the
+    // dialog built when it opened. instanceFingerprint is url|db only, so a
+    // login or API-key rotation while the dialog sat open still matches the
+    // fingerprint: the push goes out on revoked credentials and records a
+    // spurious ODOO_AUTH_FAILED against a row that was fine.
+    action.getQueueRow.mockResolvedValue(dbRow());
+    const stale = { id: "stale" };
+
+    await retryMeetingLog("r", { providerConfig: null, client: stale });
+
+    const pushed = push.pushQueuedRow.mock.calls[0][1].client;
+    expect(pushed).toEqual({ id: "fresh" });
+    // The half the mutant breaks. `toEqual` alone would still pass if the two
+    // sentinels ever converged in shape.
+    expect(pushed).not.toBe(stale);
+    expect(odooClient.createOdooClient).toHaveBeenCalledWith({
+      url: "http://h:8069", db: "odoo", login: "a@b.c", apiKey: "k",
+    });
+  });
+
+  it("fires onCommitted after the CAS and BEFORE the push", async () => {
+    // Deleting `deps.onCommitted?.()` is invisible to every other case, and
+    // Task 8 cannot cover it either: its page suite mocks this module, so it
+    // can only assert the page PASSES a callback, never that runAction FIRES
+    // one. Split across two mocked boundaries the hook is untested on both
+    // sides. Without it the row renders its pre-click status for the whole
+    // push - up to five 30s Odoo calls plus a summarize.
+    action.getQueueRow.mockResolvedValue(dbRow());
+    const onCommitted = vi.fn();
+
+    await retryMeetingLog("r", { providerConfig: null, onCommitted });
+
+    expect(onCommitted).toHaveBeenCalledTimes(1);
+    // ORDER, not two call counts. "Both were called" passes with the hook
+    // moved after the push, which is the one arrangement that makes it useless.
+    expect(onCommitted.mock.invocationCallOrder[0])
+      .toBeLessThan(push.pushQueuedRow.mock.invocationCallOrder[0]);
+  });
+
+  it("does NOT fire onCommitted when the CAS is refused", async () => {
+    // A hook that fires on a refused CAS makes the page re-read the list for
+    // nothing on every conflict - and conflicts are the common case when two
+    // windows are open, which is the whole reason the CAS exists.
+    action.getQueueRow.mockResolvedValue(dbRow());
+    action.retryQueueRow.mockResolvedValue(false);
+    const onCommitted = vi.fn();
+
+    await retryMeetingLog("r", { providerConfig: null, onCommitted });
+
+    expect(onCommitted).not.toHaveBeenCalled();
   });
 
   it("samples `now` after the credentials resolve, never before", async () => {
@@ -349,5 +412,53 @@ describe("an other-instance row", () => {
 
     expect(action.assignQueueRow).not.toHaveBeenCalled();
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
+  });
+});
+
+// Tested DIRECTLY, not through runAction: the bound is a 60s race and driving
+// it end to end would mean faking timers around the whole orchestration.
+//
+// FAKE TIMERS ARE SCOPED TO THIS DESCRIBE. The `now`-sampling case above needs
+// a REAL 25 ms delay in requireOdooConfig - the whole point of that case is a
+// measurable window - so fake timers leaking up to the file level would hang
+// it against correct code.
+describe("boundedSummarize", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves null once SUMMARIZE_TIMEOUT_MS elapses on a call that never settles", async () => {
+    // fetchAIResponse has NO timeout of its own. An unbounded summarize is the
+    // one way a dashboard push crosses STALE_CLAIM_MS, which lets the main
+    // window's reclaim re-`pending` a row this window still has in flight:
+    // two attachments and two customer-visible chatter notes. Replacing the
+    // Promise.race with a plain await leaves every other case in this file
+    // green, and nothing else in the slice covers it.
+    summarizer.generateMeetingLogSummary.mockImplementation(() => new Promise(() => {}));
+    const { summarize, didSummarize } = boundedSummarize(null);
+
+    const pending = summarize({ entries: [], startAt: 1, endAt: 2 });
+    await vi.advanceTimersByTimeAsync(SUMMARIZE_TIMEOUT_MS);
+
+    expect(await pending).toBeNull();
+    // Imported, not hardcoded: a change to the constant must not silently
+    // decouple the bound from the value the module actually races against.
+    expect(didSummarize()).toBe(false);
+  });
+
+  it("clears the timeout on the fast path", async () => {
+    // Deleting the `clearTimeout` in the `finally` is otherwise invisible -
+    // the summarize still returns the right value. Every call would leave a
+    // live 60s timer behind, and under fake timers that is exactly what a
+    // non-zero count means.
+    const { summarize } = boundedSummarize(null);
+
+    await summarize({ entries: [], startAt: 1, endAt: 2 });
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

@@ -46,7 +46,17 @@ export interface ProviderConfigLike {
 
 export interface ActionDeps {
   providerConfig: ProviderConfigLike | null;
-  /** AssignDialog passes the client it already built for its opportunity lookup. */
+  /**
+   * The dialog's OWN client, for its OWN contact and opportunity lookups.
+   *
+   * `runAction` DELIBERATELY IGNORES THIS and rebuilds from the config it just
+   * resolved. `instanceFingerprint` is url|db only, so a login or API-key
+   * rotation while the dialog sat open still matches the fingerprint - pushing
+   * with the dialog's client would hit revoked credentials and record a
+   * spurious ODOO_AUTH_FAILED against a row that was fine. `createOdooClient`
+   * is synchronous and does no I/O, so reuse would buy nothing. Do not
+   * "optimise" this into `deps.client ?? createOdooClient(config)`.
+   */
   client?: OdooClient;
   /**
    * Fired the instant the CAS commits, BEFORE the push runs.
