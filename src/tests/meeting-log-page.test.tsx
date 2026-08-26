@@ -1421,6 +1421,12 @@ describe("what the assign dialog hands up", () => {
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
+    // Confirm closes the dialog immediately, same as Cancel - it does not wait
+    // for the push to settle. A row left open here answers a THIRD click (once
+    // busy clears) against a row that is now `sent`, producing a spurious
+    // "This meeting changed in another window."
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     const [id, contactId, leadId, deps] = actions.assignMeetingLog.mock.calls[0];
     expect(id).toBe("un");

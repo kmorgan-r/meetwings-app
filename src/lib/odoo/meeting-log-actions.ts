@@ -10,7 +10,7 @@ import {
   instanceFingerprint,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { DbMeetingLogRow, SummarizationResult } from "@/types";
+import type { SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
 import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
@@ -47,15 +47,21 @@ export interface ProviderConfigLike {
 export interface ActionDeps {
   providerConfig: ProviderConfigLike | null;
   /**
-   * The dialog's OWN client, for its OWN contact and opportunity lookups.
+   * No caller passes this today. `AssignDialog` builds its own client via its
+   * own `getClient()` for its own contact and opportunity lookups, and does
+   * not put it on the Confirm payload it hands up.
    *
-   * `runAction` DELIBERATELY IGNORES THIS and rebuilds from the config it just
-   * resolved. `instanceFingerprint` is url|db only, so a login or API-key
+   * `runAction` DELIBERATELY NEVER READS THIS and rebuilds from the config it
+   * just resolved. `instanceFingerprint` is url|db only, so a login or API-key
    * rotation while the dialog sat open still matches the fingerprint - pushing
    * with the dialog's client would hit revoked credentials and record a
    * spurious ODOO_AUTH_FAILED against a row that was fine. `createOdooClient`
    * is synchronous and does no I/O, so reuse would buy nothing. Do not
    * "optimise" this into `deps.client ?? createOdooClient(config)`.
+   *
+   * It exists anyway so the "never reuse a caller's client" contract is
+   * expressible in the type and testable - see the stale-client sentinel case
+   * in `meeting-log-actions.test.ts`.
    */
   client?: OdooClient;
   /**
@@ -144,8 +150,8 @@ async function runAction(
     // the dialog sat open still matches the fingerprint - and pushing with the
     // dialog's stale client would hit revoked credentials and record a spurious
     // ODOO_AUTH_FAILED. createOdooClient is synchronous and does no I/O, so
-    // reuse buys nothing here. `deps.client` stays for the dialog's OWN contact
-    // and opportunity lookups, which is where the saved `authenticate` matters.
+    // reuse buys nothing here. No caller passes `deps.client` today - see its
+    // doc comment on ActionDeps for why the member stays anyway.
     client = createOdooClient(config);
   } catch (err) {
     // Nothing has been written. The row is genuinely unchanged.
@@ -184,7 +190,7 @@ async function runAction(
     // `now` sampled HERE, never carried from the credential step: claimRow
     // writes it into claimed_at, and a pre-aged claimed_at makes the row
     // eligible for the main window's reclaim while this push is still live.
-    await pushQueuedRow(fresh as DbMeetingLogRow, {
+    await pushQueuedRow(fresh, {
       client,
       instance,
       now: Date.now(),

@@ -358,7 +358,7 @@ describe("assignMeetingLog", () => {
 
 describe("deleteMeetingLog", () => {
   it("never pushes", async () => {
-    await deleteMeetingLog("r");
+    expect(await deleteMeetingLog("r")).toEqual({ kind: "ok" });
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
   });
 

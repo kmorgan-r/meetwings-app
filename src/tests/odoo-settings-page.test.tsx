@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -347,6 +347,9 @@ describe("the queue status block", () => {
     expect(block).toHaveTextContent("1 meeting needs attention");
     expect(block).toHaveTextContent("3 meetings not assigned to a contact");
     expect(block).toHaveTextContent("4 meetings queued for a different Odoo database");
+    expect(
+      within(block).getByRole("link", { name: "Open the meeting log" })
+    ).toHaveAttribute("href", "/meeting-log");
   });
 
   it("surfaces the most recent redacted error beside the attention group", async () => {

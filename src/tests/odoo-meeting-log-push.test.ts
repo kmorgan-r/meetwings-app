@@ -180,6 +180,7 @@ describe("the happy path", () => {
 
     // Index 2 is the message_post POST; index 0 is authenticate.
     const body = String(tauriFetch.mock.calls[2][1].body);
+    expect(body).toContain("subtype_xmlid");
     expect(body).toContain("mail.mt_note");
   });
 
