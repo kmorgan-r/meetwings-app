@@ -189,6 +189,13 @@ async function findRow(id: string) {
   return rowOf(id);
 }
 
+/** A promoted notice, addressed the same way and for the same reason. */
+function noticeElement(id: string): HTMLElement {
+  const el = document.querySelector(`[data-notice-id="${id}"]`);
+  if (!el) throw new Error(`notice ${id} is not rendered`);
+  return el as HTMLElement;
+}
+
 beforeEach(() => {
   // clearAllMocks wipes the CALL LOG and leaves implementations, so a
   // mockResolvedValue from one test would still be in force for every test
@@ -614,9 +621,33 @@ describe("delete", () => {
 });
 
 describe("outcome copy", () => {
+  /**
+   * The row STAYS actionable after the action.
+   *
+   * Realistic for conflict / no-op / push-failed / still-sending /
+   * moved-unknown / failed: every one of them leaves the row in a status
+   * `listActionable` still selects, so it keeps rendering and the outcome line
+   * stays inline on it. NOT realistic for ok or degraded - see `retryTerminal`.
+   */
   async function retryWith(outcome: unknown) {
     actions.retryMeetingLog.mockResolvedValue(outcome);
     db.listActionableRows.mockResolvedValue([row({ id: "na", status: "failed" })]);
+    await renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+  }
+
+  /**
+   * The row LEAVES the list, which is what a successful retry actually does.
+   *
+   * `retryRow` -> push -> `status = 'sent'`, and `sent` is not in
+   * listActionable's WHERE clause, so the post-action read omits it. Using
+   * `retryWith` for these two is exactly why 39 green cases missed that the
+   * `degraded` sentence was unreadable in production.
+   */
+  async function retryTerminal(outcome: unknown) {
+    actions.retryMeetingLog.mockResolvedValue(outcome);
+    db.listActionableRows.mockResolvedValueOnce([row({ id: "na", status: "failed" })]);
+    db.listActionableRows.mockResolvedValue([]);
     await renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
   }
@@ -658,7 +689,10 @@ describe("outcome copy", () => {
   });
 
   it("qualifies a degraded send rather than reporting plain success", async () => {
-    await retryWith({ kind: "degraded" });
+    // Terminal fixture: the row is gone by the time the message exists, so
+    // this also proves the one sentence the summarize plumbing exists to
+    // produce is readable at all.
+    await retryTerminal({ kind: "degraded" });
     expect(
       await screen.findByText(
         "Sent — but the note shows the transcript's first lines, because the summary could not be generated."
@@ -678,7 +712,7 @@ describe("outcome copy", () => {
   });
 
   it("reports a plain success distinctly", async () => {
-    await retryWith({ kind: "ok" });
+    await retryTerminal({ kind: "ok" });
     expect(await screen.findByText("Sent to Odoo.")).toBeInTheDocument();
   });
 
@@ -704,6 +738,90 @@ describe("outcome copy", () => {
     });
     const line = await screen.findByText(/ODOO_FAULT/);
     expect(line.textContent).toBe("The action stopped with ODOO_FAULT. Nothing on this meeting changed.");
+  });
+});
+
+describe("outcomes whose row leaves the list", () => {
+  it("promotes the message out of the unmounting row, still naming the meeting", async () => {
+    // A successful retry writes status = 'sent', which listActionable's WHERE
+    // clause does not select - so the row is gone on the very next read and an
+    // inline-only message lives about one DB round trip. This sentence is the
+    // deliverable of the whole summarize plumbing.
+    actions.retryMeetingLog.mockResolvedValue({ kind: "degraded" });
+    db.listActionableRows.mockResolvedValueOnce([row({ id: "na", status: "failed" })]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    const notice = await waitFor(() => noticeElement("na"));
+    expect(notice.textContent).toContain(
+      "Sent — but the note shows the transcript's first lines, because the summary could not be generated."
+    );
+    // The label was captured before the `finally` cleared the pin; the pinned
+    // snapshot is the only place the date and the target name survive.
+    expect(notice.textContent).toContain(new Date(MEETING_AT).toLocaleString());
+    expect(notice.textContent).toContain("Ada Lovelace");
+
+    // The row really is gone: this is a promotion, not the inline line
+    // surviving because the fixture kept the row alive.
+    expect(document.querySelector('[data-row-id="na"]')).toBeNull();
+    expect(screen.getByText("No meetings waiting to be logged.")).toBeInTheDocument();
+
+    // Persistent until dismissed - not a toast on a timer.
+    await userEvent.click(within(notice).getByRole("button", { name: /^Dismiss/ }));
+    expect(document.querySelector('[data-notice-id="na"]')).toBeNull();
+  });
+
+  it("keeps one notice per row when two rows finish", async () => {
+    // The busy Set is plural by design, so the region must be a LIST. A
+    // newest-replaces slot silently drops one message - and the one it drops
+    // could be the `degraded` line this whole region exists to make readable.
+    const gateA = deferred<{ kind: string }>();
+    const gateB = deferred<{ kind: string }>();
+    actions.retryMeetingLog.mockImplementation((id: string) =>
+      id === "a" ? gateA.promise : gateB.promise
+    );
+    db.listActionableRows.mockResolvedValueOnce([
+      row({ id: "a", status: "failed" }),
+      row({ id: "b", status: "failed" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+
+    await findRow("a");
+    await userEvent.click(rowOf("a").getByRole("button", { name: "Retry" }));
+    await userEvent.click(rowOf("b").getByRole("button", { name: "Retry" }));
+
+    gateA.resolve({ kind: "degraded" });
+    await waitFor(() => noticeElement("a"));
+    gateB.resolve({ kind: "ok" });
+    await waitFor(() => noticeElement("b"));
+
+    expect(noticeElement("a").textContent).toContain(
+      "because the summary could not be generated"
+    );
+    expect(noticeElement("b").textContent).toContain("Sent to Odoo.");
+    expect(document.querySelectorAll("[data-notice-id]")).toHaveLength(2);
+  });
+
+  it("says a deleted meeting was removed, never that it was sent", async () => {
+    // deleteMeetingLog returns {kind:"ok"} like every other action, but the
+    // module's own comment is "No push, ever" - so one shared `ok` string tells
+    // a user their DELETED meeting reached a customer's record.
+    actions.deleteMeetingLog.mockResolvedValue({ kind: "ok" });
+    db.listActionableRows.mockResolvedValueOnce([row({ id: "na", status: "failed" })]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete this meeting" }));
+
+    const notice = await waitFor(() => noticeElement("na"));
+    expect(notice.textContent).toContain("Removed from the queue. Nothing was sent to Odoo.");
+    // The negative clause is lower-case "sent"; the shared success string is
+    // "Sent to Odoo." So this fails the moment delete reuses it.
+    expect(document.body.textContent).not.toContain("Sent to Odoo.");
   });
 });
 

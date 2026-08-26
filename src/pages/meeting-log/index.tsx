@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { Button } from "@/components";
 import { PageLayout } from "@/layouts";
 import {
   countActionableQueued,
@@ -23,7 +24,11 @@ import {
 } from "@/lib/storage/odoo-config.storage";
 import type { MeetingLogListRow, OdooContact } from "@/types";
 import { ProviderConfigReader, QueueRow } from "./components";
-import type { TranscriptView } from "./components/QueueRow";
+// The date fallback is imported, never re-derived: the shipped note body uses
+// `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
+// nullable column lets the notice, the row and the customer's chatter disagree
+// about the same meeting.
+import { meetingDateOf, type TranscriptView } from "./components/QueueRow";
 
 /**
  * The queue page. Dashboard window only - the overlay never navigates here.
@@ -85,16 +90,42 @@ function describeFailure(code: string): string {
 }
 
 /**
+ * A whole-list read failure, which is NOT a row action.
+ *
+ * Separate from describeFailure because that one ends every line with "Nothing
+ * on this meeting changed." - true of an action that stopped before its CAS,
+ * and meaningless about a read that never named a meeting in the first place.
+ */
+function describeLoadFailure(code: string): string {
+  return code === "ODOO_INTERNAL"
+    ? "The meetings waiting to be logged could not be read."
+    : `The meetings waiting to be logged could not be read (${code}).`;
+}
+
+/** Retry and Assign push. Delete does not - see `outcomeCopy`. */
+const SENT_COPY = "Sent to Odoo.";
+
+/**
+ * Delete's own success line, and the negative clause is the whole point.
+ *
+ * `deleteMeetingLog` returns `{kind:"ok"}` like everything else, but the
+ * module's own comment says "No push, ever" - so a single shared `ok` string
+ * tells a user their DELETED meeting was sent to a customer's record.
+ */
+const DELETED_COPY = "Removed from the queue. Nothing was sent to Odoo.";
+
+/**
  * One line per outcome, and all seven stay distinct.
  *
  * Conflating any two teaches users to distrust the page - most sharply
  * `degraded`, which is the difference between a real summary and a
  * "Summarization failed" note live on a customer's record.
  */
-function outcomeCopy(outcome: ActionOutcome): string {
+function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
   switch (outcome.kind) {
     case "ok":
-      return "Sent to Odoo.";
+      // Per action, never one shared string. Delete pushes nothing.
+      return successCopy;
     case "degraded":
       return "Sent — but the note shows the transcript's first lines, because the summary could not be generated.";
     case "no-op":
@@ -154,6 +185,24 @@ export default function MeetingLog() {
    */
   const [pinned, setPinned] = useState<Map<string, MeetingLogListRow>>(new Map());
   const [outcomes, setOutcomes] = useState<Map<string, string>>(new Map());
+  /**
+   * Outcomes whose row has LEFT the list, promoted out of the unmounting row.
+   *
+   * A successful retry writes `status = 'sent'`, which is not in
+   * `listActionable`'s WHERE clause - so the row leaves on the very next read,
+   * QueueRow unmounts, and the inline line goes with it about one DB round trip
+   * after it appeared. That destroys the one sentence the whole summarize
+   * plumbing exists to produce: "Sent - but the note shows the transcript's
+   * first lines". Assign vanishes identically, `unassigned` -> `sent`.
+   *
+   * A LIST keyed by row id, never a single slot: the busy Set is plural by
+   * design, so a newest-replaces slot would silently drop one `degraded`
+   * message and reintroduce exactly this failure. Persistent until dismissed -
+   * an auto-dismissing toast is this same bug on a shorter timer.
+   */
+  const [notices, setNotices] = useState<
+    ReadonlyArray<{ id: string; label: string; text: string }>
+  >([]);
   const [transcript, setTranscript] = useState<{ id: string; view: TranscriptView } | null>(
     null
   );
@@ -175,14 +224,23 @@ export default function MeetingLog() {
    */
   const loadToken = useRef(0);
 
-  const reload = useCallback(async () => {
+  /**
+   * Returns the rows this read actually committed, or `null` when it did not
+   * commit one - superseded by a newer token, or failed.
+   *
+   * The return value is what the promotion check reads. `null` must NOT be
+   * treated as "the row is gone": on the error path `rows` keeps its previous
+   * value, so the row is still on screen and its inline line is still the right
+   * place for the outcome.
+   */
+  const reload = useCallback(async (): Promise<MeetingLogListRow[] | null> => {
     const token = ++loadToken.current;
     try {
       // NOT currentInstance(): it wraps requireOdooConfig, which THROWS for
       // exactly the half-filled config a user comes here to fix - so the one
       // surface showing their backlog would render nothing.
       const state = await loadOdooConfigState();
-      if (token !== loadToken.current) return;
+      if (token !== loadToken.current) return null;
 
       if (state.state !== "complete") {
         // countActionableQueued, NOT countAllQueued: that statement is scoped
@@ -191,13 +249,16 @@ export default function MeetingLog() {
         // `unassigned`. Reusing it would show a user whose backlog is entirely
         // those two a count of zero, i.e. a blank page while rows are queued.
         const total = await countActionableQueued();
-        if (token !== loadToken.current) return;
+        if (token !== loadToken.current) return null;
         setConfigState(state.state);
         setInstance("");
         setRows([]);
         setStranded(total);
         setLoadError(null);
-        return;
+        // No groups render at all now, so a pending outcome has no inline home
+        // either - an empty list is the honest answer to "is the row still
+        // rendered".
+        return [];
       }
 
       const fingerprint = instanceFingerprint(state.config.url, state.config.db);
@@ -209,18 +270,22 @@ export default function MeetingLog() {
         listActionableRows(fingerprint),
         listContacts(fingerprint),
       ]);
-      if (token !== loadToken.current) return;
+      if (token !== loadToken.current) return null;
       setConfigState("complete");
       setInstance(fingerprint);
       setRows(list);
       setContacts(new Map(cached.map((c) => [c.id, c])));
       setStranded(0);
       setLoadError(null);
+      return list;
     } catch (err) {
-      if (token !== loadToken.current) return;
+      if (token !== loadToken.current) return null;
       // Reported, never swallowed - a queue that cannot be read must not look
       // like an empty queue. The code only, for the reason the copy map states.
-      setLoadError(describeFailure(reportOdooError(err, "read the meeting log queue").code));
+      setLoadError(
+        describeLoadFailure(reportOdooError(err, "read the meeting log queue").code)
+      );
+      return null;
     }
   }, []);
 
@@ -233,14 +298,15 @@ export default function MeetingLog() {
    */
   const loaderRef = useRef(reload);
   const busyRef = useRef(busy);
-  const pinnedRef = useRef(pinned);
   const configRef = useRef(configState);
+  // Read by the notice label capture, which runs inside a []-stable handler.
+  const contactsRef = useRef(contacts);
   const transcriptRef = useRef(transcript);
   useLayoutEffect(() => {
     loaderRef.current = reload;
     busyRef.current = busy;
-    pinnedRef.current = pinned;
     configRef.current = configState;
+    contactsRef.current = contacts;
     transcriptRef.current = transcript;
   });
 
@@ -277,15 +343,46 @@ export default function MeetingLog() {
     });
   }, []);
 
+  const dismissNotice = useCallback((id: string) => {
+    setNotices((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  /**
+   * Replaces a row's message wherever it currently lives.
+   *
+   * Delete's conflict branch refines its copy AFTER the action has settled, by
+   * which point the outcome may already have been promoted - writing the
+   * refinement inline would file it against a row nothing renders.
+   */
+  const refineOutcome = useCallback((id: string, text: string) => {
+    let promoted = false;
+    setNotices((prev) => {
+      const next = prev.map((n) => {
+        if (n.id !== id) return n;
+        promoted = true;
+        return { ...n, text };
+      });
+      return promoted ? next : prev;
+    });
+    if (!promoted) setOutcome(id, text);
+  }, [setOutcome]);
+
   const runRowAction = useCallback(
     async (
       row: MeetingLogListRow,
-      run: () => Promise<ActionOutcome>
+      run: () => Promise<ActionOutcome>,
+      successCopy: string
     ): Promise<ActionOutcome | null> => {
       if (busyRef.current.has(row.id)) return null;
       // Defensive. The buttons are gone once the config stops being complete,
       // but a click racing a focus re-resolve is not unreachable.
       if (configRef.current !== "complete") return null;
+
+      // CAPTURED BEFORE ANYTHING RUNS. Once the row leaves the list - which a
+      // successful retry guarantees, since `sent` is not in listActionable's
+      // WHERE clause - neither the date nor the target name exists anywhere
+      // else, and the notice would name no meeting at all.
+      const label = `${meetingDateOf(row)} · ${targetNameOf(row, contactsRef.current)}`;
 
       // Synchronously, BEFORE the first await. The list is only re-read when
       // the action finishes, so without this the row keeps rendering its
@@ -295,18 +392,36 @@ export default function MeetingLog() {
       setBusy((prev) => new Set(prev).add(row.id));
       setPinned((prev) => new Map(prev).set(row.id, row));
       setOutcome(row.id, null);
+      dismissNotice(row.id);
 
+      let text: string | null = null;
       try {
         const outcome = await run();
-        setOutcome(row.id, outcomeCopy(outcome));
+        text = outcomeCopy(outcome, successCopy);
+        setOutcome(row.id, text);
         return outcome;
       } catch (err) {
         // Unreachable today: runAction catches at both boundaries and
         // pushQueuedRow never throws. Kept so a future change cannot strand the
         // row busy with no explanation.
-        setOutcome(row.id, describeFailure(reportOdooError(err, "meeting log action").code));
+        text = describeFailure(reportOdooError(err, "meeting log action").code);
+        setOutcome(row.id, text);
         return null;
       } finally {
+        // AWAITED, because its result is the promotion test. The generic
+        // condition - "the row is not in the fresh list" - rather than an
+        // ok/degraded special case, so it also covers moved-unknown on a
+        // re-read that returned null and a row another window deleted mid
+        // action. `null` means the read never committed, so the row is still on
+        // screen and the inline line is still the right place.
+        const fresh = await loaderRef.current();
+        if (text !== null && fresh !== null && !fresh.some((r) => r.id === row.id)) {
+          setNotices((prev) => [
+            ...prev.filter((n) => n.id !== row.id),
+            { id: row.id, label, text: text as string },
+          ]);
+          setOutcome(row.id, null);
+        }
         setBusy((prev) => {
           const next = new Set(prev);
           next.delete(row.id);
@@ -317,25 +432,28 @@ export default function MeetingLog() {
           next.delete(row.id);
           return next;
         });
-        void loaderRef.current();
       }
     },
-    [setOutcome]
+    [dismissNotice, setOutcome]
   );
 
   const handleRetry = useCallback(
     (row: MeetingLogListRow) => {
-      void runRowAction(row, () =>
-        retryMeetingLog(row.id, {
-          // Read from the ref the leaf ProviderConfigReader writes. `null` here
-          // would send every retry of a `failed` row - whose summary_json is
-          // null by construction - down the fallback-body path.
-          providerConfig: providerConfigRef.current,
-          // The only way to observe the CAS: runAction owns it internally and
-          // resolves only after both re-reads, so without this the row renders
-          // its pre-click status for the whole push.
-          onCommitted: () => void loaderRef.current(),
-        })
+      void runRowAction(
+        row,
+        () =>
+          retryMeetingLog(row.id, {
+            // Read from the ref the leaf ProviderConfigReader writes. `null`
+            // here would send every retry of a `failed` row - whose
+            // summary_json is null by construction - down the fallback-body
+            // path.
+            providerConfig: providerConfigRef.current,
+            // The only way to observe the CAS: runAction owns it internally and
+            // resolves only after both re-reads, so without this the row
+            // renders its pre-click status for the whole push.
+            onCommitted: () => void loaderRef.current(),
+          }),
+        SENT_COPY
       );
     },
     [runRowAction]
@@ -344,7 +462,7 @@ export default function MeetingLog() {
   const handleDelete = useCallback(
     (row: MeetingLogListRow) => {
       void (async () => {
-        const outcome = await runRowAction(row, () => deleteMeetingLog(row.id));
+        const outcome = await runRowAction(row, () => deleteMeetingLog(row.id), DELETED_COPY);
         if (outcome?.kind !== "conflict") return;
         // A zero-row delete re-reads the row and branches on its status.
         // Without this read the `sending`-specific copy has no path that
@@ -353,14 +471,14 @@ export default function MeetingLog() {
         try {
           const after = await getQueueRow(row.id);
           if (after?.status === "sending") {
-            setOutcome(row.id, "This meeting is being sent to Odoo right now.");
+            refineOutcome(row.id, "This meeting is being sent to Odoo right now.");
           }
         } catch (err) {
           console.error("[Odoo] could not re-read a conflicting queue row:", err);
         }
       })();
     },
-    [runRowAction, setOutcome]
+    [runRowAction, refineOutcome]
   );
 
   const handleAssign = useCallback((row: MeetingLogListRow) => {
@@ -449,6 +567,39 @@ export default function MeetingLog() {
       <ProviderConfigReader configRef={providerConfigRef} />
 
       {loadError !== null && <p className="text-sm text-destructive">{loadError}</p>}
+
+      {/*
+        Outcomes whose row has left the list. Rendered ABOVE the groups so the
+        one sentence `degraded` exists to produce is not below 200 rows, and
+        persistent until dismissed - a toast here would be the same
+        disappearing-message bug on a shorter timer.
+      */}
+      {notices.length > 0 && (
+        <section aria-label="Finished meetings" className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-2">
+            {notices.map((notice) => (
+              <li
+                key={notice.id}
+                data-notice-id={notice.id}
+                className="flex items-start justify-between gap-3 rounded-xl border p-3"
+              >
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs text-muted-foreground">{notice.label}</span>
+                  <span className="text-sm">{notice.text}</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissNotice(notice.id)}
+                  aria-label={`Dismiss the result for ${notice.label}`}
+                >
+                  Dismiss
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {configState !== "loading" && configState !== "complete" && (
         <p className="text-sm">

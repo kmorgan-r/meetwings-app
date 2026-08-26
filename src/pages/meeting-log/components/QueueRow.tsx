@@ -51,7 +51,7 @@ export interface QueueRowProps {
  * two fallbacks for one nullable column let this page - and the delete confirm
  * - disagree with the date already live on the customer's chatter.
  */
-function meetingDateOf(row: MeetingLogListRow): string {
+export function meetingDateOf(row: MeetingLogListRow): string {
   return new Date(row.meeting_started_at ?? row.transcript_start_at).toLocaleString();
 }
 
