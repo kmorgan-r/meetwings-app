@@ -1,5 +1,15 @@
-import type { DbMeetingLogRow, MeetingLogStatus, TranscriptEntry } from "@/types";
-import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
+import type {
+  DbMeetingLogRow,
+  MeetingLogListRow,
+  MeetingLogStatus,
+  TranscriptEntry,
+} from "@/types";
+import {
+  ESCALATE_AFTER_ATTEMPTS,
+  HOLD_MS,
+  STALE_CLAIM_MS,
+  pruneCutoff,
+} from "@/lib/odoo/meeting-log";
 import { getDatabase } from "./config";
 
 /**
@@ -169,6 +179,119 @@ SELECT last_error FROM meeting_log_queue
 SELECT content, timestamp, speaker, audio_source FROM messages
  WHERE conversation_id = ? AND audio_source IS NOT NULL AND timestamp > ?
  ORDER BY timestamp ASC`,
+
+  // Slice 3. Routes through `pending` rather than widening `claim` to accept
+  // `failed`: the claim is the statement the sweep and the hold timer both
+  // depend on, and widening it to serve a button changes their behaviour.
+  // Clears the error columns because a stale error rendered beside a running
+  // retry reads as a fresh failure - `toSent` clears them for the same reason.
+  // `attempts` is deliberately NOT reset: it is the escalation record.
+  retryRow: `
+UPDATE meeting_log_queue
+   SET status = 'pending', last_error = NULL, last_error_code = NULL
+ WHERE id = ? AND status IN ('failed','pending')`,
+
+  // Target and status in ONE statement, so a row can never be `pending` with
+  // no target - the exact collision `unassigned` exists to prevent.
+  //
+  // `failed` is accepted so a meeting whose Odoo target was archived can be
+  // retargeted instead of only deleted. Clearing attachment_id and message_id
+  // is LOAD-BEARING for that case: a failed row legitimately holds an
+  // attachment_id (create succeeded, message_post faulted), and retargeting
+  // without clearing makes the push skip the create and post a note on the NEW
+  // partner linking a file on the OLD partner's record.
+  assignRow: `
+UPDATE meeting_log_queue
+   SET contact_id = ?, lead_id = ?, status = 'pending',
+       attachment_id = NULL, message_id = NULL,
+       last_error = NULL, last_error_code = NULL
+ WHERE id = ? AND status IN ('unassigned','failed')`,
+
+  // A STATUS FLIP, never a hard DELETE. The watermark is MAX(transcript_end_at)
+  // with no status predicate, so deleting the row holding that maximum makes it
+  // regress and the next trigger re-slices the entries this row consumed -
+  // reposting the deleted meeting under whatever contact is selected by then. A
+  // hard delete also frees the session_key and drops the UNIQUE race backstop.
+  //
+  // `sending` is the one status refused. `sent` and `cancelled` are accepted
+  // even though the page never lists them: the predicate's job is to name what
+  // must be refused, and narrowing it to today's reachable statuses would make
+  // a future history view - or a row that reaches `sent` between render and
+  // click - fail for no stated reason.
+  // TWO STATEMENTS, NOT ONE. The spec's single predicate also accepted
+  // 'sent'/'cancelled', which made a successful delete unable to say whether
+  // anything reached Odoo - and the page's copy asserts that it did not. The
+  // dashboard window only re-reads on focus, mount and action, so a `held` row
+  // it is still rendering can already be `sent` on disk: one CAS matched it,
+  // the delete succeeded, and the user was told "Nothing was sent to Odoo."
+  // about a note already on the customer's chatter, with the local transcript
+  // blanked in the same statement.
+  //
+  // Splitting the predicate makes that impossible rather than unlikely.
+  // deleteRow matching PROVES the row was not terminal at the instant of the
+  // write - no read, no window between a check and a change. A terminal row
+  // falls through to deleteTerminalRow, which removes it just as the spec
+  // intended, under copy that does not claim anything about what was sent.
+  deleteRow: `
+UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
+ WHERE id = ? AND status IN ('held','pending','unassigned','failed')`,
+
+  deleteTerminalRow: `
+UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
+ WHERE id = ? AND status IN ('sent','cancelled')`,
+
+  // Every column EXCEPT transcript - loading a whole meeting's text for every
+  // row to render a COLLAPSED list is invisible with three rows and painful
+  // with forty.
+  //
+  // GROUP RANK FIRST, then newest-first within a group. Sorting by created_at
+  // alone starves needs-attention: those rows are by nature the OLDEST
+  // actionable rows, and a backlog of newer unassigned rows would push every
+  // one of them past the cap. LIMIT 201 renders 200 and proves at least one
+  // more exists, without a second COUNT.
+  listActionable: `
+SELECT id, session_key, conversation_id, instance, contact_id, lead_id,
+       transcript_start_at, transcript_end_at, summary_json, attachment_id,
+       message_id, status, attempts, claimed_at, last_error, last_error_code,
+       meeting_started_at, created_at, sent_at
+  FROM meeting_log_queue
+ WHERE status IN ('held','pending','sending','unassigned','failed')
+ ORDER BY CASE
+            WHEN instance <> ?1 THEN 3
+            WHEN status = 'failed' THEN 0
+            WHEN status = 'pending' AND attempts >= ?2 THEN 0
+            WHEN status = 'unassigned' THEN 1
+            ELSE 2
+          END,
+          created_at DESC
+ LIMIT 201`,
+
+  transcriptOf: `SELECT transcript FROM meeting_log_queue WHERE id = ?`,
+
+  // NOT countAll. That one is scoped to ('held','pending','sending') because
+  // the sentence it feeds on /odoo promises those rows will be sent once the
+  // credentials are finished - false for `failed` and `unassigned`. This page
+  // lists both, so reusing countAll would show a user with only those rows a
+  // count of zero and therefore a blank page.
+  countActionable: `
+SELECT COUNT(*) AS n FROM meeting_log_queue
+ WHERE status IN ('held','pending','sending','unassigned','failed')`,
+
+  // Retention. Only the two terminal statuses that can still hold text: the
+  // other five may all still be pushed, and a pushed row with a blanked
+  // transcript uploads an empty attachment to a customer record. `deleted` is
+  // deliberately absent - the delete action blanks both columns in the same
+  // statement that sets the status, so the clause would be dead.
+  //
+  // Never deletes a row and never touches a timestamp, so the watermark and the
+  // session_key dedup are unaffected. The OR guard keeps it idempotent and its
+  // rowsAffected meaningful - `transcript <> ''` alone would skip a row whose
+  // transcript was already blank but whose digest was not.
+  prune: `
+UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
+ WHERE status IN ('sent','cancelled')
+   AND (transcript <> '' OR summary_json IS NOT NULL)
+   AND created_at < ?`,
 } as const;
 
 function toRow(raw: Record<string, unknown>): DbMeetingLogRow {
@@ -384,4 +507,65 @@ export async function readMeetingMessages(
       audioSource: (row.audio_source as TranscriptEntry["audioSource"]) ?? undefined,
     };
   });
+}
+
+export async function retryQueueRow(id: string): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.retryRow, [id]);
+  return (result.rowsAffected ?? 0) === 1;
+}
+
+export async function assignQueueRow(
+  id: string, contactId: number, leadId: number | null
+): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.assignRow, [contactId, leadId, id]);
+  return (result.rowsAffected ?? 0) === 1;
+}
+
+/**
+ * Removes a row that has already reached Odoo, or was cancelled.
+ *
+ * Separate from deleteQueueRow so that one's success is proof the row was
+ * still unsent. Only reached after deleteQueueRow declines.
+ */
+export async function deleteTerminalQueueRow(id: string): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.deleteTerminalRow, [id]);
+  return (result.rowsAffected ?? 0) === 1;
+}
+
+export async function deleteQueueRow(id: string): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.deleteRow, [id]);
+  return (result.rowsAffected ?? 0) === 1;
+}
+
+export async function listActionableRows(instance: string): Promise<MeetingLogListRow[]> {
+  const db = await getDatabase();
+  const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.listActionable, [
+    instance,
+    ESCALATE_AFTER_ATTEMPTS,
+  ]);
+  return rows as unknown as MeetingLogListRow[];
+}
+
+/** `null` means NO ROW. `""` means the transcript was removed. Not the same thing. */
+export async function getQueueTranscript(id: string): Promise<string | null> {
+  const db = await getDatabase();
+  const rows = await db.select<{ transcript: string }[]>(QUEUE_SQL.transcriptOf, [id]);
+  return rows[0] ? rows[0].transcript : null;
+}
+
+export async function countActionableQueued(): Promise<number> {
+  const db = await getDatabase();
+  const rows = await db.select<{ n: number }[]>(QUEUE_SQL.countActionable);
+  return rows[0]?.n ?? 0;
+}
+
+/** Retention. Returns how many rows it blanked. */
+export async function pruneTranscripts(now: number): Promise<number> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.prune, [pruneCutoff(now)]);
+  return result.rowsAffected ?? 0;
 }

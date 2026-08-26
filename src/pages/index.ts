@@ -14,3 +14,4 @@ export { default as ContextMemory } from "./context-memory";
 export { default as Speakers } from "./speakers";
 export { default as Language } from "./language";
 export { default as Odoo } from "./odoo";
+export { default as MeetingLog } from "./meeting-log";

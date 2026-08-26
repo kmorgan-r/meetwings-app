@@ -271,6 +271,12 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
           await client.execute(model, "message_post", [[resId]], {
             body: buildNoteBody(summary, slice, row.meeting_started_at ?? row.transcript_start_at),
             attachment_ids: [attachmentId],
+            // Pinned, not left to Odoo's default. The default IS an internal
+            // note today, but nothing enforces that across Odoo versions or
+            // customer-side customisations, and the failure mode if it ever
+            // flips is that every customer is emailed their own meeting
+            // transcript.
+            subtype_xmlid: "mail.mt_note",
           }),
           "message id"
         );

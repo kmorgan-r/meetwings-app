@@ -1,0 +1,129 @@
+import { render, screen } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
+import { Outlet } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Review finding: a repo-wide grep across src/tests/** found no reference to
+// the /meeting-log route, the "Meeting log" menu item, or the "Open the
+// meeting log" link on /odoo - deleting any one of the three left the full
+// suite green while making 4,875 lines of feature unreachable from the UI.
+// The link is covered separately, alongside its sibling count fixtures, in
+// src/tests/odoo-settings-page.test.tsx ("the queue status block"). This file
+// covers the other two: the route itself, and the menu entry's shared gate.
+//
+// No suite in this repo already exercised routes/index.tsx or useMenuItems -
+// this file is new.
+
+// ---------------------------------------------------------------------------
+// (a) the /meeting-log route resolves to the page.
+//
+// Every page @/pages exports is stubbed - routes/index.tsx builds every
+// <Route element={...}> eagerly (React.createElement runs for all of them,
+// not just the one that matches), so an undefined stub for an UNVISITED page
+// would still crash the render. DashboardLayout is stubbed to a bare
+// <Outlet /> so this stays a routing-table test, not a Sidebar/useApp test -
+// the same "harness, not full render" call the repo already makes in
+// src/tests/odoo-target-new-chat-entry-points.test.tsx.
+// ---------------------------------------------------------------------------
+
+vi.mock("@/pages", () => {
+  const stub = (name: string) => () => <div data-testid={`stub-${name}`}>{name}</div>;
+  return {
+    Dashboard: stub("dashboard"),
+    App: stub("app"),
+    SystemPrompts: stub("system-prompts"),
+    ViewChat: stub("view-chat"),
+    Settings: stub("settings"),
+    DevSpace: stub("dev-space"),
+    Shortcuts: stub("shortcuts"),
+    Audio: stub("audio"),
+    Screenshot: stub("screenshot"),
+    Chats: stub("chats"),
+    Responses: stub("responses"),
+    CostTracking: stub("cost-tracking"),
+    ContextMemory: stub("context-memory"),
+    Speakers: stub("speakers"),
+    Language: stub("language"),
+    Odoo: stub("odoo"),
+    MeetingLog: stub("meeting-log"),
+  };
+});
+
+vi.mock("@/layouts", () => ({
+  DashboardLayout: () => <Outlet />,
+}));
+
+import AppRoutes from "@/routes";
+
+afterEach(() => {
+  window.history.pushState({}, "", "/");
+});
+
+describe("the /meeting-log route", () => {
+  it("resolves to the MeetingLog page", () => {
+    window.history.pushState({}, "", "/meeting-log");
+    render(<AppRoutes />);
+    expect(screen.getByTestId("stub-meeting-log")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (b) the "Meeting log" menu item exists and shares the Odoo entry's gate.
+//
+// Pinning the item's mere presence would pass a mutant that disables it under
+// a DIFFERENT condition, or never disables it at all. What actually matters
+// is that it uses the SAME gateOnSetup as the Odoo entry beside it - so this
+// asserts both states (gate on, gate off) AND that the two items agree in
+// each state, not just their own hard-coded value.
+// ---------------------------------------------------------------------------
+
+const setupStatus = vi.hoisted(() => ({ isComplete: true, isLoading: false }));
+vi.mock("@/hooks/useSetupStatus", () => ({
+  useSetupStatus: () => setupStatus,
+}));
+vi.mock("@/contexts", () => ({
+  useApp: () => ({ hasActiveLicense: false }),
+}));
+
+import { useMenuItems } from "@/hooks/useMenuItems";
+
+interface MenuItem {
+  label: string;
+  href: string;
+  disabled?: boolean;
+}
+
+function findItem(menu: MenuItem[], label: string): MenuItem {
+  const item = menu.find((m) => m.label === label);
+  if (!item) throw new Error(`menu item not found: ${label}`);
+  return item;
+}
+
+beforeEach(() => {
+  setupStatus.isComplete = true;
+  setupStatus.isLoading = false;
+});
+
+describe("the Meeting log menu entry", () => {
+  it("is present, points at /meeting-log, and shares the Odoo entry's setup gate", () => {
+    const { result, rerender } = renderHook(() => useMenuItems());
+
+    const meetingLogOpen = findItem(result.current.menu, "Meeting log");
+    const odooOpen = findItem(result.current.menu, "Odoo");
+    expect(meetingLogOpen.href).toBe("/meeting-log");
+    // Gate OFF: setup is complete. Both entries enabled, and agreeing.
+    expect(meetingLogOpen.disabled).toBe(false);
+    expect(meetingLogOpen.disabled).toBe(odooOpen.disabled);
+
+    setupStatus.isComplete = false;
+    rerender();
+
+    const meetingLogGated = findItem(result.current.menu, "Meeting log");
+    const odooGated = findItem(result.current.menu, "Odoo");
+    // Gate ON: setup incomplete. Both entries disabled, and STILL agreeing -
+    // this is what proves it is the SHARED gate, not two independent ones
+    // that happen to start out matching.
+    expect(meetingLogGated.disabled).toBe(true);
+    expect(meetingLogGated.disabled).toBe(odooGated.disabled);
+  });
+});

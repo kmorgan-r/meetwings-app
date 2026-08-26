@@ -1,4 +1,4 @@
-import type { SummarizationResult, TranscriptEntry } from "@/types";
+import type { MeetingLogListRow, SummarizationResult, TranscriptEntry } from "@/types";
 import { toOdooError } from "./errors";
 import { getRedactor, isRedactorInitialised } from "./redactor";
 
@@ -30,8 +30,48 @@ export const UNDO_BLOCKED_MS = 6_000;
  */
 export const STALE_CLAIM_MS = 5 * 60 * 1000;
 
+/**
+ * Whether a `sending` row's claim has outlived STALE_CLAIM_MS as of `now`.
+ *
+ * Takes the clock rather than reading it, because the only caller that matters
+ * is the queue page: QueueRow is memoised on its props, `Date.now()` is not one
+ * of them, and a row reading the clock itself freezes its verdict at whatever
+ * it read on its last DB-driven render. The page ticks and passes the answer
+ * down. Named for the claim, not just "stale", because src/lib/index.ts star-
+ * exports this module and ./database into one flat namespace.
+ */
+export function isClaimStale(
+  row: Pick<MeetingLogListRow, "status" | "claimed_at">,
+  now: number
+): boolean {
+  return (
+    row.status === "sending" && row.claimed_at !== null && now - row.claimed_at > STALE_CLAIM_MS
+  );
+}
+
 /** Above this, a `pending` row stops being "waiting" and starts being visible. */
 export const ESCALATE_AFTER_ATTEMPTS = 5;
+
+/** How long a terminal row keeps its transcript text before retention blanks it. */
+export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * The bound on the AI summarization the queue page passes to `pushQueuedRow`.
+ *
+ * `fetchAIResponse` has no timeout and no abort, so an unbounded summarize is
+ * the ONE way a dashboard push crosses STALE_CLAIM_MS - and crossing it lets
+ * the main window's reclaim re-push a live row, producing two attachments and
+ * two customer-visible chatter notes.
+ *
+ * 60s, not 90s, because the paths ADD. A reassigned `failed` row takes five
+ * Odoo calls at 30s (client.ts:21) AND an AI call, because `failRow` only runs
+ * after a successful claim so attempts >= 1, and `summary_json` is legitimately
+ * still null when a previous summarize failed. 150s + 60s = 210s against the
+ * 300s gate. A timed-out summarize resolves null, which pushQueuedRow already
+ * handles by taking the fallback body: degrading a note is not comparable to
+ * duplicating one.
+ */
+export const SUMMARIZE_TIMEOUT_MS = 60_000;
 
 /** `String.fromCharCode(...)` blows the argument limit on a big transcript. */
 const BASE64_CHUNK = 0x8000;
@@ -241,4 +281,53 @@ export function queueErrorText(thrown: unknown): { code: string; text: string } 
   const detail = typeof err.details.detail === "string" ? err.details.detail : "";
   const message = detail ? `${err.message} - ${detail}` : err.message;
   return { code: err.code, text: `${err.code}: ${redact(message)}` };
+}
+
+/** Which section of the queue page a row belongs to, or null for none. */
+export type QueueGroup =
+  | "needs-attention"
+  | "unassigned"
+  | "waiting"
+  | "other-database"
+  | null;
+
+/**
+ * The page's grouping. Mirrors QUEUE_SQL.counts with two DELIBERATE
+ * divergences, both recorded in the spec: current-instance `sending` rows are
+ * shown (in waiting) rather than omitted, and other-instance `failed` rows are
+ * shown (in other-database) rather than matching no arm at all - under the
+ * counts SQL such a row is invisible, unsendable, undeletable and never pruned.
+ *
+ * INSTANCE IS TESTED FIRST. A status-first implementation puts an
+ * other-instance `failed` row in needs-attention, where the page offers a Retry
+ * that `pushQueuedRow` refuses at its instance check - a button that does
+ * nothing at all and looks broken.
+ */
+export function groupOf(
+  row: Pick<MeetingLogListRow, "instance" | "status" | "attempts">,
+  instance: string
+): QueueGroup {
+  if (row.instance !== instance) {
+    return row.status === "held" ||
+      row.status === "pending" ||
+      row.status === "sending" ||
+      row.status === "unassigned" ||
+      row.status === "failed"
+      ? "other-database"
+      : null;
+  }
+  if (row.status === "failed") return "needs-attention";
+  if (row.status === "pending" && row.attempts >= ESCALATE_AFTER_ATTEMPTS) {
+    return "needs-attention";
+  }
+  if (row.status === "unassigned") return "unassigned";
+  if (row.status === "held" || row.status === "pending" || row.status === "sending") {
+    return "waiting";
+  }
+  return null;
+}
+
+/** Pure so retention is testable without a clock. */
+export function pruneCutoff(now: number): number {
+  return now - RETENTION_MS;
 }

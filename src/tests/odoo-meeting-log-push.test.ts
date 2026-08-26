@@ -164,6 +164,26 @@ describe("the happy path", () => {
     });
   });
 
+  it("pins the note subtype to an internal log note", async () => {
+    // Odoo's DEFAULT subtype happens to be an internal note today, on this
+    // version, with no customer-side customisation. If that ever flips, every
+    // customer is emailed their own meeting transcript. Pinning it makes the
+    // guarantee something the code states rather than something a person must
+    // remember to check.
+    const row = seedRow();
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(intResponse(555))   // ir.attachment.create
+      .mockResolvedValueOnce(intResponse(999));  // message_post
+
+    await pushQueuedRow(row, deps());
+
+    // Index 2 is the message_post POST; index 0 is authenticate.
+    const body = String(tauriFetch.mock.calls[2][1].body);
+    expect(body).toContain("subtype_xmlid");
+    expect(body).toContain("mail.mt_note");
+  });
+
   it("issues NO search on the first attempt", async () => {
     // This is what pins the attemptsBefore boundary. `attempts` is incremented
     // by the claim CAS, so a post-CAS read is already 1 on a brand-new row and
