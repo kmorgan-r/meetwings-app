@@ -61,14 +61,28 @@ export function meetingDateOf(row: MeetingLogListRow): string {
   return new Date(row.meeting_started_at ?? row.transcript_start_at).toLocaleString();
 }
 
-function statusLine(row: MeetingLogListRow, busy: boolean, stale: boolean): string {
+function statusLine(
+  row: MeetingLogListRow,
+  busy: boolean,
+  stale: boolean,
+  otherDatabase: boolean
+): string {
   if (busy) return "Sending…";
   // Closing the dashboard window mid-push destroys the JS context with no
   // `finally` reached. Recovery is the main window's reclaim at next launch,
   // which this page is forbidden to call - so "Sending…" here would be untrue
   // until the app restarts.
   if (stale) {
-    return "Interrupted. This will be retried the next time Meetwings starts.";
+    // The retry promise is TRUE ONLY FOR THE CURRENT DATABASE. reclaimStale-
+    // Sending's predicate is `status = 'sending' AND claimed_at < ?` with no
+    // instance filter, so it does flip this row back to `pending` - but the
+    // push that would follow comes from selectSweepable, which is scoped to
+    // `instance = ?`. A row queued against a database the user has since
+    // switched away from is reclaimed and then never swept, so promising a
+    // retry on next launch is a promise nothing keeps.
+    return otherDatabase
+      ? "Interrupted. It will not be retried until Meetwings points back at that Odoo database."
+      : "Interrupted. This will be retried the next time Meetwings starts.";
   }
   switch (row.status) {
     case "sending":
@@ -159,7 +173,7 @@ function QueueRowInner({
         <span className="text-xs text-muted-foreground">{meetingDate}</span>
       </div>
 
-      <p className="text-xs text-muted-foreground">{statusLine(row, busy, stale)}</p>
+      <p className="text-xs text-muted-foreground">{statusLine(row, busy, stale, otherDatabase)}</p>
 
       {/*
         Rendered from the COLUMN, verbatim, and in every group. queueErrorText

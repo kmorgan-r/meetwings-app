@@ -153,6 +153,11 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
       return "This meeting changed in another window.";
     case "moved-unknown":
       return "This meeting was moved, but the result could not be read.";
+    case "deleted-after-send":
+      // Says the opposite of DELETED_COPY, because the opposite is true. The
+      // transcript is gone from this app either way; the note on the customer's
+      // record is not, and only they can remove it.
+      return "Removed from the queue — but it had already been sent to Odoo. The note is on the customer's record and was not removed.";
     case "failed":
       return describeFailure(outcome.report.code);
   }

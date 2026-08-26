@@ -437,6 +437,37 @@ describe("which actions a row offers", () => {
     expect(stale.getByRole("button", { name: "Delete" })).toBeDisabled();
   });
 
+  it("does not promise a retry for a stale row on another database", async () => {
+    // reclaimStaleSending's predicate has no instance filter, so it DOES flip
+    // this row back to `pending`. The push that would follow comes from
+    // selectSweepable, which is scoped to `instance = ?` - so nothing ever
+    // pushes it while credentials point elsewhere, and the shared copy's "will
+    // be retried the next time Meetwings starts" is a promise nothing keeps.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "mine", status: "sending", claimed_at: Date.now() - STALE_CLAIM_MS - 60_000 }),
+      row({
+        id: "theirs",
+        instance: OTHER,
+        status: "sending",
+        claimed_at: Date.now() - STALE_CLAIM_MS - 60_000,
+      }),
+    ]);
+    await renderPage();
+
+    const theirs = await findRow("theirs");
+    expect(theirs.getByText(/will not be retried until Meetwings points back/)).toBeInTheDocument();
+    expect(
+      theirs.queryByText("Interrupted. This will be retried the next time Meetwings starts.")
+    ).toBeNull();
+    // The same-database row keeps the promise that IS kept for it - so this
+    // fails if the copy is simply swapped rather than branched.
+    expect(
+      rowOf("mine").getByText(
+        "Interrupted. This will be retried the next time Meetwings starts."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("flips a fresh claim to interrupted with no re-read and no user action", async () => {
     // `shouldAdvanceTime` so renderPage's waitFor still polls under a fake
     // clock. The clock has to be faked at all because advanceTimersByTime must
@@ -969,6 +1000,28 @@ describe("outcomes whose row leaves the list", () => {
     // The negative clause is lower-case "sent"; the shared success string is
     // "Sent to Odoo." So this fails the moment delete reuses it.
     expect(document.body.textContent).not.toContain("Sent to Odoo.");
+  });
+
+  it("says the opposite when the row had already reached Odoo", async () => {
+    // The row on screen is `held`; on disk the main window's sweep has already
+    // pushed it. This window re-reads on focus, mount and action only, so the
+    // click lands against a `sent` row. Telling the user "Nothing was sent to
+    // Odoo." here is false about a customer's chatter, and the transcript that
+    // was the only local record of it is blanked in the same statement.
+    actions.deleteMeetingLog.mockResolvedValue({ kind: "deleted-after-send" });
+    db.listActionableRows.mockResolvedValueOnce([row({ id: "h", status: "held" })]);
+    db.listActionableRows.mockResolvedValue([]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete this meeting" }));
+
+    const notice = await waitFor(() => noticeElement("h"));
+    expect(notice.textContent).toContain("it had already been sent to Odoo");
+    expect(notice.textContent).toContain("was not removed");
+    // The mutant: map `deleted-after-send` to DELETED_COPY and this passes
+    // everything except these two lines.
+    expect(document.body.textContent).not.toContain("Nothing was sent to Odoo.");
   });
 });
 

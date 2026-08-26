@@ -30,6 +30,7 @@ import {
   countActionableQueued,
   countAllQueued,
   deleteQueueRow,
+  deleteTerminalQueueRow,
   failRow,
   findHeldRow,
   getQueueCounts,
@@ -592,11 +593,45 @@ describe("deleteQueueRow", () => {
     });
   });
 
-  it.each(["failed", "unassigned", "held", "pending", "sent", "cancelled"])(
+  it.each(["failed", "unassigned", "held", "pending"])(
     "accepts a %s row",
     async (status) => {
       seed({ id: "r", status });
       expect(await deleteQueueRow("r")).toBe(true);
+    }
+  );
+
+  // THE SPLIT IS THE POINT, so assert the refusal, not just that the terminal
+  // statement works. deleteQueueRow succeeding is what deleteMeetingLog treats
+  // as proof that nothing reached Odoo; widen this predicate back to include
+  // 'sent' and that proof becomes a guess, and the page tells a user "Nothing
+  // was sent to Odoo." about a note already on a customer's chatter.
+  it.each(["sent", "cancelled"])("REFUSES a %s row", async (status) => {
+    seed({ id: "r", status });
+    expect(await deleteQueueRow("r")).toBe(false);
+    expect(await getQueueRow("r")).toMatchObject({ status });
+  });
+
+  it.each(["sent", "cancelled"])(
+    "deleteTerminalQueueRow removes a %s row, blanking it the same way",
+    async (status) => {
+      seed({
+        id: "r", status, transcript: "You: secrets",
+        summary_json: '{"title":"Q3 renewal"}', created_at: 1234,
+      });
+      expect(await deleteTerminalQueueRow("r")).toBe(true);
+      expect(await getQueueRow("r")).toMatchObject({
+        status: "deleted", transcript: "", summary_json: null, created_at: 1234,
+      });
+    }
+  );
+
+  it.each(["failed", "unassigned", "held", "pending", "sending"])(
+    "deleteTerminalQueueRow refuses a %s row",
+    async (status) => {
+      seed({ id: "r", status });
+      expect(await deleteTerminalQueueRow("r")).toBe(false);
+      expect(await getQueueRow("r")).toMatchObject({ status });
     }
   );
 

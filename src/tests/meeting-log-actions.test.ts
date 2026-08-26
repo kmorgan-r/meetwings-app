@@ -4,6 +4,7 @@ const action = vi.hoisted(() => ({
   retryQueueRow: vi.fn(async () => true),
   assignQueueRow: vi.fn(async () => true),
   deleteQueueRow: vi.fn(async () => true),
+  deleteTerminalQueueRow: vi.fn(async () => false),
   getQueueRow: vi.fn(async () => null as unknown),
   pruneTranscripts: vi.fn(async () => 0),
   // Where reclaimStaleSending ACTUALLY lives (meeting-log.action.ts:385). The
@@ -78,6 +79,9 @@ beforeEach(() => {
   action.retryQueueRow.mockResolvedValue(true);
   action.assignQueueRow.mockResolvedValue(true);
   action.deleteQueueRow.mockResolvedValue(true);
+  // Default false: the terminal statement is the fallback, reached only when
+  // the narrow one declines.
+  action.deleteTerminalQueueRow.mockResolvedValue(false);
   push.pushQueuedRow.mockResolvedValue(undefined);
   config.requireOdooConfig.mockResolvedValue({
     url: "http://h:8069", db: "odoo", login: "a@b.c", apiKey: "k",
@@ -362,9 +366,31 @@ describe("deleteMeetingLog", () => {
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
   });
 
-  it("reports a conflict when the CAS refuses", async () => {
+  it("reports a conflict when BOTH CAS statements refuse", async () => {
     action.deleteQueueRow.mockResolvedValue(false);
+    action.deleteTerminalQueueRow.mockResolvedValue(false);
     expect(await deleteMeetingLog("r")).toEqual({ kind: "conflict" });
+  });
+
+  // The race this split exists for: the dashboard window re-reads only on
+  // focus, mount and action, so a `held` row it is still rendering can already
+  // be `sent` on disk by the time the click lands. The old single predicate
+  // accepted it, returned `ok`, and the page said "Nothing was sent to Odoo."
+  // about a note already on the customer's chatter.
+  it("reports deleted-after-send when the row had already reached Odoo", async () => {
+    action.deleteQueueRow.mockResolvedValue(false);
+    action.deleteTerminalQueueRow.mockResolvedValue(true);
+    expect(await deleteMeetingLog("r")).toEqual({ kind: "deleted-after-send" });
+  });
+
+  // ORDER, not just outcome. Reverse the two calls and a still-unsent row is
+  // deleted by the terminal statement's sibling first - or, more precisely,
+  // `ok` stops being proof of anything, because the branch that produced it
+  // would no longer be the one with the narrow predicate.
+  it("never reaches the terminal statement when the row was still unsent", async () => {
+    action.deleteQueueRow.mockResolvedValue(true);
+    expect(await deleteMeetingLog("r")).toEqual({ kind: "ok" });
+    expect(action.deleteTerminalQueueRow).not.toHaveBeenCalled();
   });
 });
 

@@ -218,9 +218,27 @@ UPDATE meeting_log_queue
   // must be refused, and narrowing it to today's reachable statuses would make
   // a future history view - or a row that reaches `sent` between render and
   // click - fail for no stated reason.
+  // TWO STATEMENTS, NOT ONE. The spec's single predicate also accepted
+  // 'sent'/'cancelled', which made a successful delete unable to say whether
+  // anything reached Odoo - and the page's copy asserts that it did not. The
+  // dashboard window only re-reads on focus, mount and action, so a `held` row
+  // it is still rendering can already be `sent` on disk: one CAS matched it,
+  // the delete succeeded, and the user was told "Nothing was sent to Odoo."
+  // about a note already on the customer's chatter, with the local transcript
+  // blanked in the same statement.
+  //
+  // Splitting the predicate makes that impossible rather than unlikely.
+  // deleteRow matching PROVES the row was not terminal at the instant of the
+  // write - no read, no window between a check and a change. A terminal row
+  // falls through to deleteTerminalRow, which removes it just as the spec
+  // intended, under copy that does not claim anything about what was sent.
   deleteRow: `
 UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
- WHERE id = ? AND status IN ('held','pending','unassigned','failed','sent','cancelled')`,
+ WHERE id = ? AND status IN ('held','pending','unassigned','failed')`,
+
+  deleteTerminalRow: `
+UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
+ WHERE id = ? AND status IN ('sent','cancelled')`,
 
   // Every column EXCEPT transcript - loading a whole meeting's text for every
   // row to render a COLLAPSED list is invisible with three rows and painful
@@ -502,6 +520,18 @@ export async function assignQueueRow(
 ): Promise<boolean> {
   const db = await getDatabase();
   const result = await db.execute(QUEUE_SQL.assignRow, [contactId, leadId, id]);
+  return (result.rowsAffected ?? 0) === 1;
+}
+
+/**
+ * Removes a row that has already reached Odoo, or was cancelled.
+ *
+ * Separate from deleteQueueRow so that one's success is proof the row was
+ * still unsent. Only reached after deleteQueueRow declines.
+ */
+export async function deleteTerminalQueueRow(id: string): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.deleteTerminalRow, [id]);
   return (result.rowsAffected ?? 0) === 1;
 }
 

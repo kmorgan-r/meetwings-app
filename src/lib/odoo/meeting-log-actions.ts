@@ -1,6 +1,7 @@
 import {
   assignQueueRow,
   deleteQueueRow,
+  deleteTerminalQueueRow,
   getQueueRow,
   pruneTranscripts,
   retryQueueRow,
@@ -36,6 +37,12 @@ export type ActionOutcome =
   | { kind: "push-failed" }
   | { kind: "conflict" }
   | { kind: "moved-unknown" }
+  /**
+   * Deleted, but the row had already reached Odoo (or been cancelled) before
+   * the click landed. Distinct from `ok` because `ok`'s copy states that
+   * nothing was sent, and here something was.
+   */
+  | { kind: "deleted-after-send" }
   | { kind: "failed"; report: OdooErrorReport };
 
 /** The shape `useApp()` supplies. Structural, so the page owns the context. */
@@ -242,7 +249,15 @@ export function assignMeetingLog(
 
 /** No push, ever. Delete is a status flip and nothing reaches Odoo. */
 export async function deleteMeetingLog(id: string): Promise<ActionOutcome> {
-  return (await deleteQueueRow(id)) ? { kind: "ok" } : { kind: "conflict" };
+  // ORDER IS THE WHOLE POINT. deleteQueueRow refuses a terminal row, so its
+  // success is proof - at the instant of the write, not at some earlier read -
+  // that this meeting had not reached Odoo. Only that makes `ok`'s "Nothing was
+  // sent to Odoo." a statement this function can actually stand behind.
+  if (await deleteQueueRow(id)) return { kind: "ok" };
+  // Still removed, exactly as the spec intends terminal rows to be. What
+  // changes is only what the user is told about it.
+  if (await deleteTerminalQueueRow(id)) return { kind: "deleted-after-send" };
+  return { kind: "conflict" };
 }
 
 /**
