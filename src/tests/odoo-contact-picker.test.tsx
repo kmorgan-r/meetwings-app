@@ -485,6 +485,58 @@ describe("opportunities", () => {
     expect(screen.queryByText(/logged on the opportunity/i)).not.toBeInTheDocument();
   });
 
+  // An unlinked lead has no partner to name, so `partnerName` is null and the
+  // row would otherwise be a bare subject line. Its own contact_name is the
+  // only thing on screen tying it to the contact that was just selected -
+  // which, for a match made on a name rather than on Odoo's own link, is
+  // exactly what has to be visible before it is picked.
+  it("names an unlinked lead by its own contact details", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      opportunities: [
+        {
+          id: 9,
+          name: "Partnership with ECS",
+          type: "lead",
+          stageName: "New",
+          partnerId: null,
+          partnerName: null,
+          contactName: "Ada Lovelace",
+          email: "ada@ecs.example",
+        },
+      ],
+    });
+    await openPopover();
+    const row = screen.getByRole("button", { name: /partnership with ECS/i });
+    expect(row.textContent).toContain("Ada Lovelace");
+  });
+
+  // The partner is AUTHORITATIVE where it exists - Odoo itself says the record
+  // belongs to it - so it wins over the lead's own free text.
+  it("prefers the partner over the free text when both are present", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      opportunities: [
+        {
+          id: 9,
+          name: "Solar",
+          type: "opportunity",
+          stageName: null,
+          partnerId: 9,
+          partnerName: "Parent Holdings AS",
+          contactName: "Somebody Else",
+          email: "else@x.example",
+        },
+      ],
+    });
+    await openPopover();
+    const row = screen.getByRole("button", { name: /solar/i });
+    expect(row.textContent).toContain("Parent Holdings AS");
+    expect(row.textContent).not.toContain("Somebody Else");
+  });
+
   // The overlay window is FIXED at 600px tall. Leads made this list longer, and
   // an unbounded list pushes the destination sentence below it off the bottom -
   // the one line that says which record this meeting is about to be written to.

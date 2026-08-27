@@ -162,6 +162,8 @@ function opportunity(over: Partial<OdooOpportunity> = {}): OdooOpportunity {
     stageName: "Proposal",
     partnerId: 7,
     partnerName: "Ada Lovelace",
+    contactName: null,
+    email: null,
     ...over,
   };
 }
@@ -1230,8 +1232,14 @@ describe("the assign dialog's client", () => {
     // that happened to be memoised on the config would pass a count assertion.
     expect(opportunities.fetchOpportunities.mock.calls[0][0]).toBe(CLIENT);
     expect(opportunities.fetchOpportunities.mock.calls[1][0]).toBe(CLIENT);
-    // The parent is carried through, or a company's deals never surface.
-    expect(opportunities.fetchOpportunities.mock.calls[1].slice(1)).toEqual([8, 9]);
+    // The parent is carried through, or a company's deals never surface - and
+    // so are the name and email, which are the only way an UNLINKED lead is
+    // ever found.
+    expect(opportunities.fetchOpportunities.mock.calls[1][1]).toMatchObject({
+      id: 8,
+      parentId: 9,
+      name: "Bea Nordvik",
+    });
   });
 
   it("builds a fresh client for a SECOND dialog session", async () => {
@@ -1480,8 +1488,8 @@ describe("the assign dialog's opportunity step", () => {
     const gateA = deferred<OdooOpportunity[]>();
     const gateB = deferred<OdooOpportunity[]>();
     opportunities.fetchOpportunities.mockImplementation(
-      (_client: unknown, contactId: number) =>
-        contactId === 7 ? gateA.promise : gateB.promise
+      (_client: unknown, picked: { id: number }) =>
+        picked.id === 7 ? gateA.promise : gateB.promise
     );
     contacts.listContacts.mockResolvedValue([
       contact(),
@@ -1520,8 +1528,8 @@ describe("the assign dialog's opportunity step", () => {
     const gateA = deferred<OdooOpportunity[]>();
     const gateB = deferred<OdooOpportunity[]>();
     opportunities.fetchOpportunities.mockImplementation(
-      (_client: unknown, contactId: number) =>
-        contactId === 7 ? gateA.promise : gateB.promise
+      (_client: unknown, picked: { id: number }) =>
+        picked.id === 7 ? gateA.promise : gateB.promise
     );
     contacts.listContacts.mockResolvedValue([
       contact(),

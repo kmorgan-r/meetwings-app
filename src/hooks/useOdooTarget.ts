@@ -424,7 +424,7 @@ export function useOdooTarget({
 
       try {
         const client = await getClient();
-        const rows = await fetchOpportunities(client, contact.id, contact.parentId);
+        const rows = await fetchOpportunities(client, contact);
         if (token !== selectionToken.current) return;
         setOpportunities(rows);
         setIsLookingUp(false);
@@ -472,7 +472,7 @@ export function useOdooTarget({
     setIsLookingUp(true);
     try {
       const client = await getClient();
-      const rows = await fetchOpportunities(client, contact.id, contact.parentId);
+      const rows = await fetchOpportunities(client, contact);
       if (token !== selectionToken.current) return;
       setOpportunities(rows);
       setIsLookingUp(false);

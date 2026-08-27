@@ -1,10 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchOpportunities } from "@/lib/odoo/opportunities";
+import { fetchOpportunities, searchDomain } from "@/lib/odoo/opportunities";
 
 function clientReturning(rows: unknown) {
   const execute = vi.fn(async () => rows);
   return { client: { authenticate: vi.fn(), execute, serverDate: null }, execute };
 }
+
+/** Only the four fields the lookup reads. */
+const ada = (over: Record<string, unknown> = {}) => ({
+  id: 1,
+  parentId: null as number | null,
+  name: "Ada Lovelace",
+  email: "ada@analytical.example" as string | null,
+  ...over,
+});
 
 const lead = (over: Record<string, unknown> = {}) => ({
   id: 5,
@@ -13,80 +22,58 @@ const lead = (over: Record<string, unknown> = {}) => ({
   stage_id: [3, "Proposition"],
   partner_id: [1, "Ada Lovelace"],
   probability: 40,
+  contact_name: false,
+  email_from: false,
+  ...over,
+});
+
+const mapped = (over: Record<string, unknown> = {}) => ({
+  id: 5,
+  name: "Heat pump retrofit",
+  type: "opportunity",
+  stageName: "Proposition",
+  partnerId: 1,
+  partnerName: "Ada Lovelace",
+  contactName: null,
+  email: null,
   ...over,
 });
 
 describe("fetchOpportunities", () => {
   it("returns [] when there are none", async () => {
     const { client } = clientReturning([]);
-    await expect(fetchOpportunities(client, 1, null)).resolves.toEqual([]);
+    await expect(fetchOpportunities(client, ada())).resolves.toEqual([]);
   });
 
   it("maps a single result", async () => {
     const { client } = clientReturning([lead()]);
-    await expect(fetchOpportunities(client, 1, null)).resolves.toEqual([
-      {
-        id: 5,
-        name: "Heat pump retrofit",
-        type: "opportunity",
-        stageName: "Proposition",
-        partnerId: 1,
-        partnerName: "Ada Lovelace",
-      },
-    ]);
+    await expect(fetchOpportunities(client, ada())).resolves.toEqual([mapped()]);
   });
 
   it("returns several", async () => {
     const { client } = clientReturning([lead(), lead({ id: 6, name: "Solar" })]);
-    await expect(fetchOpportunities(client, 1, null)).resolves.toHaveLength(2);
+    await expect(fetchOpportunities(client, ada())).resolves.toHaveLength(2);
   });
 
-  // In Odoo an opportunity for a person at a company is very commonly held on
-  // the COMPANY partner. Searching only partner_id = contactId returns zero
-  // rows for exactly the human you are meeting, the "None" branch fires
-  // silently, and slice 2 posts to the contact record while open deals sit on
-  // the parent.
-  it("searches the parent company as well as the contact", async () => {
+  it("asks crm.lead, bounded and newest first", async () => {
     const { client, execute } = clientReturning([]);
-    await fetchOpportunities(client, 1, 9);
-    const domain = execute.mock.calls[0][2][0] as unknown[][];
-    expect(domain).toContainEqual(["partner_id", "in", [1, 9]]);
-  });
-
-  it("omits a null parent from the domain", async () => {
-    const { client, execute } = clientReturning([]);
-    await fetchOpportunities(client, 1, null);
-    const domain = execute.mock.calls[0][2][0] as unknown[][];
-    expect(domain).toContainEqual(["partner_id", "in", [1]]);
-  });
-
-  // active = false means LOST in Odoo; WON opportunities stay active = true
-  // forever, so without this the list grows with every deal ever closed.
-  it("excludes won leads and caps the result set", async () => {
-    const { client, execute } = clientReturning([]);
-    await fetchOpportunities(client, 1, null);
-    const [model, method, args, kwargs] = execute.mock.calls[0];
+    await fetchOpportunities(client, ada());
+    const [model, method, , kwargs] = execute.mock.calls[0];
     expect(model).toBe("crm.lead");
     expect(method).toBe("search_read");
-    const domain = args[0] as unknown[][];
-    expect(domain).toContainEqual(["type", "in", ["lead", "opportunity"]]);
-    expect(domain).toContainEqual(["active", "=", true]);
-    expect(domain).toContainEqual(["probability", "<", 100]);
     expect(kwargs.limit).toBe(20);
     expect(kwargs.order).toBe("write_date desc");
+    // Without these two an UNLINKED lead renders as a bare subject line with
+    // nothing on it tying it to the contact on screen.
+    expect(kwargs.fields).toContain("contact_name");
+    expect(kwargs.fields).toContain("email_from");
+    expect(kwargs.fields).toContain("type");
   });
 
   it("survives a lead with a false stage_id or partner_id", async () => {
     const { client } = clientReturning([lead({ stage_id: false, partner_id: false })]);
-    await expect(fetchOpportunities(client, 1, null)).resolves.toEqual([
-      {
-        id: 5,
-        name: "Heat pump retrofit",
-        type: "opportunity",
-        stageName: null,
-        partnerId: null,
-        partnerName: null,
-      },
+    await expect(fetchOpportunities(client, ada())).resolves.toEqual([
+      mapped({ stageName: null, partnerId: null, partnerName: null }),
     ]);
   });
 
@@ -98,7 +85,7 @@ describe("fetchOpportunities", () => {
   // leaking into a field typed number | null - instead of null.
   it("treats a many2one string as unreadable, not a tuple", async () => {
     const { client } = clientReturning([lead({ partner_id: "ab" })]);
-    const [result] = await fetchOpportunities(client, 1, null);
+    const [result] = await fetchOpportunities(client, ada());
     expect(result.partnerId).toBeNull();
     expect(result.partnerName).toBeNull();
   });
@@ -112,7 +99,7 @@ describe("fetchOpportunities", () => {
   // (typed number | null) for a value that was never a valid [id, name] pair.
   it("treats a truncated many2one array as unreadable, not a tuple", async () => {
     const { client } = clientReturning([lead({ partner_id: [5] })]);
-    const [result] = await fetchOpportunities(client, 1, null);
+    const [result] = await fetchOpportunities(client, ada());
     expect(result.partnerId).toBeNull();
     expect(result.partnerName).toBeNull();
   });
@@ -122,17 +109,8 @@ describe("fetchOpportunities", () => {
   // kind has to survive the mapping.
   it("carries a lead's type through", async () => {
     const { client } = clientReturning([lead({ id: 7, name: "Website form", type: "lead" })]);
-    const [result] = await fetchOpportunities(client, 1, null);
+    const [result] = await fetchOpportunities(client, ada());
     expect(result.type).toBe("lead");
-  });
-
-  it("asks the CRM for both kinds, not opportunities alone", async () => {
-    const { client, execute } = clientReturning([]);
-    await fetchOpportunities(client, 1, null);
-    const [, , args, kwargs] = execute.mock.calls[0];
-    const domain = args[0] as unknown[][];
-    expect(domain).toContainEqual(["type", "in", ["lead", "opportunity"]]);
-    expect(kwargs.fields).toContain("type");
   });
 
   // A missing or unreadable `type` must read as an opportunity - the kind every
@@ -140,14 +118,134 @@ describe("fetchOpportunities", () => {
   // would print "Lead" beside a deal, and the label is what the user picks by.
   it("reads an unusable type as an opportunity, never as a lead", async () => {
     const { client } = clientReturning([lead({ type: false }), lead({ id: 8, type: undefined })]);
-    const rows = await fetchOpportunities(client, 1, null);
+    const rows = await fetchOpportunities(client, ada());
     expect(rows.map((r) => r.type)).toEqual(["opportunity", "opportunity"]);
+  });
+
+  // The free text an unlinked lead carries INSTEAD of a partner. Odoo returns
+  // `false` for an empty char field, never "".
+  it("carries an unlinked lead's own contact details, and nulls empty ones", async () => {
+    const { client } = clientReturning([
+      lead({ id: 9, type: "lead", partner_id: false, contact_name: "Christian Carron", email_from: "cc@ecs.example" }),
+      lead({ id: 10, type: "lead", partner_id: false }),
+    ]);
+    const rows = await fetchOpportunities(client, ada());
+    expect(rows[0]).toMatchObject({
+      contactName: "Christian Carron",
+      email: "cc@ecs.example",
+    });
+    expect(rows[1]).toMatchObject({ contactName: null, email: null });
   });
 
   it("throws ODOO_UNEXPECTED_ROW for a lead with no usable id", async () => {
     const { client } = clientReturning([{ name: "no id" }]);
-    await expect(fetchOpportunities(client, 1, null)).rejects.toMatchObject({
+    await expect(fetchOpportunities(client, ada())).rejects.toMatchObject({
       code: "ODOO_UNEXPECTED_ROW",
     });
+  });
+});
+
+/**
+ * The domain is asserted WHOLE, not clause by clause.
+ *
+ * Odoo domains are prefix notation, so the operators and their operand counts
+ * are as load-bearing as the leaves themselves - a `toContainEqual` per clause
+ * passes happily against a domain whose "&"/"|" nesting means something else
+ * entirely.
+ */
+describe("searchDomain", () => {
+  it("builds the whole thing: linked records, or an unlinked lead by identity", () => {
+    expect(searchDomain(ada({ parentId: 9 }))).toEqual([
+      ["active", "=", true],
+      ["type", "in", ["lead", "opportunity"]],
+      // The won filter, scoped to opportunities: a lead is never won.
+      "|",
+      ["type", "=", "lead"],
+      ["probability", "<", 100],
+      // Reachability: Odoo's own link, OR an unlinked lead that names this
+      // contact itself.
+      "|",
+      ["partner_id", "in", [1, 9]],
+      "&",
+      "&",
+      ["type", "=", "lead"],
+      ["partner_id", "=", false],
+      "|",
+      ["email_from", "=ilike", "ada@analytical.example"],
+      ["contact_name", "=ilike", "Ada Lovelace"],
+    ]);
+  });
+
+  // In Odoo an opportunity for a person at a company is very commonly held on
+  // the COMPANY partner. Searching only partner_id = contactId returns zero
+  // rows for exactly the human you are meeting, the "None" branch fires
+  // silently, and slice 2 posts to the contact record while open deals sit on
+  // the parent.
+  it("searches the parent company as well as the contact", () => {
+    expect(searchDomain(ada({ parentId: 9 }))).toContainEqual(["partner_id", "in", [1, 9]]);
+  });
+
+  it("omits a null parent", () => {
+    expect(searchDomain(ada())).toContainEqual(["partner_id", "in", [1]]);
+  });
+
+  // active = false means LOST in Odoo; WON opportunities stay active = true
+  // forever, so without this the list grows with every deal ever closed.
+  it("keeps lost records out", () => {
+    expect(searchDomain(ada())).toContainEqual(["active", "=", true]);
+  });
+
+  // THE BUG THIS CLAUSE EXISTS FOR. Odoo's default for an unconverted lead is
+  // free-text contact details and NO partner, so a partner_id-only search finds
+  // none of them - a real Leads list looked empty here.
+  it("finds an unlinked lead by the contact's own name and email", () => {
+    const domain = searchDomain(ada());
+    expect(domain).toContainEqual(["contact_name", "=ilike", "Ada Lovelace"]);
+    expect(domain).toContainEqual(["email_from", "=ilike", "ada@analytical.example"]);
+    // A lead already pointed at a DIFFERENT partner belongs to that partner,
+    // whatever name it carries.
+    expect(domain).toContainEqual(["partner_id", "=", false]);
+  });
+
+  // `ilike` wraps its value in %...%, so "ada@x.com" would also match
+  // "notada@x.com" - a meeting posted to a stranger's lead.
+  it("never uses a substring operator for the identity match", () => {
+    const flat = JSON.stringify(searchDomain(ada()));
+    expect(flat).toContain('"=ilike"');
+    expect(flat).not.toContain('"ilike"');
+    expect(flat).not.toContain('"like"');
+  });
+
+  it("drops the email clause for a contact that has none", () => {
+    const domain = searchDomain(ada({ email: null }));
+    expect(JSON.stringify(domain)).not.toContain("email_from");
+    expect(domain).toContainEqual(["contact_name", "=ilike", "Ada Lovelace"]);
+  });
+
+  // Nothing to recognise an unlinked lead BY. Widening the search on a blank
+  // value would match every unlinked lead in the database.
+  it("asks only for linked records when the contact has no identity at all", () => {
+    expect(searchDomain(ada({ name: "   ", email: null }))).toEqual([
+      ["active", "=", true],
+      ["type", "in", ["lead", "opportunity"]],
+      "|",
+      ["type", "=", "lead"],
+      ["probability", "<", 100],
+      ["partner_id", "in", [1]],
+    ]);
+  });
+
+  // `probability` is nullable in Postgres and NULL < 100 is NULL, i.e.
+  // excluded - so a probability filter applied to leads can silently drop every
+  // one of them. It buys nothing either way: a lead is converted (which flips
+  // `type`) or lost (which clears `active`), never won.
+  it("scopes the won filter to opportunities so no lead is caught by it", () => {
+    const domain = searchDomain(ada());
+    const wonAt = domain.findIndex(
+      (t) => JSON.stringify(t) === JSON.stringify(["probability", "<", 100])
+    );
+    expect(wonAt).toBeGreaterThan(0);
+    expect(domain[wonAt - 1]).toEqual(["type", "=", "lead"]);
+    expect(domain[wonAt - 2]).toBe("|");
   });
 });

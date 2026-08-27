@@ -425,7 +425,16 @@ describe("the opportunity panel", () => {
   // skips the lookup entirely - stale deals would otherwise stay forever.
   it("clears the previous contact's opportunities before the next selection", async () => {
     odoo.fetchOpportunities.mockResolvedValue([
-      { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+      {
+        id: 5,
+        name: "Heat pump",
+        type: "opportunity",
+        stageName: null,
+        partnerId: 1,
+        partnerName: "Ada",
+        contactName: null,
+        email: null,
+      },
     ]);
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
@@ -493,8 +502,7 @@ describe("the opportunity panel", () => {
     });
     expect(odoo.fetchOpportunities).toHaveBeenCalledWith(
       expect.anything(),
-      1,
-      ada.parentId
+      expect.objectContaining({ id: 1, parentId: ada.parentId })
     );
   });
 });
@@ -680,7 +688,10 @@ describe("selecting", () => {
       result.current.pickerProps.onSelect(ada);
     });
     await waitFor(() =>
-      expect(odoo.fetchOpportunities).toHaveBeenCalledWith(expect.anything(), 1, 9)
+      expect(odoo.fetchOpportunities).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ id: 1, parentId: 9 })
+      )
     );
   });
 
@@ -706,7 +717,16 @@ describe("selecting", () => {
     await act(async () => {
       deferred[1]?.([]);
       deferred[0]?.([
-        { id: 99, name: "A's deal", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+        {
+          id: 99,
+          name: "A's deal",
+          type: "opportunity",
+          stageName: null,
+          partnerId: 1,
+          partnerName: "Ada",
+          contactName: null,
+          email: null,
+        },
       ]);
     });
 

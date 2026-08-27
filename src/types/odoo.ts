@@ -76,6 +76,13 @@ export interface OdooOpportunity {
   stageName: string | null;
   partnerId: number | null;
   partnerName: string | null;
+  /**
+   * `contact_name` and `email_from`: the free text a crm.lead carries when it
+   * has no partner at all, which is Odoo default for an unconverted lead and
+   * the only thing tying such a row to the contact on screen.
+   */
+  contactName: string | null;
+  email: string | null;
 }
 
 /** What slice 2 consumes. Written whole, never field-by-field. */

@@ -216,7 +216,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
       void (async () => {
         try {
           const client = await getClient();
-          const rows = await fetchOpportunities(client, contact.id, contact.parentId);
+          const rows = await fetchOpportunities(client, contact);
           if (token !== selectionToken.current) return;
           setOpportunities(rows);
           setIsLookingUp(false);
@@ -397,8 +397,11 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                         {opp.stageName && (
                           <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>
                         )}
-                        {opp.partnerName && (
-                          <span className="text-muted-foreground">{` · ${opp.partnerName}`}</span>
+                        {/* Partner, or an unlinked lead free text - see ContactPicker. */}
+                        {(opp.partnerName ?? opp.contactName ?? opp.email) && (
+                          <span className="text-muted-foreground">
+                            {` · ${opp.partnerName ?? opp.contactName ?? opp.email}`}
+                          </span>
                         )}
                       </span>
                     </button>

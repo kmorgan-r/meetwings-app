@@ -283,8 +283,19 @@ export const ContactPicker = memo(function ContactPicker({
                         )}
                         {opp.name}
                         {opp.stageName && <span className="text-muted-foreground"> &middot; {opp.stageName}</span>}
-                        {opp.partnerName && (
-                          <span className="text-muted-foreground"> &middot; {opp.partnerName}</span>
+                        {/*
+                          WHO the record is about. `partnerName` for anything
+                          Odoo has linked to a partner; for an unlinked lead
+                          there is no partner to name, and its own free text is
+                          the only thing on the row tying it to the contact
+                          that was just selected - which for a heuristic match
+                          is exactly what the user needs to see before picking.
+                        */}
+                        {(opp.partnerName ?? opp.contactName ?? opp.email) && (
+                          <span className="text-muted-foreground">
+                            {" "}
+                            &middot; {opp.partnerName ?? opp.contactName ?? opp.email}
+                          </span>
                         )}
                       </span>
                     </button>
