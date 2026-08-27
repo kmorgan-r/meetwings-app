@@ -2,7 +2,7 @@ import { memo, useMemo, useState } from "react";
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts } from "@/lib/odoo";
 import type { OdooContact, OdooOpportunity } from "@/types";
-import { StarIcon, UsersIcon } from "lucide-react";
+import { CheckIcon, StarIcon, UsersIcon } from "lucide-react";
 
 export const MAX_RENDERED_ROWS = 100;
 
@@ -61,7 +61,7 @@ export interface ContactPickerProps {
 
 export const ContactPicker = memo(function ContactPicker({
   contactId,
-  leadId: _leadId,
+  leadId,
   contactName,
   cache,
   opportunities,
@@ -82,6 +82,31 @@ export const ContactPicker = memo(function ContactPicker({
     if (cache.kind !== "ready") return [];
     return filterContacts(cache.contacts, query).sort(compareContacts).slice(0, MAX_RENDERED_ROWS);
   }, [cache, query]);
+
+  /**
+   * WHICH RECORD this meeting lands on, spelled out - the same sentence the
+   * dashboard's AssignDialog carries, and needed more here than there: this is
+   * the live-meeting path, res.partner vs crm.lead is invisible in the button
+   * labels, and it cannot be undone once the row is `sent`.
+   *
+   * Three branches, not two. `leadId` is persisted in odoo_selected_target
+   * while `opportunities` is in-memory, so a target rehydrated after a
+   * <Completion /> remount arrives holding a lead id with no list to name it
+   * from - and a lookup that DID run comes back without it once the deal is
+   * won or lost. Falling back to "contact record" in either case would state
+   * the opposite of what slice 2 will write.
+   */
+  const chosenOpportunity =
+    leadId === null ? null : (opportunities?.find((o) => o.id === leadId) ?? null);
+  const targetRecord =
+    leadId === null
+      ? // `contactName` is resolved from the CACHE, so it is null whenever the
+        // selected contact is not in it - a target that outlived a sync, or a
+        // cache still loading. The sentence still has to name a record.
+        `${contactName ?? "the selected contact"}'s contact record`
+      : chosenOpportunity !== null
+        ? `the opportunity ${chosenOpportunity.name}`
+        : `the opportunity you picked earlier (#${leadId})`;
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -212,25 +237,55 @@ export const ContactPicker = memo(function ContactPicker({
                     <button
                       key={opp.id}
                       type="button"
+                      aria-pressed={leadId === opp.id}
                       onClick={() => onSelectOpportunity(opp.id)}
-                      className="text-left text-xs px-2 py-1 rounded-md hover:bg-muted/50"
+                      className={`flex items-start gap-1.5 text-left text-xs px-2 py-1 rounded-md hover:bg-muted/50 ${
+                        leadId === opp.id ? "bg-muted" : ""
+                      }`}
                     >
-                      {opp.name}
-                      {opp.stageName && <span className="text-muted-foreground"> &middot; {opp.stageName}</span>}
-                      {opp.partnerName && (
-                        <span className="text-muted-foreground"> &middot; {opp.partnerName}</span>
-                      )}
+                      {/*
+                        `invisible`, NOT a conditional render: the tick holds its
+                        column on every row, so choosing one does not shunt the
+                        list sideways. aria-hidden because aria-pressed on the
+                        button already carries this to a screen reader, and a
+                        second announcement of the same fact is noise.
+                      */}
+                      <CheckIcon
+                        aria-hidden
+                        data-testid="lead-check"
+                        className={`h-3 w-3 mt-0.5 shrink-0 text-primary ${
+                          leadId === opp.id ? "" : "invisible"
+                        }`}
+                      />
+                      <span>
+                        {opp.name}
+                        {opp.stageName && <span className="text-muted-foreground"> &middot; {opp.stageName}</span>}
+                        {opp.partnerName && (
+                          <span className="text-muted-foreground"> &middot; {opp.partnerName}</span>
+                        )}
+                      </span>
                     </button>
                   ))}
                   <button
                     type="button"
+                    aria-pressed={leadId === null}
                     onClick={() => onSelectOpportunity(null)}
-                    className="text-left text-xs px-2 py-1 rounded-md hover:bg-muted/50 text-muted-foreground"
+                    className={`flex items-start gap-1.5 text-left text-xs px-2 py-1 rounded-md hover:bg-muted/50 ${
+                      leadId === null ? "bg-muted" : "text-muted-foreground"
+                    }`}
                   >
-                    Contact record only
+                    <CheckIcon
+                      aria-hidden
+                      data-testid="lead-check"
+                      className={`h-3 w-3 mt-0.5 shrink-0 text-primary ${
+                        leadId === null ? "" : "invisible"
+                      }`}
+                    />
+                    <span>Contact record only</span>
                   </button>
                 </div>
               )}
+              <p className="text-[11px]">{`This meeting will be logged on ${targetRecord}.`}</p>
             </div>
           )}
         </div>

@@ -327,6 +327,141 @@ describe("opportunities", () => {
     expect(screen.queryByText(/not looked up/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /contact record only/i })).toBeInTheDocument();
   });
+
+  // The picker took `leadId` and threw it away (`leadId: _leadId`), so nothing
+  // on screen moved when either row was clicked - and the muted opt-out under a
+  // deal read as a caption describing the deal rather than an alternative to it.
+  it("marks the chosen opportunity pressed and the others not", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: 6,
+      opportunities: [
+        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 6, name: "Solar", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getByRole("button", { name: /solar/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /heat pump/i })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+    expect(screen.getByRole("button", { name: /contact record only/i })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
+  it("marks 'Contact record only' pressed when no deal is chosen", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: null,
+      opportunities: [
+        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getByRole("button", { name: /contact record only/i })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: /heat pump/i })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
+  // aria-pressed is the semantic half; this is the half a sighted user reads.
+  // The tick is HELD on every row (`invisible`, not unmounted) so picking one
+  // does not shunt the list sideways - hence the length assertion.
+  it("ticks the chosen row and holds the column on the rest", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: 6,
+      opportunities: [
+        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 6, name: "Solar", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getAllByTestId("lead-check")).toHaveLength(3);
+    expect(
+      within(screen.getByRole("button", { name: /solar/i })).getByTestId("lead-check")
+    ).not.toHaveClass("invisible");
+    expect(
+      within(screen.getByRole("button", { name: /heat pump/i })).getByTestId("lead-check")
+    ).toHaveClass("invisible");
+    expect(
+      within(screen.getByRole("button", { name: /contact record only/i })).getByTestId(
+        "lead-check"
+      )
+    ).toHaveClass("invisible");
+  });
+
+  // Which MODEL the meeting lands on is the one thing the labels cannot show
+  // and the push cannot take back, so the picker says it in words.
+  it("names the contact record as the destination when no deal is chosen", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: null,
+      opportunities: [
+        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(
+      screen.getByText(/logged on Ada Lovelace's contact record/i)
+    ).toBeInTheDocument();
+  });
+
+  it("names the opportunity as the destination once one is chosen", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: 5,
+      opportunities: [
+        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getByText(/logged on the opportunity Heat pump/i)).toBeInTheDocument();
+    expect(screen.queryByText(/contact record\./i)).not.toBeInTheDocument();
+  });
+
+  // A target rehydrated after a <Completion /> remount holds a lead id with no
+  // list to name it from - `leadId` is in the DB, `opportunities` is in memory.
+  // Reading that as "no deal chosen" would state the opposite of what is
+  // written. Same branch covers a deal that has since been won or lost.
+  it("still names the lead when the list cannot identify it", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: 6,
+      opportunities: null,
+    });
+    await openPopover();
+    expect(screen.getByText(/picked earlier \(#6\)/i)).toBeInTheDocument();
+  });
+
+  // Outside the four-way branch, not inside the list: the destination is
+  // decided in every one of those states, including before the lookup lands.
+  it("names the destination while the lookup is still running", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: null,
+      opportunities: null,
+      isLookingUp: true,
+    });
+    await openPopover();
+    expect(
+      screen.getByText(/logged on Ada Lovelace's contact record/i)
+    ).toBeInTheDocument();
+  });
 });
 
 describe("refresh", () => {
