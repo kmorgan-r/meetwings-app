@@ -258,11 +258,19 @@ export default function OdooSettings() {
   // "Connection verified" check describes the credentials that were tested,
   // so leaving it up while the user edits the API key would show a passing
   // check for a value that has never been tried.
+  //
+  // The sync check goes for that same reason, only harder. runSync reads the
+  // PERSISTED config (requireOdooConfig), never this form state, so a green
+  // "Contacts synced" describes the credentials as they were on disk when it
+  // ran - exactly the claim an edit invalidates. Leaving it would also break
+  // the card's own done-in-order chain, since the sync row is drawn
+  // pending={!verified}: step 3 would show done while step 2 showed untested.
   function updateField<K extends keyof OdooConfig>(key: K, value: OdooConfig[K]) {
     setConfig((c) => ({ ...c, [key]: value }));
     setSaveStatus(null);
     setTestStatus(null);
     setVerifiedUid(null);
+    setSyncStatus(null);
   }
 
   useEffect(() => {

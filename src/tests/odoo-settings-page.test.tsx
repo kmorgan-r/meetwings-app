@@ -298,6 +298,27 @@ describe("the Odoo settings page", () => {
     expect(screen.getByText(/not tested yet/i)).toBeInTheDocument();
   });
 
+  // Same reasoning as the verified check above, and the card needs it more:
+  // runSync reads the persisted config, so a green "Contacts synced" is a
+  // claim about credentials the edit has just changed. It is also the row
+  // drawn pending={!verified}, so a stale synced=true beside a freshly
+  // cleared verified=false renders step 3 done above an untested step 2.
+  it("drops the synced check when a credential is edited", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/contacts not synced yet/i)).toBeInTheDocument();
+  });
+
   // The storage layer's completeness check is bare truthiness, so "   " passes
   // it. The client concatenates config.url straight into the XML-RPC URL, so a
   // padded value cannot connect - a green "Credentials stored" check for one
