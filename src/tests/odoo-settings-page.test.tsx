@@ -215,7 +215,11 @@ describe("the Odoo settings page", () => {
     });
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
-    expect(await screen.findByText(/uid 7/i)).toBeInTheDocument();
+    // Scoped to the status line rather than the whole document: the checklist
+    // card now repeats the uid as a detail beside its verified step, so a bare
+    // findByText(/uid 7/i) matches two nodes and throws on the ambiguity.
+    // Asserting on the line the button actually writes is the narrower claim.
+    expect(await screen.findByTestId("odoo-test-status")).toHaveTextContent(/uid 7/i);
   });
 
   // Every ODOO_* code surfaces. A failure that shows nothing is the bug this
@@ -237,6 +241,155 @@ describe("the Odoo settings page", () => {
     await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
     await screen.findByText(/ODOO_FAULT/);
     expect(document.body.textContent).not.toContain("i9j0");
+  });
+
+  it("marks the connection verified on the checklist after a successful test", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    expect(await screen.findByText(/not tested yet/i)).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not tested yet/i)).not.toBeInTheDocument();
+  });
+
+  // A failed test must not leave the checklist claiming a verified connection,
+  // including the case where an EARLIER test succeeded - the green check
+  // describes the credentials as they stand now.
+  it("drops the verified check when a later test fails", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+
+    odoo.testOdooConnection.mockRejectedValue(
+      odooError("ODOO_AUTH_FAILED", "Odoo rejected the credentials")
+    );
+    await userEvent.click(screen.getByRole("button", { name: /test connection/i }));
+    expect(await screen.findByText(/not tested yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connection verified/i)).not.toBeInTheDocument();
+  });
+
+  // Editing the API key invalidates a verification performed against the old
+  // one. Without this the checklist shows a passing check for a value that has
+  // never been sent to Odoo.
+  it("drops the verified check when a credential is edited", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.queryByText(/connection verified/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/not tested yet/i)).toBeInTheDocument();
+  });
+
+  // Same reasoning as the verified check above, and the card needs it more:
+  // runSync reads the persisted config, so a green "Contacts synced" is a
+  // claim about credentials the edit has just changed. It is also the row
+  // drawn pending={!verified}, so a stale synced=true beside a freshly
+  // cleared verified=false renders step 3 done above an untested step 2.
+  it("drops the synced check when a credential is edited", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/contacts not synced yet/i)).toBeInTheDocument();
+  });
+
+  // The reviewer's repro, and the most common first run there is: the four
+  // fields are full long before anything reaches disk, because saveOdooConfig
+  // runs only from the Save button. A green "Credentials stored" here is
+  // contradicted by the very next button - testOdooConnection reads storage
+  // via requireOdooConfig and answers ODOO_NOT_CONFIGURED.
+  it("does not claim the credentials are stored until Save is pressed", async () => {
+    renderPage();
+    await userEvent.type(await screen.findByLabelText(/url/i), "http://h:8069");
+    await userEvent.type(screen.getByLabelText(/database/i), "odoo");
+    await userEvent.type(screen.getByLabelText(/login/i), "bob@example.com");
+    await userEvent.type(screen.getByLabelText(/api key/i), KEY);
+
+    expect(screen.queryByText(/credentials stored/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/press save to store them/i)).toBeInTheDocument();
+  });
+
+  it("marks the credentials stored once the save succeeds", async () => {
+    renderPage();
+    await fillAndSave();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+    expect(screen.queryByText(/press save to store them/i)).not.toBeInTheDocument();
+  });
+
+  // The returning user. Nothing else in this file asserts the first row green,
+  // so without this case the load path could stop setting the flag and every
+  // configured user would be told to fill in fields already on disk.
+  it("marks the credentials stored for a config that was already on disk", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+  });
+
+  // Deliberately UNLIKE the verified and synced rows above: an edit does not
+  // un-store anything. The credentials on disk are still there and still the
+  // ones Test connection will use, so clearing this check on edit would swap
+  // the bug it fixes for its mirror image - a card reporting nothing stored
+  // while the button under it connects fine.
+  it("keeps the stored check when a credential is edited", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.getByText(/credentials stored/i)).toBeInTheDocument();
+  });
+
+  // The storage layer's completeness check is bare truthiness, so "   " passes
+  // it. The client concatenates config.url straight into the XML-RPC URL, so a
+  // padded value cannot connect - a green "Credentials stored" check for one
+  // would be the checklist lying about the exact failure this page is most
+  // likely to hit, since every field here is pasted.
+  it("does not count a whitespace-only field as filled", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: "   ",
+    });
+    renderPage();
+    expect(await screen.findByText(/3 of 4/)).toBeInTheDocument();
+    expect(screen.queryByText(/credentials stored/i)).not.toBeInTheDocument();
   });
 
   it("reports what a manual sync did", async () => {
@@ -298,6 +451,46 @@ describe("the Odoo settings page", () => {
     await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
     expect(await screen.findByText(/already running/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/failed/i);
+  });
+
+  // The copy above already said "benign"; this pins that the ICON agrees with
+  // it. Statuses carry a kind precisely so the renderer does not have to sniff
+  // the wording, and the failure this kills is a future refactor collapsing
+  // every catch branch onto errorStatus - which would leave the sentence
+  // reassuring and paint a red cross next to it.
+  it("renders a busy sync in the muted tone, not the failure tone", async () => {
+    odoo.runSync.mockRejectedValue(
+      new OdooError("ODOO_SYNC_BUSY", "A sync is already running in another window", {})
+    );
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    const line = await screen.findByTestId("odoo-sync-status");
+    expect(line).toHaveClass("text-muted-foreground");
+    expect(line).not.toHaveClass("text-destructive");
+  });
+
+  it("renders a genuinely failed sync in the failure tone", async () => {
+    odoo.runSync.mockRejectedValue(new OdooError("ODOO_FAULT", "server exploded", {}));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    const line = await screen.findByTestId("odoo-sync-status");
+    expect(line).toHaveClass("text-destructive");
+  });
+
+  // A sync that declined to run has not failed either - same reasoning as the
+  // busy case, different branch of handleSync.
+  it("renders a sync that never ran in the muted tone", async () => {
+    odoo.runSync.mockResolvedValue({
+      ran: false,
+      reason: "not configured",
+      changed: 0,
+      fetched: 0,
+      skipped: 0,
+      clampSkipped: false,
+    } as never);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /sync contacts/i }));
+    expect(await screen.findByTestId("odoo-sync-status")).toHaveClass("text-muted-foreground");
   });
 
   // Review finding 2: worse than finding 1, because by the time `emit` runs
