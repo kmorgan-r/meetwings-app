@@ -1,13 +1,14 @@
 import { useState } from "react";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
   ContactPicker,
+  LEAD_SEARCH_DEBOUNCE_MS,
   MAX_RENDERED_ROWS,
   type ContactPickerProps,
 } from "@/pages/app/components/completion/ContactPicker";
-import type { OdooContact } from "@/types";
+import type { OdooContact, OdooOpportunity } from "@/types";
 
 function contact(over: Partial<OdooContact> = {}): OdooContact {
   return {
@@ -51,12 +52,18 @@ function setup(over: Partial<ContactPickerProps> = {}) {
   const props: ContactPickerProps = {
     contactId: null,
     leadId: null,
+    leadName: null,
     contactName: null,
     cache: { kind: "ready", contacts: [contact()], lastError: null },
     opportunities: null,
     opportunityError: null,
     isLookingUp: false,
+    leadResults: null,
+    leadSearchError: null,
+    isSearchingLeads: false,
     // All async handlers resolve, matching the Promise<void> contract.
+    onSelectLead: vi.fn(async () => {}),
+    onSearchLeads: vi.fn(async () => {}),
     onSelect: vi.fn(async () => {}),
     onSelectOpportunity: vi.fn(async () => {}),
     onToggleColleague: vi.fn(async () => {}),
@@ -70,6 +77,7 @@ function setup(over: Partial<ContactPickerProps> = {}) {
   render(<Harness {...props} />);
   return props;
 }
+
 
 // The chip is the popover TRIGGER and lives outside the popover content, so a
 // name query is safe here - the rows do not exist until it is clicked. Inside
@@ -568,6 +576,147 @@ describe("opportunities", () => {
     await openPopover();
     expect(
       screen.getByText(/logged on Ada Lovelace's contact record/i)
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * The contact list is an offline filter over a synced res.partner cache. An
+ * unconverted lead is not in it and never will be - Odoo default for one is
+ * free-text contact details and no partner at all - so this live search is the
+ * ONLY way such a record is reachable from the overlay.
+ */
+describe("the lead search", () => {
+  const lead = (over: Partial<OdooOpportunity> = {}): OdooOpportunity => ({
+    id: 90,
+    name: "Partnership with ECS",
+    type: "lead",
+    stageName: "New",
+    partnerId: null,
+    partnerName: null,
+    contactName: "Christian Carron",
+    email: "cc@ecs.example",
+    ...over,
+  });
+
+  it("lists a result and hands the whole record up when it is picked", async () => {
+    const props = setup({ leadResults: [lead()] });
+    await openPopover();
+    await userEvent.click(screen.getByRole("button", { name: /partnership with ECS/i }));
+    // The whole record, not an id: the caller has to persist the NAME beside
+    // the id, and take the lead's own partner as the contact when it has one.
+    expect(props.onSelectLead).toHaveBeenCalledWith(lead());
+  });
+
+  it("names an unlinked result by its own contact details", async () => {
+    setup({ leadResults: [lead()] });
+    await openPopover();
+    const row = screen.getByRole("button", { name: /partnership with ECS/i });
+    expect(row.textContent).toContain("Christian Carron");
+    expect(row.textContent).toMatch(/lead/i);
+  });
+
+  // Three states that must never look alike: nothing typed, a search that
+  // failed, and a search that genuinely found nothing. Collapsing the middle
+  // one into the last tells the user the record does not exist when the truth
+  // is that nobody could ask - and the lead search is the only way that record
+  // is reachable at all.
+  it("says nothing at all until something has been searched for", async () => {
+    setup({ leadResults: null });
+    await openPopover();
+    expect(screen.queryByText(/no matches/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/search failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/leads & opportunities/i)).not.toBeInTheDocument();
+  });
+
+  it("shows a failed search as a failure, never as 'none found'", async () => {
+    setup({ leadResults: [], leadSearchError: "ODOO_UNREACHABLE" });
+    await openPopover();
+    expect(screen.getByText(/search failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/ODOO_UNREACHABLE/)).toBeInTheDocument();
+    expect(screen.queryByText(/no matches/i)).not.toBeInTheDocument();
+  });
+
+  it("shows an empty result as an empty result", async () => {
+    setup({ leadResults: [], leadSearchError: null });
+    await openPopover();
+    expect(screen.getByText(/no matches/i)).toBeInTheDocument();
+    expect(screen.queryByText(/search failed/i)).not.toBeInTheDocument();
+  });
+
+  it("marks the chosen result and leaves the others unmarked", async () => {
+    setup({
+      leadId: 91,
+      leadResults: [lead(), lead({ id: 91, name: "Solar tender" })],
+    });
+    await openPopover();
+    expect(screen.getByRole("button", { name: /solar tender/i })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(
+      screen.getByRole("button", { name: /partnership with ECS/i })
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  // Live results arrive later than the offline contact filter, and this list
+  // grows inside a window fixed at 600px.
+  it("scrolls its own results rather than growing past the window", async () => {
+    setup({ leadResults: [lead()] });
+    await openPopover();
+    const list = screen.getByTestId("lead-search-results");
+    expect(list).toHaveClass("overflow-y-auto");
+    expect(list.className).toMatch(/max-h-/);
+  });
+
+  // One live XML-RPC round trip per keystroke is what the debounce exists to
+  // prevent - and the cleanup is what makes it a debounce rather than a delay.
+  it("sends ONE search for a burst of typing, not one per keystroke", async () => {
+    vi.useFakeTimers();
+    try {
+      // Rendered already open: userEvent drives its own timers and does not
+      // co-operate with vi.useFakeTimers(), and this test is about the timer.
+      const props = setup({ open: true });
+      const box = screen.getByPlaceholderText(/search contacts/i);
+      for (const value of ["c", "ch", "chr", "chri"]) {
+        fireEvent.change(box, { target: { value } });
+      }
+      // Nothing on the wire yet, four keystrokes in.
+      expect(props.onSearchLeads).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(LEAD_SEARCH_DEBOUNCE_MS);
+      });
+      // ONE call, for the last value only. The mount effect's own timer for
+      // the empty query is cancelled by the first keystroke, exactly as each
+      // keystroke cancels the one before it - which is what makes this a
+      // debounce rather than a delay.
+      expect(props.onSearchLeads.mock.calls.map((c) => c[0])).toEqual(["chri"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // A lead has no res.partner behind it, so the trigger has no contact name to
+  // show. Falling back to "Who are you meeting?" would report NOTHING CHOSEN
+  // for a target a meeting is already queued against.
+  it("names a lead-only target on the trigger", () => {
+    setup({ contactId: null, leadId: 90, leadName: "Partnership with ECS" });
+    expect(
+      screen.getByRole("button", { name: "Partnership with ECS" })
+    ).toBeInTheDocument();
+  });
+
+  it("names a lead-only target as the destination", async () => {
+    setup({
+      contactId: null,
+      leadId: 90,
+      leadName: "Partnership with ECS",
+      leadResults: [lead()],
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Partnership with ECS" }));
+    expect(
+      screen.getByText(/logged on the lead or opportunity Partnership with ECS/i)
     ).toBeInTheDocument();
   });
 });

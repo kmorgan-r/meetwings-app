@@ -123,23 +123,94 @@ export async function fetchOpportunities(
   contact: OpportunityLookupContact
 ): Promise<OdooOpportunity[]> {
   const rows = await client.execute("crm.lead", "search_read", [searchDomain(contact)], {
-    fields: [
-      "id",
-      "name",
-      "type",
-      "stage_id",
-      "partner_id",
-      "probability",
-      // The free text an UNLINKED lead carries instead of a partner. Read so
-      // the row can show WHO it is about - without it such a lead renders as a
-      // bare subject line with nothing on it tying it to the contact on screen.
-      "contact_name",
-      "email_from",
-    ],
+    fields: LEAD_FIELDS,
     order: "write_date desc",
     limit: OPPORTUNITY_LIMIT,
   });
 
+  return mapLeadRows(rows);
+}
+
+export const LEAD_SEARCH_LIMIT = 10;
+/** Below this the search is not run at all - see `searchLeads`. */
+export const LEAD_SEARCH_MIN_CHARS = 2;
+
+/**
+ * Free-text search across crm.lead, for records the contact-first flow cannot
+ * reach at all.
+ *
+ * `fetchOpportunities` starts from a res.partner, which is the right shape for
+ * every record Odoo has linked to one. A lead that was never converted has no
+ * partner - not one that is hard to find, one that does not exist - so there
+ * is nothing to select first and no lookup to hang off it. This is the only
+ * way such a record is reachable.
+ *
+ * `ilike` here, deliberately the opposite of the identity match in
+ * `searchDomain`. That one asks "is this the same person" and must be exact;
+ * this one is a user typing a fragment into a search box, where the wrapping
+ * `%...%` is the whole point.
+ *
+ * Four fields, because a lead is found by whatever it happens to carry: the
+ * subject line (`name`), the person (`contact_name`), the company
+ * (`partner_name`) and the address it arrived from (`email_from`).
+ */
+export function leadSearchDomain(query: string): XmlRpcValue[] {
+  return [
+    ["active", "=", true],
+    // Same reasoning as searchDomain: a lead is never won, and `probability`
+    // is nullable, so NULL < 100 would exclude every one of them.
+    "|",
+    ["type", "=", "lead"],
+    ["probability", "<", 100],
+    "|",
+    "|",
+    "|",
+    ["name", "ilike", query],
+    ["contact_name", "ilike", query],
+    ["partner_name", "ilike", query],
+    ["email_from", "ilike", query],
+  ];
+}
+
+export async function searchLeads(
+  client: OdooClient,
+  query: string
+): Promise<OdooOpportunity[]> {
+  const trimmed = query.trim();
+  // A one-character `ilike` matches a large fraction of any real CRM, and an
+  // empty one matches ALL of it. Returning nothing is the honest answer to a
+  // query that has not been typed yet - and it keeps the call off the wire on
+  // the way to a real one.
+  if (trimmed.length < LEAD_SEARCH_MIN_CHARS) return [];
+
+  const rows = await client.execute("crm.lead", "search_read", [leadSearchDomain(trimmed)], {
+    fields: LEAD_FIELDS,
+    order: "write_date desc",
+    limit: LEAD_SEARCH_LIMIT,
+  });
+
+  return mapLeadRows(rows);
+}
+
+const LEAD_FIELDS = [
+  "id",
+  "name",
+  "type",
+  "stage_id",
+  "partner_id",
+  "probability",
+  // The free text an UNLINKED lead carries instead of a partner. Read so the
+  // row can show WHO it is about - without it such a lead renders as a bare
+  // subject line with nothing on it tying it to the contact on screen.
+  "contact_name",
+  "email_from",
+];
+
+/**
+ * Shared by both reads, and it THROWS on the first unreadable row rather than
+ * skipping it - see `fetchOpportunities` for why loud beats partial here.
+ */
+function mapLeadRows(rows: unknown): OdooOpportunity[] {
   if (!Array.isArray(rows)) {
     throw odooError("ODOO_UNEXPECTED_ROW", "Odoo returned a non-list from search_read");
   }

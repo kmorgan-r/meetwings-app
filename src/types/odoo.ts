@@ -85,10 +85,28 @@ export interface OdooOpportunity {
   email: string | null;
 }
 
-/** What slice 2 consumes. Written whole, never field-by-field. */
+/**
+ * What slice 2 consumes. Written whole, never field-by-field.
+ *
+ * `contactId` is NULLABLE, and that is not defensive. A crm.lead picked
+ * straight out of the lead search has no res.partner behind it at all -
+ * Odoo's default for an unconverted lead is free-text contact details and no
+ * partner - so there is no contact to name. The push already handles it:
+ * `meeting-log-push` resolves a non-null `lead_id` to `crm.lead` and never
+ * looks at `contact_id` in that case.
+ *
+ * BOTH being null is not a target and is never stored; `useOdooTarget` clears
+ * the row instead.
+ *
+ * `leadName` is persisted rather than resolved because nothing else can name
+ * a lead. A contact is named from the synced cache; a lead is not in it by
+ * definition, and the in-memory list a lookup produced does not survive a
+ * <Completion /> remount.
+ */
 export interface ResolvedTarget {
-  contactId: number;
+  contactId: number | null;
   leadId: number | null;
+  leadName: string | null;
 }
 
 export interface SyncResult {

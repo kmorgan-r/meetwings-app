@@ -268,26 +268,46 @@ export async function saveTarget(
 ): Promise<void> {
   const db = await getDatabase();
   await db.execute(
-    `INSERT INTO odoo_selected_target (id, instance, contact_id, lead_id, conversation_id, selected_at)
-     VALUES ('current', ?, ?, ?, ?, ?)
+    `INSERT INTO odoo_selected_target (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
+     VALUES ('current', ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        instance        = excluded.instance,
        contact_id      = excluded.contact_id,
        lead_id         = excluded.lead_id,
+       lead_name       = excluded.lead_name,
        conversation_id = excluded.conversation_id,
        selected_at     = excluded.selected_at`,
-    [target.instance, target.contactId, target.leadId, target.conversationId, at]
+    [
+      target.instance,
+      target.contactId,
+      target.leadId,
+      target.leadName,
+      target.conversationId,
+      at,
+    ]
   );
 }
 
 export async function loadTarget(instance: string): Promise<ResolvedTarget | null> {
   const db = await getDatabase();
-  const rows = await db.select<{ contact_id: number; lead_id: number | null }[]>(
-    "SELECT contact_id, lead_id FROM odoo_selected_target WHERE id = 'current' AND instance = ?",
+  const rows = await db.select<
+    { contact_id: number | null; lead_id: number | null; lead_name: string | null }[]
+  >(
+    "SELECT contact_id, lead_id, lead_name FROM odoo_selected_target WHERE id = 'current' AND instance = ?",
     [instance]
   );
   const row = rows[0];
-  return row ? { contactId: row.contact_id, leadId: row.lead_id } : null;
+  if (!row) return null;
+  // A row with NEITHER id is not a target. It cannot be written by this app -
+  // `commit` clears instead - but reading it back as a target would hand slice
+  // 2 something it can only file as unassigned while the picker claims a
+  // selection.
+  if (row.contact_id === null && row.lead_id === null) return null;
+  return {
+    contactId: row.contact_id,
+    leadId: row.lead_id,
+    leadName: row.lead_name,
+  };
 }
 
 export async function clearTarget(): Promise<void> {

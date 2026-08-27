@@ -181,7 +181,15 @@ function plural(n: number): string {
  * would be a guess printed beside a customer's name.
  */
 function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
-  if (row.contact_id === null) return "No contact chosen";
+  // A row can have a crm.lead and NO contact: a lead picked out of the search
+  // has no res.partner behind it. Reading that as "No contact chosen" would
+  // offer to assign a meeting that is already correctly targeted, and the id
+  // is all there is to name it by - the queue stores no lead name.
+  if (row.contact_id === null) {
+    return row.lead_id === null
+      ? "No contact chosen"
+      : `Lead or opportunity #${row.lead_id}`;
+  }
   const cached = contacts.get(row.contact_id);
   const base = cached ? cached.name : `Contact #${row.contact_id}`;
   return row.lead_id === null ? base : `${base} (lead or opportunity)`;

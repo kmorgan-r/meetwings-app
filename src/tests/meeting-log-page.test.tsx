@@ -1139,6 +1139,19 @@ describe("the contact map", () => {
     expect(contacts.listContacts).toHaveBeenCalledTimes(db.listActionableRows.mock.calls.length);
   });
 
+  // A lead picked out of the search has NO res.partner behind it, so the row
+  // carries a lead_id and no contact_id. Reading that as "No contact chosen"
+  // offers to assign a meeting that is already correctly targeted - and the
+  // queue stores no lead name, so the id is all there is to name it by.
+  it("does not call a lead-only row unassigned", async () => {
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "lo", status: "pending", contact_id: null, lead_id: 42 }),
+    ]);
+    await renderPage();
+    expect(await screen.findByText("Lead or opportunity #42")).toBeInTheDocument();
+    expect(screen.queryByText("No contact chosen")).toBeNull();
+  });
+
   // NEUTRAL between the two kinds, and that is the assertion. The queue stores
   // `lead_id` and never its type, so naming one would be a guess printed beside
   // a customer's name - the marker's job is only to say "not the contact

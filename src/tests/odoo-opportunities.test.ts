@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchOpportunities, searchDomain } from "@/lib/odoo/opportunities";
+import {
+  fetchOpportunities,
+  leadSearchDomain,
+  searchDomain,
+  searchLeads,
+} from "@/lib/odoo/opportunities";
 
 function clientReturning(rows: unknown) {
   const execute = vi.fn(async () => rows);
@@ -247,5 +252,92 @@ describe("searchDomain", () => {
     expect(wonAt).toBeGreaterThan(0);
     expect(domain[wonAt - 1]).toEqual(["type", "=", "lead"]);
     expect(domain[wonAt - 2]).toBe("|");
+  });
+});
+
+/**
+ * The only way to reach a record the contact-first flow cannot.
+ *
+ * `fetchOpportunities` starts from a res.partner. An unconverted lead has none
+ * - not one that is hard to find, one that does not exist - so there is no
+ * contact to select first and no lookup to hang off it.
+ */
+describe("searchLeads", () => {
+  it("builds the whole domain: unwon, active, and any of four text fields", () => {
+    expect(leadSearchDomain("carron")).toEqual([
+      ["active", "=", true],
+      "|",
+      ["type", "=", "lead"],
+      ["probability", "<", 100],
+      "|",
+      "|",
+      "|",
+      ["name", "ilike", "carron"],
+      ["contact_name", "ilike", "carron"],
+      ["partner_name", "ilike", "carron"],
+      ["email_from", "ilike", "carron"],
+    ]);
+  });
+
+  // Deliberately the OPPOSITE operator to searchDomain's identity match. That
+  // one asks "is this the same person" and must be exact; this is a user
+  // typing a fragment, where the wrapping %...% is the entire point.
+  it("uses substring matching, unlike the identity match", () => {
+    const flat = JSON.stringify(leadSearchDomain("carron"));
+    expect(flat).toContain('"ilike"');
+    expect(flat).not.toContain('"=ilike"');
+  });
+
+  it("asks crm.lead, bounded and newest first", async () => {
+    const { client, execute } = clientReturning([]);
+    await searchLeads(client, "carron");
+    const [model, method, args, kwargs] = execute.mock.calls[0];
+    expect(model).toBe("crm.lead");
+    expect(method).toBe("search_read");
+    expect(args[0]).toEqual(leadSearchDomain("carron"));
+    expect(kwargs.limit).toBe(10);
+    expect(kwargs.order).toBe("write_date desc");
+  });
+
+  it("maps rows exactly as the contact lookup does", async () => {
+    const { client } = clientReturning([
+      lead({ id: 90, name: "Partnership with ECS", type: "lead", partner_id: false, contact_name: "Christian Carron" }),
+    ]);
+    await expect(searchLeads(client, "carron")).resolves.toEqual([
+      {
+        id: 90,
+        name: "Partnership with ECS",
+        type: "lead",
+        stageName: "Proposition",
+        partnerId: null,
+        partnerName: null,
+        contactName: "Christian Carron",
+        email: null,
+      },
+    ]);
+  });
+
+  // A one-character `ilike` matches a large fraction of any real CRM and an
+  // empty one matches ALL of it - and this fires from a debounce timer on the
+  // way to a real query, not only when the user has stopped typing.
+  it("does not go to the wire for a query too short to mean anything", async () => {
+    const { client, execute } = clientReturning([]);
+    await expect(searchLeads(client, "c")).resolves.toEqual([]);
+    await expect(searchLeads(client, "   ")).resolves.toEqual([]);
+    await expect(searchLeads(client, "")).resolves.toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("searches on the trimmed value, not the raw one", async () => {
+    const { client, execute } = clientReturning([]);
+    await searchLeads(client, "  carron  ");
+    expect(execute.mock.calls[0][2][0]).toEqual(leadSearchDomain("carron"));
+  });
+
+  it("throws ODOO_UNEXPECTED_ROW for a row with no usable id", async () => {
+    const { client } = clientReturning([{ name: "no id" }]);
+    await expect(searchLeads(client, "carron")).rejects.toMatchObject({
+      code: "ODOO_UNEXPECTED_ROW",
+    });
   });
 });

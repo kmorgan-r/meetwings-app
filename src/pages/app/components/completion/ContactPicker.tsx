@@ -1,10 +1,19 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts } from "@/lib/odoo";
 import type { OdooContact, OdooOpportunity } from "@/types";
 import { CheckIcon, StarIcon, UsersIcon } from "lucide-react";
 
 export const MAX_RENDERED_ROWS = 100;
+
+/**
+ * How long the search box sits still before the lead search goes out.
+ *
+ * The contact list filters offline against a synced cache and updates on every
+ * keystroke; the lead search is a live XML-RPC round trip, and firing one per
+ * keystroke would put a dozen calls on the wire for one word.
+ */
+export const LEAD_SEARCH_DEBOUNCE_MS = 350;
 
 /**
  * `not-configured` is a SEPARATE state from `never-synced`.
@@ -33,11 +42,27 @@ export type PickerCacheState =
 export interface ContactPickerProps {
   contactId: number | null; // primitive, NOT an object - see below
   leadId: number | null; // primitive
+  /**
+   * The chosen crm.lead's name, PERSISTED alongside its id.
+   *
+   * The only thing that can name a lead-only target. Its contact name comes
+   * from the synced cache and a lead is not in that cache by definition, so
+   * without this the trigger reads "Who are you meeting?" while a meeting is
+   * queued against a real record.
+   */
+  leadName: string | null;
   contactName: string | null; // primitive
   cache: PickerCacheState;
   opportunities: OdooOpportunity[] | null; // null = not looked up yet
   opportunityError: string | null; // an ODOO_* code, or null
   isLookingUp: boolean;
+  // The lead SEARCH - a different read from the opportunity lookup above, with
+  // its own in-flight and error state. null = nothing searched for yet.
+  leadResults: OdooOpportunity[] | null;
+  leadSearchError: string | null;
+  isSearchingLeads: boolean;
+  onSelectLead: (lead: OdooOpportunity) => Promise<void>;
+  onSearchLeads: (query: string) => Promise<void>;
   // EVERY handler that does async work returns its promise. See the note below:
   // Task 12's tests await these and then assert synchronously on the result.
   onSelect: (contact: OdooContact) => Promise<void>; // useCallback-stable
@@ -62,11 +87,17 @@ export interface ContactPickerProps {
 export const ContactPicker = memo(function ContactPicker({
   contactId,
   leadId,
+  leadName,
   contactName,
   cache,
   opportunities,
   opportunityError,
   isLookingUp,
+  leadResults,
+  leadSearchError,
+  isSearchingLeads,
+  onSelectLead,
+  onSearchLeads,
   onSelect,
   onSelectOpportunity,
   onToggleColleague,
@@ -77,6 +108,22 @@ export const ContactPicker = memo(function ContactPicker({
   onOpenChange,
 }: ContactPickerProps) {
   const [query, setQuery] = useState("");
+
+  /**
+   * The live half of the search box.
+   *
+   * Debounced HERE rather than in the hook because the query lives here - and
+   * the cleanup is what makes it a debounce rather than a delay: every
+   * keystroke cancels the pending timer, so only the last one in a burst is
+   * ever sent. `void` because this runs from a timer, where a rejection would
+   * be unhandled; `onSearchLeads` is documented never to reject.
+   */
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void onSearchLeads(query);
+    }, LEAD_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, onSearchLeads]);
 
   const visible = useMemo(() => {
     if (cache.kind !== "ready") return [];
@@ -106,12 +153,13 @@ export const ContactPicker = memo(function ContactPicker({
         `${contactName ?? "the selected contact"}'s contact record`
       : chosenOpportunity !== null
         ? `the ${chosenOpportunity.type} ${chosenOpportunity.name}`
-        : // NEUTRAL on purpose. Only `lead_id` is persisted, never its kind, so
-          // in this branch - a rehydrated target, or a record the lookup no
-          // longer returns - there is nothing to tell a lead from an
-          // opportunity, and naming either would be a guess about the record
-          // this meeting is going to be written to.
-          `the lead or opportunity you picked earlier (#${leadId})`;
+        : // The persisted name, when there is one. NEUTRAL between the two
+          // kinds either way: only `lead_id` and `lead_name` are stored, never
+          // the kind, so naming one would be a guess about the record this
+          // meeting is about to be written to.
+          leadName !== null
+          ? `the lead or opportunity ${leadName}`
+          : `the lead or opportunity you picked earlier (#${leadId})`;
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -119,10 +167,18 @@ export const ContactPicker = memo(function ContactPicker({
         <button
           type="button"
           className={`px-2 py-1 rounded-md text-xs font-medium transition-colors ${
-            contactId !== null ? "bg-primary/10 text-primary" : "bg-muted/50 text-muted-foreground"
+            contactId !== null || leadId !== null
+              ? "bg-primary/10 text-primary"
+              : "bg-muted/50 text-muted-foreground"
           }`}
         >
-          {contactName ?? "Who are you meeting?"}
+          {/*
+            `leadId`, not `contactId`, decides whether anything is selected: a
+            lead picked out of the search has no res.partner behind it, so a
+            contact-only test reports "nothing chosen" for a target a meeting
+            is already queued against.
+          */}
+          {contactName ?? leadName ?? "Who are you meeting?"}
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80 p-3">
@@ -209,15 +265,91 @@ export const ContactPicker = memo(function ContactPicker({
             </div>
           )}
 
+          {/*
+            THE ONLY WAY TO REACH AN UNCONVERTED LEAD. The list above searches
+            synced res.partner records; Odoo default for a lead is free-text
+            contact details and no partner at all, so such a record has no
+            contact to pick first and no lookup to hang off one.
+
+            Rendered under the contacts rather than mixed into them: these are
+            live results for the same query, they arrive later than the offline
+            filter above, and reordering the contact list as they land would
+            move a row out from under a click.
+          */}
+          {(isSearchingLeads || leadSearchError !== null || leadResults !== null) && (
+            <div className="flex flex-col gap-1 border-t pt-2">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Leads &amp; opportunities
+              </p>
+
+              {leadSearchError !== null ? (
+                <p className="text-[11px] text-destructive">
+                  {`Search failed \u2014 ${leadSearchError}`}
+                </p>
+              ) : isSearchingLeads ? (
+                <p className="text-[11px] text-muted-foreground">Searching&hellip;</p>
+              ) : leadResults !== null && leadResults.length === 0 ? (
+                <p className="text-[11px] text-muted-foreground">No matches</p>
+              ) : (
+                <div
+                  data-testid="lead-search-results"
+                  className="flex flex-col gap-1 max-h-40 overflow-y-auto"
+                >
+                  {(leadResults ?? []).map((lead) => (
+                    <button
+                      key={lead.id}
+                      type="button"
+                      data-testid="lead-search-row"
+                      aria-pressed={leadId === lead.id}
+                      onClick={() => onSelectLead(lead)}
+                      className={`flex items-start gap-1.5 text-left text-xs px-2 py-1 rounded-md hover:bg-muted/50 ${
+                        leadId === lead.id ? "bg-muted" : ""
+                      }`}
+                    >
+                      <CheckIcon
+                        aria-hidden
+                        className={`h-3 w-3 mt-0.5 shrink-0 text-primary ${
+                          leadId === lead.id ? "" : "invisible"
+                        }`}
+                      />
+                      <span>
+                        {lead.type === "lead" && (
+                          <span className="text-muted-foreground">Lead &middot; </span>
+                        )}
+                        {lead.name}
+                        {(lead.partnerName ?? lead.contactName ?? lead.email) && (
+                          <span className="text-muted-foreground">
+                            {" "}
+                            &middot; {lead.partnerName ?? lead.contactName ?? lead.email}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {cache.kind !== "not-configured" && (
             <Button size="sm" variant="ghost" className="text-xs" onClick={onRefresh}>
               Refresh
             </Button>
           )}
 
-          {contactId !== null && (
+          {/*
+            `contactId !== null || leadId !== null`, because a lead picked out
+            of the search HAS no contact. Gating on the contact alone hid the
+            destination sentence for exactly the target that most needs it -
+            the one whose record cannot be named from the contact cache at all.
+          */}
+          {(contactId !== null || leadId !== null) && (
             <div className="flex flex-col gap-1 border-t pt-2">
-              {isLookingUp ? (
+              {/*
+                The lookup itself stays contact-gated: it hangs off a res.partner
+                and there is nothing to run it against without one.
+              */}
+              {contactId === null ? null : isLookingUp ? (
                 <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <UsersIcon className="h-3 w-3 animate-pulse" />
                   Looking up opportunities &amp; leads&hellip;

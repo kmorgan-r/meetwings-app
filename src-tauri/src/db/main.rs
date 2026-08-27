@@ -87,5 +87,13 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-log-queue.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 13: A crm.lead can be the target on its own, with no
+        // res.partner behind it
+        Migration {
+            version: 13,
+            description: "allow_lead_only_selected_target",
+            sql: include_str!("migrations/odoo-lead-only-target.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
