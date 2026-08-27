@@ -7,6 +7,26 @@ import type { XmlRpcValue } from "./xmlrpc-codec";
 export const OPPORTUNITY_LIMIT = 20;
 
 /**
+ * The kind, spelled out for a row.
+ *
+ * Marking only leads and leaving deals bare was the first cut, on the argument
+ * that an unmarked row is a deal because that is all these lists used to hold.
+ * That argument only works for someone who remembers the old list - to anyone
+ * else an unmarked row says nothing at all, and the kind is half of what the
+ * destination sentence is about to promise.
+ *
+ * HERE rather than in either page, because the overlay picker and the
+ * dashboard assign dialog both render it and neither owns it. (Contrast
+ * `MAX_CONTACT_ROWS`, which AssignDialog deliberately restates rather than
+ * imports: that one is the overlay picker's own contract, and a change there
+ * should NOT silently change the dialog. This is the opposite - the two must
+ * never drift.)
+ */
+export function kindLabel(type: OdooOpportunity["type"]): string {
+  return type === "lead" ? "Lead" : "Opportunity";
+}
+
+/**
  * Everything the lookup reads off the selected contact.
  *
  * Narrow on purpose. Both callers hand it a whole `OdooContact` and it is

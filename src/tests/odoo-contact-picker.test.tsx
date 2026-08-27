@@ -462,10 +462,10 @@ describe("opportunities", () => {
   });
 
   // Leads and opportunities are the same Odoo table and the same write, but
-  // they are not the same thing to say out loud. The marker is a PREFIX and
-  // only leads carry it - an unmarked row is a deal, which is what every row
-  // in this list used to be.
-  it("marks lead rows and leaves opportunities unmarked", async () => {
+  // they are not the same thing to say out loud. EVERY row carries its kind as
+  // a prefix - marking only leads reads as "unmarked means deal", which is
+  // true only for someone who remembers the list before leads were in it.
+  it("labels every row with its kind", async () => {
     setup({
       contactId: 1,
       contactName: "Ada Lovelace",
@@ -475,8 +475,12 @@ describe("opportunities", () => {
       ],
     });
     await openPopover();
-    expect(screen.getByRole("button", { name: /lead . website form/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /heat pump/i }).textContent).not.toMatch(/lead/i);
+    expect(
+      screen.getByRole("button", { name: /website form/i }).textContent
+    ).toMatch(/^Lead ·/);
+    expect(
+      screen.getByRole("button", { name: /heat pump/i }).textContent
+    ).toMatch(/^Opportunity ·/);
   });
 
   it("names the lead as the destination once one is chosen", async () => {
@@ -608,12 +612,16 @@ describe("the lead search", () => {
     expect(props.onSelectLead).toHaveBeenCalledWith(lead());
   });
 
-  it("names an unlinked result by its own contact details", async () => {
-    setup({ leadResults: [lead()] });
+  it("names an unlinked result by its own contact details, under its kind", async () => {
+    setup({ leadResults: [lead(), lead({ id: 91, name: "Solar tender", type: "opportunity" })] });
     await openPopover();
     const row = screen.getByRole("button", { name: /partnership with ECS/i });
     expect(row.textContent).toContain("Christian Carron");
-    expect(row.textContent).toMatch(/lead/i);
+    expect(row.textContent).toMatch(/^Lead ·/);
+    // A search hits both kinds, so the results have to tell them apart too.
+    expect(
+      screen.getByRole("button", { name: /solar tender/i }).textContent
+    ).toMatch(/^Opportunity ·/);
   });
 
   // Three states that must never look alike: nothing typed, a search that

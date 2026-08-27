@@ -16,7 +16,7 @@ import { createOdooClient, type OdooClient } from "@/lib/odoo/client";
 import { compareContacts, filterContacts } from "@/lib/odoo/contact-ordering";
 import { reportOdooError } from "@/lib/odoo/errors";
 import type { ProviderConfigLike } from "@/lib/odoo/meeting-log-actions";
-import { fetchOpportunities } from "@/lib/odoo/opportunities";
+import { fetchOpportunities, kindLabel } from "@/lib/odoo/opportunities";
 import { requireOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type { MeetingLogListRow, OdooContact, OdooOpportunity } from "@/types";
 import { useProviderConfig } from "./ProviderConfigReader";
@@ -389,10 +389,10 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                         }`}
                       />
                       <span>
-                        {/* A prefix, and only on leads - see ContactPicker. */}
-                        {opp.type === "lead" && (
-                          <span className="text-muted-foreground">{"Lead · "}</span>
-                        )}
+                        {/* A prefix, on every row - see ContactPicker. */}
+                        <span className="text-muted-foreground">
+                          {`${kindLabel(opp.type)} · `}
+                        </span>
                         {opp.name}
                         {opp.stageName && (
                           <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>

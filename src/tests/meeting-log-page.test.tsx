@@ -56,6 +56,10 @@ vi.mock("@/lib/odoo/client", () => client);
 const opportunities = vi.hoisted(() => ({
   fetchOpportunities: vi.fn(),
   OPPORTUNITY_LIMIT: 20,
+  // NOT a spy. It is a pure string function the dialog calls during render, and
+  // a `vi.fn()` returning undefined renders every row with a blank kind - the
+  // one thing these rows now have to state.
+  kindLabel: (type: string) => (type === "lead" ? "Lead" : "Opportunity"),
 }));
 vi.mock("@/lib/odoo/opportunities", () => opportunities);
 
@@ -1477,7 +1481,7 @@ describe("the assign dialog's opportunity step", () => {
     ).toBeInTheDocument();
   });
 
-  it("leaves an opportunity unmarked and calls it an opportunity", async () => {
+  it("labels an opportunity as an opportunity, in the row and in the sentence", async () => {
     opportunities.fetchOpportunities.mockResolvedValue([opportunity()]);
     db.listActionableRows.mockResolvedValue([
       row({ id: "un", status: "unassigned", contact_id: null }),
@@ -1487,6 +1491,7 @@ describe("the assign dialog's opportunity step", () => {
 
     await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
     const oppRow = await screen.findByRole("button", { name: /Heat pumps for the north wing/ });
+    expect(oppRow.textContent).toMatch(/^Opportunity ·/);
     expect(oppRow.textContent).not.toMatch(/Lead/);
     await userEvent.click(oppRow);
 

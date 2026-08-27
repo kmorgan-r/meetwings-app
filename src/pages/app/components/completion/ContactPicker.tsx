@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
-import { compareContacts, filterContacts } from "@/lib/odoo";
+import { compareContacts, filterContacts, kindLabel } from "@/lib/odoo";
 import type { OdooContact, OdooOpportunity } from "@/types";
 import { CheckIcon, StarIcon, UsersIcon } from "lucide-react";
 
@@ -313,9 +313,9 @@ export const ContactPicker = memo(function ContactPicker({
                         }`}
                       />
                       <span>
-                        {lead.type === "lead" && (
-                          <span className="text-muted-foreground">Lead &middot; </span>
-                        )}
+                        <span className="text-muted-foreground">
+                          {kindLabel(lead.type)} &middot;{" "}
+                        </span>
                         {lead.name}
                         {(lead.partnerName ?? lead.contactName ?? lead.email) && (
                           <span className="text-muted-foreground">
@@ -407,12 +407,10 @@ export const ContactPicker = memo(function ContactPicker({
                           A PREFIX, not a suffix: it is the first thing to scan
                           down the column, and leads and opportunities sit
                           interleaved in write_date order rather than grouped.
-                          Only leads are marked - an unmarked row is a deal,
-                          which is what every row in this list used to be.
                         */}
-                        {opp.type === "lead" && (
-                          <span className="text-muted-foreground">Lead &middot; </span>
-                        )}
+                        <span className="text-muted-foreground">
+                          {kindLabel(opp.type)} &middot;{" "}
+                        </span>
                         {opp.name}
                         {opp.stageName && <span className="text-muted-foreground"> &middot; {opp.stageName}</span>}
                         {/*
