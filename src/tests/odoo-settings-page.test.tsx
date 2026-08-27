@@ -319,6 +319,62 @@ describe("the Odoo settings page", () => {
     expect(screen.getByText(/contacts not synced yet/i)).toBeInTheDocument();
   });
 
+  // The reviewer's repro, and the most common first run there is: the four
+  // fields are full long before anything reaches disk, because saveOdooConfig
+  // runs only from the Save button. A green "Credentials stored" here is
+  // contradicted by the very next button - testOdooConnection reads storage
+  // via requireOdooConfig and answers ODOO_NOT_CONFIGURED.
+  it("does not claim the credentials are stored until Save is pressed", async () => {
+    renderPage();
+    await userEvent.type(await screen.findByLabelText(/url/i), "http://h:8069");
+    await userEvent.type(screen.getByLabelText(/database/i), "odoo");
+    await userEvent.type(screen.getByLabelText(/login/i), "bob@example.com");
+    await userEvent.type(screen.getByLabelText(/api key/i), KEY);
+
+    expect(screen.queryByText(/credentials stored/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/press save to store them/i)).toBeInTheDocument();
+  });
+
+  it("marks the credentials stored once the save succeeds", async () => {
+    renderPage();
+    await fillAndSave();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+    expect(screen.queryByText(/press save to store them/i)).not.toBeInTheDocument();
+  });
+
+  // The returning user. Nothing else in this file asserts the first row green,
+  // so without this case the load path could stop setting the flag and every
+  // configured user would be told to fill in fields already on disk.
+  it("marks the credentials stored for a config that was already on disk", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+  });
+
+  // Deliberately UNLIKE the verified and synced rows above: an edit does not
+  // un-store anything. The credentials on disk are still there and still the
+  // ones Test connection will use, so clearing this check on edit would swap
+  // the bug it fixes for its mirror image - a card reporting nothing stored
+  // while the button under it connects fine.
+  it("keeps the stored check when a credential is edited", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    renderPage();
+    expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/url/i), "1");
+    expect(screen.getByText(/credentials stored/i)).toBeInTheDocument();
+  });
+
   // The storage layer's completeness check is bare truthiness, so "   " passes
   // it. The client concatenates config.url straight into the XML-RPC URL, so a
   // padded value cannot connect - a green "Credentials stored" check for one

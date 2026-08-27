@@ -136,20 +136,34 @@ function StatusLine({ status, testId }: { status: Status; testId?: string }) {
  * schema change - and would let a checklist keep showing a green check for an
  * API key that was revoked in Odoo an hour ago. A check that resets on reload
  * is the honest one.
+ *
+ * `filled` counts what is TYPED; `stored` is whether a complete config is on
+ * DISK, and the first row makes the second claim. testOdooConnection and
+ * runSync both read persisted storage (requireOdooConfig), never this form, so
+ * a green "Credentials stored" derived from the live fields would pass on a
+ * fresh install and then be contradicted by the very next button, which
+ * answers ODOO_NOT_CONFIGURED.
+ *
+ * `stored` is deliberately NOT cleared when a field is edited, unlike the two
+ * rows below it. An edit does not un-store anything - the credentials on disk
+ * are still there, and still the ones Test connection will use. Clearing it
+ * would swap this bug for its mirror image: a card reporting nothing stored
+ * while the button under it connects fine.
  */
 function OdooSetupCard({
   filled,
+  stored,
   verified,
   verifiedDetail,
   synced,
 }: {
   filled: number;
+  stored: boolean;
   verified: boolean;
   verifiedDetail: string | null;
   synced: boolean;
 }) {
-  const configured = filled === 4;
-  const done = (configured ? 1 : 0) + (verified ? 1 : 0) + (synced ? 1 : 0);
+  const done = (stored ? 1 : 0) + (verified ? 1 : 0) + (synced ? 1 : 0);
   const percent = (done / 3) * 100;
   const isComplete = done === 3;
 
@@ -181,14 +195,21 @@ function OdooSetupCard({
 
       <div className="space-y-2">
         <div className="flex items-center gap-2">
-          <StatusIcon done={configured} />
+          <StatusIcon done={stored} />
           <span className="text-sm text-foreground">
-            {configured ? (
+            {stored ? (
               // "stored", not "saved" - the button below reports "Saved", and
-              // two lines saying the same word about different things (all
-              // four fields present vs. this click wrote them) reads as one
-              // duplicated message.
+              // two lines saying the same word about different things (a
+              // complete config is on disk vs. this click wrote it) reads as
+              // one duplicated message.
               "Credentials stored"
+            ) : filled === 4 ? (
+              // The step the user is actually on. Without this branch the row
+              // falls through to "Fill in all four fields below (4 of 4)",
+              // which is both false and no help.
+              <span className="text-muted-foreground">
+                All four fields filled - press Save to store them
+              </span>
             ) : (
               <span className="text-muted-foreground">
                 Fill in all four fields below ({filled} of 4)
@@ -198,7 +219,7 @@ function OdooSetupCard({
         </div>
 
         <div className="flex items-center gap-2 pl-6">
-          <StatusIcon done={verified} pending={!configured} />
+          <StatusIcon done={verified} pending={!stored} />
           <span className="text-sm">
             {verified ? (
               <span className="text-foreground">
@@ -208,7 +229,7 @@ function OdooSetupCard({
                 )}
               </span>
             ) : (
-              <span className={cn(configured ? "text-muted-foreground" : "text-muted-foreground/50")}>
+              <span className={cn(stored ? "text-muted-foreground" : "text-muted-foreground/50")}>
                 Not tested yet
               </span>
             )}
@@ -234,6 +255,10 @@ function OdooSetupCard({
 
 export default function OdooSettings() {
   const [config, setConfig] = useState<OdooConfig>(EMPTY);
+  // Whether a COMPLETE config is on disk - the claim the first checklist row
+  // makes, and one `config` cannot answer: on a fresh install every field is
+  // full before Save has ever run, while requireOdooConfig reads storage.
+  const [stored, setStored] = useState(false);
   const [loadStatus, setLoadStatus] = useState<Status | null>(null);
   const [saveStatus, setSaveStatus] = useState<Status | null>(null);
   const [testStatus, setTestStatus] = useState<Status | null>(null);
@@ -278,7 +303,14 @@ export default function OdooSettings() {
     void (async () => {
       try {
         const loaded = await loadOdooConfig();
-        if (!cancelled && loaded) setConfig(loaded);
+        if (!cancelled && loaded) {
+          setConfig(loaded);
+          // The check has to survive a reload, or every returning user is told
+          // to fill in fields that are already on disk. filledCount rather than
+          // the storage layer's own truthiness test, so a padded value is not
+          // counted as stored here after being refused there.
+          setStored(filledCount(loaded) === 4);
+        }
       } catch (err) {
         // Reported, never swallowed - a config that cannot load must not look
         // like a config that was never set.
@@ -342,6 +374,11 @@ export default function OdooSettings() {
     // handler and the user sees nothing.
     try {
       const result = await saveOdooConfig(config);
+      // Recomputed from what was just written, not set to true: saveOdooConfig
+      // does not validate completeness, so a save can take the config complete
+      // -> incomplete (clearing the api key) exactly as the queue effect below
+      // already accounts for.
+      setStored(filledCount(config) === 4);
       setSaveStatus(okStatus("Saved"));
       setQueueReadKey((k) => k + 1);
       // Fires on EITHER flag, not instanceChanged alone. instanceChanged is
@@ -422,6 +459,7 @@ export default function OdooSettings() {
 
       <OdooSetupCard
         filled={filled}
+        stored={stored}
         verified={testStatus?.kind === "ok"}
         verifiedDetail={verifiedUid === null ? null : `uid ${verifiedUid}`}
         synced={syncStatus?.kind === "ok"}
