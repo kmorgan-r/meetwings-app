@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckIcon } from "lucide-react";
 import {
   Button,
   Dialog,
@@ -376,26 +377,43 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                       type="button"
                       aria-pressed={leadId === opp.id}
                       onClick={() => setLeadId(opp.id)}
-                      className={`rounded-lg px-2 py-1 text-left text-xs hover:bg-muted/50 ${
+                      className={`flex items-start gap-1.5 rounded-lg px-2 py-1 text-left text-xs hover:bg-muted/50 ${
                         leadId === opp.id ? "bg-muted" : ""
                       }`}
                     >
-                      {opp.name}
-                      {opp.stageName && (
-                        <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>
-                      )}
-                      {opp.partnerName && (
-                        <span className="text-muted-foreground">{` · ${opp.partnerName}`}</span>
-                      )}
+                      {/* Held, not conditionally rendered - see ContactPicker. */}
+                      <CheckIcon
+                        aria-hidden
+                        className={`mt-0.5 h-3 w-3 shrink-0 text-primary ${
+                          leadId === opp.id ? "" : "invisible"
+                        }`}
+                      />
+                      <span>
+                        {opp.name}
+                        {opp.stageName && (
+                          <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>
+                        )}
+                        {opp.partnerName && (
+                          <span className="text-muted-foreground">{` · ${opp.partnerName}`}</span>
+                        )}
+                      </span>
                     </button>
                   ))}
                   <button
                     type="button"
                     aria-pressed={leadId === null}
                     onClick={() => setLeadId(null)}
-                    className="rounded-lg px-2 py-1 text-left text-xs text-muted-foreground hover:bg-muted/50"
+                    className={`flex items-start gap-1.5 rounded-lg px-2 py-1 text-left text-xs hover:bg-muted/50 ${
+                      leadId === null ? "bg-muted" : "text-muted-foreground"
+                    }`}
                   >
-                    Contact record only
+                    <CheckIcon
+                      aria-hidden
+                      className={`mt-0.5 h-3 w-3 shrink-0 text-primary ${
+                        leadId === null ? "" : "invisible"
+                      }`}
+                    />
+                    <span>Contact record only</span>
                   </button>
                 </div>
               )
