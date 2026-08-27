@@ -158,6 +158,7 @@ function opportunity(over: Partial<OdooOpportunity> = {}): OdooOpportunity {
   return {
     id: 500,
     name: "Heat pumps for the north wing",
+    type: "opportunity",
     stageName: "Proposal",
     partnerId: 7,
     partnerName: "Ada Lovelace",
@@ -1398,10 +1399,10 @@ describe("the assign dialog's opportunity step", () => {
     await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
 
     expect(
-      await screen.findByText(/The opportunities for this contact could not be read/)
+      await screen.findByText(/The opportunities and leads for this contact could not be read/)
     ).toBeInTheDocument();
     // THE KILLER ASSERTION. A failed fetch must never read as "no open deals".
-    expect(screen.queryByText("No open opportunities for this contact.")).toBeNull();
+    expect(screen.queryByText("No open opportunities or leads for this contact.")).toBeNull();
     // The code only - never the raw thrown text.
     expect(document.body.textContent).not.toContain("crm.lead blew up");
 
@@ -1423,9 +1424,51 @@ describe("the assign dialog's opportunity step", () => {
 
     await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
     expect(
-      await screen.findByText("No open opportunities for this contact.")
+      await screen.findByText("No open opportunities or leads for this contact.")
     ).toBeInTheDocument();
     expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  // Leads and opportunities are one Odoo table and one write, but they are not
+  // the same thing to say out loud - and this dialog's sentence is the only
+  // place the record's kind is stated before a push that cannot be taken back.
+  it("marks lead rows and names a lead as a lead in the destination sentence", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([
+      opportunity({ id: 700, name: "Website enquiry", type: "lead", stageName: "New" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    const leadRow = await screen.findByRole("button", { name: /Lead . Website enquiry/ });
+    await userEvent.click(leadRow);
+
+    expect(
+      screen.getByText("This meeting will be logged on the lead Website enquiry.")
+    ).toBeInTheDocument();
+  });
+
+  it("leaves an opportunity unmarked and calls it an opportunity", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity()]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    const oppRow = await screen.findByRole("button", { name: /Heat pumps for the north wing/ });
+    expect(oppRow.textContent).not.toMatch(/Lead/);
+    await userEvent.click(oppRow);
+
+    expect(
+      screen.getByText(
+        "This meeting will be logged on the opportunity Heat pumps for the north wing."
+      )
+    ).toBeInTheDocument();
   });
 
   it("is token-ordered on the RESOLVE path: a slow lookup cannot paint under a newer contact", async () => {

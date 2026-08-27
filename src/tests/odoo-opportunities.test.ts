@@ -9,6 +9,7 @@ function clientReturning(rows: unknown) {
 const lead = (over: Record<string, unknown> = {}) => ({
   id: 5,
   name: "Heat pump retrofit",
+  type: "opportunity",
   stage_id: [3, "Proposition"],
   partner_id: [1, "Ada Lovelace"],
   probability: 40,
@@ -24,7 +25,14 @@ describe("fetchOpportunities", () => {
   it("maps a single result", async () => {
     const { client } = clientReturning([lead()]);
     await expect(fetchOpportunities(client, 1, null)).resolves.toEqual([
-      { id: 5, name: "Heat pump retrofit", stageName: "Proposition", partnerId: 1, partnerName: "Ada Lovelace" },
+      {
+        id: 5,
+        name: "Heat pump retrofit",
+        type: "opportunity",
+        stageName: "Proposition",
+        partnerId: 1,
+        partnerName: "Ada Lovelace",
+      },
     ]);
   });
 
@@ -61,7 +69,7 @@ describe("fetchOpportunities", () => {
     expect(model).toBe("crm.lead");
     expect(method).toBe("search_read");
     const domain = args[0] as unknown[][];
-    expect(domain).toContainEqual(["type", "=", "opportunity"]);
+    expect(domain).toContainEqual(["type", "in", ["lead", "opportunity"]]);
     expect(domain).toContainEqual(["active", "=", true]);
     expect(domain).toContainEqual(["probability", "<", 100]);
     expect(kwargs.limit).toBe(20);
@@ -71,7 +79,14 @@ describe("fetchOpportunities", () => {
   it("survives a lead with a false stage_id or partner_id", async () => {
     const { client } = clientReturning([lead({ stage_id: false, partner_id: false })]);
     await expect(fetchOpportunities(client, 1, null)).resolves.toEqual([
-      { id: 5, name: "Heat pump retrofit", stageName: null, partnerId: null, partnerName: null },
+      {
+        id: 5,
+        name: "Heat pump retrofit",
+        type: "opportunity",
+        stageName: null,
+        partnerId: null,
+        partnerName: null,
+      },
     ]);
   });
 
@@ -100,6 +115,33 @@ describe("fetchOpportunities", () => {
     const [result] = await fetchOpportunities(client, 1, null);
     expect(result.partnerId).toBeNull();
     expect(result.partnerName).toBeNull();
+  });
+
+  // Leads and opportunities are one Odoo table; the picker offers both, and the
+  // row label and the destination sentence have to name the right one, so the
+  // kind has to survive the mapping.
+  it("carries a lead's type through", async () => {
+    const { client } = clientReturning([lead({ id: 7, name: "Website form", type: "lead" })]);
+    const [result] = await fetchOpportunities(client, 1, null);
+    expect(result.type).toBe("lead");
+  });
+
+  it("asks the CRM for both kinds, not opportunities alone", async () => {
+    const { client, execute } = clientReturning([]);
+    await fetchOpportunities(client, 1, null);
+    const [, , args, kwargs] = execute.mock.calls[0];
+    const domain = args[0] as unknown[][];
+    expect(domain).toContainEqual(["type", "in", ["lead", "opportunity"]]);
+    expect(kwargs.fields).toContain("type");
+  });
+
+  // A missing or unreadable `type` must read as an opportunity - the kind every
+  // row this function returned before leads existed. Defaulting the other way
+  // would print "Lead" beside a deal, and the label is what the user picks by.
+  it("reads an unusable type as an opportunity, never as a lead", async () => {
+    const { client } = clientReturning([lead({ type: false }), lead({ id: 8, type: undefined })]);
+    const rows = await fetchOpportunities(client, 1, null);
+    expect(rows.map((r) => r.type)).toEqual(["opportunity", "opportunity"]);
   });
 
   it("throws ODOO_UNEXPECTED_ROW for a lead with no usable id", async () => {

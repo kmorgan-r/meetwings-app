@@ -237,8 +237,8 @@ describe("opportunities", () => {
       contactId: 1,
       contactName: "Ada Lovelace",
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: "Proposition", partnerId: 1, partnerName: "Ada" },
-        { id: 6, name: "Solar", stageName: "Qualified", partnerId: 9, partnerName: "Analytical Ltd" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: "Proposition", partnerId: 1, partnerName: "Ada" },
+        { id: 6, name: "Solar", type: "opportunity", stageName: "Qualified", partnerId: 9, partnerName: "Analytical Ltd" },
       ],
     });
     await openPopover();
@@ -260,6 +260,7 @@ describe("opportunities", () => {
         {
           id: 6,
           name: "Solar",
+          type: "opportunity",
           stageName: "Qualified",
           partnerId: 9,
           partnerName: "Parent Holdings AS",
@@ -275,7 +276,7 @@ describe("opportunities", () => {
       contactId: 1,
       contactName: "Ada Lovelace",
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -294,7 +295,7 @@ describe("opportunities", () => {
       opportunityError: "ODOO_UNREACHABLE",
     });
     await openPopover();
-    expect(screen.getByText(/opportunities unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/opportunities & leads unavailable/i)).toBeInTheDocument();
     expect(screen.getByText(/ODOO_UNREACHABLE/)).toBeInTheDocument();
     // Retry calls the hook's own callback. The component holds only primitives
     // and cannot reconstruct the OdooContact that onSelect demands - and with a
@@ -337,8 +338,8 @@ describe("opportunities", () => {
       contactName: "Ada Lovelace",
       leadId: 6,
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
-        { id: 6, name: "Solar", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 6, name: "Solar", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -359,7 +360,7 @@ describe("opportunities", () => {
       contactName: "Ada Lovelace",
       leadId: null,
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -382,8 +383,8 @@ describe("opportunities", () => {
       contactName: "Ada Lovelace",
       leadId: 6,
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
-        { id: 6, name: "Solar", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 6, name: "Solar", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -409,7 +410,7 @@ describe("opportunities", () => {
       contactName: "Ada Lovelace",
       leadId: null,
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -424,7 +425,7 @@ describe("opportunities", () => {
       contactName: "Ada Lovelace",
       leadId: 5,
       opportunities: [
-        { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
       ],
     });
     await openPopover();
@@ -445,6 +446,61 @@ describe("opportunities", () => {
     });
     await openPopover();
     expect(screen.getByText(/picked earlier \(#6\)/i)).toBeInTheDocument();
+    // NEUTRAL wording, and that is the assertion. Only `lead_id` is persisted,
+    // never its kind, so this branch has nothing to tell a lead from an
+    // opportunity and must not name either.
+    expect(screen.queryByText(/the opportunity you picked/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/the lead you picked/i)).not.toBeInTheDocument();
+  });
+
+  // Leads and opportunities are the same Odoo table and the same write, but
+  // they are not the same thing to say out loud. The marker is a PREFIX and
+  // only leads carry it - an unmarked row is a deal, which is what every row
+  // in this list used to be.
+  it("marks lead rows and leaves opportunities unmarked", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      opportunities: [
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+        { id: 7, name: "Website form", type: "lead", stageName: "New", partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getByRole("button", { name: /lead . website form/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /heat pump/i }).textContent).not.toMatch(/lead/i);
+  });
+
+  it("names the lead as the destination once one is chosen", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      leadId: 7,
+      opportunities: [
+        { id: 7, name: "Website form", type: "lead", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    expect(screen.getByText(/logged on the lead Website form/i)).toBeInTheDocument();
+    expect(screen.queryByText(/logged on the opportunity/i)).not.toBeInTheDocument();
+  });
+
+  // The overlay window is FIXED at 600px tall. Leads made this list longer, and
+  // an unbounded list pushes the destination sentence below it off the bottom -
+  // the one line that says which record this meeting is about to be written to.
+  // The contacts list above already scrolls for the same reason.
+  it("scrolls the deals list rather than growing past the window", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Ada Lovelace",
+      opportunities: [
+        { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ],
+    });
+    await openPopover();
+    const list = screen.getByTestId("opportunity-list");
+    expect(list).toHaveClass("overflow-y-auto");
+    expect(list.className).toMatch(/max-h-/);
   });
 
   // Outside the four-way branch, not inside the list: the destination is

@@ -338,7 +338,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
         {preflight.state === "ready" && selected !== null && (
           <div className="flex flex-col gap-2 border-t pt-2">
             {isLookingUp && (
-              <p className="text-xs text-muted-foreground">Looking up opportunities…</p>
+              <p className="text-xs text-muted-foreground">Looking up opportunities &amp; leads…</p>
             )}
 
             {opportunityError !== null && (
@@ -352,7 +352,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                   read as "this contact has none".
                 */}
                 <p className="text-xs text-destructive">
-                  {`The opportunities for this contact could not be read (${opportunityError}). Whether ${selected.name} has open deals is unknown.`}
+                  {`The opportunities and leads for this contact could not be read (${opportunityError}). Whether ${selected.name} has open deals is unknown.`}
                 </p>
                 <Button
                   size="sm"
@@ -367,7 +367,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
             {opportunityError === null && opportunities !== null && (
               opportunities.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
-                  No open opportunities for this contact.
+                  No open opportunities or leads for this contact.
                 </p>
               ) : (
                 <div className="flex flex-col gap-1">
@@ -389,6 +389,10 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                         }`}
                       />
                       <span>
+                        {/* A prefix, and only on leads - see ContactPicker. */}
+                        {opp.type === "lead" && (
+                          <span className="text-muted-foreground">{"Lead · "}</span>
+                        )}
                         {opp.name}
                         {opp.stageName && (
                           <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>
@@ -427,7 +431,10 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
             <p className="text-xs">
               {chosenOpportunity === null
                 ? `This meeting will be logged on ${selected.name}'s contact record.`
-                : `This meeting will be logged on the opportunity ${chosenOpportunity.name}.`}
+                : // Two branches, not the picker's three: `leadId` here is local
+                  // state set from the list that is on screen, so the record it
+                  // names is always present to name its own kind.
+                  `This meeting will be logged on the ${chosenOpportunity.type} ${chosenOpportunity.name}.`}
             </p>
           </div>
         )}

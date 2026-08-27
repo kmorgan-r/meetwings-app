@@ -425,7 +425,7 @@ describe("the opportunity panel", () => {
   // skips the lookup entirely - stale deals would otherwise stay forever.
   it("clears the previous contact's opportunities before the next selection", async () => {
     odoo.fetchOpportunities.mockResolvedValue([
-      { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+      { id: 5, name: "Heat pump", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
     ]);
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
@@ -705,7 +705,9 @@ describe("selecting", () => {
     // A resolves last, with A's opportunity.
     await act(async () => {
       deferred[1]?.([]);
-      deferred[0]?.([{ id: 99, name: "A's deal", stageName: null, partnerId: 1, partnerName: "Ada" }]);
+      deferred[0]?.([
+        { id: 99, name: "A's deal", type: "opportunity", stageName: null, partnerId: 1, partnerName: "Ada" },
+      ]);
     });
 
     expect(result.current.targetRef.current?.contactId).toBe(3);

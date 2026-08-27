@@ -105,8 +105,13 @@ export const ContactPicker = memo(function ContactPicker({
         // cache still loading. The sentence still has to name a record.
         `${contactName ?? "the selected contact"}'s contact record`
       : chosenOpportunity !== null
-        ? `the opportunity ${chosenOpportunity.name}`
-        : `the opportunity you picked earlier (#${leadId})`;
+        ? `the ${chosenOpportunity.type} ${chosenOpportunity.name}`
+        : // NEUTRAL on purpose. Only `lead_id` is persisted, never its kind, so
+          // in this branch - a rehydrated target, or a record the lookup no
+          // longer returns - there is nothing to tell a lead from an
+          // opportunity, and naming either would be a guess about the record
+          // this meeting is going to be written to.
+          `the CRM record you picked earlier (#${leadId})`;
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>
@@ -215,24 +220,32 @@ export const ContactPicker = memo(function ContactPicker({
               {isLookingUp ? (
                 <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <UsersIcon className="h-3 w-3 animate-pulse" />
-                  Looking up opportunities&hellip;
+                  Looking up opportunities &amp; leads&hellip;
                 </p>
               ) : opportunityError !== null ? (
                 <div className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  <p>Opportunities unavailable &mdash; {opportunityError}</p>
+                  <p>Opportunities &amp; leads unavailable &mdash; {opportunityError}</p>
                   <Button size="sm" variant="outline" onClick={onRetryOpportunities}>
                     Retry
                   </Button>
                 </div>
               ) : opportunities === null ? (
                 <div className="flex flex-col gap-1 text-xs text-muted-foreground">
-                  <p>Opportunities not looked up</p>
+                  <p>Opportunities &amp; leads not looked up</p>
                   <Button size="sm" variant="outline" onClick={onRetryOpportunities}>
                     Look up
                   </Button>
                 </div>
               ) : (
-                <div className="flex flex-col gap-1">
+                /*
+                  max-h + overflow, matching the contacts list above. This
+                  popover renders into a window fixed at 600x54 that grows only
+                  through useCompletion's resize effect, so an unbounded list -
+                  now carrying leads as well as deals - pushes the destination
+                  sentence below it off the bottom, which is the one line that
+                  says where this meeting is going.
+                */
+                <div data-testid="opportunity-list" className="flex flex-col gap-1 max-h-40 overflow-y-auto">
                   {opportunities.map((opp) => (
                     <button
                       key={opp.id}
@@ -258,6 +271,16 @@ export const ContactPicker = memo(function ContactPicker({
                         }`}
                       />
                       <span>
+                        {/*
+                          A PREFIX, not a suffix: it is the first thing to scan
+                          down the column, and leads and opportunities sit
+                          interleaved in write_date order rather than grouped.
+                          Only leads are marked - an unmarked row is a deal,
+                          which is what every row in this list used to be.
+                        */}
+                        {opp.type === "lead" && (
+                          <span className="text-muted-foreground">Lead &middot; </span>
+                        )}
                         {opp.name}
                         {opp.stageName && <span className="text-muted-foreground"> &middot; {opp.stageName}</span>}
                         {opp.partnerName && (

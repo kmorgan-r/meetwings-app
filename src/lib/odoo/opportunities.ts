@@ -9,9 +9,26 @@ export const OPPORTUNITY_LIMIT = 20;
 /**
  * The one live call the picker makes when you select a client.
  *
+ * BOTH KINDS of crm.lead, leads and opportunities. They are one table in Odoo
+ * separated by the `type` column, `meeting-log-push` already resolves any
+ * non-null lead_id to the `crm.lead` model, and a meeting held about an
+ * unconverted lead belongs on that lead - not on the contact record, which is
+ * where it would land if the picker pretended the lead did not exist.
+ *
+ * Matched by `partner_id` for both kinds, which is the one caveat worth
+ * knowing: a lead that was never linked to a partner (Odoo's own default for
+ * an unconverted lead is to hold `contact_name`/`email_from` and no
+ * `partner_id`) cannot be found this way and will not be listed.
+ *
  * `probability < 100` rather than `active = true` alone: in Odoo active = false
  * means LOST, while WON opportunities stay active forever - so filtering only
- * on active would list every deal ever closed with that partner.
+ * on active would list every deal ever closed with that partner. It holds for
+ * leads too: a lead is converted before it can be won, so a live one is never
+ * at 100.
+ *
+ * ONE query, and its `limit` is a shared budget across both kinds. Two queries
+ * would double the throw surface of the one live call the picker makes, and
+ * add a round trip to the live-meeting path.
  *
  * This THROWS on the first unreadable row, where syncContacts skips and counts.
  * The asymmetry is deliberate, not an oversight. In the sync, failing the run
@@ -31,13 +48,13 @@ export async function fetchOpportunities(
   const partnerIds = parentId === null ? [contactId] : [contactId, parentId];
   const domain: XmlRpcValue[] = [
     ["partner_id", "in", partnerIds],
-    ["type", "=", "opportunity"],
+    ["type", "in", ["lead", "opportunity"]],
     ["active", "=", true],
     ["probability", "<", 100],
   ];
 
   const rows = await client.execute("crm.lead", "search_read", [domain], {
-    fields: ["id", "name", "stage_id", "partner_id", "probability"],
+    fields: ["id", "name", "type", "stage_id", "partner_id", "probability"],
     order: "write_date desc",
     limit: OPPORTUNITY_LIMIT,
   });
@@ -59,6 +76,11 @@ export async function fetchOpportunities(
     return {
       id: row.id,
       name: typeof row.name === "string" ? row.name : `Opportunity ${row.id}`,
+      // Anything that is not literally "lead" reads as an opportunity, which
+      // is the pre-existing behaviour of this function for every row it has
+      // ever returned. An unreadable `type` must not promote a deal to a
+      // "Lead" label - the label is what the user picks by.
+      type: row.type === "lead" ? "lead" : "opportunity",
       stageName: stage?.name ?? null,
       // Surfaced in the popover so it is visible WHICH record a deal hangs off
       // - the contact, or their company.

@@ -54,9 +54,25 @@ export interface DbOdooContact {
   synced_at: number;
 }
 
+/**
+ * One `crm.lead` row, of EITHER kind.
+ *
+ * The name says "opportunity" and the model does not: Odoo keeps leads and
+ * opportunities in the same `crm.lead` table, separated only by the `type`
+ * column, and the picker offers both. The name is kept because the persisted
+ * side is already lead-named end to end (`odoo_selected_target.lead_id`,
+ * `ResolvedTarget.leadId`, `meeting-log-push`'s `crm.lead`), so renaming this
+ * one type would churn six files and every fixture for no behaviour change.
+ *
+ * `type` is what the UI needs: posting a meeting to a lead and posting it to
+ * an opportunity are the same write to the same model, but they are not the
+ * same thing to say out loud, and the row label and the destination sentence
+ * both have to name the right one.
+ */
 export interface OdooOpportunity {
   id: number;
   name: string;
+  type: "lead" | "opportunity";
   stageName: string | null;
   partnerId: number | null;
   partnerName: string | null;
