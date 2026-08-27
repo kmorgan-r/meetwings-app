@@ -111,7 +111,7 @@ export const ContactPicker = memo(function ContactPicker({
           // longer returns - there is nothing to tell a lead from an
           // opportunity, and naming either would be a guess about the record
           // this meeting is going to be written to.
-          `the CRM record you picked earlier (#${leadId})`;
+          `the lead or opportunity you picked earlier (#${leadId})`;
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>

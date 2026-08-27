@@ -1137,12 +1137,17 @@ describe("the contact map", () => {
     expect(contacts.listContacts).toHaveBeenCalledTimes(db.listActionableRows.mock.calls.length);
   });
 
-  it("marks a row targeting an opportunity", async () => {
+  // NEUTRAL between the two kinds, and that is the assertion. The queue stores
+  // `lead_id` and never its type, so naming one would be a guess printed beside
+  // a customer's name - the marker's job is only to say "not the contact
+  // record".
+  it("marks a row targeting a crm.lead without guessing which kind", async () => {
     db.listActionableRows.mockResolvedValue([
       row({ id: "na", status: "failed", contact_id: 7, lead_id: 42 }),
     ]);
     await renderPage();
-    expect(await screen.findByText("Ada Lovelace (opportunity)")).toBeInTheDocument();
+    expect(await screen.findByText("Ada Lovelace (lead or opportunity)")).toBeInTheDocument();
+    expect(screen.queryByText("Ada Lovelace (opportunity)")).toBeNull();
   });
 });
 
