@@ -1577,6 +1577,14 @@ describe("the assign dialog's opportunity step", () => {
   });
 });
 
+// BRIDGE, for Task 7's assignMeetingLog(id, contactId, leadId, deps) ->
+// assignMeetingLog(id, targets, deps) signature change, same as the marker in
+// meeting-log-actions.test.ts. Every call-site assertion in this describe
+// block, plus one in "the assign dialog's provider pre-flight" below, still
+// destructured/indexed the old 4-arg shape. Updated to read the new
+// `targets: SelectedTargets` array at index 1 instead of `contactId`/`leadId`
+// at indices 1/2, and `deps` at index 2 instead of index 3. Pure signature
+// bridge, not new coverage. Tasks 13/14 own this file's real conversion.
 describe("what the assign dialog hands up", () => {
   it("passes the provider config derived from @/contexts, never null", async () => {
     // This is the case that kills "wired to the wrong useApp", "missing
@@ -1599,10 +1607,9 @@ describe("what the assign dialog hands up", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    const [id, contactId, leadId, deps] = actions.assignMeetingLog.mock.calls[0];
+    const [id, targets, deps] = actions.assignMeetingLog.mock.calls[0];
     expect(id).toBe("un");
-    expect(contactId).toBe(7);
-    expect(leadId).toBeNull();
+    expect(targets).toEqual([{ model: "res.partner", resId: 7, name: null }]);
     expect(deps.providerConfig).toEqual({ provider: PROVIDER, selectedProvider: SELECTED });
     // The page owns the push, so it - not the dialog - supplies the CAS hook.
     expect(deps.onCommitted).toBeTypeOf("function");
@@ -1628,7 +1635,9 @@ describe("what the assign dialog hands up", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    expect(actions.assignMeetingLog.mock.calls[0][2]).toBeNull();
+    expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
+      { model: "res.partner", resId: 7, name: null },
+    ]);
   });
 
   it("keeps the opportunity when it is the one confirmed", async () => {
@@ -1644,7 +1653,9 @@ describe("what the assign dialog hands up", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    expect(actions.assignMeetingLog.mock.calls[0].slice(1, 3)).toEqual([7, 500]);
+    expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
+      { model: "crm.lead", resId: 500, name: null },
+    ]);
   });
 
   it("drops a stale opportunity when the contact is changed after picking one", async () => {
@@ -1668,7 +1679,9 @@ describe("what the assign dialog hands up", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    expect(actions.assignMeetingLog.mock.calls[0].slice(1, 3)).toEqual([8, null]);
+    expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
+      { model: "res.partner", resId: 8, name: null },
+    ]);
   });
 
   it("is offered on a current-instance FAILED row as Reassign, and assigns it", async () => {
@@ -1690,7 +1703,10 @@ describe("what the assign dialog hands up", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    expect(actions.assignMeetingLog.mock.calls[0].slice(0, 3)).toEqual(["na", 8, null]);
+    expect(actions.assignMeetingLog.mock.calls[0].slice(0, 2)).toEqual([
+      "na",
+      [{ model: "res.partner", resId: 8, name: null }],
+    ]);
     // The row left the list on `sent`, so its outcome is promoted rather than
     // lost with the unmounting row.
     const notice = await waitFor(() => noticeElement("na"));
@@ -1779,7 +1795,9 @@ describe("the assign dialog's provider pre-flight", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    expect(actions.assignMeetingLog.mock.calls[0][3].providerConfig).toBeNull();
+    // deps moved from index 3 to index 2 - see the BRIDGE comment above
+    // "what the assign dialog hands up".
+    expect(actions.assignMeetingLog.mock.calls[0][2].providerConfig).toBeNull();
   });
 
   it("does NOT warn when the Meetwings API is the provider", async () => {
