@@ -23,11 +23,52 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 - **No line in this feature may claim nothing reached Odoo when something did.** This binds `deleteRow`'s copy, `runAction`'s classification, and any new copy.
 - **A `sent` target row is immutable.** No user action deletes one.
 - **Migration 14 is one-way.** Back up the database before first run on any machine holding real queued meetings.
+- **`MAX_TARGETS` lives in `src/lib/odoo/meeting-log.ts`**, beside
+  `ESCALATE_AFTER_ATTEMPTS`, `HOLD_MS` and `STALE_CLAIM_MS`. Both action files import
+  it from there. `meeting-log.action.ts` already sources every shared domain constant
+  from that module and never from a sibling `database/*.action.ts`.
+- **`assignQueueRow`, `deleteQueueRow` and `insertQueueRow` return `Promise<boolean>`,
+  and every caller consumes them by truthiness** (`if (!(await cas())) return
+  {kind:"conflict"}`). Do NOT change any of them to return a `QueryResult`: a
+  `QueryResult` is always truthy, so every refused CAS would be reported as a success
+  — a delete or reassign that did nothing, reported as done. That is the exact class
+  of lie this feature exists to remove.
+- **Before Task 1, copy the development database aside.** Migration 14 drops
+  `odoo_selected_target`. Checking the branch out at an earlier commit afterwards
+  leaves version 14 recorded in `_sqlx_migrations` with no matching file and the
+  singleton table gone — this repo has already hit checksum-drift breakage of exactly
+  that shape. Recovery is "restore the copy and re-run". **Never edit
+  `odoo-multi-target.sql` after it has been applied locally.**
 - **Live Odoo failure legs are manufactured locally only** — kill the app, drop the network, target an archived record. Never by sending bad credentials: fail2ban on the Odoo host is `maxretry 10 / findtime 600 / bantime 3600`. Unban: `sudo fail2ban-client set odoo-login unbanip <ip>`.
 
 ## Slice boundary
 
-**Tasks 1–9 are a shippable, behavior-preserving slice.** They move the app onto the new schema and the per-target machinery while every meeting still resolves to exactly one target (the backfill writes at most one child per row, and the picker still selects one). They carry *all* the database risk. **Tasks 10–14 are the UI** that lets a user pick more than one; they add no migration risk. If execution needs a checkpoint, take it after Task 9.
+**Tasks 1–9 compile and pass their tests at every commit, and preserve today's
+behaviour.** They move the app onto the new schema and the per-target machinery while
+every meeting still resolves to exactly one target — the backfill writes at most one
+child per row, and Task 6 adapts the picker's still-singular selection at the call
+site. They carry *all* the database risk.
+
+They are deliberately **not** described as shippable: `ResolvedTarget` and the
+singular `targetRef` survive until Task 14, so the UI is mid-migration until then.
+"Compiles and passes tests" is the property each task boundary actually guarantees,
+and it is the one the gates check.
+
+**Tasks 10–14 are the UI** that lets a user pick more than one; they add no migration
+risk. If execution needs a checkpoint, take it after Task 9.
+
+### Keeping the tree green between tasks
+
+Signature changes are kept in the same task as their call sites. Where that is
+impossible, the plan says exactly how the gap is bridged:
+
+| Break | Bridge |
+|---|---|
+| `assignQueueRow(id, targets)` (Task 7) vs `assignMeetingLog` | Task 7 updates the caller in-task; the file is in its Files list |
+| `saveTarget` / `loadTarget` removed (Task 4) vs `useOdooTarget` (Task 11) | Task 4 **keeps** both. They are runtime-dead once migration 14 drops the table, but they compile and their pre-14 tests pass. Deleted in Task 11 |
+| `NewQueueRow` loses `contactId`/`leadId` (Task 6) vs `targetRef: ResolvedTarget \| null` (until Task 14) | Task 6 adapts at the call site: `target ? [resolvedToSelected(target)] : []`. Three lines, single-target behaviour identical, deleted in Task 14 |
+| `groupOf` / `statusLine` gain `failedTargets` (Task 8) vs their callers (Tasks 13, 14) | The parameter is **optional, defaulting to 0**. Real wiring lands in Tasks 13 and 14 |
+| `ResolvedTarget` deletion | **Task 14**, not Task 11 — Tasks 12 and 14 still consume it |
 
 ## File Structure
 
@@ -227,7 +268,7 @@ export interface MeetingLogTarget {
 }
 ```
 
-Do **not** delete `ResolvedTarget` yet — Task 10 removes it, and deleting it here breaks every consumer before its replacement is wired.
+Do **not** delete `ResolvedTarget` yet — **Task 14** removes it, once its last consumer is gone. Deleting it here breaks every consumer before its replacement is wired.
 
 - [ ] **Step 7: Run the type check**
 
@@ -252,7 +293,13 @@ git commit -m "feat(odoo): add migration 14 for multi-target assignment"
 - Consumes: migration 14's SQL from Task 1.
 - Produces: nothing new; this task proves Task 1.
 
-This is its own task because the backfill is a one-way data migration over live user data, and the four row shapes it must survive are the difference between a working upgrade and a permanently failing `Database.load`. Read how the existing suite builds its sql.js database and applies migrations before starting.
+This is its own task because the backfill is a one-way data migration over live user data, and the row shapes it must survive are the difference between a working upgrade and a permanently failing `Database.load`.
+
+**Three harness facts you must handle before any test here runs.** Three separate reviewers hit these from different angles:
+
+1. **The suite's shared `beforeEach` applies migrations only through version 12** (`odoo-contacts.sql`, `meeting-log-queue.sql`). It never runs `odoo-lead-only-target.sql`. Migration 14's singleton backfill reads `lead_name`, which only exists after migration 13, and needs `contact_id` nullable — also a migration-13 change, since migration 11 declares it `NOT NULL`. `seedPre14` must run migration 13 itself, or the first singleton test dies with `no such column: lead_name`.
+2. **The existing `seed()` helper applies no migrations at all** — it only inserts into already-existing tables. Do not model `seedPre14` on it for schema; model it on the `beforeEach` that loads migration files.
+3. **The shared harness must also gain `meeting_log_targets` and `odoo_selected_targets`**, or every `seedTargets` test from Task 3 onward fails on a missing table. Add migration 14 to the shared `beforeEach` in the same step.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -329,6 +376,17 @@ it("migrates a contact-only singleton with a null name", async () => {
   });
 });
 
+it("backfills a both-NULL singleton to zero rows", async () => {
+  // The spec requires this case explicitly. It cannot be produced by saveTarget,
+  // but loadTarget already guards against reading one back, and the cost of the
+  // guard is one WHERE clause against a permanently failing Database.load.
+  const db = await seedPre14Singleton({
+    instance: "i1", contact_id: null, lead_id: null, lead_name: null,
+  });
+  await applyMigration14(db);
+  expect(rows(db, "SELECT * FROM odoo_selected_targets")).toHaveLength(0);
+});
+
 it("drops the singleton table", async () => {
   const db = await seedPre14([]);
   await applyMigration14(db);
@@ -347,18 +405,39 @@ Add to the same file, above the `describe`. `applyMigration14` reads the real mi
 
 ```ts
 import { readFileSync } from "node:fs";
+import path from "node:path";
 
-const MIGRATION_14 = readFileSync(
-  "src-tauri/src/db/migrations/odoo-multi-target.sql",
-  "utf8",
-);
+// Use the file's existing MIGRATIONS constant, not a bare relative path - every
+// other migration load here goes through it, and a bare path is cwd-fragile.
+const readMigration = (name: string) =>
+  readFileSync(path.join(MIGRATIONS, name), "utf8");
 
 function applyMigration14(db: Database) {
-  db.exec(MIGRATION_14);
+  db.exec(readMigration("odoo-multi-target.sql"));
+}
+
+// Migrations 11 and 12 come from the shared beforeEach. Migration 13 does NOT -
+// and migration 14's singleton backfill reads lead_name, which only 13 creates.
+function seedPre14(queueRows: PreQueueRow[]): Database {
+  const db = freshDb();                       // beforeEach: migrations 11 and 12
+  db.exec(readMigration("odoo-lead-only-target.sql"));   // migration 13
+  for (const r of queueRows) insertPreQueueRow(db, r);
+  return db;
+}
+
+function seedPre14Singleton(row: PreSingletonRow): Database {
+  const db = seedPre14([]);
+  db.run(
+    `INSERT INTO odoo_selected_target
+       (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
+     VALUES ('current', ?, ?, ?, ?, NULL, 0)`,
+    [row.instance, row.contact_id, row.lead_id, row.lead_name],
+  );
+  return db;
 }
 ```
 
-`seedPre14` creates the pre-14 `meeting_log_queue` and `odoo_selected_target` shapes (migrations 12 and 13) and inserts the given rows; `seedPre14Singleton` seeds one singleton row. Build both from the existing `seed()` helper's pattern in this file.
+`insertPreQueueRow` is a raw INSERT into `meeting_log_queue` in the pre-14 shape — the same style as the file's existing `seed()` helper, which inserts into already-existing tables and applies no migrations of its own.
 
 - [ ] **Step 4: Run them to verify they pass**
 
@@ -373,14 +452,24 @@ Temporarily edit the migration and re-run after each:
 |---|---|
 | remove `WHERE contact_id IS NOT NULL OR lead_id IS NOT NULL` from the queue backfill | the unassigned-row test — a NOT NULL violation |
 | drop `attachment_id, message_id` from the SELECT list | the in-flight carry-across test |
-| remove the same `WHERE` from the singleton copy | the contact-only singleton test |
+| remove the same `WHERE` from the singleton copy | **the both-NULL singleton test** — not the contact-only one, whose `contact_id: 7` fixture never triggers a NOT NULL violation and would survive this mutant |
 
 Revert every mutant before committing.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Put the singleton tests in the right file**
+
+The three `odoo_selected_target(s)` tests — both named singletons and the
+both-NULL one — belong in `src/tests/odoo-contacts.action.test.ts`, which already
+owns that table and has `describe("the migration")` and
+`describe("the selected target")` blocks for it. Only the `meeting_log_targets`
+backfill tests stay in `meeting-log.action.test.ts`. Splitting them here keeps the
+codebase's one-file-per-action-module convention, and puts them in the file Task 4
+edits next.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/tests/meeting-log.action.test.ts
+git add src/tests/meeting-log.action.test.ts src/tests/odoo-contacts.action.test.ts
 git commit -m "test(odoo): prove migration 14's backfill against every legacy row shape"
 ```
 ---
@@ -396,6 +485,34 @@ git commit -m "test(odoo): prove migration 14's backfill against every legacy ro
 - Produces: `QUEUE_SQL.insertTarget`, `.deleteTargetsByRow`, `.targetsByRow`, `.sweepOrphanTargets`, `.targetToPending`, `.targetToFailed`, `.targetToSent`, `.setTargetAttachment`, `.setTargetMessage`; and `listTargets(rowId: string): Promise<MeetingLogTarget[]>`.
 
 Read `QUEUE_SQL`'s header comment and `reclaimBase`'s comment first. `QUEUE_SQL` is exported **so the static scan can iterate its VALUES**; a statement written inline in an action function escapes the only guard that exists for the no-transaction rule.
+
+**Do the test-harness refactor in this task, before anything else.** The
+`vi.mock("@/lib/database/config", …)` factory currently builds a brand-new
+`{ execute, select }` closure pair on *every* `getDatabase()` call, so there is no
+stable object for `vi.spyOn()` to attach to. Tasks 6 and 8 both need to observe
+statement order and count — Task 6's "children before the parent" test is the only
+thing proving the feature's core no-transaction safety argument, and it cannot be
+written against the current mock.
+
+Hoist them to module level, the way the sibling suite's `failNextWrite` is already a
+module-level hoisted mutable the mock checks:
+
+```ts
+const execute = vi.fn(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
+const select  = vi.fn(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
+vi.mock("@/lib/database/config", () => ({ getDatabase: async () => ({ execute, select }) }));
+
+const spyOnExecute = (fn: (sql: string) => void) => {
+  execute.mockClear();
+  return { calls: () => execute.mock.calls.map(([sql]) => sql as string) };
+};
+```
+
+`seedTargets`, used from this task onward, is a **raw test-only INSERT** into
+`meeting_log_targets`, parallel to `seed()`. It must not be built on
+`QUEUE_SQL.insertTarget`: that statement hardcodes `status = 'pending'` in its
+`ON CONFLICT` and cannot set `attachmentId`, `messageId`, `lastError` or
+`lastErrorCode` — which nearly every fixture in this plan needs.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -433,7 +550,8 @@ In `src/lib/database/meeting-log.action.ts`, add to `QUEUE_SQL`. Update its head
       (id, row_id, model, res_id, name, status, created_at)
     VALUES (?, ?, ?, ?, ?, 'pending', ?)
     ON CONFLICT(row_id, model, res_id) DO UPDATE SET
-      status = 'pending', last_error = NULL, last_error_code = NULL`,
+      status = 'pending', last_error = NULL, last_error_code = NULL
+    WHERE meeting_log_targets.status <> 'sent'`,
 
   deleteTargetsByRow: `DELETE FROM meeting_log_targets WHERE row_id = ?`,
 
@@ -446,10 +564,14 @@ In `src/lib/database/meeting-log.action.ts`, add to `QUEUE_SQL`. Update its head
     WHERE created_at < ?
       AND row_id NOT IN (SELECT id FROM meeting_log_queue)`,
 
+  // Parameter order is (code, text, id), matching the parent toPending/toFailed
+  // these are named to mirror. Do NOT reverse it: two statements with mirrored
+  // names and reversed parameters is swap-bait, and a swap silently puts
+  // ODOO_FAULT into the user-visible message field.
   targetToPending: `UPDATE meeting_log_targets
-    SET status = 'pending', last_error = ?, last_error_code = ? WHERE id = ?`,
+    SET status = 'pending', last_error_code = ?, last_error = ? WHERE id = ?`,
   targetToFailed: `UPDATE meeting_log_targets
-    SET status = 'failed', last_error = ?, last_error_code = ? WHERE id = ?`,
+    SET status = 'failed', last_error_code = ?, last_error = ? WHERE id = ?`,
   // Clearing the error columns matters: a stale error rendered beside a green
   // sent target reads as a fresh failure.
   targetToSent: `UPDATE meeting_log_targets
@@ -496,7 +618,11 @@ git commit -m "feat(odoo): add the meeting-log target statements to QUEUE_SQL"
 
 **Interfaces:**
 - Consumes: `SelectedTarget`, `SelectedTargets` from Task 1.
-- Produces: `loadTargets(instance: string): Promise<SelectedTargets>`, `addTarget(instance: string, t: SelectedTarget, conversationId: string | null, at: number): Promise<{ ok: boolean; reason?: "cap" }>`, `removeTarget(instance: string, model: string, resId: number): Promise<void>`, `clearTargets(instance: string): Promise<void>`. `purgeOtherInstances` keeps its signature.
+- Produces: `loadTargets(instance: string): Promise<SelectedTargets>`, `addSelectedTarget(instance: string, t: SelectedTarget, conversationId: string | null, at: number): Promise<{ ok: boolean; reason?: "cap" }>`, `removeSelectedTarget(instance: string, model: string, resId: number): Promise<void>`, `clearTargets(instance: string): Promise<void>`. `purgeOtherInstances` keeps its signature. `saveTarget` and `loadTarget` are **kept** (see below).
+
+**Names matter here.** `src/lib/index.ts` star-exports this module and `./odoo` into one flat `@/lib` namespace, so a bare `removeTarget` would collide with Task 10's queue-target remover. Hence `addSelectedTarget` / `removeSelectedTarget` in this file and `removeQueueTarget` in `meeting-log-actions.ts`.
+
+**Do not delete `saveTarget` or `loadTarget` in this task.** They become runtime-dead the moment migration 14 drops their table, but they still compile and their pre-14 tests still pass, and `useOdooTarget` consumes them until Task 11. Deleting them here breaks the build for seven tasks.
 
 `purgeOtherInstances` currently ends with `DELETE FROM odoo_selected_target WHERE instance <> ?` and runs on **every** contact sync. Migration 14 dropped that table. Left unchanged, every sync throws "no such table" after it has already purged `odoo_contacts` and `odoo_sync_state` — contact sync breaks permanently, for every user.
 
@@ -514,7 +640,7 @@ describe("selected targets", () => {
 
   it("rejects a sixth target instead of truncating", async () => {
     for (let i = 1; i <= 5; i++) {
-      const r = await addTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
+      const r = await addSelectedTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
       expect(r.ok).toBe(true);
     }
     const sixth = await addTarget("i1", { model: "res.partner", resId: 6, name: "C6" }, null, 100);
@@ -551,10 +677,12 @@ Expected: FAIL — `addTarget is not a function`.
 
 Replace `saveTarget` / `loadTarget` with the set operations. The cap check reads the current count and refuses; the `INSERT … ON CONFLICT DO UPDATE` means re-adding an existing target updates it rather than counting against the cap:
 
-```ts
-export const MAX_TARGETS = 5;
+`MAX_TARGETS` is **imported from `src/lib/odoo/meeting-log.ts`**, where it sits beside `ESCALATE_AFTER_ATTEMPTS` and `STALE_CLAIM_MS`. Do not define it here: `meeting-log.action.ts` (Tasks 6 and 7) also needs it, and that file sources every shared domain constant from `meeting-log.ts`, never from a sibling `database/*.action.ts`.
 
-export async function addTarget(
+```ts
+import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
+
+export async function addSelectedTarget(
   instance: string,
   t: SelectedTarget,
   conversationId: string | null,
@@ -581,7 +709,7 @@ export async function addTarget(
 }
 ```
 
-Write `loadTargets`, `removeTarget` and `clearTargets` in the same style. In `purgeOtherInstances`, change the final statement's table name to `odoo_selected_targets` — the new table carries `instance`, so it is a one-word substitution.
+Write `loadTargets`, `removeSelectedTarget` and `clearTargets` in the same style. In `purgeOtherInstances`, change the final statement's table name to `odoo_selected_targets` — the new table carries `instance`, so it is a one-word substitution.
 
 - [ ] **Step 4: Run them to verify they pass**
 
@@ -673,7 +801,11 @@ describe("deriveRowStatus", () => {
   it("loses to a concurrent claim", async () => {
     await seedRow({ id: "r1", status: "failed" });
     await seedTargets("r1", [{ resId: 1, status: "sent" }]);
-    await claimRow("r1"); // another window wins: status becomes 'sending'
+    // Seed the stolen claim with raw SQL. QUEUE_SQL.claim is
+    // `WHERE id = ? AND status IN ('pending','held')` and CANNOT claim a failed
+    // row - calling claimRow here would leave the row `failed`, the derive CAS
+    // would match, and this test would fail against a CORRECT implementation.
+    await rawExec("UPDATE meeting_log_queue SET status = 'sending' WHERE id = ?", ["r1"]);
     expect(await deriveRowStatus("r1", "failed")).toMatchObject({ changed: false });
   });
 
@@ -733,24 +865,31 @@ export async function deriveRowStatus(
     next,
     next === "sent" ? null : (source?.lastError ?? null),
     next === "sent" ? null : (source?.lastErrorCode ?? null),
-    next === "sent" ? Date.now() : null,
+    next === "sent" ? now : null,
     rowId,
     observedStatus,
   ]);
-  return { changed: res.rowsAffected > 0, status: next };
+  // ?? 0 matches every other rowsAffected read in this file.
+  return { changed: (res.rowsAffected ?? 0) > 0, status: next };
 }
 ```
 
 And the statement, in `QUEUE_SQL` — a CAS on **the status the caller observed**, which for the push is `'sending'` and for the queue page is the `pending` or `failed` it read. `COALESCE` on the error columns keeps a non-terminal row from being blanked:
 
 ```ts
+  // Fully numbered, matching QUEUE_SQL.counts' style, because ?1 is reused three
+  // times. Clearing claimed_at is part of the reduction to today's
+  // toSent/toFailed/toPending, all three of which set it NULL.
   deriveStatus: `UPDATE meeting_log_queue
-    SET status = ?,
-        last_error = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?, last_error) END,
-        last_error_code = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?, last_error_code) END,
-        sent_at = COALESCE(?, sent_at)
-    WHERE id = ? AND status = ?`,
+    SET status = ?1,
+        last_error      = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?2, last_error) END,
+        last_error_code = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?3, last_error_code) END,
+        sent_at    = COALESCE(?4, sent_at),
+        claimed_at = NULL
+    WHERE id = ?5 AND status = ?6`,
 ```
+
+`deriveRowStatus` takes the timestamp from its caller rather than calling `Date.now()` itself, so the push can pass `deps.now()` and the test can drive it.
 
 - [ ] **Step 4: Run them to verify they pass**
 
@@ -786,7 +925,21 @@ git commit -m "feat(odoo): derive a queue row's status from its targets under a 
 
 **Interfaces:**
 - Consumes: `QUEUE_SQL.insertTarget`, `.deleteTargetsByRow`, `.sweepOrphanTargets` from Task 3; `loadTargets` from Task 4.
-- Produces: `insertQueueRow` gains a `targets: SelectedTargets` parameter and loses `contactId` / `leadId`; `sweepOrphanTargets(olderThan: number): Promise<number>`; `runOrphanSweep(): Promise<void>` in `useMeetingLog`'s module scope.
+- Produces: `insertQueueRow` gains a `targets: SelectedTargets` parameter and loses `contactId` / `leadId`. **It keeps its `Promise<boolean>` return** — the caller does `const created = await insertQueueRow(…); if (!created) return;`, and the child cleanup and overflow stamp are internal to it. Also `sweepOrphanTargets(olderThan: number): Promise<number>` and `runOrphanSweep(): Promise<void>` in `useMeetingLog`'s module scope.
+
+**The caller is still single-target, and this task adapts it rather than converting it.** `useMeetingLog` holds `targetRef: RefObject<ResolvedTarget | null>` until Task 14. Map at the call site:
+
+```ts
+// Three lines, deleted in Task 14. Lead wins, matching the backfill's coalesce.
+const resolvedToSelected = (t: ResolvedTarget): SelectedTarget =>
+  t.leadId !== null
+    ? { model: "crm.lead",    resId: t.leadId,    name: t.leadName }
+    : { model: "res.partner", resId: t.contactId, name: null };
+
+const targets = target ? [resolvedToSelected(target)] : [];
+```
+
+`status: targets.length ? "held" : "unassigned"` and `if (targets.length) startHold(rowId)` replace the `target ?` conditionals. Behaviour is bit-for-bit what it is today.
 
 There is no transaction. Ordering is the whole safety argument:
 
@@ -884,21 +1037,42 @@ for (const t of capped) {
   ]);
 }
 
-const res = await db.execute(QUEUE_SQL.insert, [...]);
-const created = res.rowsAffected > 0;
+// QUEUE_SQL.insert still names contact_id and lead_id and still takes 12
+// placeholders. Bind BOTH as null: the target rows are the source of truth now,
+// and the columns stay on disk as pre-14 history.
+const res = await db.execute(QUEUE_SQL.insert, [
+  row.id, row.instance, row.sessionKey, row.conversationId,
+  null, null,                                   // contact_id, lead_id
+  row.transcript, row.transcriptStartAt, row.transcriptEndAt,
+  row.status, row.attempts, row.createdAt,
+]);
+const created = (res.rowsAffected ?? 0) > 0;
 
-if (!created) {
-  // The other trigger won ON CONFLICT(session_key). Take our children back.
-  await db.execute(QUEUE_SQL.deleteTargetsByRow, [row.id]);
-  return { created: false };
+// Both bookkeeping writes are guarded. They run AFTER the parent insert has
+// already succeeded, and an escaping throw would reject out of insertQueueRow
+// into trigger's catch - which toasts "This meeting could not be queued for
+// Odoo.", calls skipUnwritten() so the span is never re-sliced, and never calls
+// startHold. A false failure report and no undo window, for a meeting that IS
+// queued.
+try {
+  if (!created) {
+    // The other trigger won ON CONFLICT(session_key). Take our children back.
+    await db.execute(QUEUE_SQL.deleteTargetsByRow, [row.id]);
+  } else if (overflowed) {
+    // recordError, NOT recordErrorOnUnsent. The latter has no id predicate -
+    // `WHERE status IN ('held','pending','sending')` - and would stamp
+    // TARGET_CAP across every unsent row in the queue, destroying the real
+    // reason on unrelated stuck meetings. Bindings are code-first, matching
+    // recordAttemptError.
+    await db.execute(QUEUE_SQL.recordError, [
+      "TARGET_CAP", `Only the first ${MAX_TARGETS} targets were queued.`, row.id,
+    ]);
+  }
+} catch (e) {
+  console.warn("[meeting-log] enqueue bookkeeping failed", e);
 }
 
-if (overflowed) {
-  await db.execute(QUEUE_SQL.recordErrorOnUnsent, [
-    `Only the first ${MAX_TARGETS} targets were queued.`, "TARGET_CAP", row.id,
-  ]);
-}
-return { created: true };
+return created;
 ```
 
 Capping rather than rejecting here is deliberate and is the opposite of the selection-write rule. Throwing lands in `trigger`'s catch, which calls `skipUnwritten()` and advances the skip watermark — the span is never re-sliced and the **whole meeting** is lost, instead of one note off a stale selection.
@@ -967,7 +1141,9 @@ git commit -m "feat(odoo): order enqueue's writes and sweep orphaned target rows
 
 **Interfaces:**
 - Consumes: Tasks 3 and 5.
-- Produces: `assignQueueRow(id: string, targets: SelectedTargets)` replacing the `(id, contactId, leadId)` signature; `deleteRow`'s predicate gains a sent-target check.
+- Produces: `assignQueueRow(id: string, targets: SelectedTargets): Promise<boolean>` replacing the `(id, contactId, leadId)` signature — **the `Promise<boolean>` return is unchanged and must stay**, because `runAction` consumes it as `if (!(await cas())) return {kind:"conflict"}`. `deleteRow` gains a sent-target check and `deleteTerminalRow` gains its complement.
+
+**Files also include `src/lib/odoo/meeting-log-actions.ts`.** `assignMeetingLog(id, contactId, leadId, deps)` calls `assignQueueRow(id, contactId, leadId)`; changing the signature without updating it in the same task breaks the build. It becomes `assignMeetingLog(id, targets: SelectedTargets, deps)`.
 
 Both gates live in the **write predicate**, not in which buttons render. `assignRow`'s CAS is status-only and cannot see children, and `deleteRow`'s own comment documents the stale-dashboard window as reachable: "the dashboard window only re-reads on focus, mount and action".
 
@@ -980,13 +1156,32 @@ it("refuses to delete a partially-sent row under the nothing-was-sent copy", asy
     { resId: 1, status: "sent" },
     { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
   ]);
-  expect(await deleteQueueRow("r1")).toMatchObject({ rowsAffected: 0 });
+  // deleteQueueRow returns Promise<boolean>, not a QueryResult.
+  expect(await deleteQueueRow("r1")).toBe(false);
 });
 
 it("still deletes a row where nothing was sent", async () => {
   await seedRow({ id: "r1", status: "failed" });
   await seedTargets("r1", [{ resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
-  expect(await deleteQueueRow("r1")).toMatchObject({ rowsAffected: 1 });
+  expect(await deleteQueueRow("r1")).toBe(true);
+});
+
+it("deletes a partially-sent row through the honest deleted-after-send copy", async () => {
+  await seedRow({ id: "r1", status: "failed" });
+  await seedTargets("r1", [
+    { resId: 1, status: "sent" },
+    { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+  ]);
+  // Without widening deleteTerminalRow, BOTH statements refuse and the row is
+  // permanently undeletable.
+  expect(await deleteTerminalQueueRow("r1")).toBe(true);
+});
+
+it("un-sends nothing when the new set contains an already-sent target", async () => {
+  await seedRow({ id: "r1", status: "failed" });
+  await seedTargets("r1", [{ resId: 1, status: "sent" }]);
+  await assignQueueRow("r1", [{ model: "res.partner", resId: 1, name: "A" }]);
+  expect((await listTargets("r1"))[0].status).toBe("sent");
 });
 
 it("refuses to retarget a row with a sent target", async () => {
@@ -1035,29 +1230,41 @@ it("leaves a concurrently-sent child in place during the delete step", async () 
 Run: `npx vitest run src/tests/meeting-log.action.test.ts -t "retarget"`
 Expected: FAIL — `assignQueueRow` still takes three arguments.
 
-- [ ] **Step 3: Add the sent-target check to `deleteRow`**
+- [ ] **Step 3: Add the sent-target check to `deleteRow` — and widen `deleteTerminalRow`**
 
-Extend `QUEUE_SQL.deleteRow`'s predicate. The subquery correlates on `meeting_log_queue.id`, so the call site's single `[id]` binding is untouched:
+Both, in this step. Extend `QUEUE_SQL.deleteRow`'s predicate — the subquery correlates on `meeting_log_queue.id`, so the call site's single `[id]` binding is untouched:
 
 ```sql
 AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
                  WHERE row_id = meeting_log_queue.id AND status = 'sent')
 ```
 
-A partially-sent row then falls through to `deleteTerminalRow` and the honest `deleted-after-send` copy.
+**And `deleteTerminalRow`, or the row becomes permanently undeletable.** Its predicate is `status IN ('sent','cancelled')`; a partially-sent parent derives `pending` or `failed`, so with only the change above *both* statements refuse and `deleteMeetingLog` returns `conflict` forever:
+
+```sql
+OR EXISTS (SELECT 1 FROM meeting_log_targets
+            WHERE row_id = meeting_log_queue.id AND status = 'sent')
+```
+
+The two predicates are then complementary, and `deleteMeetingLog`'s existing try-`deleteRow`-then-`deleteTerminalRow` routing sends a partially-sent row to the honest `deleted-after-send` copy with no other change.
 
 - [ ] **Step 4: Rewrite the retarget as three ordered steps**
 
 ```ts
-export async function assignQueueRow(id: string, targets: SelectedTargets) {
+export async function assignQueueRow(id: string, targets: SelectedTargets): Promise<boolean> {
   const db = await getDatabase();
   const capped = targets.slice(0, MAX_TARGETS);
+  const overflowed = targets.length > MAX_TARGETS;
 
   // 1. Insert the new children. ON CONFLICT is what stops an overlapping set
   //    from aborting on UNIQUE (row_id, model, res_id), and DO UPDATE resets a
   //    retained child to pending so the push loop does not skip it. It does NOT
   //    touch attachment_id / message_id: preserving those is what makes a
   //    concurrently-sent retained child converge instead of re-posting.
+  //    The `WHERE status <> 'sent'` on the DO UPDATE is what keeps a sent target
+  //    immutable: without it, a stale dashboard whose new set CONTAINS a target
+  //    just marked sent would un-send it here, so step 2's skip and step 3's gate
+  //    both see nothing and the retarget succeeds on a partially-sent row.
   for (const t of capped) {
     await db.execute(QUEUE_SQL.insertTarget, [
       crypto.randomUUID(), id, t.model, t.resId, t.name, Date.now(),
@@ -1076,8 +1283,31 @@ export async function assignQueueRow(id: string, targets: SelectedTargets) {
     await db.execute(QUEUE_SQL.deleteTargetById, [existing.id]);
   }
 
-  // 3. Flip the parent last, under the gate.
-  return db.execute(QUEUE_SQL.assignRow, [id]);
+  // 3. Flip the parent last, under the gate. Returns boolean, like today.
+  const res = await db.execute(QUEUE_SQL.assignRow, [id]);
+  const ok = (res.rowsAffected ?? 0) > 0;
+
+  // The retarget path caps like the enqueue path does - and records why, rather
+  // than truncating silently.
+  if (ok && overflowed) {
+    try {
+      await db.execute(QUEUE_SQL.recordError, [
+        "TARGET_CAP", `Only the first ${MAX_TARGETS} targets were assigned.`, id,
+      ]);
+    } catch (e) {
+      console.warn("[meeting-log] retarget cap note failed", e);
+    }
+  }
+  return ok;
+}
+```
+
+Then update the caller in the same task:
+
+```ts
+export async function assignMeetingLog(id: string, targets: SelectedTargets, deps: Deps) {
+  if (!(await assignQueueRow(id, targets))) return { kind: "conflict" as const };
+  // ... unchanged
 }
 ```
 
@@ -1150,28 +1380,32 @@ it("attaches targets to every listed row with one extra query, not N+1", async (
 });
 
 it("groups a partly-failed pending row as needing attention", () => {
-  expect(groupOf({ status: "pending", attempts: 0, failedTargets: 1 })).toBe("needs_attention");
-  expect(groupOf({ status: "pending", attempts: 0, failedTargets: 0 })).toBe("waiting");
+  // groupOf(row, instance) - two arguments, instance second, and the union
+  // member is hyphenated. Both verified against src/lib/odoo/meeting-log.ts.
+  const row = { status: "pending", attempts: 0, instance: "i1" };
+  expect(groupOf({ ...row, failedTargets: 1 }, "i1")).toBe("needs-attention");
+  expect(groupOf({ ...row, failedTargets: 0 }, "i1")).toBe("waiting");
 });
 
-it("counts a partly-failed row under needs_attention, not waiting", async () => {
+it("counts a partly-failed row under needs-attention, not waiting", async () => {
   await seedRow({ id: "r1", status: "pending", attempts: 0 });
   await seedTargets("r1", [
     { resId: 1, status: "pending" },
     { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
   ]);
-  const c = await getQueueCounts();
+  const c = await getQueueCounts("i1");   // takes an instance
   expect(c.needsAttention).toBe(1);
   expect(c.waiting).toBe(0);
 });
 
-it("excludes a partly-failed row from countAll's promise", async () => {
+it("excludes a partly-failed row from countAllQueued's promise", async () => {
   await seedRow({ id: "r1", status: "pending", attempts: 0 });
   await seedTargets("r1", [
     { resId: 1, status: "pending" },
     { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
   ]);
-  expect((await getQueueCounts()).all).toBe(0);
+  // countAllQueued is a SEPARATE function; QueueCounts has no `all` field.
+  expect(await countAllQueued("i1")).toBe(0);
 });
 
 it("surfaces a reason for a partly-failed row below the escalation threshold", async () => {
@@ -1180,7 +1414,7 @@ it("surfaces a reason for a partly-failed row below the escalation threshold", a
     { resId: 1, status: "pending" },
     { resId: 2, status: "failed", lastError: "boom", lastErrorCode: "ODOO_FAULT" },
   ]);
-  expect((await getQueueCounts()).lastError).toBe("boom");
+  expect((await getQueueCounts("i1")).lastError).toBe("boom");
 });
 ```
 
@@ -1193,13 +1427,17 @@ Expected: FAIL — `r.targets` is undefined; `groupOf` takes no `failedTargets`.
 
 In `listActionableRows`, after the existing parent query, fetch every target for the listed ids in **one** statement and join in memory. Not N+1, and not a SQL JOIN — a JOIN would multiply the parent rows:
 
+The statement's static half goes in `QUEUE_SQL` — the plan's own Global Constraint, and `reclaimBase` is the established precedent for a statement whose `IN (…)` list is generated at call time:
+
+```ts
+  targetsByRows: `SELECT * FROM meeting_log_targets WHERE row_id IN (`,
+```
+
 ```ts
 const ids = parents.map((p) => p.id);
 const targets = ids.length
   ? await db.select<Record<string, unknown>[]>(
-      `SELECT * FROM meeting_log_targets
-        WHERE row_id IN (${ids.map(() => "?").join(",")})
-        ORDER BY created_at, id`,
+      `${QUEUE_SQL.targetsByRows}${ids.map(() => "?").join(",")}) ORDER BY created_at, id`,
       ids,
     )
   : [];
@@ -1214,14 +1452,24 @@ Add `targets: MeetingLogTarget[]` to `MeetingLogListRow` in `src/types/odoo.ts`.
 
 - [ ] **Step 4: Thread the signal through the four consumers**
 
-`groupOf` gains `failedTargets` and returns `needs_attention` when it is above zero, whatever the parent status says. `QUEUE_SQL.counts` and `QUEUE_SQL.lastError` gain the same condition — `lastError`'s predicate is `status = 'failed' OR (status = 'pending' AND attempts >= ?)` today, so a partly-failed row below the threshold currently raises the count with no reason attached anywhere on the /odoo page:
+`groupOf(row, instance)` gains `failedTargets` — **optional, defaulting to 0**, so its existing callers in Tasks 13 and 14 keep compiling until those tasks wire it — and returns `"needs-attention"` when it is above zero, whatever the parent status says. `statusLine` takes it the same way.
+
+`QUEUE_SQL.counts` and `QUEUE_SQL.lastError` gain the matching condition. Both arms are needed, not just the additive one: without the `AND NOT EXISTS` the row is counted twice, and this task's own test asserts `waiting` drops it.
 
 ```sql
+-- needs-attention arm gains:
 OR EXISTS (SELECT 1 FROM meeting_log_targets
-            WHERE row_id = meeting_log_queue.id AND status = 'failed')
+            WHERE row_id = meeting_log_queue.id
+              AND status = 'failed'
+              AND meeting_log_queue.status IN ('pending','failed'))
+-- waiting arm gains:
+AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
+                 WHERE row_id = meeting_log_queue.id AND status = 'failed')
 ```
 
-`countAll` excludes such a row from its "finishing the credentials will send these" promise. `statusLine` takes `failedTargets` too — it is wired in Task 13, where `QueueRow` is edited.
+The `meeting_log_queue.status IN ('pending','failed')` scoping is load-bearing. `deleteRow` only flips the parent to `deleted` and leaves its children, so an unscoped `EXISTS` makes a deleted meeting's failed child count under needs-attention and supply `getQueueCounts().lastError` **forever**, while `groupOf` returns null and the page never lists it.
+
+`countAllQueued` excludes such a row from its "finishing the credentials will send these" promise.
 
 - [ ] **Step 5: Run them to verify they pass**
 
@@ -1243,6 +1491,8 @@ git commit -m "feat(odoo): attach targets to listed rows and surface partly-fail
 - Modify: `src/lib/odoo/meeting-log-push.ts`
 - Modify: `src/lib/odoo/meeting-log.ts`
 - Modify: `src/lib/database/meeting-log.action.ts`
+- Modify: `src/lib/odoo/meeting-log-actions.ts` — constructs `PushDeps` in `runAction`
+- Modify: `src/hooks/useMeetingLog.ts` — constructs `PushDeps` for the hold push
 - Test: `src/tests/odoo-meeting-log-push.test.ts`
 
 **Interfaces:**
@@ -1257,7 +1507,7 @@ The parent claim is unchanged. Summarize once; build one body and one rendered t
 
 `PushDeps.now` becomes `() => number`. This is an interface change, not a test convenience: `now` is currently a single value sampled once by the caller, so every claim re-stamp would write the identical value — making a correct implementation and one that stamps only once **indistinguishable in the database**, and the corresponding mutation check unkillable.
 
-Update every construction site of `PushDeps` and every `deps.now` read (`deps.now()`).
+`PushDeps` is constructed with `now: Date.now()` in **three** places, all of which change to `now: () => Date.now()`: `runMeetingLogSweep`, `runAction` in `src/lib/odoo/meeting-log-actions.ts`, and `useMeetingLog.ts`'s hold push. Update every `deps.now` read to `deps.now()`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1269,18 +1519,20 @@ it("posts to every pending target and skips the sent ones", async () => {
     { resId: 2, status: "pending" },
   ]);
   await pushQueuedRow("r1", deps);
-  expect(client.messagePost).toHaveBeenCalledTimes(1);
-  expect(client.messagePost).toHaveBeenCalledWith(
-    expect.objectContaining({ res_id: 2, subtype_xmlid: "mail.mt_note" }),
+  // There is no OdooClient.messagePost. The real push calls the generic execute:
+  // client.execute(model, "message_post", [[resId]], { body, attachment_ids, subtype_xmlid })
+  expect(postCalls(client)).toHaveLength(1);
+  expect(client.execute).toHaveBeenCalledWith(
+    "res.partner", "message_post", [[2]],
+    expect.objectContaining({ subtype_xmlid: "mail.mt_note" }),
   );
 });
 
 it("continues past a deterministic failure on target 3 of 5", async () => {
   await seedRow({ id: "r1", status: "pending" });
   await seedTargets("r1", [1, 2, 3, 4, 5].map((resId) => ({ resId, status: "pending" })));
-  client.messagePost.mockImplementation(({ res_id }) =>
-    res_id === 3 ? Promise.reject(odooFault()) : Promise.resolve({ id: res_id * 10 }));
-  await pushQueuedRow("r1", deps);
+  failPostFor(client, 3, odooFault());
+  await pushQueuedRow(await readRow("r1"), deps);   // takes a DbMeetingLogRow
   const t = await listTargets("r1");
   expect(t.filter((x) => x.status === "sent").map((x) => x.resId)).toEqual([1, 2, 4, 5]);
   expect(t.find((x) => x.resId === 3)!.status).toBe("failed");
@@ -1289,9 +1541,8 @@ it("continues past a deterministic failure on target 3 of 5", async () => {
 it("aborts the remaining targets on a retryable transport failure, and records its error", async () => {
   await seedRow({ id: "r1", status: "pending" });
   await seedTargets("r1", [1, 2, 3].map((resId) => ({ resId, status: "pending" })));
-  client.messagePost.mockImplementation(({ res_id }) =>
-    res_id === 2 ? Promise.reject(unreachable()) : Promise.resolve({ id: res_id * 10 }));
-  await pushQueuedRow("r1", deps);
+  failPostFor(client, 2, unreachable());
+  await pushQueuedRow(await readRow("r1"), deps);
   const t = await listTargets("r1");
   expect(t.find((x) => x.resId === 3)!.status).toBe("pending");   // never attempted
   expect(t.find((x) => x.resId === 2)!.lastErrorCode).toBe("ODOO_UNREACHABLE");
@@ -1309,9 +1560,8 @@ it("does not let a persistence failure on target 1 misclassify target 3's Odoo f
   await seedRow({ id: "r1", status: "pending" });
   await seedTargets("r1", [1, 2, 3].map((resId) => ({ resId, status: "pending" })));
   failOnceOnExecute("UPDATE meeting_log_targets SET attachment_id");   // target 1
-  client.messagePost.mockImplementation(({ res_id }) =>
-    res_id === 3 ? Promise.reject(odooFault()) : Promise.resolve({ id: res_id * 10 }));
-  await pushQueuedRow("r1", deps);
+  failPostFor(client, 3, odooFault());
+  await pushQueuedRow(await readRow("r1"), deps);
   // The pass aborted at target 1, so target 3 was never reached this pass.
   expect((await listTargets("r1")).find((x) => x.resId === 3)!.status).toBe("pending");
 });
@@ -1321,17 +1571,26 @@ it("re-stamps claimed_at after each target, tracking the last one", async () => 
   await seedTargets("r1", [{ resId: 1, status: "pending" }, { resId: 2, status: "pending" }]);
   const clock = vi.fn().mockReturnValueOnce(1_000).mockReturnValueOnce(2_000)
                        .mockReturnValue(3_000);
-  await pushQueuedRow("r1", { ...deps, now: clock });
+  await pushQueuedRow(await readRow("r1"), { ...deps, now: clock });
   expect((await readRow("r1")).claimed_at).toBe(3_000);
 });
+// NOTE: this test alone cannot distinguish "re-stamp after every target" from
+// "re-stamp once after the loop" - both end at 3_000, since deps.now() is called
+// three times per res.partner target. The neighbouring zero-rows test is what
+// proves the per-target cadence. They only work as a pair.
 
 it("aborts the pass when the claim re-stamp affects zero rows", async () => {
   await seedRow({ id: "r1", status: "pending" });
   await seedTargets("r1", [{ resId: 1, status: "pending" }, { resId: 2, status: "pending" }]);
-  stealClaimAfterFirstTarget("r1");     // another window reclaims and re-claims
-  await pushQueuedRow("r1", deps);
+  // Injects a competing write BETWEEN two of the push's own calls - unlike
+  // failNextWrite, which is a one-shot self-failure hook. Implement it as a
+  // call-count side effect on the mocked execute: after the Nth statement
+  // matching /UPDATE meeting_log_targets SET status = 'sent'/, run
+  // rawExec("UPDATE meeting_log_queue SET status='pending' WHERE id=?", [rowId]).
+  stealClaimAfterFirstTarget("r1");
+  await pushQueuedRow(await readRow("r1"), deps);
   expect((await listTargets("r1")).find((x) => x.resId === 2)!.status).toBe("pending");
-  expect(client.messagePost).toHaveBeenCalledTimes(1);
+  expect(postCalls(client)).toHaveLength(1);
 });
 
 it("stamps last_meeting_at for every contact target and skips leads", async () => {
@@ -1341,8 +1600,14 @@ it("stamps last_meeting_at for every contact target and skips leads", async () =
     { resId: 2, model: "res.partner", status: "pending" },
     { resId: 9, model: "crm.lead", status: "pending" },
   ]);
-  await pushQueuedRow("r1", deps);
+  await pushQueuedRow(await readRow("r1"), deps);
   expect(stampLastMeeting).toHaveBeenCalledTimes(2);
+});
+
+it("declines a zero-target row before the claim, so attempts is not burned", async () => {
+  await seedRow({ id: "r1", status: "pending", attempts: 0 });
+  await pushQueuedRow(await readRow("r1"), deps);
+  expect(await readRow("r1")).toMatchObject({ status: "pending", attempts: 0 });
 });
 ```
 
@@ -1353,9 +1618,22 @@ Expected: FAIL — the push still resolves one `resId` via `row.lead_id ?? row.c
 
 - [ ] **Step 4: Implement the loop**
 
-Replace the single-target resolution with the loop. Three failure branches, not two:
+Write the control flow **once, as one state machine**. These rules interlock; applied as
+independent patches they contradict each other.
+
+The whole loop stays inside `pushQueuedRow`'s existing outer `try/finally`. That
+`finally { if (claimedHere) claimed.delete(row.id) }` and the function's documented
+**NEVER THROWS** contract survive verbatim. If an escaping throw skipped that `finally`, the
+row would stay in the module-scope `claimed` set — excluded from `reclaimStaleSending` **for
+the life of the process**, with nothing to recover it.
 
 ```ts
+// Read the children first, and decline BEFORE the claim when there are none, the
+// way today's push returns before the CAS on a null resId "so a mismatch moves
+// neither status nor attempts".
+const targets = await listTargets(row.id);
+if (targets.length === 0) return;
+
 for (const target of targets) {
   if (target.status === "sent") continue;
 
@@ -1369,45 +1647,79 @@ for (const target of targets) {
   };
 
   try {
-    const attachmentId = target.attachmentId
-      ?? await createOrAdoptAttachment(target, attemptsBefore, deps);
-    await persist(QUEUE_SQL.setTargetAttachment, [attachmentId, target.id]);
+    let attachmentId = target.attachmentId;
+    if (attachmentId === null) {
+      attachmentId = await createOrAdoptAttachment(target, attemptsBefore, deps);
+      await persist(QUEUE_SQL.setTargetAttachment, [attachmentId, target.id]);
+    }
 
-    const messageId = target.messageId
-      ?? await postOrAdoptMessage(target, attachmentId, attemptsBefore, deps);
-    await persist(QUEUE_SQL.setTargetMessage, [messageId, target.id]);
+    let messageId = target.messageId;
+    if (messageId === null) {
+      messageId = await postOrAdoptMessage(target, attachmentId, attemptsBefore, deps);
+      await persist(QUEUE_SQL.setTargetMessage, [messageId, target.id]);
+    }
 
     await persist(QUEUE_SQL.targetToSent, [deps.now(), target.id]);
+
     if (target.model === "res.partner") {
-      void stampLastMeeting(instance, target.resId, deps.now());
+      // Never bare `void`: this is a db.execute, a transient SQLITE_BUSY rejects,
+      // and an unhandled rejection in the webview is the exact path errors.ts
+      // exists to close. Never await it unwrapped either - it sits inside the
+      // boundary but outside persist(), so an awaited rejection would be read as
+      // an Odoo fault and mark a target terminal whose note is already live.
+      stampLastMeeting(instance, target.resId, deps.now())
+        .catch((e) => console.warn("[meeting-log] last_meeting_at stamp failed", e));
     }
   } catch (e) {
-    const { message, code } = classify(e);
-    if (persistenceFailed) {
-      // A local write failed AFTER a wire call. Route THIS target to pending -
-      // never failed, whatever the code says - and abort: continuing would fire
-      // wire calls whose ids the same broken database cannot store.
-      await db.execute(QUEUE_SQL.targetToPending, [message, code, target.id]);
-      break;
-    }
-    if (isRetryable(e)) {
-      // Record the error before unwinding, or the parent's mirror has nothing
-      // to copy and a network outage renders as an unexplained stuck row.
-      await db.execute(QUEUE_SQL.targetToPending, [message, code, target.id]);
-      break;
-    }
-    await db.execute(QUEUE_SQL.targetToFailed, [message, code, target.id]);
-    continue;
-  }
+    // toOdooError FIRST. isRetryable switches on err.code, so an unwrapped
+    // transport rejection (a fetch TypeError, an abort) hits `default: false`,
+    // is treated as deterministic, and is marked terminally failed - which
+    // selectSweepable never picks up.
+    const odoo = toOdooError(e);
+    const text = queueErrorText(odoo);
 
-  // Age the claim per target, not per meeting. rowsAffected === 0 means another
-  // window took the claim: abort rather than push under a claim nobody refreshes.
-  const stamp = await db.execute(QUEUE_SQL.restampClaim, [deps.now(), rowId]);
-  if (stamp.rowsAffected === 0) break;
+    // Every recovery write keeps its own guard. This branch is reached when the
+    // database is what is broken, so a second unguarded write escapes the outer
+    // contract.
+    const record = async (sql: string) => {
+      try { await db.execute(sql, [odoo.code, text, target.id]); }
+      catch (inner) { console.warn("[meeting-log] target status write failed", inner); }
+    };
+
+    if (persistenceFailed) {
+      // A local write failed AFTER a wire call. This target goes pending - never
+      // failed, whatever the code says - and the pass aborts, because continuing
+      // fires wire calls whose ids the same broken database cannot store.
+      await record(QUEUE_SQL.targetToPending);
+      break;
+    }
+    if (isRetryable(odoo)) {
+      await record(QUEUE_SQL.targetToPending);
+      break;
+    }
+    await record(QUEUE_SQL.targetToFailed);
+    // continue - a deterministic fault on one target must not strand the rest
+  } finally {
+    // In a finally, so a DETERMINISTIC failure refreshes the claim too. Three
+    // consecutive slow faults (a 30s-timeout client returning an access refusal)
+    // would otherwise cross STALE_CLAIM_MS with zero re-stamps, and the other
+    // window would reclaim mid-flight - the duplicate note this exists to stop.
+    const stamp = await db.execute(QUEUE_SQL.restampClaim, [deps.now(), row.id]);
+    if ((stamp.rowsAffected ?? 0) === 0) {
+      // The claim belongs to someone else now. RETURN, not break: the terminal
+      // derive below CASes on 'sending' and would match the NEW owner's row,
+      // overwriting their state mid-push.
+      return;
+    }
+  }
 }
 
-await deriveRowStatus(rowId, "sending");
+await deriveRowStatus(row.id, "sending", deps.now());
 ```
+
+`db` is `await getDatabase()`, imported explicitly — `meeting-log-push.ts` has only ever
+used action wrappers, so the import is new. `attachmentNameFor(…)` takes **the parent queue
+row's `id`**, not the target's.
 
 With the statement:
 
@@ -1416,9 +1728,15 @@ With the statement:
     WHERE id = ? AND status = 'sending'`,
 ```
 
-The predicate is **not** needed to make re-stamping work — a plain update already defeats `reclaimBase`'s `claimed_at < ?` test, and the only other reader, `isClaimStale`, is status-gated. It is there because `rowsAffected = 0` is the pusher's only signal that its claim was taken.
+The predicate is **not** needed to make re-stamping work — a plain update already defeats
+`reclaimBase`'s `claimed_at < ?` test, and the only other reader, `isClaimStale`, is
+status-gated. It is there because `rowsAffected = 0` is the pusher's only signal that its
+claim was taken.
 
-Some deterministic codes are instance-wide — `ODOO_UNREACHABLE` with a non-retryable status, `ODOO_PAYLOAD_UNSERIALIZABLE`, `ODOO_MALFORMED_RESPONSE` — and will mark all five targets `failed` on one fault. That is accepted, not carved out: one whole-row Retry recovers all five, because it resets every `failed` child.
+Some deterministic codes are instance-wide — `ODOO_UNREACHABLE` with a non-retryable status,
+`ODOO_PAYLOAD_UNSERIALIZABLE`, `ODOO_MALFORMED_RESPONSE` — and will mark all five targets
+`failed` on one fault. That is accepted, not carved out: one whole-row Retry recovers all
+five, because it resets every `failed` child.
 
 - [ ] **Step 5: Rewrite the stale budget comment**
 
@@ -1440,6 +1758,9 @@ Expected: PASS.
 | drop the `status === "sent"` skip | "posts to every pending target and skips the sent ones" |
 | re-stamp with a hoisted `now` value | "re-stamps claimed_at after each target, tracking the last one" |
 | ignore `stamp.rowsAffected` | "aborts the pass when the claim re-stamp affects zero rows" |
+| move the re-stamp out of `finally` into the success path | a deterministic failure stops refreshing the claim |
+| pass the raw error to `isRetryable` instead of `toOdooError(e)` | an unwrapped transport rejection is marked terminally failed |
+| claim before reading the targets | "declines a zero-target row before the claim" |
 
 Revert every mutant before committing.
 
@@ -1459,7 +1780,9 @@ git commit -m "feat(odoo): push a meeting to every one of its targets"
 
 **Interfaces:**
 - Consumes: `deriveRowStatus` (Task 5), `assignQueueRow` (Task 7), `listTargets` (Task 3).
-- Produces: `retryTarget(rowId: string, targetId: string)`, `removeTarget(rowId: string, targetId: string)`; `runAction` gains a `push-partial` outcome.
+- Produces: `retryTarget(rowId: string, targetId: string)`, `removeQueueTarget(rowId: string, targetId: string)`; `runAction` gains a `push-partial` outcome. Named `removeQueueTarget`, not `removeTarget`: `src/lib/index.ts` star-exports this module and `./database` into one flat `@/lib` namespace, where Task 4's `removeSelectedTarget` also lands.
+
+`mockPush` has a **two-part contract**: `runAction`'s partial-send classification re-reads target counts from the database, so the mock must both replace `pushQueuedRow` *and* perform the underlying `meeting_log_targets` writes (raw SQL, `seedTargets`-style). Resolving a return value alone leaves the re-read seeing nothing.
 
 `runAction` classifies a push by the parent alone — `if (after.status !== "sent") return { kind: "push-failed" }` — and the page renders "This meeting could not be sent. The error on the row says why." A pass that lands notes on two of three customer records derives `pending` or `failed`, so the user is told nothing was sent while two notes are live on two customers' chatter. This is the same falsehood `deleteRow` was fixed for in Task 7, on a different path.
 
@@ -1483,7 +1806,30 @@ it("still reports push-failed when nothing landed", async () => {
   await seedRow({ id: "r1", status: "pending" });
   await seedTargets("r1", [{ resId: 1, status: "pending" }]);
   mockPush({ sent: [], failed: [1] });
-  expect((await retryMeetingLog("r1")).kind).toBe("push-failed");
+  expect((await retryMeetingLog("r1", deps)).kind).toBe("push-failed");
+});
+
+it("reports a partial send even when this pass changed nothing", async () => {
+  // The delta is zero: target 3 faults again. Classifying on the delta would
+  // fall through to push-failed and print "This meeting could not be sent" while
+  // two notes are live on two customers' chatter - the exact lie this task
+  // exists to remove, reintroduced on the retry path the feature adds.
+  await seedRow({ id: "r1", status: "failed" });
+  await seedTargets("r1", [
+    { resId: 1, status: "sent" },
+    { resId: 2, status: "sent" },
+    { resId: 3, status: "failed", lastErrorCode: "ODOO_FAULT" },
+  ]);
+  mockPush({ sent: [], failed: [3] });
+  expect((await retryMeetingLog("r1", deps)).kind).toBe("push-partial");
+});
+
+it("surfaces a refusal when the row moved underneath the caller", async () => {
+  await seedRow({ id: "r1", status: "failed" });
+  await seedTargets("r1", [{ resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
+  const t = (await listTargets("r1"))[0];
+  await rawExec("UPDATE meeting_log_queue SET status = 'sending' WHERE id = ?", ["r1"]);
+  expect(await retryTarget("r1", t.id)).toMatchObject({ kind: "conflict" });
 });
 
 it("resets the child, not just the parent, on a per-target retry", async () => {
@@ -1572,11 +1918,15 @@ export async function retryTarget(rowId: string, targetId: string) {
   // status = 'pending', so flipping only the parent leaves this a no-op
   // against the very target the button names.
   await db.execute(QUEUE_SQL.targetToPending, [null, null, targetId]);
-  await db.execute(QUEUE_SQL.retryRow, [rowId]);
+  // retryRow's CAS is `WHERE id = ? AND status IN ('failed','pending')`. A row
+  // that went 'sending' between render and click matches nothing - surface that
+  // rather than telling the user a retry is under way.
+  const res = await db.execute(QUEUE_SQL.retryRow, [rowId]);
+  if ((res.rowsAffected ?? 0) === 0) return { kind: "conflict" as const };
   return { kind: "ok" as const };
 }
 
-export async function removeTarget(rowId: string, targetId: string) {
+export async function removeQueueTarget(rowId: string, targetId: string) {
   const target = (await listTargets(rowId)).find((t) => t.id === targetId);
   if (!target) return { kind: "gone" as const };
   // A sent target row is immutable: it is the only record that the note exists.
@@ -1585,12 +1935,18 @@ export async function removeTarget(rowId: string, targetId: string) {
   const db = await getDatabase();
   const before = await readRowStatus(rowId);
   await db.execute(QUEUE_SQL.deleteTargetById, [targetId]);
-  await deriveRowStatus(rowId, before);
+  // The read-then-derive window is a real TOCTOU, but a fail-safe one: the CAS
+  // turns a moved row into zero rows affected. Surface it instead of discarding
+  // it - the spec requires the action to report a refusal and re-read.
+  const { changed } = await deriveRowStatus(rowId, before, Date.now());
+  if (!changed) return { kind: "conflict" as const };
   return { kind: "ok" as const };
 }
 ```
 
-In `retryMeetingLog`, reset every `failed` child before flipping the parent — never a `sent` one. In `runAction`, count sent targets before and after the push and return `push-partial` when the after-count rose but some target is not `sent`.
+In `retryMeetingLog`, reset every `failed` child before flipping the parent — never a `sent` one.
+
+In `runAction`, classify on the **after-state, not the delta**: any target `sent` **and** any target not `sent` → `push-partial`, regardless of what changed this pass. A delta-keyed rule reports `push-failed` when a retry re-faults on the same target, which is the falsehood this task exists to remove.
 
 - [ ] **Step 4: Run them to verify they pass**
 
@@ -1603,8 +1959,10 @@ Expected: PASS.
 |---|---|
 | `retryTarget` flips only the parent | "resets the child, not just the parent" |
 | `retryMeetingLog` resets `sent` children too | "resets every failed child and no sent child" |
-| `removeTarget` drops the `sent` check | "refuses to remove a sent target" |
+| `removeQueueTarget` drops the `sent` check | "refuses to remove a sent target" |
 | `runAction` returns `push-failed` for any non-`sent` parent | "reports a partial send rather than claiming nothing was sent" |
+| `runAction` classifies on the delta rather than the after-state | "reports a partial send even when this pass changed nothing" |
+| `retryTarget` discards `retryRow`'s zero-row result | "surfaces a refusal when the row moved underneath the caller" |
 
 - [ ] **Step 6: Commit**
 
@@ -1629,11 +1987,26 @@ git commit -m "feat(odoo): retry and remove one target, and stop calling a parti
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-it("holds a non-nullable list so the picker's memo can hold", () => {
-  const { result } = renderHook(() => useOdooTarget(opts));
-  const first = result.current.targets;
+it("hands ContactPicker a referentially stable list at zero targets", () => {
+  // Assert on pickerProps.targets - the value actually spread into
+  // <ContactPicker /> - not the top-level field. A test on the top-level field
+  // passes even if pickerProps reintroduces a `?? []` or a defensive copy, which
+  // is the exact regression this is meant to catch.
+  const { result, rerender } = renderHook(() => useOdooTarget(opts));
+  const first = result.current.pickerProps.targets;
   rerender();
-  expect(result.current.targets).toBe(first);   // same reference, not a new []
+  expect(result.current.pickerProps.targets).toBe(first);
+});
+
+it("re-renders the picker when a row's lookup resolves", async () => {
+  // The ref-only version of the cache passes every hook-level assertion and
+  // still leaves the row stuck on "Looking up..." - only a render-level test
+  // catches it.
+  render(<Harness />);
+  await user.click(screen.getByRole("button", { name: /expand Christian Carron/i }));
+  await resolveOpportunities(1, [{ id: 9, name: "Partnership with ECS" }]);
+  expect(await screen.findByRole("button", { name: /add Partnership with ECS/i }))
+    .toBeVisible();
 });
 
 it("keys the deal lookup per contact, so adding a target does not strand an open row", async () => {
@@ -1708,12 +2081,23 @@ const [targets, setTargets] = useState<SelectedTargets>([]);
 
 - [ ] **Step 4: Implement the per-contact disclosure cache and its epoch**
 
+**The cache must be state, not only refs.** A `useRef` write schedules no render, so
+when `expandContact`'s fetch resolves and writes the cache, `ContactPicker` never learns
+the data arrived and the row sits on "Looking up…" forever. Every other ref in this file
+that backs rendered UI (`opportunitiesRef`, `cacheRef`) mirrors a real `useState`.
+
+Refs stay for the fast in-flight and staleness checks; the rendered data is state, replaced
+by a **new `Map`** on every write so the identity changes — the idiom `onToggleColleague`
+already uses for `cache`:
+
 ```ts
 // Per-contact generation, so adding or removing a target elsewhere in the list
-// cannot invalidate an unrelated open disclosure.
+// cannot invalidate an unrelated open disclosure. Refs: not rendered.
 const rowGen = useRef(new Map<number, number>());
-const rowCache = useRef(new Map<number, OdooOpportunity[]>());
-const rowError = useRef(new Map<number, string>());
+
+// Rendered. New Map on every write, or nothing re-renders.
+const [rowCache, setRowCache] = useState<Map<number, OdooOpportunity[]>>(new Map());
+const [rowError, setRowError] = useState<Map<number, string>>(new Map());
 
 // ...but NOT independent of everything. handleInstanceChanged bumps
 // selectionToken precisely to supersede data from a database we just switched
@@ -1737,9 +2121,14 @@ Call `bumpEpoch()` from `handleInstanceChanged` and `handleNewChat`, alongside t
 
 `commit` becomes list-accepting. `reload()`'s archived check filters `targetRef.current` down to the survivors and commits that, under the same double `token !== selectionToken.current` check `commit` already performs — never a full clear.
 
-- [ ] **Step 6: Delete `ResolvedTarget`**
+- [ ] **Step 6: Delete `saveTarget` and `loadTarget`**
 
-Its last consumer is gone. Remove it from `src/types/odoo.ts`.
+Task 4 kept them so the tree would compile; `useOdooTarget` was their last consumer and
+this task removes it. Delete both from `src/lib/database/odoo-contacts.action.ts` and drop
+their tests.
+
+**`ResolvedTarget` stays.** `useMeetingLog.ts`'s `targetRef`, `ContactPicker` (Task 12) and
+the meeting-log page (Task 14) still declare it. It is deleted in **Task 14**.
 
 - [ ] **Step 7: Run them to verify they pass**
 
@@ -1839,9 +2228,22 @@ Contact rows, deal rows and lead-search results all get `+ add` / `✓ added`; c
 
 At the cap, add affordances get `aria-disabled="true"` and a no-op handler — **not** the native attribute, which drops the element from the tab order and blurs it with no defined recovery target. The archived-contact row keeps native `disabled`: its disablement is static at render time, not a side effect of another row's interaction, so the focus hazard does not apply. Two patterns in one list, deliberately.
 
-- [ ] **Step 5: Wire the resize dependency**
+- [ ] **Step 5: Wire the resize dependency — as a push, not a pull**
 
-`useCompletion`'s resize effect watches a fixed flag list and fires on picker open/close. "Logging to" changes height from clicks *inside* an already-open popover, which never toggles `isPickerOpen`. Read `targetCount` off `UseOdooTargetReturn` and add it to the effect's dependency array.
+`useCompletion`'s resize effect watches a fixed flag list and fires on picker open/close.
+"Logging to" changes height from clicks *inside* an already-open popover, which never
+toggles `isPickerOpen`.
+
+`useCompletion` **cannot read** `targetCount` off `UseOdooTargetReturn`: the two hooks are
+siblings, and `<Completion />` calls `useCompletion()` first, so nothing `useOdooTarget`
+returns exists when the effect is defined. Mirror the idiom already in place for
+`isPickerOpen`:
+
+- `useCompletion` owns a `targetCount` / `setTargetCount` pair and adds `targetCount` to
+  its own resize effect's dependency array.
+- `setTargetCount` is threaded **down** into `useOdooTarget`'s params, beside
+  `setIsPickerOpen`.
+- `useOdooTarget` calls it whenever the target list changes.
 
 - [ ] **Step 6: Run them to verify they pass**
 
@@ -1919,7 +2321,7 @@ Expected: FAIL.
 
 - [ ] **Step 4: Extend `propsAreEqual`**
 
-That comparator is exhaustive by design — its own comment reads "EVERY PROP THE ROW RENDERS, not just the DB columns" and warns that "a comparator narrowed to the DB columns is worse than none". Add a structural comparison over the target list — length plus per-target `id`, `status`, `last_error`, the same shape as the existing `sameTranscript` treatment — plus entries for `onRetryTarget` and `onRemoveTarget`. Comparing by reference instead re-renders all 200 rows on every read, because each refresh hands back fresh SQLite objects.
+That comparator is exhaustive by design — its own comment reads "EVERY PROP THE ROW RENDERS, not just the DB columns" and warns that "a comparator narrowed to the DB columns is worse than none". Add a structural comparison over the target list — length plus per-target `id`, `status`, `lastError` (camelCase: `MeetingLogTarget` is a mapped type, unlike the snake_case DB-mirrored fields in the comparator right above it) — the same shape as the existing `sameTranscript` treatment, plus entries for `onRetryTarget` and `onRemoveTarget`. Comparing by reference instead re-renders all 200 rows on every read, because each refresh hands back fresh SQLite objects.
 
 - [ ] **Step 5: Give `statusLine` the `failedTargets` input**
 
@@ -1948,6 +2350,8 @@ git commit -m "feat(odoo): expand a queue row to its per-target state"
 **Files:**
 - Modify: `src/pages/meeting-log/components/AssignDialog.tsx`
 - Modify: `src/pages/meeting-log/index.tsx`
+- Modify: `src/hooks/useMeetingLog.ts` — `targetRef` becomes `RefObject<SelectedTargets>`, and Task 6's `resolvedToSelected` adapter is deleted
+- Modify: `src/types/odoo.ts` — delete `ResolvedTarget`
 - Test: `src/tests/meeting-log-page.test.tsx`
 
 **Interfaces:**
@@ -2010,15 +2414,23 @@ Replace the dialog's single `selected` / `leadId` pair with `SelectedTarget[]` a
 
 In `src/pages/meeting-log/index.tsx`, `handleAssign` reads `row.targets` — the field Task 8 attached — and does not open the dialog when any target is `sent`. Confirm performs exactly the insert-new / delete-old / flip-parent operation the reassign rule forbids on a partially-sent row; the write predicate refuses it anyway, and this keeps the UI from offering an action that will be rejected.
 
-- [ ] **Step 4: Run them to verify they pass**
+- [ ] **Step 4: Retire `ResolvedTarget` and the adapter**
+
+This is its last task. Convert `useMeetingLog`'s `targetRef` to
+`RefObject<SelectedTargets>`, delete Task 6's `resolvedToSelected` shim and the
+`targets.length` conditionals it fed, and remove `ResolvedTarget` from
+`src/types/odoo.ts`. Nothing else should reference it — `grep -rn "ResolvedTarget" src/`
+must come back empty.
+
+- [ ] **Step 5: Run them to verify they pass**
 
 Run: `npx vitest run src/tests/meeting-log-page.test.tsx && npm run check:types && npm run lint`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/pages/meeting-log/components/AssignDialog.tsx src/pages/meeting-log/index.tsx src/tests/meeting-log-page.test.tsx
+git add src/pages/meeting-log/components/AssignDialog.tsx src/pages/meeting-log/index.tsx src/hooks/useMeetingLog.ts src/types/odoo.ts src/tests/meeting-log-page.test.tsx
 git commit -m "feat(odoo): assign a queued meeting to several records from the dashboard"
 ```
 
