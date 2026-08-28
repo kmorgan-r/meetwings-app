@@ -365,3 +365,45 @@ a botched retry test locks the account out for an hour.
   (`partner_ids` on the message)
 - Sharing one attachment across records rather than uploading per target
 - Any change to summarization, transcript slicing, or the watermark
+
+## Forward compatibility: automated target selection
+
+**Non-normative except where marked.** This section adds no requirements to
+this implementation and no plan task implements it. It records what a later
+calendar-sync feature — read the current Outlook meeting, match its attendee
+list against the contact cache, propose targets — would attach to, so that
+feature does not reopen decisions already made here.
+
+The seam is `odoo_selected_targets`. A set of `(model, res_id, name)` rows is
+already exactly the shape an automated selector would produce; nothing about
+the flat list assumes a human clicked it.
+
+**Binding on this implementation:** enqueue trusts every row in
+`odoo_selected_targets` and performs no confirmation of its own. That is
+sound today only because each row got there by an explicit click. Any
+automated writer must therefore land its results somewhere a human confirms
+first, and must not write into `odoo_selected_targets` directly. The failure
+mode is not a wasted note: a wrong match posts one customer's meeting
+transcript into another customer's CRM record, on up to five records at once,
+under a `mail.mt_note` the wrong customer's account manager will read. This
+paragraph exists so the invariant is written down where the next spec finds
+it, not so this implementation adds a check.
+
+Consequences for a future matcher, in the same spirit:
+
+- **Email exact match is feasible against today's cache.**
+  `odoo_contacts.email` exists (migration 11) and is indexed on
+  `(instance, email)`. No sync change is needed to look attendees up by
+  address.
+- **Name similarity is propose-only, never auto-applied.** Two people share a
+  name across two companies; the email index does not have that problem.
+- **The cap of five applies to any source.** A source that produces more than
+  five matches must choose or ask — the cap is enforced at the action layer
+  precisely so a caller cannot exceed it. Which five, and how the overflow is
+  presented, is that feature's design problem, not this one's.
+- **Provenance is deliberately not stored now.** A `source` column
+  (`'manual' | 'calendar'`) on `odoo_selected_targets` would only matter once
+  something automated writes to it. The table holds the current selection, not
+  durable history, so adding it later is a new migration file with
+  `DEFAULT 'manual'` and no meaningful backfill — it does not touch the frozen
+  checksums of 11 through 14. Deferred on purpose.
