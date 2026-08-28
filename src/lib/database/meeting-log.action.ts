@@ -336,9 +336,17 @@ UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
     WHERE id = ? AND status <> 'sent'`,
   // Clearing the error columns matters: a stale error rendered beside a green
   // sent target reads as a fresh failure.
+  //
+  // `AND status <> 'sent'` guards the Global Constraint that a sent target is
+  // immutable: a duplicate or late-arriving success reprocessing an
+  // already-sent target must not silently rewrite sent_at. It cannot refuse a
+  // legitimate write - 'sent' is already this statement's own end state, and
+  // a retry (failed -> pending -> sent) reaches it untouched by the guard. A
+  // 0-rowsAffected result from THIS statement means "already sent", not a
+  // failure.
   targetToSent: `UPDATE meeting_log_targets
     SET status = 'sent', sent_at = ?, last_error = NULL, last_error_code = NULL
-    WHERE id = ?`,
+    WHERE id = ? AND status <> 'sent'`,
 
   setTargetAttachment: `UPDATE meeting_log_targets SET attachment_id = ? WHERE id = ?`,
   setTargetMessage: `UPDATE meeting_log_targets SET message_id = ? WHERE id = ?`,
