@@ -102,7 +102,7 @@ const conversationStorage = vi.hoisted(() => {
 });
 vi.mock("@/lib/storage/active-conversation.storage", () => conversationStorage);
 
-import { resetMeetingLogSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
+import { resetMeetingLogSweepGuard, resetOrphanSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
 // resetTranscriptPruneGuard ONLY. runTranscriptPrune is never referenced in
 // this suite - every prune assertion targets action.pruneTranscripts, the DB
 // wrapper the real runTranscriptPrune calls - and the actions module is not
@@ -176,6 +176,7 @@ beforeEach(() => {
   windowLabel.value = "main";
   resetMeetingLogSweepGuard();
   resetTranscriptPruneGuard();
+  resetOrphanSweepGuard();
   listeners.clear();
   // Reset the STATE behind the stateful storage mocks, not just their call
   // history - vi.clearAllMocks() in afterEach clears .mock.calls but the
@@ -493,6 +494,21 @@ describe("the sweep kickoff", () => {
     render();
 
     await waitFor(() => expect(action.pruneTranscripts).toHaveBeenCalledTimes(1));
+  });
+
+  it("runs the orphan sweep on mount, even when the sweep reports it did not run", async () => {
+    // Chained after the sweep/prune, outside runMeetingLogSweep's `ran` guard -
+    // same reasoning as the prune sibling above. Without this, a mutant that
+    // deleted the runOrphanSweep() call, or that gated it inside
+    // `if (outcome.ran)`, would leave orphaned meeting_log_targets rows
+    // accumulating forever for exactly the users least likely to ever
+    // complete Odoo credentials, and every other test in this file would
+    // still pass.
+    push.runMeetingLogSweep.mockResolvedValue({ ran: false, pushed: 0 });
+
+    render();
+
+    await waitFor(() => expect(action.sweepOrphanTargets).toHaveBeenCalledTimes(1));
   });
 
   it("does not prune from the dashboard window", async () => {

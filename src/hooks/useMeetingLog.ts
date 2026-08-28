@@ -108,6 +108,11 @@ export async function runOrphanSweep(): Promise<void> {
   }
 }
 
+/** Test-only. Lets a suite start each case from a clean process state. */
+export function resetOrphanSweepGuard(): void {
+  orphanSweepRan = false;
+}
+
 /**
  * The single-target caller's adapter, until Task 14 replaces targetRef with
  * a real multi-select. Lead wins, matching the migration 14 backfill's own
