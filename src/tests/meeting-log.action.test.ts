@@ -79,7 +79,7 @@ import {
   retryQueueRow,
   selectSweepable,
 } from "@/lib/database/meeting-log.action";
-import { purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
+import { SELECTED_TARGET_SQL, purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
 import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { applyMigration14, MIGRATIONS, rows, seedPre14 } from "./helpers/migration-14";
 
@@ -140,9 +140,12 @@ interface SeedTarget {
  * ON CONFLICT and cannot set attachmentId, messageId, lastError or
  * lastErrorCode - which nearly every fixture that needs this helper does.
  *
- * Only usable once a test's own setup has applied migration 14
- * (odoo-multi-target.sql) - this file's shared beforeEach deliberately does
- * not (see the header comment above "no JS transactions").
+ * Usable directly off the shared beforeEach below: it now applies migrations
+ * 13 and 14 (odoo-lead-only-target.sql, odoo-multi-target.sql), so
+ * meeting_log_targets already exists before any test body runs. It was added
+ * for purgeOtherInstances (repointed at odoo_selected_targets in Task 4),
+ * which runs on every contact sync and would otherwise throw "no such table"
+ * against this file's schema.
  */
 function seedTargets(rowId: string, targets: SeedTarget[]) {
   targets.forEach((t, i) => {
@@ -180,6 +183,13 @@ beforeEach(async () => {
   // which deletes from the three tables that migration creates.
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-contacts.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "meeting-log-queue.sql"), "utf8"));
+  // Migrations 13 and 14, in that order (14's singleton backfill reads
+  // lead_name, which 13 adds). Needed so purgeOtherInstances - which now
+  // deletes from odoo_selected_targets, not the odoo_selected_target singleton
+  // - has somewhere to write on every run, including the "leaves the queue
+  // alone" test below, which calls the real function.
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
+  await applyMigration14(db);
   execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
 });
@@ -199,7 +209,11 @@ describe("no JS transactions", () => {
     // mandated "NO BEGIN / COMMIT HERE, DELIBERATELY" comment and a file scan
     // would fail on its own warning. sql.js is a single connection and cannot
     // catch a real violation at runtime, so this static guard is the only check.
-    for (const [name, sql] of Object.entries(QUEUE_SQL)) {
+    //
+    // SELECTED_TARGET_SQL (odoo-contacts.action.ts, Task 4) is scanned
+    // alongside QUEUE_SQL: it is a sibling exported statement object, and this
+    // is the only place either one gets checked.
+    for (const [name, sql] of Object.entries({ ...QUEUE_SQL, ...SELECTED_TARGET_SQL })) {
       expect(sql, `${name} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
       expect(sql, `${name} must not commit`).not.toMatch(/\bCOMMIT\b/i);
     }

@@ -52,6 +52,18 @@ export function isClaimStale(
 /** Above this, a `pending` row stops being "waiting" and starts being visible. */
 export const ESCALATE_AFTER_ATTEMPTS = 5;
 
+/**
+ * How many Odoo records one meeting can be logged to.
+ *
+ * Enforced by REJECTING the write in odoo-contacts.action.ts's
+ * addSelectedTarget - the user picks fewer targets instead. The enqueue and
+ * retarget child inserts (meeting-log.action.ts, Tasks 6/7) cannot reject the
+ * same way: an overflow there would throw out of `trigger`, whose catch calls
+ * skipUnwritten() and advances the watermark, destroying the whole meeting.
+ * Those paths cap to five and record the error on the row instead.
+ */
+export const MAX_TARGETS = 5;
+
 /** How long a terminal row keeps its transcript text before retention blanks it. */
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 

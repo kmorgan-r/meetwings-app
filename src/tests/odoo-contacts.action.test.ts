@@ -27,20 +27,30 @@ vi.mock("@/lib/database/config", () => ({
 }));
 
 import {
+  addSelectedTarget,
   claimSync,
   clearTarget,
+  clearTargets,
   failSync,
   finishSync,
   listContacts,
   loadTarget,
+  loadTargets,
   purgeOtherInstances,
   releaseSync,
+  removeSelectedTarget,
   saveTarget,
   setColleague,
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import type { OdooContact } from "@/types";
-import { applyMigration14, rows, seedPre14, seedPre14Singleton } from "./helpers/migration-14";
+import {
+  applyMigration14,
+  readMigration,
+  rows,
+  seedPre14,
+  seedPre14Singleton,
+} from "./helpers/migration-14";
 
 const MIGRATION = path.resolve(
   __dirname,
@@ -155,18 +165,24 @@ describe("upsertContacts", () => {
 });
 
 describe("purgeOtherInstances", () => {
+  // purgeOtherInstances now deletes from odoo_selected_targets (migration 14),
+  // not the odoo_selected_target singleton the outer beforeEach's schema stops
+  // at. Migration 12 first, since migration 14's backfill reads FROM
+  // meeting_log_queue.
+  beforeEach(() => {
+    db.run(readMigration("meeting-log-queue.sql"));
+    db.run(readMigration("odoo-multi-target.sql"));
+  });
+
   it("removes every trace of a switched-away instance", async () => {
     await upsertContacts(OTHER, [contact({ id: 77 })], 1000);
     await finishSync(OTHER, "2026-08-01 10:00:00", 1000, 0);
-    await saveTarget(
-      { instance: OTHER, contactId: 77, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
+    await addSelectedTarget(OTHER, { model: "res.partner", resId: 77, name: "A" }, null, 1000);
 
     await purgeOtherInstances(INSTANCE);
 
     expect(await listContacts(OTHER)).toEqual([]);
-    expect(await loadTarget(OTHER)).toBeNull();
+    expect(await loadTargets(OTHER)).toEqual([]);
     // The third table, and the one that matters most. A purge that dropped the
     // contacts but left odoo_sync_state keeps the OLD instance's watermark
     // alive, so switching back re-pulls nothing and the cache silently holds
@@ -174,6 +190,62 @@ describe("purgeOtherInstances", () => {
     // fingerprint exists to close. Without this assertion that purge passes.
     const { getSyncState } = await import("@/lib/database/odoo-contacts.action");
     expect(await getSyncState(OTHER)).toBeNull();
+  });
+});
+
+describe("selected targets", () => {
+  // odoo_selected_targets only exists once migration 14 has run, and its
+  // backfill reads FROM meeting_log_queue, so migration 12 goes first. The
+  // outer beforeEach stops at migration 13 deliberately - see "the selected
+  // target" above, which pins saveTarget/loadTarget against the pre-14
+  // odoo_selected_target table that migration 14 drops.
+  beforeEach(() => {
+    db.run(readMigration("meeting-log-queue.sql"));
+    db.run(readMigration("odoo-multi-target.sql"));
+  });
+
+  it("purges other instances from the new table", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i2", { model: "res.partner", resId: 2, name: "B" }, null, 100);
+    await purgeOtherInstances("i1");
+    expect(await loadTargets("i1")).toHaveLength(1);
+    expect(await loadTargets("i2")).toHaveLength(0);
+  });
+
+  it("rejects a sixth target instead of truncating", async () => {
+    for (let i = 1; i <= 5; i++) {
+      const r = await addSelectedTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
+      expect(r.ok).toBe(true);
+    }
+    const sixth = await addSelectedTarget("i1", { model: "res.partner", resId: 6, name: "C6" }, null, 100);
+    expect(sixth).toEqual({ ok: false, reason: "cap" });
+    expect(await loadTargets("i1")).toHaveLength(5);
+  });
+
+  it("re-adding an existing target is not a new target", async () => {
+    for (let i = 1; i <= 5; i++) {
+      await addSelectedTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
+    }
+    const again = await addSelectedTarget("i1", { model: "res.partner", resId: 3, name: "C3" }, null, 200);
+    expect(again.ok).toBe(true);
+    expect(await loadTargets("i1")).toHaveLength(5);
+  });
+
+  it("removes one target and leaves the rest", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i1", { model: "crm.lead", resId: 9, name: "L" }, null, 100);
+    await removeSelectedTarget("i1", "res.partner", 1);
+    expect(await loadTargets("i1")).toEqual([
+      { model: "crm.lead", resId: 9, name: "L" },
+    ]);
+  });
+
+  it("clears every target for an instance, and leaves other instances alone", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i2", { model: "res.partner", resId: 2, name: "B" }, null, 100);
+    await clearTargets("i1");
+    expect(await loadTargets("i1")).toEqual([]);
+    expect(await loadTargets("i2")).toHaveLength(1);
   });
 });
 

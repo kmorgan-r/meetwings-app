@@ -1,4 +1,5 @@
-import type { DbOdooContact, OdooContact, ResolvedTarget } from "@/types";
+import type { DbOdooContact, OdooContact, ResolvedTarget, SelectedTarget, SelectedTargets } from "@/types";
+import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import { getDatabase } from "./config";
 
 /**
@@ -248,7 +249,7 @@ export async function purgeOtherInstances(instance: string): Promise<void> {
   // surfaces the stranded rows under their own wording.
   await db.execute("DELETE FROM odoo_contacts WHERE instance <> ?", [instance]);
   await db.execute("DELETE FROM odoo_sync_state WHERE instance <> ?", [instance]);
-  await db.execute("DELETE FROM odoo_selected_target WHERE instance <> ?", [instance]);
+  await db.execute("DELETE FROM odoo_selected_targets WHERE instance <> ?", [instance]);
 }
 
 /**
@@ -313,4 +314,92 @@ export async function loadTarget(instance: string): Promise<ResolvedTarget | nul
 export async function clearTarget(): Promise<void> {
   const db = await getDatabase();
   await db.execute("DELETE FROM odoo_selected_target WHERE id = 'current'");
+}
+
+/**
+ * Migration 14's replacement for the singleton above: up to MAX_TARGETS rows
+ * per instance instead of one. `saveTarget` / `loadTarget` / `clearTarget`
+ * stay in this file - `useOdooTarget` still calls them until Task 11 - but
+ * they are runtime-dead from here on, since odoo_selected_target no longer
+ * exists once migration 14 has run.
+ *
+ * Every statement is exported, alongside QUEUE_SQL in meeting-log.action.ts,
+ * so the no-BEGIN/no-COMMIT scan in meeting-log.action.test.ts can see it too.
+ */
+export const SELECTED_TARGET_SQL = {
+  // Counts every OTHER row for the instance. Re-adding a target already in
+  // the set must update it, not count against the cap - the NOT (...) excludes
+  // the row being written from its own count.
+  countOthers: `SELECT COUNT(*) AS n FROM odoo_selected_targets
+      WHERE instance = ? AND NOT (model = ? AND res_id = ?)`,
+
+  upsert: `INSERT INTO odoo_selected_targets
+       (instance, model, res_id, name, conversation_id, selected_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(instance, model, res_id) DO UPDATE SET
+       name = excluded.name,
+       conversation_id = excluded.conversation_id,
+       selected_at = excluded.selected_at`,
+
+  list: `SELECT model, res_id, name FROM odoo_selected_targets
+      WHERE instance = ? ORDER BY selected_at`,
+
+  remove: `DELETE FROM odoo_selected_targets WHERE instance = ? AND model = ? AND res_id = ?`,
+
+  clear: `DELETE FROM odoo_selected_targets WHERE instance = ?`,
+};
+
+export async function loadTargets(instance: string): Promise<SelectedTargets> {
+  const db = await getDatabase();
+  const rows = await db.select<{ model: SelectedTarget["model"]; res_id: number; name: string | null }[]>(
+    SELECTED_TARGET_SQL.list,
+    [instance]
+  );
+  return rows.map((row) => ({ model: row.model, resId: row.res_id, name: row.name }));
+}
+
+/**
+ * The cap is enforced HERE, by rejecting. It is NOT enforced by truncating -
+ * that would silently drop whichever target the caller thought it just added.
+ * Overflow at enqueue/retarget (meeting-log.action.ts, Tasks 6/7) instead caps
+ * to five and records the error on the row, because throwing there would
+ * surface out of `trigger`, whose catch calls skipUnwritten() and advances the
+ * watermark - destroying the whole meeting rather than one target.
+ */
+export async function addSelectedTarget(
+  instance: string,
+  t: SelectedTarget,
+  conversationId: string | null,
+  at: number
+): Promise<{ ok: boolean; reason?: "cap" }> {
+  const db = await getDatabase();
+  const existing = await db.select<{ n: number }[]>(SELECTED_TARGET_SQL.countOthers, [
+    instance,
+    t.model,
+    t.resId,
+  ]);
+  if ((existing[0]?.n ?? 0) >= MAX_TARGETS) return { ok: false, reason: "cap" };
+  await db.execute(SELECTED_TARGET_SQL.upsert, [
+    instance,
+    t.model,
+    t.resId,
+    t.name,
+    conversationId,
+    at,
+  ]);
+  return { ok: true };
+}
+
+export async function removeSelectedTarget(
+  instance: string,
+  model: string,
+  resId: number
+): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(SELECTED_TARGET_SQL.remove, [instance, model, resId]);
+}
+
+export async function clearTargets(instance: string): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(SELECTED_TARGET_SQL.clear, [instance]);
 }
