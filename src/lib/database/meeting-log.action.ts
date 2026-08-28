@@ -350,6 +350,23 @@ UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
 
   setTargetAttachment: `UPDATE meeting_log_targets SET attachment_id = ? WHERE id = ?`,
   setTargetMessage: `UPDATE meeting_log_targets SET message_id = ? WHERE id = ?`,
+
+  // The parent-status derivation. A CAS on the status the caller OBSERVED -
+  // 'sending' for the push, the 'pending' or 'failed' a queue-page action
+  // read - so a row that moved between the read and this write is left alone
+  // rather than overwritten out from under whoever moved it. See
+  // deriveRowStatus's doc comment for the precedence this statement encodes.
+  //
+  // Fully numbered, matching QUEUE_SQL.counts' style, because ?1 is reused
+  // three times. Clearing claimed_at is part of the reduction to today's
+  // toSent/toFailed/toPending, all three of which set it NULL.
+  deriveStatus: `UPDATE meeting_log_queue
+    SET status = ?1,
+        last_error      = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?2, last_error) END,
+        last_error_code = CASE WHEN ?1 = 'sent' THEN NULL ELSE COALESCE(?3, last_error_code) END,
+        sent_at    = COALESCE(?4, sent_at),
+        claimed_at = NULL
+    WHERE id = ?5 AND status = ?6`,
 } as const;
 
 function toRow(raw: Record<string, unknown>): DbMeetingLogRow {
@@ -392,6 +409,76 @@ export async function listTargets(rowId: string): Promise<MeetingLogTarget[]> {
   const db = await getDatabase();
   const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.targetsByRow, [rowId]);
   return rows.map(toMeetingLogTarget);
+}
+
+// A parent already in one of these is not re-derived. `sent`, `cancelled` and
+// `deleted` are terminal; `unassigned` needs a contact, not a re-derive. This
+// is an EXCLUSION list, not "only from `sending`": Remove and Retry (Task 10)
+// call this from a `pending` or `failed` parent, and a `sending`-only gate
+// would match zero rows for either of them, by construction.
+const DERIVE_FORBIDDEN: MeetingLogStatus[] = ["cancelled", "deleted", "sent", "unassigned"];
+
+/**
+ * Derives a queue row's status from its children under a CAS on the status
+ * the caller observed, and writes it. The one mechanism both the push
+ * (Task 9, observing `sending`) and the queue-page actions (Task 10,
+ * observing `pending` or `failed`) use to fold N target outcomes into the
+ * parent's single status.
+ *
+ * Precedence, in order - 0 first, and 1-before-2 load-bearing:
+ *   0. zero targets            -> unassigned (else "all sent" is vacuously
+ *      true of an empty set)
+ *   1. any target still pending -> pending
+ *   2. else any target failed   -> failed
+ *   3. else every target sent   -> sent
+ * `selectSweepable` only picks up `pending` and `held` parents, so a
+ * failed-wins ordering would strand a retryable target forever.
+ *
+ * `now` is injected, never `Date.now()` read here, so the push can pass
+ * `deps.now()` and a test can drive the clock.
+ */
+export async function deriveRowStatus(
+  rowId: string,
+  observedStatus: MeetingLogStatus,
+  now: number,
+): Promise<{ changed: boolean; status: MeetingLogStatus }> {
+  if (DERIVE_FORBIDDEN.includes(observedStatus)) {
+    return { changed: false, status: observedStatus };
+  }
+
+  const targets = await listTargets(rowId);
+  // Only targets carrying a reason. Without this, "first pending target" would
+  // pick an EARLIER but error-free target over a later one that actually
+  // failed a send, and mirror NULL into last_error_code - blanking the error
+  // surface in the app on every retryable row that has more than one target.
+  const withError = targets.filter((t) => t.lastErrorCode !== null);
+
+  let next: MeetingLogStatus;
+  let source: MeetingLogTarget | undefined;
+
+  if (targets.length === 0) {
+    next = "unassigned";
+  } else if (targets.some((t) => t.status === "pending")) {
+    next = "pending";
+    source = withError.find((t) => t.status === "pending");
+  } else if (targets.some((t) => t.status === "failed")) {
+    next = "failed";
+    source = withError.find((t) => t.status === "failed");
+  } else {
+    next = "sent";
+  }
+
+  const db = await getDatabase();
+  const res = await db.execute(QUEUE_SQL.deriveStatus, [
+    next,
+    next === "sent" ? null : (source?.lastError ?? null),
+    next === "sent" ? null : (source?.lastErrorCode ?? null),
+    next === "sent" ? now : null,
+    rowId,
+    observedStatus,
+  ]);
+  // ?? 0 matches every other rowsAffected read in this file.
+  return { changed: (res.rowsAffected ?? 0) > 0, status: next };
 }
 
 export async function getTranscriptWatermark(): Promise<number> {

@@ -61,6 +61,7 @@ import {
   countAllQueued,
   deleteQueueRow,
   deleteTerminalQueueRow,
+  deriveRowStatus,
   failRow,
   findHeldRow,
   getQueueCounts,
@@ -664,6 +665,77 @@ describe("assignQueueRow", () => {
   it("refuses a pending row", async () => {
     seed({ id: "r", status: "pending" });
     expect(await assignQueueRow("r", 42, null)).toBe(false);
+  });
+});
+
+describe("deriveRowStatus", () => {
+  it("derives unassigned when the row has no targets", async () => {
+    seed({ id: "r1", status: "sending" });
+    expect(await deriveRowStatus("r1", "sending", 1_000)).toMatchObject({ status: "unassigned" });
+  });
+
+  it("prefers a retryable target over a failed one", async () => {
+    seed({ id: "r1", status: "sending" });
+    seedTargets("r1", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    expect(await deriveRowStatus("r1", "sending", 1_000)).toMatchObject({ status: "pending" });
+  });
+
+  it("derives failed when every unsent target is failed", async () => {
+    seed({ id: "r1", status: "sending" });
+    seedTargets("r1", [
+      { resId: 1, status: "sent" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    expect(await deriveRowStatus("r1", "sending", 1_000)).toMatchObject({ status: "failed" });
+  });
+
+  it("derives sent when every target is sent", async () => {
+    seed({ id: "r1", status: "sending" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }, { resId: 2, status: "sent" }]);
+    expect(await deriveRowStatus("r1", "sending", 1_000)).toMatchObject({ status: "sent" });
+  });
+
+  it("runs from a failed parent, which is what Remove needs", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    expect(await deriveRowStatus("r1", "failed", 1_000)).toMatchObject({
+      changed: true,
+      status: "sent",
+    });
+  });
+
+  it("refuses to run on a deleted parent", async () => {
+    seed({ id: "r1", status: "deleted" });
+    seedTargets("r1", [{ resId: 1, status: "pending" }]);
+    expect(await deriveRowStatus("r1", "deleted", 1_000)).toMatchObject({ changed: false });
+    expect(await getQueueRow("r1")).toMatchObject({ status: "deleted" });
+  });
+
+  it("loses to a concurrent claim", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    // Seed the stolen claim with raw SQL. QUEUE_SQL.claim is
+    // `WHERE id = ? AND status IN ('pending','held')` and CANNOT claim a failed
+    // row - calling claimRow here would leave the row `failed`, the derive CAS
+    // would match, and this test would fail against a CORRECT implementation.
+    await rawExecute("UPDATE meeting_log_queue SET status = 'sending' WHERE id = ?", ["r1"]);
+    expect(await deriveRowStatus("r1", "failed", 1_000)).toMatchObject({ changed: false });
+  });
+
+  it("mirrors the determining target's error and clears it on sent", async () => {
+    seed({ id: "r1", status: "sending" });
+    seedTargets("r1", [
+      { resId: 1, status: "pending", createdAt: 1 }, // no error yet
+      {
+        resId: 2, status: "pending", createdAt: 2,
+        lastError: "boom", lastErrorCode: "ODOO_UNREACHABLE",
+      },
+    ]);
+    await deriveRowStatus("r1", "sending", 1_000);
+    expect(await getQueueRow("r1")).toMatchObject({ last_error_code: "ODOO_UNREACHABLE" });
   });
 });
 
