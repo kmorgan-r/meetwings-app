@@ -225,7 +225,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       await pushQueuedRow(row, {
         client: createOdooClient(config),
         instance: instanceFingerprint(config.url, config.db),
-        now: Date.now(),
+        now: () => Date.now(),
         summarize: (slice) => summarize(slice.entries),
       });
     } catch (err) {

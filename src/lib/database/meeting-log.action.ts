@@ -445,6 +445,21 @@ UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
   setTargetAttachment: `UPDATE meeting_log_targets SET attachment_id = ? WHERE id = ?`,
   setTargetMessage: `UPDATE meeting_log_targets SET message_id = ? WHERE id = ?`,
 
+  // Task 9's per-target push loop re-stamps the parent's claim after EVERY
+  // target, not once for the whole row - a slow Odoo (five targets at up to
+  // 30s each, client.ts:21) can otherwise cross STALE_CLAIM_MS with a single
+  // stale claimed_at, and the sweep's reclaim would then steal a still-live
+  // push out from under it.
+  //
+  // The `status = 'sending'` predicate is NOT needed to make the re-stamp
+  // itself work - a plain unconditional UPDATE already defeats reclaimBase's
+  // `claimed_at < ?` test, and the only other reader, isClaimStale, is
+  // status-gated too. It is here because `rowsAffected = 0` is the pusher's
+  // ONLY signal that its claim was taken by someone else - the one thing that
+  // lets the loop abort instead of writing a second, colliding claim.
+  restampClaim: `UPDATE meeting_log_queue SET claimed_at = ?
+    WHERE id = ? AND status = 'sending'`,
+
   // The parent-status derivation. A CAS on the status the caller OBSERVED -
   // 'sending' for the push, the 'pending' or 'failed' a queue-page action
   // read - so a row that moved between the read and this write is left alone

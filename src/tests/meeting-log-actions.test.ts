@@ -226,7 +226,10 @@ describe("retryMeetingLog", () => {
 
     await retryMeetingLog("r", { providerConfig: null });
 
-    expect(push.pushQueuedRow.mock.calls[0][1].now).toBeGreaterThanOrEqual(afterCreds);
+    // Task 9 bridge: PushDeps.now is `() => number` now, sampled fresh on
+    // every read - not a scalar the caller sampled once. Call it to get the
+    // value this assertion actually cares about.
+    expect(push.pushQueuedRow.mock.calls[0][1].now()).toBeGreaterThanOrEqual(afterCreds);
   });
 
   it("reports a no-op when the push wrote nothing", async () => {

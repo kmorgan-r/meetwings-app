@@ -75,13 +75,19 @@ export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * the main window's reclaim re-push a live row, producing two attachments and
  * two customer-visible chatter notes.
  *
- * 60s, not 90s, because the paths ADD. A reassigned `failed` row takes five
- * Odoo calls at 30s (client.ts:21) AND an AI call, because `failRow` only runs
- * after a successful claim so attempts >= 1, and `summary_json` is legitimately
- * still null when a previous summarize failed. 150s + 60s = 210s against the
- * 300s gate. A timed-out summarize resolves null, which pushQueuedRow already
- * handles by taking the fallback body: degrading a note is not comparable to
- * duplicating one.
+ * The arithmetic this bound protects is NOT "summarize plus a fixed Odoo
+ * budget" any more - it cannot be, because the Odoo half now scales with the
+ * target count (up to MAX_TARGETS records per meeting) instead of being one
+ * fixed cost. What actually keeps a live push from crossing STALE_CLAIM_MS is
+ * pushQueuedRow re-stamping `claimed_at` after EVERY target it finishes, not
+ * once for the whole row - so the budget that matters per claim window is one
+ * target's worth of Odoo calls (two, at up to 30s each, client.ts:21 - an
+ * attachment create/adopt and a message post/adopt), not five targets'. 60s
+ * for the summarize call plus 60s for one target's Odoo calls is comfortably
+ * under STALE_CLAIM_MS (300s), with the re-stamp keeping every LATER target
+ * from ever needing to borrow from that same budget. A timed-out summarize
+ * resolves null, which pushQueuedRow already handles by taking the fallback
+ * body: degrading a note is not comparable to duplicating one.
  */
 export const SUMMARIZE_TIMEOUT_MS = 60_000;
 

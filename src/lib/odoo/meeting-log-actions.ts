@@ -200,7 +200,7 @@ async function runAction(
     await pushQueuedRow(fresh, {
       client,
       instance,
-      now: Date.now(),
+      now: () => Date.now(),
       summarize,
     });
 
