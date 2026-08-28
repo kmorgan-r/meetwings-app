@@ -196,21 +196,32 @@ UPDATE meeting_log_queue
    SET status = 'pending', last_error = NULL, last_error_code = NULL
  WHERE id = ? AND status IN ('failed','pending')`,
 
-  // Target and status in ONE statement, so a row can never be `pending` with
-  // no target - the exact collision `unassigned` exists to prevent.
-  //
   // `failed` is accepted so a meeting whose Odoo target was archived can be
-  // retargeted instead of only deleted. Clearing attachment_id and message_id
-  // is LOAD-BEARING for that case: a failed row legitimately holds an
-  // attachment_id (create succeeded, message_post faulted), and retargeting
-  // without clearing makes the push skip the create and post a note on the NEW
-  // partner linking a file on the OLD partner's record.
+  // retargeted instead of only deleted. Targets themselves are no longer
+  // written here - contact_id/lead_id are pre-migration-14 history, and the
+  // real target set lives in meeting_log_targets, written by
+  // assignQueueRow's own steps 1 and 2 BEFORE this statement runs.
+  //
+  // `attempts` is deliberately NOT reset - retryRow's own comment says why: it
+  // is the escalation record. Resetting it also makes attemptsBefore === 0 on
+  // the next push, which DISABLES BOTH ADOPT-SEARCHES, so a retained child
+  // whose message_post succeeded but whose setTargetMessage failed gets
+  // re-posted as a duplicate customer-visible note.
+  //
+  // `NOT EXISTS` is the authoritative backstop for the Global Constraint that
+  // a sent target is immutable. assignQueueRow's own read-then-write check
+  // runs before the child inserts so a refused retarget never rewrites the
+  // child set - this predicate is what makes that check safe against the
+  // residual TOCTOU, not the only thing enforcing it.
   assignRow: `
 UPDATE meeting_log_queue
-   SET contact_id = ?, lead_id = ?, status = 'pending',
-       attachment_id = NULL, message_id = NULL,
-       last_error = NULL, last_error_code = NULL
- WHERE id = ? AND status IN ('unassigned','failed')`,
+   SET status = 'pending', last_error = NULL, last_error_code = NULL
+ WHERE id = ?
+   AND status IN ('unassigned','failed')
+   AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
+                    WHERE row_id = meeting_log_queue.id AND status = 'sent')`,
+
+  deleteTargetById: `DELETE FROM meeting_log_targets WHERE id = ?`,
 
   // A STATUS FLIP, never a hard DELETE. The watermark is MAX(transcript_end_at)
   // with no status predicate, so deleting the row holding that maximum makes it
@@ -237,13 +248,43 @@ UPDATE meeting_log_queue
   // write - no read, no window between a check and a change. A terminal row
   // falls through to deleteTerminalRow, which removes it just as the spec
   // intended, under copy that does not claim anything about what was sent.
+  //
+  // `NOT EXISTS (... status = 'sent')` extends the same proof to a row with
+  // MULTIPLE targets: a parent can derive `pending` or `failed` while one of
+  // its children already reached Odoo, and matching here would blank the
+  // transcript under "Nothing was sent to Odoo." while a note is live on that
+  // customer's chatter. A row with a sent child falls through to
+  // deleteTerminalRow instead, under the honest deleted-after-send copy.
   deleteRow: `
 UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
- WHERE id = ? AND status IN ('held','pending','unassigned','failed')`,
+ WHERE id = ? AND status IN ('held','pending','unassigned','failed')
+   AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
+                    WHERE row_id = meeting_log_queue.id AND status = 'sent')`,
 
+  // Complement of deleteRow, widened the same way and for the same reason: a
+  // partially-sent row derives `pending` or `failed`, so without the OR arm
+  // BOTH statements refuse it and deleteMeetingLog returns `conflict` forever
+  // - the row becomes permanently undeletable.
+  //
+  // THE PARENTHESES ARE LOAD-BEARING. `AND` binds tighter than `OR`, so a bare
+  // `... AND status IN (...) OR EXISTS (...)` parses as
+  // `(id = ? AND status IN (...)) OR EXISTS (...)` - the `id` scope is gone,
+  // and one Delete click sets status='deleted', transcript='',
+  // summary_json=NULL on EVERY queue row that has a sent target, which after
+  // migration 14's backfill is the user's entire sent history. Never append a
+  // bare `OR EXISTS (...)` fragment to this WHERE - rewrite it whole.
+  //
+  // `status <> 'sending'` is required even with the parentheses: without it
+  // the new OR arm admits a mid-push row, which both delete statements
+  // deliberately refuse today - a stale dashboard's Delete would blank the
+  // transcript while the loop keeps posting notes to the remaining targets.
   deleteTerminalRow: `
 UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
- WHERE id = ? AND status IN ('sent','cancelled')`,
+ WHERE id = ?
+   AND status <> 'sending'
+   AND (status IN ('sent','cancelled')
+        OR EXISTS (SELECT 1 FROM meeting_log_targets
+                    WHERE row_id = meeting_log_queue.id AND status = 'sent'))`,
 
   // Every column EXCEPT transcript - loading a whole meeting's text for every
   // row to render a COLLAPSED list is invisible with three rows and painful
@@ -753,12 +794,79 @@ export async function retryQueueRow(id: string): Promise<boolean> {
   return (result.rowsAffected ?? 0) === 1;
 }
 
-export async function assignQueueRow(
-  id: string, contactId: number, leadId: number | null
-): Promise<boolean> {
+/**
+ * Retargets a row to a new set of Odoo targets, as three ordered steps -
+ * insert the new children, delete the complement, then flip the parent -
+ * with no transaction, per the file header.
+ *
+ * GATED FIRST, before any write. Evaluating the sent-target check only at the
+ * parent flip (step 3) would mean a REFUSED retarget has already rewritten
+ * the child set: on {A(sent), B(failed)} retargeted to {A, C}, B would already
+ * be deleted and C already inserted by the time the CAS refuses, and step 2's
+ * deletes are unrecoverable. Step 3's own `NOT EXISTS` stays as the
+ * authoritative backstop for the Global Constraint that a sent target is
+ * immutable - the residual TOCTOU between this read and step 2 is safe,
+ * because step 2 below never deletes a sent child.
+ */
+export async function assignQueueRow(id: string, targets: SelectedTargets): Promise<boolean> {
   const db = await getDatabase();
-  const result = await db.execute(QUEUE_SQL.assignRow, [contactId, leadId, id]);
-  return (result.rowsAffected ?? 0) === 1;
+
+  const currentTargets = await listTargets(id);
+  if (currentTargets.some((t) => t.status === "sent")) return false;
+
+  const capped = targets.slice(0, MAX_TARGETS);
+  const overflowed = targets.length > MAX_TARGETS;
+
+  // 1. Insert the new children. ON CONFLICT is what stops an overlapping set
+  //    from aborting on UNIQUE (row_id, model, res_id), and DO UPDATE resets a
+  //    retained child to pending so the push loop does not skip it. It does
+  //    NOT touch attachment_id / message_id: preserving those is what makes a
+  //    concurrently-sent retained child converge instead of re-posting. The
+  //    `WHERE status <> 'sent'` on the DO UPDATE is what keeps a sent target
+  //    immutable even here: without it, a stale dashboard whose new set
+  //    contains a target just marked sent would un-send it in this step, and
+  //    both step 2's skip and step 3's gate would then see nothing sent.
+  for (const t of capped) {
+    await db.execute(QUEUE_SQL.insertTarget, [
+      crypto.randomUUID(), id, t.model, t.resId, t.name, Date.now(),
+    ]);
+  }
+
+  // 2. Delete only the COMPLEMENT of the new set, and never a sent child.
+  //    Deleting by bare row_id would remove the child step 1 just upserted.
+  //    Dropping the sent skip would destroy a child that reached Odoo between
+  //    the gate's read above and this loop - after which step 3's gate finds
+  //    nothing sent and passes, which is exactly what the gate exists to
+  //    prevent.
+  const keep = capped.map((t) => `${t.model}:${t.resId}`);
+  for (const existing of await listTargets(id)) {
+    if (existing.status === "sent") continue;
+    if (keep.includes(`${existing.model}:${existing.resId}`)) continue;
+    await db.execute(QUEUE_SQL.deleteTargetById, [existing.id]);
+  }
+
+  // 3. Flip the parent last, under the gate. Returns boolean, like today. A
+  //    crash after step 1, or a flip refused here by the CAS, leaves extra
+  //    `pending` children on a row whose parent status has not changed - the
+  //    orphan sweep does not touch them (the parent exists) and the next
+  //    retarget's ON CONFLICT absorbs them. There is no separate
+  //    reconciliation step: after step 2 the old target set no longer exists
+  //    to reconcile against.
+  const res = await db.execute(QUEUE_SQL.assignRow, [id]);
+  const ok = (res.rowsAffected ?? 0) > 0;
+
+  // The retarget path caps like the enqueue path does (insertQueueRow above),
+  // and records why rather than truncating silently.
+  if (ok && overflowed) {
+    try {
+      await db.execute(QUEUE_SQL.recordError, [
+        "TARGET_CAP", `Only the first ${MAX_TARGETS} targets were assigned.`, id,
+      ]);
+    } catch (e) {
+      console.warn("[meeting-log] retarget cap note failed", e);
+    }
+  }
+  return ok;
 }
 
 /**

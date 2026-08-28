@@ -729,48 +729,148 @@ describe("retryQueueRow", () => {
 });
 
 describe("assignQueueRow", () => {
-  it("writes target and status in ONE statement", async () => {
+  it("assigns an unassigned row and inserts its target", async () => {
     // A row can never be `pending` with no target - the exact collision the
     // `unassigned` status exists to prevent.
     seed({ id: "r", status: "unassigned", contact_id: null, lead_id: null });
 
-    expect(await assignQueueRow("r", 42, 7)).toBe(true);
+    expect(await assignQueueRow("r", [{ model: "res.partner", resId: 42, name: "A" }]))
+      .toBe(true);
 
-    expect(await getQueueRow("r")).toMatchObject({
-      status: "pending",
-      contact_id: 42,
-      lead_id: 7,
-    });
+    expect(await getQueueRow("r")).toMatchObject({ status: "pending" });
+    expect(await listTargets("r")).toMatchObject([
+      { model: "res.partner", resId: 42, status: "pending" },
+    ]);
   });
 
-  it("accepts a failed row and CLEARS both Odoo ids", async () => {
-    // Reassign. Clearing the ids is not tidying: a failed row legitimately
-    // holds an attachment_id when ir.attachment.create succeeded and
-    // message_post then faulted. Retargeting without clearing makes
-    // pushQueuedRow skip the create and post a note on the NEW partner that
-    // links a file living on the OLD partner's record - one customer's
-    // transcript reachable from another customer's chatter.
+  it("accepts a failed row, clears its last_error, inserts the new target, and leaves attempts alone", async () => {
+    // `failed` is accepted so a meeting whose Odoo target was archived can be
+    // retargeted instead of only deleted.
+    //
+    // `attempts` is asserted here (not just documented) because resetting it
+    // makes attemptsBefore === 0 on the next push, which disables both
+    // adopt-searches - a retained child whose message_post succeeded but
+    // whose setTargetMessage failed would get re-posted as a duplicate
+    // customer-visible note.
     seed({
-      id: "r", status: "failed", contact_id: 1, lead_id: null,
-      attachment_id: 99, message_id: null, last_error: "gone", last_error_code: "ODOO_FAULT",
+      id: "r", status: "failed", attempts: 3,
+      last_error: "gone", last_error_code: "ODOO_FAULT",
     });
 
-    expect(await assignQueueRow("r", 42, null)).toBe(true);
+    expect(await assignQueueRow("r", [{ model: "res.partner", resId: 42, name: null }]))
+      .toBe(true);
 
     expect(await getQueueRow("r")).toMatchObject({
       status: "pending",
-      contact_id: 42,
-      lead_id: null,
-      attachment_id: null,
-      message_id: null,
+      attempts: 3,
       last_error: null,
       last_error_code: null,
     });
+    expect(await listTargets("r")).toMatchObject([
+      { model: "res.partner", resId: 42, status: "pending" },
+    ]);
   });
 
-  it("refuses a pending row", async () => {
-    seed({ id: "r", status: "pending" });
-    expect(await assignQueueRow("r", 42, null)).toBe(false);
+  it("refuses to retarget a row that is neither unassigned nor failed", async () => {
+    seed({ id: "r1", status: "pending" });
+    expect(await assignQueueRow("r1", [{ model: "res.partner", resId: 2, name: "B" }]))
+      .toBe(false);
+  });
+
+  it("un-sends nothing when the new set contains an already-sent target", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    await assignQueueRow("r1", [{ model: "res.partner", resId: 1, name: "A" }]);
+    expect((await listTargets("r1"))[0].status).toBe("sent");
+  });
+
+  it("refuses to retarget a row with a sent target, without touching the children", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    expect(await assignQueueRow("r1", [{ model: "res.partner", resId: 2, name: "B" }]))
+      .toBe(false);
+    // Length 1, not 2: the gate runs BEFORE the inserts. Gating only in step 3
+    // would leave the new child behind on a "refused" retarget.
+    expect(await listTargets("r1")).toHaveLength(1);
+  });
+
+  it("retargets an overlapping set without colliding, and resets the retained child", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [
+      { resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT", attachmentId: 111 },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    await assignQueueRow("r1", [
+      { model: "res.partner", resId: 1, name: "A" },     // retained
+      { model: "res.partner", resId: 3, name: "C" },     // new
+    ]);
+    const t = await listTargets("r1");
+    expect(t.map((x) => x.resId).sort()).toEqual([1, 3]);
+    const retained = t.find((x) => x.resId === 1)!;
+    expect(retained.status).toBe("pending");
+    expect(retained.lastErrorCode).toBeNull();
+    expect(retained.attachmentId).toBe(111);   // preserved, so the next push converges
+  });
+
+  it("leaves a concurrently-sent child in place during the delete step", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 2, status: "sent" }]);   // sent between steps 1 and 2
+    await assignQueueRow("r1", [{ model: "res.partner", resId: 3, name: "C" }]);
+    const t = await listTargets("r1");
+    expect(t.some((x) => x.resId === 2 && x.status === "sent")).toBe(true);
+  });
+
+  // The two tests above seed their sent target BEFORE calling assignQueueRow,
+  // so the read-then-write gate at the top of assignQueueRow ("GATE FIRST")
+  // refuses the whole call before step 1 or step 2 ever run - neither one
+  // reaches step 2's `status === "sent"` skip or step 3's `NOT EXISTS`
+  // backstop. These two simulate the actual race the gate's own comment
+  // names: the target is still unsent when the gate reads it, and only
+  // reaches Odoo WHILE step 1's insert is in flight - the "residual TOCTOU"
+  // the gate is not supposed to be safe from on its own.
+  it("refuses a retarget whose target is sent mid-flight, and step 2 leaves it in place", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 2, status: "pending" }]);
+
+    let flipped = false;
+    execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      const result = await rawExecute(sql, args);
+      if (!flipped && sql.includes("INSERT INTO meeting_log_targets")) {
+        flipped = true;
+        // Simulates the push loop's own targetToSent landing between this
+        // function's gate read and its step 2 delete pass.
+        await rawExecute(
+          `UPDATE meeting_log_targets SET status = 'sent' WHERE row_id = ? AND res_id = ?`,
+          ["r1", 2]
+        );
+      }
+      return result;
+    });
+
+    expect(await assignQueueRow("r1", [{ model: "res.partner", resId: 3, name: "C" }]))
+      .toBe(false);
+    expect((await listTargets("r1")).find((x) => x.resId === 2)?.status).toBe("sent");
+  });
+
+  it("does not un-send a target that lands mid-flight when the new set retains it", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "pending" }]);
+
+    let flipped = false;
+    execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (!flipped && sql.includes("INSERT INTO meeting_log_targets")) {
+        flipped = true;
+        await rawExecute(
+          `UPDATE meeting_log_targets SET status = 'sent' WHERE row_id = ? AND res_id = ?`,
+          ["r1", 1]
+        );
+      }
+      return rawExecute(sql, args);
+    });
+
+    expect(await assignQueueRow("r1", [{ model: "res.partner", resId: 1, name: "A" }]))
+      .toBe(false);
+    expect((await listTargets("r1"))[0].status).toBe("sent");
   });
 });
 
@@ -946,6 +1046,50 @@ describe("deleteQueueRow", () => {
 
     // A hard delete would free the key and drop the UNIQUE race backstop.
     expect(await insertQueueRow(newRow({ id: "other", sessionKey: "conv:1000" }))).toBe(false);
+  });
+
+  it("refuses to delete a partially-sent row under the nothing-was-sent copy", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [
+      { resId: 1, status: "sent" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    // deleteQueueRow returns Promise<boolean>, not a QueryResult.
+    expect(await deleteQueueRow("r1")).toBe(false);
+  });
+
+  it("still deletes a row where nothing was sent", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
+    expect(await deleteQueueRow("r1")).toBe(true);
+  });
+
+  it("deletes a partially-sent row through the honest deleted-after-send copy", async () => {
+    seed({ id: "r1", status: "failed" });
+    seedTargets("r1", [
+      { resId: 1, status: "sent" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    // Without widening deleteTerminalRow, BOTH statements refuse and the row is
+    // permanently undeletable.
+    expect(await deleteTerminalQueueRow("r1")).toBe(true);
+  });
+
+  it("deletes only the row it was asked to delete", async () => {
+    // The AND/OR precedence bug drops the id scope and deletes every row with a
+    // sent child. Every other fixture here is single-row and cannot see it.
+    seed({ id: "r1", session_key: "seed-r1", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    seed({ id: "r2", session_key: "seed-r2", status: "sent" });
+    seedTargets("r2", [{ resId: 2, status: "sent" }]);
+    await deleteTerminalQueueRow("r1");
+    expect(await readRow("r2")).toMatchObject({ status: "sent" });
+  });
+
+  it("refuses to delete a row that is mid-push", async () => {
+    seed({ id: "r1", status: "sending" });
+    seedTargets("r1", [{ resId: 1, status: "sent" }]);
+    expect(await deleteTerminalQueueRow("r1")).toBe(false);
   });
 });
 

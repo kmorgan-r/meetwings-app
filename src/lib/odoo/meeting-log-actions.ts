@@ -11,7 +11,7 @@ import {
   instanceFingerprint,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { SummarizationResult } from "@/types";
+import type { SelectedTargets, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
 import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
@@ -242,9 +242,9 @@ export function retryMeetingLog(id: string, deps: ActionDeps): Promise<ActionOut
 }
 
 export function assignMeetingLog(
-  id: string, contactId: number, leadId: number | null, deps: ActionDeps
+  id: string, targets: SelectedTargets, deps: ActionDeps
 ): Promise<ActionOutcome> {
-  return runAction(id, () => assignQueueRow(id, contactId, leadId), deps);
+  return runAction(id, () => assignQueueRow(id, targets), deps);
 }
 
 /** No push, ever. Delete is a status flip and nothing reaches Odoo. */
