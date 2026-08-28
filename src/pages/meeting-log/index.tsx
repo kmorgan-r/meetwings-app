@@ -23,7 +23,7 @@ import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, OdooContact } from "@/types";
+import type { MeetingLogListRow, OdooContact, SelectedTargets } from "@/types";
 import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
@@ -193,6 +193,24 @@ function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>
   const cached = contacts.get(row.contact_id);
   const base = cached ? cached.name : `Contact #${row.contact_id}`;
   return row.lead_id === null ? base : `${base} (lead or opportunity)`;
+}
+
+/**
+ * BRIDGE, for Task 7's `assignMeetingLog` signature change - Task 14 deletes
+ * this once AssignDialog produces a real `SelectedTargets` payload itself.
+ *
+ * Lead wins over contact, matching the migration 14 backfill's own coalesce
+ * (the same rule useMeetingLog.ts's `resolvedToSelected` applies on the
+ * enqueue side). `AssignPayload.contactId` is non-nullable - the dialog's
+ * Confirm button is disabled until a contact is selected - so the "neither
+ * set" case that adapter also guards can't occur here; there is always
+ * exactly one target.
+ */
+function assignPayloadToTargets(payload: AssignPayload): SelectedTargets {
+  if (payload.leadId !== null) {
+    return [{ model: "crm.lead", resId: payload.leadId, name: null }];
+  }
+  return [{ model: "res.partner", resId: payload.contactId, name: null }];
 }
 
 type ConfigState = "loading" | "absent" | "incomplete" | "complete";
@@ -531,7 +549,7 @@ export default function MeetingLog() {
       void runRowAction(
         row,
         () =>
-          assignMeetingLog(row.id, payload.contactId, payload.leadId, {
+          assignMeetingLog(row.id, assignPayloadToTargets(payload), {
             providerConfig: payload.providerConfig,
             // `summary_json` is null on an unassigned row, so this push makes
             // the AI call - up to 210s for a reassign. Without this hook the

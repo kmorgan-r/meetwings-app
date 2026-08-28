@@ -310,7 +310,7 @@ describe("assignMeetingLog", () => {
       .mockResolvedValueOnce(dbRow({ status: "pending", contact_id: 42, lead_id: 7 })) // 2: fresh
       .mockResolvedValueOnce(dbRow({ status: "sent", attempts: 2 }));                  // 3: after
 
-    await assignMeetingLog("r", 42, 7, { providerConfig: null });
+    await assignMeetingLog("r", [{ model: "crm.lead", resId: 7, name: null }], { providerConfig: null });
 
     expect(push.pushQueuedRow.mock.calls[0][0]).toMatchObject({ contact_id: 42, lead_id: 7 });
   });
@@ -318,7 +318,7 @@ describe("assignMeetingLog", () => {
   it("does not push when the CAS returns false", async () => {
     action.getQueueRow.mockResolvedValue(dbRow());
     action.assignQueueRow.mockResolvedValue(false);
-    const out = await assignMeetingLog("r", 42, null, { providerConfig: null });
+    const out = await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null });
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
     expect(out).toEqual({ kind: "conflict" });
   });
@@ -329,7 +329,7 @@ describe("assignMeetingLog", () => {
     // tests over a path where the summary never reached Odoo.
     action.getQueueRow.mockResolvedValue(dbRow());
 
-    await assignMeetingLog("r", 42, null, { providerConfig: null });
+    await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null });
 
     const deps = push.pushQueuedRow.mock.calls[0][1];
     const result = await deps.summarize({
@@ -355,7 +355,7 @@ describe("assignMeetingLog", () => {
       .mockResolvedValueOnce(dbRow())                                  // 2: fresh, attempts 1
       .mockResolvedValueOnce(dbRow({ status: "sent", attempts: 2 }));  // 3: after
 
-    expect(await assignMeetingLog("r", 42, null, { providerConfig: null }))
+    expect(await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null }))
       .toEqual({ kind: "degraded" });
   });
 });
@@ -403,7 +403,7 @@ describe("the cross-window rule", () => {
     action.getQueueRow.mockResolvedValue(dbRow());
 
     await retryMeetingLog("r", { providerConfig: null });
-    await assignMeetingLog("r", 42, null, { providerConfig: null });
+    await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null });
     await deleteMeetingLog("r");
 
     expect(push.runMeetingLogSweep).not.toHaveBeenCalled();
@@ -434,7 +434,7 @@ describe("an other-instance row", () => {
     // from the other-database group.
     action.getQueueRow.mockResolvedValue(dbRow({ instance: "http://h:8069|staging" }));
 
-    await assignMeetingLog("r", 42, null, { providerConfig: null });
+    await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null });
 
     expect(action.assignQueueRow).not.toHaveBeenCalled();
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
