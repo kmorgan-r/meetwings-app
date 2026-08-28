@@ -70,6 +70,7 @@ import {
   getTranscriptWatermark,
   insertQueueRow,
   listActionableRows,
+  listTargets,
   markSent,
   pruneTranscripts,
   readMeetingMessages,
@@ -79,6 +80,7 @@ import {
   releaseRowToPending,
   retryQueueRow,
   selectSweepable,
+  sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
 import { SELECTED_TARGET_SQL, purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
 import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
@@ -94,8 +96,7 @@ function newRow(over: Record<string, unknown> = {}) {
     sessionKey: "conv-1:1000",
     conversationId: "conv-1",
     instance: INSTANCE,
-    contactId: 42,
-    leadId: null,
+    targets: [{ model: "res.partner", resId: 42, name: null }],
     transcript: "You: hello",
     transcriptStartAt: 1000,
     transcriptEndAt: 2000,
@@ -172,6 +173,33 @@ function seedTargets(rowId: string, targets: SeedTarget[]) {
   });
 }
 
+/**
+ * Writes ONLY the child rows, through the real insertTarget statement -
+ * modeling a crash between insertQueueRow's ordered writes, where the
+ * children landed and the parent insert never ran.
+ */
+async function insertTargetsOnly(
+  rowId: string,
+  targets: { model: "res.partner" | "crm.lead"; resId: number; name: string | null }[],
+  createdAt = NOW
+) {
+  for (const t of targets) {
+    await rawExecute(QUEUE_SQL.insertTarget, [
+      crypto.randomUUID(), rowId, t.model, t.resId, t.name, createdAt,
+    ]);
+  }
+}
+
+/**
+ * Raw read distinguishing "no such row" (undefined) from a real row -
+ * getQueueRow instead returns null for a missing row, which the
+ * un-queued-meeting assertion below needs to NOT be confused with.
+ */
+async function readRow(id: string) {
+  const rows = await rawSelect("SELECT * FROM meeting_log_queue WHERE id = ?", [id]);
+  return rows[0];
+}
+
 beforeEach(async () => {
   const wasmBinary = fs.readFileSync(
     path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm")
@@ -245,6 +273,84 @@ describe("insertQueueRow", () => {
     await insertQueueRow(newRow());
     expect(await insertQueueRow(newRow({ id: "row-2" }))).toBe(false);
     expect(db.exec("SELECT COUNT(*) FROM meeting_log_queue")[0].values[0][0]).toBe(1);
+  });
+});
+
+describe("insertQueueRow: ordered enqueue", () => {
+  const baseRow = newRow();
+
+  it("writes children before the parent", async () => {
+    const order: string[] = [];
+    spyOnExecute((sql) => {
+      if (sql.includes("INSERT INTO meeting_log_targets")) order.push("child");
+      if (sql.includes("INSERT INTO meeting_log_queue")) order.push("parent");
+    });
+    await insertQueueRow({
+      ...baseRow,
+      targets: [
+        { model: "res.partner", resId: 1, name: "A" },
+        { model: "crm.lead", resId: 9, name: "L" },
+      ],
+    });
+    expect(order).toEqual(["child", "child", "parent"]);
+  });
+
+  it("leaves the meeting un-queued when the parent insert never runs", async () => {
+    // Crash after the children: the row is absent, so the watermark cannot
+    // advance and the next trigger re-slices the same span.
+    await insertTargetsOnly("r1", [{ model: "res.partner", resId: 1, name: "A" }]);
+    expect(await readRow("r1")).toBeUndefined();
+    expect(await listTargets("r1")).toHaveLength(1);
+  });
+
+  it("deletes its children when it loses the session_key race", async () => {
+    await insertQueueRow({
+      ...baseRow, id: "r1", sessionKey: "k",
+      targets: [{ model: "res.partner", resId: 1, name: "A" }],
+    });
+    const second = await insertQueueRow({
+      ...baseRow, id: "r2", sessionKey: "k",
+      targets: [{ model: "res.partner", resId: 2, name: "B" }],
+    });
+    // NOTE: this test only means something once the binding array above is
+    // right. With `instance` bound into session_key, EVERY meeting on one
+    // instance collides and this test passes for the wrong reason.
+    expect(second).toBe(false); // insertQueueRow returns Promise<boolean>
+    expect(await listTargets("r2")).toHaveLength(0);
+    expect(await listTargets("r1")).toHaveLength(1);
+  });
+
+  it("caps the child insert at five and records the error, rather than failing the parent", async () => {
+    const six = Array.from({ length: 6 }, (_, i) => ({
+      model: "res.partner" as const, resId: i + 1, name: `C${i + 1}`,
+    }));
+    const created = await insertQueueRow({ ...baseRow, id: "r1", targets: six });
+    expect(created).toBe(true); // the meeting is NOT lost
+    expect(await listTargets("r1")).toHaveLength(5);
+    expect(await readRow("r1")).toMatchObject({ last_error_code: "TARGET_CAP" });
+  });
+});
+
+describe("orphan sweep", () => {
+  it("sweeps parentless children older than the gate", async () => {
+    await insertTargetsOnly("gone", [{ model: "res.partner", resId: 1, name: "A" }], 0);
+    expect(await sweepOrphanTargets(1_000)).toBe(1);
+  });
+
+  it("leaves recent parentless children alone", async () => {
+    await insertTargetsOnly("gone", [{ model: "res.partner", resId: 1, name: "A" }], 5_000);
+    expect(await sweepOrphanTargets(1_000)).toBe(0);
+  });
+
+  it("never touches the children of a row that still exists, however old", async () => {
+    // The age gate alone does not give you this one: a mutant that drops
+    // `row_id NOT IN (SELECT id FROM meeting_log_queue)` and keeps the age
+    // gate would pass every other case here while deleting the targets of
+    // every aged queued row in the backlog.
+    seed({ id: "r1", status: "cancelled" });
+    seedTargets("r1", [{ resId: 1, status: "pending", createdAt: 0 }]);
+    expect(await sweepOrphanTargets(1_000)).toBe(0);
+    expect(await listTargets("r1")).toHaveLength(1);
   });
 });
 

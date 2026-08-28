@@ -3,11 +3,13 @@ import type {
   MeetingLogListRow,
   MeetingLogStatus,
   MeetingLogTarget,
+  SelectedTargets,
   TranscriptEntry,
 } from "@/types";
 import {
   ESCALATE_AFTER_ATTEMPTS,
   HOLD_MS,
+  MAX_TARGETS,
   STALE_CLAIM_MS,
   pruneCutoff,
 } from "@/lib/odoo/meeting-log";
@@ -40,8 +42,7 @@ export interface NewQueueRow {
   sessionKey: string;
   conversationId: string | null;
   instance: string;
-  contactId: number | null;
-  leadId: number | null;
+  targets: SelectedTargets;
   transcript: string;
   transcriptStartAt: number;
   transcriptEndAt: number;
@@ -392,23 +393,90 @@ function toMeetingLogTarget(raw: Record<string, unknown>): MeetingLogTarget {
   };
 }
 
+/**
+ * Writes the children, then the parent, with no transaction - see the file
+ * header. `rowId` is a client-side crypto.randomUUID(), so every child's
+ * foreign key is valid before the parent row exists; a crash between the two
+ * steps leaves an orphaned set of children and no parent, which
+ * sweepOrphanTargets below reclaims and the watermark (MAX(transcript_end_at)
+ * over meeting_log_queue, unmoved by an absent row) re-slices correctly on
+ * the next trigger.
+ *
+ * Overflow past MAX_TARGETS is CAPPED, not rejected - the opposite of
+ * addSelectedTarget's rule. Throwing here would escape into `trigger`'s
+ * catch, which calls skipUnwritten() and advances the skip watermark,
+ * destroying the whole meeting instead of one stale target.
+ */
 export async function insertQueueRow(row: NewQueueRow): Promise<boolean> {
   const db = await getDatabase();
+
+  const capped = row.targets.slice(0, MAX_TARGETS);
+  const overflowed = row.targets.length > MAX_TARGETS;
+
+  // Children first. The watermark reads the parent table, so a crash here
+  // leaves the meeting un-queued and the next trigger re-slices it.
+  for (const t of capped) {
+    await db.execute(QUEUE_SQL.insertTarget, [
+      crypto.randomUUID(), row.id, t.model, t.resId, t.name, row.createdAt,
+    ]);
+  }
+
+  // QUEUE_SQL.insert's column order: (id, session_key, conversation_id,
+  // instance, contact_id, lead_id, transcript, transcript_start_at,
+  // transcript_end_at, meeting_started_at, status, created_at). Only the two
+  // id columns changed to null here - the target rows are the source of
+  // truth now, and these two stay on disk purely as pre-migration-14 history.
   const result = await db.execute(QUEUE_SQL.insert, [
-    row.id, row.sessionKey, row.conversationId, row.instance, row.contactId,
-    row.leadId, row.transcript, row.transcriptStartAt, row.transcriptEndAt,
+    row.id, row.sessionKey, row.conversationId, row.instance,
+    null, null, // contact_id, lead_id
+    row.transcript, row.transcriptStartAt, row.transcriptEndAt,
     row.meetingStartedAt, row.status, row.createdAt,
   ]);
   // 0 means the other trigger already enqueued this meeting. That is a NORMAL
   // outcome, not an error: the caller returns silently - no hold, no push, no
   // recorded failure.
-  return (result.rowsAffected ?? 0) > 0;
+  const created = (result.rowsAffected ?? 0) > 0;
+
+  // Guarded: both writes below run AFTER the parent insert already succeeded,
+  // and an escaping throw would reject out of insertQueueRow into trigger's
+  // catch - which toasts a failure, skips the watermark and never starts the
+  // hold, for a meeting that IS queued.
+  try {
+    if (!created) {
+      // The other trigger won ON CONFLICT(session_key). Take our children back.
+      await db.execute(QUEUE_SQL.deleteTargetsByRow, [row.id]);
+    } else if (overflowed) {
+      // recordError, NOT recordErrorOnUnsent - that one has no id predicate
+      // and would stamp TARGET_CAP across every unsent row in the queue.
+      await db.execute(QUEUE_SQL.recordError, [
+        "TARGET_CAP", `Only the first ${MAX_TARGETS} targets were queued.`, row.id,
+      ]);
+    }
+  } catch (e) {
+    console.warn("[meeting-log] enqueue bookkeeping failed", e);
+  }
+
+  return created;
 }
 
 export async function listTargets(rowId: string): Promise<MeetingLogTarget[]> {
   const db = await getDatabase();
   const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.targetsByRow, [rowId]);
   return rows.map(toMeetingLogTarget);
+}
+
+/**
+ * Reclaims children whose parent never got written - the crash window
+ * insertQueueRow's write order leaves behind. Age-gated so a row genuinely
+ * mid-insert (children written, parent write still in flight) is never
+ * touched; the NOT IN half is equally load-bearing, because a parent that
+ * still exists (cancelled, sent, whatever) means its children are not
+ * orphans at all, however old.
+ */
+export async function sweepOrphanTargets(olderThan: number): Promise<number> {
+  const db = await getDatabase();
+  const res = await db.execute(QUEUE_SQL.sweepOrphanTargets, [olderThan]);
+  return res.rowsAffected ?? 0; // ?? 0 matches every other read in this file
 }
 
 // A parent already in one of these is not re-derived. `sent`, `cancelled` and

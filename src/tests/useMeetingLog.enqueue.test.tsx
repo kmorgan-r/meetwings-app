@@ -36,6 +36,7 @@ const action = vi.hoisted(() => ({
   retryQueueRow: vi.fn(async () => true),
   assignQueueRow: vi.fn(async () => true),
   deleteQueueRow: vi.fn(async () => true),
+  sweepOrphanTargets: vi.fn(async () => 0),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 
@@ -208,6 +209,7 @@ beforeEach(() => {
   action.retryQueueRow.mockResolvedValue(true);
   action.assignQueueRow.mockResolvedValue(true);
   action.deleteQueueRow.mockResolvedValue(true);
+  action.sweepOrphanTargets.mockResolvedValue(0);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
   summarizer.generateMeetingLogSummary.mockResolvedValue(null);
@@ -233,7 +235,7 @@ describe("the meeting-ended trigger", () => {
       status: "held",
       transcriptStartAt: 1000,
       transcriptEndAt: 1000,
-      contactId: 42,
+      targets: [{ model: "res.partner", resId: 42, name: null }],
     });
   });
 
@@ -276,7 +278,7 @@ describe("the meeting-ended trigger", () => {
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
-      status: "unassigned", contactId: null,
+      status: "unassigned", targets: [],
     });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
