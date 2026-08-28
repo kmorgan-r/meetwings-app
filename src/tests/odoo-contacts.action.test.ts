@@ -40,6 +40,17 @@ import {
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import type { OdooContact } from "@/types";
+import { applyMigration14, seedPre14, seedPre14Singleton } from "./helpers/migration-14";
+
+/** Reads a query back as plain row objects, for asserting on a table no
+ * exported action function reads yet (odoo_selected_targets). */
+function rows(database: SqlJsDatabase, sql: string): Record<string, unknown>[] {
+  const stmt = database.prepare(sql);
+  const out: Record<string, unknown>[] = [];
+  while (stmt.step()) out.push(stmt.getAsObject());
+  stmt.free();
+  return out;
+}
 
 const MIGRATION = path.resolve(
   __dirname,
@@ -308,5 +319,43 @@ describe("the selected target", () => {
     );
     await clearTarget();
     await expect(loadTarget(INSTANCE)).resolves.toBeNull();
+  });
+});
+
+describe("migration 14 backfill", () => {
+  // Each test builds its own pre-14 sql.js database via the shared helpers -
+  // it does not touch the file-level `db` / beforeEach above.
+  it("migrates a lead singleton whose lead_name migration 13 left NULL", async () => {
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: 7, lead_id: 90, lead_name: null,
+    });
+    await applyMigration14(db);
+    const s = rows(db, "SELECT * FROM odoo_selected_targets");
+    expect(s).toHaveLength(1);
+    expect(s[0]).toMatchObject({ model: "crm.lead", res_id: 90, name: null });
+  });
+
+  it("migrates a contact-only singleton with a null name", async () => {
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: 7, lead_id: null, lead_name: null,
+    });
+    await applyMigration14(db);
+    expect(rows(db, "SELECT * FROM odoo_selected_targets")[0]).toMatchObject({
+      model: "res.partner", res_id: 7, name: null,
+    });
+  });
+
+  it("backfills a both-NULL singleton to zero rows", async () => {
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: null, lead_id: null, lead_name: null,
+    });
+    await applyMigration14(db);
+    expect(rows(db, "SELECT * FROM odoo_selected_targets")).toHaveLength(0);
+  });
+
+  it("drops the singleton table", async () => {
+    const db = await seedPre14([]);
+    await applyMigration14(db);
+    expect(() => db.exec("SELECT 1 FROM odoo_selected_target")).toThrow();
   });
 });

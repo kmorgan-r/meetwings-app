@@ -51,8 +51,8 @@ import {
 } from "@/lib/database/meeting-log.action";
 import { purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
 import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
+import { applyMigration14, MIGRATIONS, seedPre14 } from "./helpers/migration-14";
 
-const MIGRATIONS = path.resolve(__dirname, "../../src-tauri/src/db/migrations");
 const INSTANCE = "http://h:8069|odoo";
 const OTHER = "http://h:8069|staging";
 const NOW = 1_700_000_000_000;
@@ -90,6 +90,16 @@ function seed(over: Record<string, unknown>) {
       `VALUES (${Object.keys(row).map(() => "?").join(",")})`,
     Object.values(row) as never[]
   );
+}
+
+/** Reads a query back as plain row objects, for asserting on tables no
+ * exported action function reads (meeting_log_targets, odoo_selected_targets). */
+function rows(database: SqlJsDatabase, sql: string): Record<string, unknown>[] {
+  const stmt = database.prepare(sql);
+  const out: Record<string, unknown>[] = [];
+  while (stmt.step()) out.push(stmt.getAsObject());
+  stmt.free();
+  return out;
 }
 
 beforeEach(async () => {
@@ -894,5 +904,57 @@ describe("getQueueTranscript", () => {
     seed({ id: "r", status: "deleted", transcript: "" });
     expect(await getQueueTranscript("r")).toBe("");
     expect(await getQueueTranscript("nope")).toBeNull();
+  });
+});
+
+describe("migration 14 backfill", () => {
+  it("backfills an unassigned legacy row to zero targets", async () => {
+    const db = await seedPre14([
+      { id: "r1", contact_id: null, lead_id: null, status: "unassigned" },
+    ]);
+    await applyMigration14(db);
+    expect(rows(db, "SELECT * FROM meeting_log_targets")).toHaveLength(0);
+  });
+
+  it("backfills a lead row to one crm.lead target", async () => {
+    const db = await seedPre14([
+      { id: "r1", contact_id: 7, lead_id: 90, status: "pending" },
+    ]);
+    await applyMigration14(db);
+    const t = rows(db, "SELECT * FROM meeting_log_targets");
+    expect(t).toHaveLength(1);
+    expect(t[0]).toMatchObject({ row_id: "r1", model: "crm.lead", res_id: 90 });
+  });
+
+  it("backfills a contact-only row to one res.partner target", async () => {
+    const db = await seedPre14([
+      { id: "r1", contact_id: 7, lead_id: null, status: "pending" },
+    ]);
+    await applyMigration14(db);
+    const t = rows(db, "SELECT * FROM meeting_log_targets");
+    expect(t[0]).toMatchObject({ model: "res.partner", res_id: 7 });
+  });
+
+  it("carries attachment_id and message_id across for an in-flight row", async () => {
+    const db = await seedPre14([
+      { id: "r1", contact_id: 7, lead_id: null, status: "sending",
+        attachment_id: 111, message_id: 222 },
+    ]);
+    await applyMigration14(db);
+    const t = rows(db, "SELECT * FROM meeting_log_targets")[0];
+    expect(t).toMatchObject({ attachment_id: 111, message_id: 222, status: "pending" });
+  });
+
+  it("maps sent to sent and failed to failed, everything else to pending", async () => {
+    const db = await seedPre14([
+      { id: "a", contact_id: 1, lead_id: null, status: "sent" },
+      { id: "b", contact_id: 2, lead_id: null, status: "failed" },
+      { id: "c", contact_id: 3, lead_id: null, status: "held" },
+    ]);
+    await applyMigration14(db);
+    const byRow = Object.fromEntries(
+      rows(db, "SELECT row_id, status FROM meeting_log_targets").map((r) => [r.row_id, r.status]),
+    );
+    expect(byRow).toEqual({ a: "sent", b: "failed", c: "pending" });
   });
 });
