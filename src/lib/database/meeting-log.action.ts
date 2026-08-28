@@ -2,6 +2,7 @@ import type {
   DbMeetingLogRow,
   MeetingLogListRow,
   MeetingLogStatus,
+  MeetingLogTarget,
   TranscriptEntry,
 } from "@/types";
 import {
@@ -28,7 +29,10 @@ import { getDatabase } from "./config";
  * scanned statically instead.
  *
  * Atomicity is not needed: the write-ahead row plus the per-row CAS is the
- * whole concurrency design. Nothing here writes two rows that must agree.
+ * whole concurrency design. Ordering replaces it - see the target statements
+ * below, which DO write rows that must agree (a queue row and its targets),
+ * in an order chosen so a crash mid-write leaves the system inert rather than
+ * inconsistent.
  */
 
 export interface NewQueueRow {
@@ -292,10 +296,75 @@ UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
  WHERE status IN ('sent','cancelled')
    AND (transcript <> '' OR summary_json IS NOT NULL)
    AND created_at < ?`,
+
+  // Children of a queue row. Ordering replaces atomicity: these are written
+  // BEFORE the parent, because the watermark reads the parent table and a
+  // child without a parent is inert.
+  insertTarget: `INSERT INTO meeting_log_targets
+      (id, row_id, model, res_id, name, status, created_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+    ON CONFLICT(row_id, model, res_id) DO UPDATE SET
+      status = 'pending', last_error = NULL, last_error_code = NULL
+    WHERE meeting_log_targets.status <> 'sent'`,
+
+  deleteTargetsByRow: `DELETE FROM meeting_log_targets WHERE row_id = ?`,
+
+  targetsByRow: `SELECT * FROM meeting_log_targets
+    WHERE row_id = ? ORDER BY created_at, id`,
+
+  // Orphans only. The NOT IN half is as load-bearing as the age gate: a
+  // cancelled row's children are NOT orphans, because the parent still exists.
+  sweepOrphanTargets: `DELETE FROM meeting_log_targets
+    WHERE created_at < ?
+      AND row_id NOT IN (SELECT id FROM meeting_log_queue)`,
+
+  // Parameter order is (code, text, id), matching the parent toPending/toFailed
+  // these are named to mirror. Do NOT reverse it: two statements with mirrored
+  // names and reversed parameters is swap-bait, and a swap silently puts
+  // ODOO_FAULT into the user-visible message field.
+  // `AND status <> 'sent'` on BOTH. Without it a stale dashboard's Retry - or the
+  // push's own record() after a stolen claim - flips a sent target back to
+  // pending. No duplicate note results (message_id is still stored), but
+  // deleteRow's `NOT EXISTS (... status='sent')` gate then PASSES, and the user
+  // deletes the row under "Nothing was sent to Odoo." while a note is live on a
+  // customer's chatter. Also the Global Constraint: a sent target is immutable.
+  targetToPending: `UPDATE meeting_log_targets
+    SET status = 'pending', last_error_code = ?, last_error = ?
+    WHERE id = ? AND status <> 'sent'`,
+  targetToFailed: `UPDATE meeting_log_targets
+    SET status = 'failed', last_error_code = ?, last_error = ?
+    WHERE id = ? AND status <> 'sent'`,
+  // Clearing the error columns matters: a stale error rendered beside a green
+  // sent target reads as a fresh failure.
+  targetToSent: `UPDATE meeting_log_targets
+    SET status = 'sent', sent_at = ?, last_error = NULL, last_error_code = NULL
+    WHERE id = ?`,
+
+  setTargetAttachment: `UPDATE meeting_log_targets SET attachment_id = ? WHERE id = ?`,
+  setTargetMessage: `UPDATE meeting_log_targets SET message_id = ? WHERE id = ?`,
 } as const;
 
 function toRow(raw: Record<string, unknown>): DbMeetingLogRow {
   return raw as unknown as DbMeetingLogRow;
+}
+
+// Unlike toRow, a real field-by-field mapping: MeetingLogTarget is camelCase
+// and QUEUE_SQL.targetsByRow returns the table's snake_case columns as-is.
+function toMeetingLogTarget(raw: Record<string, unknown>): MeetingLogTarget {
+  return {
+    id: raw.id as string,
+    rowId: raw.row_id as string,
+    model: raw.model as MeetingLogTarget["model"],
+    resId: raw.res_id as number,
+    name: (raw.name as string | null) ?? null,
+    status: raw.status as MeetingLogTarget["status"],
+    attachmentId: (raw.attachment_id as number | null) ?? null,
+    messageId: (raw.message_id as number | null) ?? null,
+    lastError: (raw.last_error as string | null) ?? null,
+    lastErrorCode: (raw.last_error_code as string | null) ?? null,
+    createdAt: raw.created_at as number,
+    sentAt: (raw.sent_at as number | null) ?? null,
+  };
 }
 
 export async function insertQueueRow(row: NewQueueRow): Promise<boolean> {
@@ -309,6 +378,12 @@ export async function insertQueueRow(row: NewQueueRow): Promise<boolean> {
   // outcome, not an error: the caller returns silently - no hold, no push, no
   // recorded failure.
   return (result.rowsAffected ?? 0) > 0;
+}
+
+export async function listTargets(rowId: string): Promise<MeetingLogTarget[]> {
+  const db = await getDatabase();
+  const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.targetsByRow, [rowId]);
+  return rows.map(toMeetingLogTarget);
 }
 
 export async function getTranscriptWatermark(): Promise<number> {

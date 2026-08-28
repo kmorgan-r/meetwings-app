@@ -5,22 +5,52 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 let db: SqlJsDatabase;
 
-vi.mock("@/lib/database/config", () => ({
-  getDatabase: vi.fn(async () => ({
-    execute: async (sql: string, params: unknown[] = []) => {
-      db.run(sql, params as never[]);
-      return { rowsAffected: db.getRowsModified(), lastInsertId: 0 };
-    },
-    select: async (sql: string, params: unknown[] = []) => {
-      const stmt = db.prepare(sql);
-      stmt.bind(params as never[]);
-      const rows: Record<string, unknown>[] = [];
-      while (stmt.step()) rows.push(stmt.getAsObject());
-      stmt.free();
-      return rows;
-    },
-  })),
+/** The real sql.js reads/writes, unwrapped. Tests call these directly for
+ * fixture setup; `execute`/`select` below delegate to them by default. */
+async function rawExecute(sql: string, params?: unknown[]) {
+  db.run(sql, (params ?? []) as never[]);
+  return { rowsAffected: db.getRowsModified(), lastInsertId: 0 };
+}
+
+async function rawSelect(sql: string, params?: unknown[]) {
+  const stmt = db.prepare(sql);
+  stmt.bind((params ?? []) as never[]);
+  const rows: Record<string, unknown>[] = [];
+  while (stmt.step()) rows.push(stmt.getAsObject());
+  stmt.free();
+  return rows;
+}
+
+// vi.mock is hoisted above every top-level statement, so a factory closing
+// over a plain `const` reads a binding still in TDZ and throws "Cannot
+// access 'execute' before initialization" on import, before any test runs.
+// vi.hoisted gives the mock a binding that already exists by then.
+//
+// A STABLE pair, unlike a factory that built a fresh { execute, select }
+// closure on every getDatabase() call: there is now something for
+// mockImplementation/spying to attach to across a whole test. Tasks 6 and 8
+// need to observe statement order and count against this pair.
+const { execute, select } = vi.hoisted(() => ({
+  execute: vi.fn(),
+  select: vi.fn(),
 }));
+vi.mock("@/lib/database/config", () => ({
+  getDatabase: async () => ({ execute, select }),
+}));
+
+/**
+ * Wraps `execute` so a test can observe statement order/text without losing
+ * the real write - `fn` runs, then the call still lands in sql.js via
+ * `rawExecute`. A spy that does not delegate would see every statement pass
+ * an empty database, and Task 6's "children before the parent" test - the
+ * only proof of the core no-transaction argument - would hold on a no-op.
+ */
+const spyOnExecute = (fn: (sql: string) => void) => {
+  execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+    fn(sql);
+    return rawExecute(sql, args);
+  });
+};
 
 import {
   QUEUE_SQL,
@@ -92,6 +122,52 @@ function seed(over: Record<string, unknown>) {
   );
 }
 
+interface SeedTarget {
+  resId: number;
+  model?: "res.partner" | "crm.lead";
+  name?: string | null;
+  status?: "pending" | "sent" | "failed";
+  createdAt?: number;
+  attachmentId?: number | null;
+  messageId?: number | null;
+  lastError?: string | null;
+  lastErrorCode?: string | null;
+}
+
+/**
+ * Straight into meeting_log_targets, parallel to seed(). NOT built on
+ * QUEUE_SQL.insertTarget: that statement hardcodes status = 'pending' in its
+ * ON CONFLICT and cannot set attachmentId, messageId, lastError or
+ * lastErrorCode - which nearly every fixture that needs this helper does.
+ *
+ * Only usable once a test's own setup has applied migration 14
+ * (odoo-multi-target.sql) - this file's shared beforeEach deliberately does
+ * not (see the header comment above "no JS transactions").
+ */
+function seedTargets(rowId: string, targets: SeedTarget[]) {
+  targets.forEach((t, i) => {
+    const row = {
+      id: `target-${rowId}-${i}`,
+      row_id: rowId,
+      model: t.model ?? "res.partner",
+      res_id: t.resId,
+      name: t.name ?? null,
+      status: t.status ?? "pending",
+      attachment_id: t.attachmentId ?? null,
+      message_id: t.messageId ?? null,
+      last_error: t.lastError ?? null,
+      last_error_code: t.lastErrorCode ?? null,
+      created_at: t.createdAt ?? NOW,
+      sent_at: null,
+    };
+    db.run(
+      `INSERT INTO meeting_log_targets (${Object.keys(row).join(",")}) ` +
+        `VALUES (${Object.keys(row).map(() => "?").join(",")})`,
+      Object.values(row) as never[]
+    );
+  });
+}
+
 beforeEach(async () => {
   const wasmBinary = fs.readFileSync(
     path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm")
@@ -104,6 +180,8 @@ beforeEach(async () => {
   // which deletes from the three tables that migration creates.
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-contacts.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "meeting-log-queue.sql"), "utf8"));
+  execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
+  select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
 });
 
 describe("the migration", () => {
@@ -124,6 +202,17 @@ describe("no JS transactions", () => {
     for (const [name, sql] of Object.entries(QUEUE_SQL)) {
       expect(sql, `${name} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
       expect(sql, `${name} must not commit`).not.toMatch(/\bCOMMIT\b/i);
+    }
+  });
+
+  it("keeps every target statement inside QUEUE_SQL where the scan can see it", () => {
+    const required = [
+      "insertTarget", "deleteTargetsByRow", "targetsByRow", "sweepOrphanTargets",
+      "targetToPending", "targetToFailed", "targetToSent",
+      "setTargetAttachment", "setTargetMessage",
+    ];
+    for (const key of required) {
+      expect(QUEUE_SQL, `QUEUE_SQL is missing ${key}`).toHaveProperty(key);
     }
   });
 });
