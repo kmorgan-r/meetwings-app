@@ -2,7 +2,7 @@
 
 **Status:** approved, not implemented
 **Date:** 2026-08-28
-**Revised:** 2026-08-28, applying 38 findings from a five-reviewer spec review
+**Revised:** 2026-08-28, after two five-reviewer rounds and 79 applied findings
 **Supersedes:** the single-target selection introduced in the contact picker
 design (2026-08-04) and carried through the meeting log queue (2026-08-08)
 
@@ -65,7 +65,11 @@ this follows that.
 
 It is registered in `src-tauri/src/db/main.rs` as **version 14**, one new vec
 entry, exactly one new `.sql` file — `every_migration_file_is_registered`
-counts files against entries.
+counts files against entries. Its `description` is
+`"create_multi_target_tables"`, following `"create_odoo_contact_tables"`,
+`"create_meeting_log_queue"` and `"allow_lead_only_selected_target"`. That
+string is not cosmetic: the pin test finds its migration with
+`.find(|m| m.description == "…")`.
 
 It also needs its own pin test in `src-tauri/src/db/migration_tests.rs`,
 following `lead_only_target_migration_is_version_13_and_points_at_its_own_file`
@@ -109,10 +113,12 @@ CREATE TABLE IF NOT EXISTS meeting_log_targets (
   sent_at         INTEGER,
   UNIQUE (row_id, model, res_id)
 );
-
-CREATE INDEX IF NOT EXISTS idx_meeting_log_targets_row
-  ON meeting_log_targets (row_id);
 ```
+
+No separate index on `row_id`. `UNIQUE (row_id, model, res_id)` already
+creates one with `row_id` leftmost, which serves every `WHERE row_id = ?`
+lookup; an explicit second index would only add write amplification on each
+child insert and status update.
 
 ### Why `model` + `res_id` and not `contact_id` / `lead_id`
 
@@ -169,7 +175,7 @@ who ever ended a meeting without selecting anybody.
 The backfill is therefore gated:
 
 ```sql
-INSERT INTO meeting_log_targets (id, row_id, model, res_id, name, status,
+INSERT OR IGNORE INTO meeting_log_targets (id, row_id, model, res_id, name, status,
                                  attachment_id, message_id, created_at, sent_at)
 SELECT hex(randomblob(16)),
        id,
@@ -187,12 +193,25 @@ SELECT hex(randomblob(16)),
 would also be unique — the backfill writes at most one child per parent — but
 a distinct id keeps the two id spaces from being confused later.
 
+`INSERT OR IGNORE` matches migration 13's `INSERT OR REPLACE` precedent. The
+DDL's `IF NOT EXISTS` lets a drifted development database survive the create,
+and a bare `INSERT` would then abort on `UNIQUE (row_id, model, res_id)`
+anyway.
+
 It carries `attachment_id` and `message_id` across. Dropping those ids would
 make every in-flight queued meeting re-post on the next sweep — duplicate
 notes and duplicate transcript files on live customer records, for anyone who
 upgrades with a non-empty queue.
 
-The old singleton row migrates by the same coalesce rule.
+The old singleton row migrates by the same coalesce rule **and the same
+`WHERE contact_id IS NOT NULL OR lead_id IS NOT NULL` gate**, before
+`DROP TABLE IF EXISTS odoo_selected_target` runs. A both-NULL singleton cannot
+be produced by this app's writes — `saveTarget` never stores one — but
+`loadTarget` already guards against reading one back, on the reasoning that it
+"cannot be written by this app… but reading it back as a target would hand
+slice 2 something it can only file as unassigned". The cost of the guard is one
+WHERE clause; the cost of its absence is a permanently failing
+`Database.load`.
 
 ### Every reader of the dropped table moves with it
 
@@ -219,10 +238,24 @@ only the ones named here.
 The spec's claim that `meeting_log_queue.contact_id` and `lead_id` become
 unwritten is only true if the code that writes them today changes:
 
-- `ResolvedTarget` (`src/types/odoo.ts`) is replaced by
-  `SelectedTargets` — an ordered list of `{ model, resId, name }`, living
-  beside it in the same file. It is the type threaded through
-  `useOdooTarget`'s `targetRef`, `useMeetingLog`'s
+- `ResolvedTarget` (`src/types/odoo.ts`) is replaced by two exported types
+  living beside it in the same file — **the element is named, not only the
+  list**, because the picker's per-row handlers, `AssignDialog`'s selection
+  state and the per-target rendering each need to name one element, and an
+  anonymous shape gets redeclared inline in all three:
+
+  ```ts
+  export interface SelectedTarget {
+    model: "res.partner" | "crm.lead";
+    resId: number;
+    name: string | null;
+  }
+  export type SelectedTargets = SelectedTarget[];
+  ```
+
+  Unprefixed, matching every other type in that file, and camelCase over the
+  snake_case columns, matching how `loadTarget` already maps its read. This is
+  the type threaded through `useOdooTarget`'s `targetRef`, `useMeetingLog`'s
   `UseMeetingLogOptions.targetRef`, and `ContactPickerProps` in place of the
   singular `contactId` / `leadId` / `leadName` fields.
 - `NewQueueRow.contactId` and `NewQueueRow.leadId`
@@ -286,6 +319,12 @@ child insert is exactly the code most likely to be "improved" into a
 transaction by a later contributor, and a statement outside `QUEUE_SQL` is
 invisible to the only guard that would catch it.
 
+The new keys follow the existing naming so the object stays readable:
+`insertTarget`, `deleteTargetsByRow`, `targetsByRow`, `sweepOrphanTargets`,
+`targetToPending` / `targetToFailed` / `targetToSent` (mirroring `toPending` /
+`toFailed` / `toSent`), and `setTargetAttachment` / `setTargetMessage`
+(mirroring `setAttachment` / `setMessage`).
+
 If the statements are grouped into a sibling exported object instead, the
 scan's list is extended in the same commit.
 
@@ -333,6 +372,14 @@ backfill.
 `res_model` and `res_id` as well as by name, and those already differ per
 target.
 
+**`PushDeps.now` changes from `number` to `() => number`.** Today it is a
+single value sampled once by the caller and threaded through the whole push.
+That is fine for a push that writes one timestamp; it is not fine for a loop
+that re-stamps the claim between targets, because every re-stamp would write
+the identical value — making a correct implementation and one that stamps only
+once indistinguishable in the database, and the corresponding mutation check
+unkillable. This is an interface change to the push, not a test-only concern.
+
 ### One target's failure does not strand the others
 
 Each target's attempt is wrapped in **its own error boundary**. Today
@@ -343,7 +390,7 @@ retryable): targets 1 and 2 skip as already sent, target 3 faults again, the
 loop aborts. Every pass. Targets 4 and 5 are never attempted even once, and
 `selectSweepable` never picks up `failed`.
 
-So:
+So, three branches — not two:
 
 - A **deterministic** failure is caught for that target, written to its
   `status` / `last_error` / `last_error_code`, and the loop **continues** to
@@ -351,12 +398,27 @@ So:
   rule.
 - A **retryable transport** failure (`isRetryable`) **aborts the remaining
   targets** for this pass rather than burning N × 30s against a dead network.
-  Untried targets stay `pending`; the next sweep picks the row up again.
+  The aborting target records its own `last_error` and `last_error_code`
+  before the loop unwinds — without that the parent's mirror has nothing to
+  copy and a network outage renders as an unexplained stuck row. Untried
+  targets stay `pending`; the next sweep picks the row up again.
+- A **local persistence** failure is neither, and **also aborts the pass**.
+  Continuing would fire wire calls on targets 4 and 5 whose returned ids the
+  same broken database cannot store. See the next section for how that target
+  is classified.
 
 `attempts` remains a **parent-level** counter measuring passes, not targets.
 `ESCALATE_AFTER_ATTEMPTS` therefore still counts sweep passes, and a row that
 advances one target per pass does not escalate faster than a single-target
 row would.
+
+**Some deterministic codes are instance-wide, and that is accepted.**
+`ODOO_UNREACHABLE` with a non-retryable status (a 404 from a wrong URL path),
+`ODOO_PAYLOAD_UNSERIALIZABLE` and `ODOO_MALFORMED_RESPONSE` share the body and
+the client, so they fail identically for every target and the loop marks all
+five `failed` where the single-target code failed one row. This is deliberate
+rather than carved into the abort branch: one whole-row Retry recovers all
+five, because `retryRow` resets every `failed` child.
 
 ### A local write failure after a wire call routes that target to `pending`
 
@@ -373,6 +435,13 @@ recorded, never to `failed`, regardless of the code. Classifying by code
 instead turns a transient `SQLITE_BUSY` into `ODOO_INTERNAL`, `isRetryable`
 returns false, and the target goes `failed` with its attachment live in Odoo
 — which the retry rules below then make permanently unrecoverable.
+
+**The `persist` helper and its flag are re-created inside each target's error
+boundary.** Today `persistenceFailed` is one boolean over the whole push and is
+never reset. Hoisted unchanged into a per-target loop it stays `true` for every
+subsequent target, so a `SQLITE_BUSY` on target 1 would route target 3's
+genuine `ODOO_FAULT` to `pending` and retry it forever — the same
+misclassification this section forbids, running the other way.
 
 The claim that "the adopt-search covers it" holds only if that target comes
 back `pending`.
@@ -401,6 +470,22 @@ completes**, so the claim ages per target rather than per meeting.
 `STALE_CLAIM_MS` keeps its current value and its current meaning: the longest
 a single unit of work may run before it is presumed dead.
 
+The re-stamp is a CAS:
+
+```sql
+UPDATE meeting_log_queue SET claimed_at = ? WHERE id = ? AND status = 'sending'
+```
+
+The predicate is **not** needed to make re-stamping work — a plain update
+already defeats `reclaimBase`'s `claimed_at < ?` test, and the only other
+reader, `isClaimStale`, is status-gated. It is there because
+`rowsAffected = 0` is the pusher's only signal that its claim was taken by
+another window while it was working. A zero-row result and a throw are treated
+identically: the claim is gone or unprovable, so the pass aborts and the
+remaining targets stay `pending`. Continuing to push under a claim nobody is
+refreshing is precisely the reclaim-mid-flight duplicate the re-stamp exists to
+prevent.
+
 `SUMMARIZE_TIMEOUT_MS`'s comment is rewritten in the same change. Leaving
 stale arithmetic in a comment that a future contributor will tune against is
 its own defect.
@@ -421,14 +506,22 @@ reached nothing as `sent`, writes `sent_at`, clears its error, drops it from
 strand the retryable target permanently: `selectSweepable` picks up only
 `pending` and `held`, so nothing would ever come back for it.
 
-Derivation is reachable **only from a parent in `sending`**. It never runs on
-a parent in `cancelled`, `deleted`, `sent` or `unassigned`. Without that
-guard, re-deriving a `deleted` parent that still holds `pending` children
-flips it to `pending` — and a `deleted` row has `transcript = ''`, so the
-next push sends an empty attachment and a "Summarization failed" note to a
-customer record.
+Derivation **refuses** to run on a parent in `cancelled`, `deleted`, `sent` or
+`unassigned`. Re-deriving a `deleted` parent that still holds `pending`
+children would flip it to `pending` — and a `deleted` row has
+`transcript = ''`, so the next push would send an empty attachment and a
+"Summarization failed" note to a customer record.
 
-### The derived write is a CAS, like every other status write
+It is stated as an exclusion list, not as "only from `sending`". That earlier
+phrasing was wrong, and wrong in a way that made the queue page's own actions
+impossible: Remove and Retry act on a parent that is `pending` or `failed` —
+QueueRow disables every control while `sending` — so a derive gated on
+`status = 'sending'` would match zero rows by construction. Removing the
+failed child from a 1-sent/1-failed row would leave every remaining target
+`sent` while the parent stayed `failed`, sitting in needs-attention with a
+Retry that has no failed child to reset.
+
+### The derived write is one CAS'd mechanism with two callers
 
 `toPending`, `toFailed` and `toSent` are each a CAS on `status = 'sending'`,
 with a documented zombie-writer rationale. The derived write is no different
@@ -440,9 +533,25 @@ Remove re-derives and writes over the live claim; `reclaimStaleSending` or
 the next sweep re-claims and re-pushes — two attachments and two
 customer-visible notes.
 
-So the derived write carries the status it expects to replace, and the push's
-own terminal derive routes through the existing `toSent` / `toFailed` /
-`toPending` statements rather than a new statement without a predicate.
+So the derived write carries **the status it observed**:
+
+```sql
+UPDATE meeting_log_queue SET status = ?, last_error = ?, last_error_code = ?
+ WHERE id = ? AND status = ?
+```
+
+There is **one** such mechanism, with two callers, not two separately
+specified writes:
+
+- the push's terminal derive, where the observed status is `'sending'` — the
+  special case that reduces to today's `toSent` / `toFailed` / `toPending`
+- the queue page's Remove and per-target Retry, where the observed status is
+  the `pending` or `failed` the caller read
+
+Specifying those as different mechanisms would re-create the contradiction
+above in new words. A zero-row result means the row moved underneath the
+caller: the action reports a refusal and re-reads, exactly as the existing
+zero-row assign CAS does.
 
 ### The parent's error is a denormalized mirror
 
@@ -454,9 +563,20 @@ them from the parent leaves all three permanently blank while the writer
 keeps writing, so the two sources drift.
 
 On derivation the parent copies the error of the target that determined its
-status: the first retryable target, else the first failed one. When it
-derives `sent` it clears both columns, mirroring `toSent`. The parent's copy
-is a mirror for display, never a second source of truth.
+status. "First" must be defined or the mirror silently resolves to NULL:
+target rows have no ordering column, and an untried target and a
+transport-aborted one are both `pending`, so an unqualified "first retryable
+target" can land on a row that never ran and carries no error. The rule is
+therefore: **`ORDER BY created_at, id`, restricted to targets that actually
+carry a `last_error_code`** — the first such retryable target, else the first
+such failed one.
+
+When it derives `sent` it clears both columns, mirroring `toSent`. Otherwise
+the parent's error is **never overwritten with NULL while the row is
+non-terminal** — blanking it takes `QUEUE_SQL.lastError`, `getQueueCounts()`
+and `runAction`'s copy down with it, turning a network outage into an
+unexplained stuck row. The parent's copy is a mirror for display, never a
+second source of truth.
 
 ### A partly-failed meeting must not hide in "Waiting"
 
@@ -469,10 +589,22 @@ sent. The failure surfaces only once `attempts` reaches
 `ESCALATE_AFTER_ATTEMPTS`, if ever.
 
 "Any target failed" is therefore a first-class signal, independent of the
-derived parent status: `groupOf` and `QUEUE_SQL.counts` take a
-`failedTargets > 0` input and group and count such a row as needing
-attention while its parent is still `pending`, and `countAll` excludes it
-from its promise.
+derived parent status. Four consumers take it, not two:
+
+- `groupOf` files such a row under needs-attention while its parent is still
+  `pending`
+- `QUEUE_SQL.counts` counts it there rather than under `waiting`
+- `countAll` excludes it from its "finishing the credentials will send these"
+  promise
+- **`statusLine`** gets its own sentence for a partly-failed parent. Without
+  it the row renders "Waiting to be sent" directly beneath the "Needs
+  attention" heading, beside a "1 of 3 failed" summary — three surfaces
+  disagreeing about one row.
+
+`QUEUE_SQL.lastError` needs the same condition. Its predicate today is
+`status = 'failed' OR (status = 'pending' AND attempts >= ?)`, so a
+partly-failed row counted as needs-attention is `pending` below the threshold
+— the /odoo page's count rises with no reason attached anywhere on the page.
 
 ### Undo is untouched
 
@@ -512,22 +644,53 @@ So:
 ... WHERE id = ?
       AND status IN ('unassigned','failed')
       AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
-                       WHERE row_id = ? AND status = 'sent')
+                       WHERE row_id = meeting_log_queue.id AND status = 'sent')
 ```
+
+The subquery correlates on `meeting_log_queue.id` rather than taking a second
+`?`, matching the delete predicate below. A second placeholder would mean the
+row id is bound twice, and the existing `assignQueueRow` call site gives an
+implementer no cue that the parameter count changed.
 
 The three-step retarget gets the same crash-ordering treatment the enqueue
 path got, because it has the same exposure and no transaction available:
 
-1. Insert the new children first.
-2. Delete the old children.
-3. Flip the parent last, under the CAS above.
+1. **Insert the new children**, with
+   `ON CONFLICT(row_id, model, res_id) DO UPDATE SET status = 'pending',
+   last_error = NULL, last_error_code = NULL`.
+2. **Delete the old children**, scoped to the *complement* of the new
+   `(model, res_id)` set, and `AND status <> 'sent'`.
+3. **Flip the parent last**, under the CAS above.
 
-A crash after step 1 leaves extra `pending` children on a row whose parent
-status has not changed — recoverable, and the orphan sweep does not touch
-them because the parent exists. Deleting first, as originally written, leaves
-a zero-target parent stuck at its prior status. If the parent flip in step 3
-is refused, the children are reconciled to match the parent's unchanged
-target set rather than left divergent.
+Every clause there is load-bearing:
+
+- Without `ON CONFLICT`, an overlapping target set aborts the whole retarget.
+  Old `{A, B}` → new `{A, C}` re-inserts `A` under the same `row_id` and
+  violates `UNIQUE (row_id, model, res_id)`.
+- The `DO UPDATE` resets a retained child to `pending` and clears its error.
+  Without that, a retained child that was `failed` keeps that status, the push
+  loop filters on `status = 'pending'`, and the retarget is a silent partial
+  no-op against it.
+- The `DO UPDATE` deliberately does **not** touch `attachment_id` or
+  `message_id`. Preserving them is what makes a concurrently-sent retained
+  child converge: the stored ids short-circuit the next push straight to
+  `sent` instead of re-posting.
+- Deleting only the complement, rather than everything under `row_id`, keeps
+  the retained child that step 1 just upserted.
+- `AND status <> 'sent'` protects the evidence the step-3 gate reads. If the
+  sweep marks a target `sent` between steps 1 and 2 — the main window pushing
+  a `failed` row while a stale dashboard retargets it — an unqualified delete
+  removes that `sent` child, the gate then finds nothing sent and passes, and
+  the only record that a note is live on a customer's chatter is gone. That is
+  exactly the outcome the gate exists to prevent.
+
+A crash after step 1, and a step-3 flip refused by the CAS, leave the **same**
+state: extra `pending` children on a row whose parent status has not changed.
+That is recoverable — the orphan sweep does not touch them because the parent
+exists, and the next retarget's `ON CONFLICT` absorbs them. A refused flip is
+reported to the caller as a refusal; the caller re-reads. There is no separate
+reconciliation step, because after step 2 the old target set no longer exists
+in the database to reconcile against.
 
 A partially-sent row gets per-target actions instead:
 
@@ -582,6 +745,22 @@ AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
 so a partially-sent row falls through to `deleteTerminalRow` and the honest
 `deleted-after-send` copy.
 
+### Retry and Assign tell the same lie, and get the same fix
+
+`runAction` classifies a push by the parent alone —
+`if (after.status !== "sent") return { kind: "push-failed" }` — and the page
+renders "This meeting could not be sent. The error on the row says why." A
+pass that lands notes on two of three customer records and fails the third
+derives `pending` or `failed`, so the user is told nothing was sent while two
+notes are live on two customers' chatter.
+
+This is the same falsehood `deleteRow` was just fixed for, on a different
+path. `runAction`'s post-push classification becomes target-aware — comparing
+sent-target counts before and after, or reading `failedTargets` /
+`sentTargets` on the re-read — with its own outcome and copy for a partial
+send. No line in this feature may claim nothing reached Odoo when something
+did.
+
 ### The cap is enforced in `meeting-log.action.ts`
 
 Not in the picker, and not in `src/lib/odoo/meeting-log-actions.ts`. Those
@@ -593,12 +772,25 @@ calls "the action layer" elsewhere (see `sliceTranscript`'s doc comment).
 `retryMeetingLog`, `assignMeetingLog`, `deleteMeetingLog` — and has no
 enqueue path at all, so it cannot cap target rows it never creates.
 
-The cap is enforced **on write to `odoo_selected_targets`**, so the selection
-can never exceed five in the first place, and again on the child insert at
-enqueue, so a stale caller cannot smuggle a sixth through. Overflow
-**rejects**: the add is refused and the caller is told the cap was reached.
-It never silently truncates — dropping a target the user believes they
-selected is the one outcome worse than refusing the click.
+There are **three** write paths, not two, and they do not share an overflow
+rule:
+
+1. **The write to `odoo_selected_targets`** — the selection itself. Overflow
+   **rejects**: the add is refused and the user is told the cap was reached.
+   A user is present, the refusal is visible and immediately correctable, and
+   silently dropping a target someone believes they selected is worse.
+2. **The child insert at enqueue.** Overflow **caps to five and records the
+   error on the row** — it does not reject. Rejecting here does not refuse a
+   click; it throws into `trigger`, whose catch toasts "This meeting could not
+   be queued for Odoo." and calls `skipUnwritten()`, advancing the skip
+   watermark so the span is never re-sliced. A stale six-target selection
+   would destroy the entire meeting rather than log five of it. The
+   refusing-beats-truncating hierarchy inverts here precisely because refusal
+   is the destructive option.
+3. **The child insert during retarget**, which reuses the same capped helper
+   as (2). AssignDialog's Confirm goes through this path, so leaving it out
+   would make the dialog's cap UI-only — contradicting the rule two sections
+   above that the gate belongs in the write, not in which buttons render.
 
 ### `stampLastMeeting` stamps every contact target
 
@@ -653,6 +845,14 @@ on every add and remove while the picker is open. Reserving the worst-case
 five-row height on open was the alternative and is rejected: in a 54px
 overlay it hands back a large empty panel to the common case of one target.
 
+The count has to travel the wrong way down the existing wiring, so the
+mechanism is named rather than left to an implementer: today `isPickerOpen`
+and `setIsPickerOpen` are threaded **down** from `useCompletion` into
+`useOdooTarget`, and the resize effect lives in `useCompletion`, which has no
+other reason to know anything about the selection. `UseOdooTargetReturn`
+therefore gains `targetCount: number`, which `useCompletion` reads and adds to
+the effect's dependency list.
+
 ### Rows are toggles
 
 Every contact row, every deal row and every lead-search result gets the same
@@ -675,6 +875,12 @@ successful add risks tripping the popover's outside-interaction dismiss.
 announcing it as disabled, and the click handler no-ops. Hiding the controls
 was already rejected — a search box that vanishes reads as a bug.
 
+**The archived-contact row keeps native `disabled`.** Its `disabled={!contact.active}`
+is static at render time, not a side effect of another row's interaction, so
+the focus-loss hazard the cap rule addresses does not arise. The two patterns
+sitting in one list is a deliberate distinction — dynamic disablement uses
+`aria-disabled`, static disablement uses the attribute — not an oversight.
+
 ### The deal lookup moves from selection-time to browse-time
 
 Today `fetchOpportunities` fires when a contact is *selected*. That cannot
@@ -694,8 +900,29 @@ row — the staleness guard swallows the result and that disclosure is stuck on
 
 So per-row fetches are keyed per contact: a `Map<contactId, number>`
 generation counter (or a per-row `AbortController`), independent of
-`selectionToken`. Re-expanding a contact whose fetch is in flight, or already
-cached, starts no second request.
+`selectionToken` **for add and remove**. Re-expanding a contact whose fetch is
+in flight, or already cached, starts no second request.
+
+**Independent of adds and removes is not independent of everything.**
+`handleInstanceChanged` bumps `selectionToken` precisely to supersede data from
+a database the app just switched away from, and `ContactPicker` is a long-lived
+`memo` component — Radix unmounts `PopoverContent`'s subtree, not the instance
+holding the cache. A per-row cache with no hook into that event keeps serving
+opportunities from the previous database, under contact ids that may now name
+entirely different Odoo records.
+
+The per-row primitive therefore reads a coarser **epoch** ref that
+`handleInstanceChanged` and `handleNewChat` bump alongside `selectionToken`,
+and a bumped epoch empties the cache. Equivalently, the disclosure cache can
+live in `useOdooTarget` and be wiped in the same block that already does
+`setTarget(null); targetRef.current = null;`. Either way: invalidate on
+instance change, never on an add.
+
+**The per-row error and its Retry are keyed the same way.** Today one
+`opportunityError` and one `onRetryOpportunities` serve one selection. Left
+shared under disclosures, one contact's failed lookup paints "Opportunities &
+leads unavailable" beneath *every* expanded row, and a Retry hung off the
+shared handler re-fetches whichever contact the hook last selected.
 
 ### The colleague guard moves with it, and is not verbatim
 
@@ -723,6 +950,33 @@ targets because a fifth one's contact went inactive.
 Archival-driven removal operates **per target**: it drops only the
 `odoo_selected_targets` row whose contact went inactive, and leaves the rest.
 
+The mechanism is named, because `commit`'s signature
+(`(next: ResolvedTarget | null, token: number)`) is built around the singleton
+and its only archival path is a full clear. `commit` becomes list-accepting,
+and archival removal filters `targetRef.current` down to the surviving targets
+and calls it — under the same double `token !== selectionToken.current` check
+`commit` already performs. A dedicated `removeTarget(model, resId, token)` with
+an equivalent staleness guard is acceptable; inventing a partial-removal path
+without one is not, because that race class is exactly what the existing
+double-check exists for.
+
+### The selection state is non-nullable
+
+`useOdooTarget` holds `useState<SelectedTargets>([])`, **not**
+`useState<SelectedTargets | null>(null)`.
+
+The existing idiom derives picker props with a `??` fallback to a stable
+primitive (`contactId: target?.contactId ?? null`). Ported literally, the list
+version becomes `targets: target ?? []` — which allocates a brand-new array on
+every render whenever there are zero targets, the steady state before anyone
+picks anything. `ContactPicker` is wrapped in `memo` with the **default**
+shallow comparator, so that single fallback would re-render it on every
+`<Completion />` render — every streamed AI chunk — in exactly the case the
+memo most needs to hold.
+
+Starting non-nullable keeps `pickerProps.targets` referentially stable except
+when a real add or remove produces a genuinely new array.
+
 ### Destination sentence
 
 Pluralises, and stays exact about each record's kind:
@@ -741,9 +995,9 @@ would silently collapse a queued meeting back to one record.
 
 Three things the one-sentence version left unstated:
 
-- **Selection state** mirrors the picker's: an ordered list of
-  `{ model, resId, name }` replacing the dialog's single `selected` /
-  `leadId` pair, with the same `+ add` / `✓ added` rows.
+- **Selection state** mirrors the picker's: a `SelectedTarget[]` replacing the
+  dialog's single `selected` / `leadId` pair, with the same `+ add` /
+  `✓ added` rows.
 - **The dialog enforces the cap itself**, with the same `aria-disabled`
   treatment at five — the action layer refuses a sixth regardless, but a
   dialog that lets you pick six and then fails on Confirm is worse.
@@ -754,6 +1008,14 @@ Three things the one-sentence version left unstated:
   is superseded by the queue page's per-target Retry and Remove. The write
   predicate refuses it anyway; this keeps the UI from offering an action that
   will be rejected.
+
+  For that gate to be implementable at all, **`MeetingLogListRow` gains
+  `targets: MeetingLogTarget[]`**, populated by the same per-target join
+  `listActionableRows` already performs for the queue page. Today
+  `handleAssign` is just `setAssignRow(row)` and `AssignDialogProps.row` is a
+  bare `MeetingLogListRow` with no target data, so the dialog has nothing to
+  test "any target sent" against. Attaching the array to the row snapshot lets
+  `QueueRow`'s expansion and `AssignDialog`'s Confirm gate read the same data.
 
 ---
 
@@ -776,13 +1038,38 @@ name and fall back to the cache lookup, then to `Contact #12` /
 
 `listActionableRows` needs the per-target rows: one extra query fetching all
 targets for the listed parent ids, joined in memory. Not N+1, and not a JOIN
-that would multiply the parent rows.
+that would multiply the parent rows. The result is attached to
+`MeetingLogListRow` as `targets`, which is also what makes AssignDialog's
+Confirm gate implementable.
+
+**`QueueRow`'s `propsAreEqual` gains a structural comparison over that list.**
+That comparator is exhaustive by design — its own comment reads "EVERY PROP
+THE ROW RENDERS, not just the DB columns" and warns that "a comparator
+narrowed to the DB columns is worse than none". A new `targets` prop left out
+of it makes the memo return `true` while a target moves `pending → failed`, so
+an expanded row renders a stale per-target status permanently. Comparing it by
+reference instead re-renders all 200 rows on every read, since each refresh
+hands back fresh SQLite objects. The comparison is length plus per-target
+`id`, `status` and `last_error` — the same shape as the existing
+`sameTranscript` treatment — alongside entries for the new `onRetryTarget` and
+`onRemoveTarget` callbacks.
 
 ---
 
 ## Testing
 
-Unit and component coverage in the existing style:
+Unit and component coverage in the existing style.
+
+**What the harness can and cannot do.** "Crash" in the bullets below means
+partial execution — call the child-insert step, do not call the parent-insert
+step, inspect the result — which `seed()` already supports throughout
+`meeting-log.action.test.ts`. CAS-loss bullets seed the row as though a
+concurrent claim already won, attempt the write, and assert zero rows
+affected, exactly like the existing `markSent` / `failRow` tests. Neither needs
+a harness that does not exist. The one bullet that did — `claimed_at` being
+re-stamped between targets — is unprovable while `PushDeps.now` is a scalar,
+which is why that is specified as an interface change in the push-loop section
+rather than left here as a test note.
 
 **Migration and backfill**
 
@@ -791,31 +1078,62 @@ Unit and component coverage in the existing style:
 - a legacy row with `lead_id` set backfills to one `crm.lead` target; a row
   with only `contact_id` backfills to one `res.partner` target
 - `attachment_id` and `message_id` carry across for an in-flight row
-- the legacy singleton with `lead_id` set and `lead_name` NULL migrates
-  without violating a constraint
+- the legacy singleton migrates with the **correct `model`, `res_id` and
+  `name`** for both a contact-only and a lead-set singleton — including one
+  with `lead_id` set and `lead_name` NULL, which must not violate a constraint.
+  Asserting only that the migration does not abort is not enough
+- a both-NULL legacy singleton backfills to zero rows
+- `purgeOtherInstances` completes after migration 14 and deletes exactly the
+  `odoo_selected_targets` rows belonging to other instances
 - **Rust:** `multi_target_migration_is_version_14_and_points_at_its_own_file`
-  in `migration_tests.rs`, following the three existing precedents
+  in `migration_tests.rs`, following the three existing precedents. The two
+  generic checks already cover migration 14 automatically; no others are
+  needed
 
 **Data layer**
 
 - the four-way parent status precedence, including rule 0 (zero targets →
-  `unassigned`)
+  `unassigned`) **and** a mixed retryable-plus-failed row deriving `pending`
+  — the order the spec calls load-bearing, exercised through derivation rather
+  than seeded as a fixture
 - derivation refuses to run on a `cancelled`, `deleted`, `sent` or
   `unassigned` parent
+- derivation from the queue page's Remove and per-target Retry succeeds on a
+  `pending` or `failed` parent — the case a `sending`-only gate would have
+  made impossible
+- the derived write is a CAS and loses to a concurrent claim
+- the parent's `last_error` / `last_error_code` mirror the determining
+  target's, are chosen deterministically among targets that carry an error,
+  clear when the derived status is `sent`, and are never blanked while the row
+  is non-terminal
 - a zero-target row is excluded from claim and from every "will be sent"
   count
-- the derived write is a CAS and loses to a concurrent claim
 - `deleteRow` refuses a row with a `sent` target, so it routes to the
   `deleted-after-send` copy
-- the reassign predicate refuses a row with a `sent` target
+- the reassign predicate refuses a row with a `sent` target, and separately
+  refuses on the base `status IN ('unassigned','failed')` CAS — two different
+  conditions, two cases
+- a zero-row assign CAS is surfaced to the caller, not swallowed
 - Remove is refused on a `sent` target
 - Remove of the last target flips the parent to `unassigned`
 - enqueue ordering under a crash between the two writes
+- the losing `ON CONFLICT(session_key)` trigger deletes the children it just
+  inserted
 - the three-step retarget under a crash after each step
+- the three-step retarget with an **overlapping** target set — old `{A,B}` to
+  new `{A,C}` — upserts the retained child back to `pending`, preserves its
+  `attachment_id` / `message_id`, and deletes only the complement
+- the retarget's delete leaves a concurrently-`sent` child in place
 - the orphan sweep's age gate
+- the orphan sweep leaves the children of a **still-existing** parent alone
+  regardless of age, and sweeps genuinely parentless old children
+- the orphan sweep runs once per process across two mounts, and still runs
+  when `runMeetingLogSweep` reports it did not run — mirroring the two
+  `runTranscriptPrune` tests the spec's design is copied from
 - the no-transaction static scan covers every new statement
-- the cap at `meeting-log.action.ts`, on both write paths, rejecting rather
-  than truncating
+- the cap at the selection write **rejects**, and the cap at the enqueue and
+  retarget child inserts **caps to five and records the error** rather than
+  failing the parent insert
 
 **Push**
 
@@ -823,37 +1141,53 @@ Unit and component coverage in the existing style:
 - retry of a `failed` target actually re-attempts it — the child is reset,
   not just the parent
 - a deterministic failure on target 3 of 5 does not stop targets 4 and 5
-- a retryable transport failure aborts the remaining targets and leaves them
-  `pending`
+- a retryable transport failure aborts the remaining targets, leaves them
+  `pending`, and records the aborting target's own error
 - a local write failure after a successful wire call routes that target to
-  `pending`, never `failed`
+  `pending`, never `failed`, and aborts the pass
+- a persistence failure on target 1 does not misclassify target 3's genuine
+  Odoo fault — the flag is per target, not per push
 - the adopt / reuse / short-circuit matrix across **mixed** target states in
   one push — target A short-circuiting on stored ids while target B needs an
   adopt-search
-- `claimed_at` is re-stamped between targets
+- `claimed_at` is re-stamped between targets, tracking the last completed
+  target rather than the first, driven by sequential mocked clock values
+- a re-stamp that affects zero rows aborts the pass
 - a target marked `sent` has its error columns cleared
+- a push over N contact targets stamps `last_meeting_at` for all N, and skips
+  any `crm.lead` target
 
 **UI**
 
 - the picker's toggle behaviour, cap state, and pluralised sentence
 - a backfilled NULL-name target whose id is also absent from the contact
   cache renders the generic placeholder
-- a partly-failed row is grouped and counted as needing attention while its
-  parent is `pending`
+- a partly-failed row is grouped by `groupOf`, counted by `QUEUE_SQL.counts`,
+  excluded from `countAll`'s promise, and described by `statusLine` as needing
+  attention while its parent is `pending` — all four, since three surfaces
+  agreeing and one disagreeing is the bug
 - expanding two contacts in quick succession resolves both disclosures;
   adding a target elsewhere does not strand an open one on "Looking up…"
+- a **rejected** per-row fetch does not paint under a newer, unrelated row's
+  state — the reject path the existing suite tests deliberately alongside the
+  resolve path
+- an instance change empties the per-row disclosure cache
+- a failed lookup shows its message on its own row only, and its Retry
+  re-fetches that contact
 - the resize effect re-fires when a target is added or removed while the
   picker is open
 - a colleague's expanded row renders static text and no dead control
 - an archived contact drops only its own target
-- AssignDialog's Confirm is unreachable on a row with a `sent` target
+- `QueueRow`'s `propsAreEqual` re-renders when a target's status changes
+- AssignDialog's Confirm is unreachable on a row with a `sent` target, and an
+  individual target can be added and taken back off
 
 `assignQueueRow`'s two-id signature, its own test, and the roughly 560 lines
 of AssignDialog tests built on singular-opportunity semantics are **replaced**
-by list-based equivalents, not left to break during implementation. The
-replacements must still prove what the originals proved: a zero-row assign
-CAS is surfaced rather than swallowed, an individual target can be added and
-taken back off, and a still-pending row is refused.
+by list-based equivalents, not left to break during implementation. The three
+proofs the originals carried are itemised above rather than left as prose: the
+zero-row assign CAS is surfaced, an individual target can be added and removed,
+and a still-pending row is refused.
 
 Mutation checks where a passing test proves least:
 
@@ -861,17 +1195,25 @@ Mutation checks where a passing test proves least:
 |---|---|
 | parent status precedence inverted (failed before retryable) | a mixed row stays retryable |
 | rule 0 removed, so zero targets falls through to "all sent" | removing the last target marks the meeting `sent` |
+| derivation gated on `status = 'sending'` alone | Remove on a `failed` parent silently does nothing |
 | the retry loop stops skipping `sent` targets | retry re-posts to a sent target |
 | "Retry this one" flips only the parent, not the child | the retry is a no-op against a failed target |
 | the loop aborts on the first target failure | a target behind a deterministic fault is never attempted |
 | a persistence failure marks the target `failed` | an attachment is stranded on a customer record with no retry path |
+| the persistence flag is hoisted out of the per-target boundary | a later target's Odoo fault is misclassified as retryable |
 | the backfill drops `attachment_id` / `message_id` | an upgraded in-flight row re-posts |
 | the backfill loses its `contact_id IS NOT NULL OR lead_id IS NOT NULL` gate | an unassigned legacy row aborts the migration |
+| the retarget insert loses its `ON CONFLICT` clause | an overlapping target set aborts the retarget |
+| the retarget delete drops `AND status <> 'sent'` | a concurrently-sent child is destroyed and the gate then passes |
 | the reassign gate moves from the predicate to the UI | a stale dashboard retargets a partially-sent row |
 | `deleteRow` loses its `sent`-target check | a 1-sent/1-failed row deletes under "Nothing was sent to Odoo" |
+| `runAction` classifies a partial send as `push-failed` | the page says nothing was sent while two notes are live |
 | the derived write drops its CAS | a stale dashboard overwrites a live claim |
 | `claimed_at` is stamped once per meeting | a five-target push is reclaimed mid-flight |
 | the orphan sweep loses its age gate | a live enqueue's children survive |
+| the orphan sweep loses its `NOT IN (SELECT id FROM meeting_log_queue)` | the children of an aged, still-queued row are deleted |
+| the purge still names `odoo_selected_target` | contact sync throws "no such table" on every run |
+| `targets` omitted from `QueueRow`'s comparator | an expanded row never updates |
 
 ### What no local test can prove
 
