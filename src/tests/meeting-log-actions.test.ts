@@ -301,6 +301,14 @@ describe("retryMeetingLog", () => {
   });
 });
 
+// BRIDGE, for Task 7's assignMeetingLog(id, contactId, leadId, deps) ->
+// assignMeetingLog(id, targets, deps) signature change. Every call site in
+// this file below (including two outside this describe block, in "the
+// cross-window rule" and "an other-instance row") passes a one-element
+// SelectedTargets built from the old contactId/leadId instead of the raw
+// ids. `action.assignQueueRow` is a mock here, so the array's content is
+// never inspected - this is a pure signature bridge, not new coverage.
+// Task 10 owns this file and replaces these calls with its own.
 describe("assignMeetingLog", () => {
   it("pushes the re-read row carrying the NEW target", async () => {
     action.getQueueRow

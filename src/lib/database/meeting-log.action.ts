@@ -799,17 +799,40 @@ export async function retryQueueRow(id: string): Promise<boolean> {
  * insert the new children, delete the complement, then flip the parent -
  * with no transaction, per the file header.
  *
- * GATED FIRST, before any write. Evaluating the sent-target check only at the
- * parent flip (step 3) would mean a REFUSED retarget has already rewritten
- * the child set: on {A(sent), B(failed)} retargeted to {A, C}, B would already
- * be deleted and C already inserted by the time the CAS refuses, and step 2's
- * deletes are unrecoverable. Step 3's own `NOT EXISTS` stays as the
- * authoritative backstop for the Global Constraint that a sent target is
- * immutable - the residual TOCTOU between this read and step 2 is safe,
- * because step 2 below never deletes a sent child.
+ * GATED FIRST, before any write, on BOTH the row's own status and its
+ * children's. Evaluating either check only at the parent flip (step 3) would
+ * mean a REFUSED retarget has already rewritten the child set:
+ *
+ * - Sent-target case: on {A(sent), B(failed)} retargeted to {A, C}, B would
+ *   already be deleted and C already inserted by the time the CAS refuses,
+ *   and step 2's deletes are unrecoverable. Step 3's own `NOT EXISTS` stays
+ *   as the authoritative backstop for the Global Constraint that a sent
+ *   target is immutable - the residual TOCTOU between this read and step 2
+ *   is safe, because step 2 below never deletes a sent child.
+ * - Row-status case: a `pending` row with three UNSENT children, retargeted
+ *   to one different target, without this gate: step 1 inserts the new
+ *   child, step 2 deletes all three pre-existing children as the complement
+ *   of the new set, step 3's CAS refuses on `pending`, and the function
+ *   returns `false` - while the row's entire target set has already been
+ *   silently replaced under a result the caller reads as "nothing happened."
+ *   That is exactly the class of lie this feature exists to remove.
+ *
+ * NEITHER gate makes the sequence atomic, and neither is meant to - the row's
+ * status or a child's status can still change between this read and step 3,
+ * which is why `assignRow`'s CAS stays the authority and keeps its own
+ * predicate. These gates only close the DETERMINISTIC case (nothing changes
+ * between the read and the write), which is the one actually reachable from
+ * a stale dashboard; they are not the guarantee.
  */
 export async function assignQueueRow(id: string, targets: SelectedTargets): Promise<boolean> {
   const db = await getDatabase();
+
+  // Mirrors assignRow's own CAS predicate below - `unassigned` and `failed`
+  // are the only statuses that statement accepts, and a gate that disagreed
+  // with the CAS it guards would be worse than no gate. A missing row is
+  // refused the same as an ineligible one; there is nothing to retarget.
+  const row = await getQueueRow(id);
+  if (!row || (row.status !== "unassigned" && row.status !== "failed")) return false;
 
   const currentTargets = await listTargets(id);
   if (currentTargets.some((t) => t.status === "sent")) return false;

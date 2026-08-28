@@ -777,6 +777,28 @@ describe("assignQueueRow", () => {
       .toBe(false);
   });
 
+  it("refuses a pending retarget without deleting its existing children first", async () => {
+    // The row-status gate closes this: without it, step 1 inserts the new
+    // target, step 2 deletes BOTH pre-existing unsent children as the
+    // complement of the new set, step 3's CAS correctly refuses on
+    // `pending` - but by then the row's entire target set has already been
+    // silently replaced under a result the caller reads as "nothing
+    // happened." Neither child here is sent, so the sent-target gate alone
+    // would not catch this - it is the row's own status that must gate
+    // steps 1 and 2, not only its children's.
+    seed({ id: "r1", status: "pending" });
+    seedTargets("r1", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+
+    expect(await assignQueueRow("r1", [{ model: "res.partner", resId: 3, name: "C" }]))
+      .toBe(false);
+
+    const t = await listTargets("r1");
+    expect(t.map((x) => x.resId).sort()).toEqual([1, 2]);
+  });
+
   it("un-sends nothing when the new set contains an already-sent target", async () => {
     seed({ id: "r1", status: "failed" });
     seedTargets("r1", [{ resId: 1, status: "sent" }]);
