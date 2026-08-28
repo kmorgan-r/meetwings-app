@@ -95,5 +95,11 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/odoo-lead-only-target.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 14,
+            description: "create_multi_target_tables",
+            sql: include_str!("migrations/odoo-multi-target.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

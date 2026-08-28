@@ -109,6 +109,31 @@ export interface ResolvedTarget {
   leadName: string | null;
 }
 
+export interface SelectedTarget {
+  model: "res.partner" | "crm.lead";
+  resId: number;
+  name: string | null;
+}
+
+export type SelectedTargets = SelectedTarget[];
+
+export type MeetingLogTargetStatus = "pending" | "sent" | "failed";
+
+export interface MeetingLogTarget {
+  id: string;
+  rowId: string;
+  model: "res.partner" | "crm.lead";
+  resId: number;
+  name: string | null;
+  status: MeetingLogTargetStatus;
+  attachmentId: number | null;
+  messageId: number | null;
+  lastError: string | null;
+  lastErrorCode: string | null;
+  createdAt: number;
+  sentAt: number | null;
+}
+
 export interface SyncResult {
   changed: number;
   fetched: number;
