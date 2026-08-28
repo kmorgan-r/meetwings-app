@@ -51,7 +51,7 @@ import {
 } from "@/lib/database/meeting-log.action";
 import { purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
 import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
-import { applyMigration14, MIGRATIONS, seedPre14 } from "./helpers/migration-14";
+import { applyMigration14, MIGRATIONS, rows, seedPre14 } from "./helpers/migration-14";
 
 const INSTANCE = "http://h:8069|odoo";
 const OTHER = "http://h:8069|staging";
@@ -90,16 +90,6 @@ function seed(over: Record<string, unknown>) {
       `VALUES (${Object.keys(row).map(() => "?").join(",")})`,
     Object.values(row) as never[]
   );
-}
-
-/** Reads a query back as plain row objects, for asserting on tables no
- * exported action function reads (meeting_log_targets, odoo_selected_targets). */
-function rows(database: SqlJsDatabase, sql: string): Record<string, unknown>[] {
-  const stmt = database.prepare(sql);
-  const out: Record<string, unknown>[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
 }
 
 beforeEach(async () => {
@@ -908,6 +898,10 @@ describe("getQueueTranscript", () => {
 });
 
 describe("migration 14 backfill", () => {
+  // This assertion holds identically with or without the migration's WHERE
+  // guard: INSERT OR IGNORE already skips a row that would violate res_id
+  // NOT NULL, so a both-NULL row produces zero targets either way. The guard
+  // states that intent explicitly rather than being load-bearing for it.
   it("backfills an unassigned legacy row to zero targets", async () => {
     const db = await seedPre14([
       { id: "r1", contact_id: null, lead_id: null, status: "unassigned" },

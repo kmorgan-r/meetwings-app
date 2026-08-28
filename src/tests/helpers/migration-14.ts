@@ -23,6 +23,16 @@ export function applyMigration14(db: Database) {
   db.exec(readMigration("odoo-multi-target.sql"));
 }
 
+/** Reads a query back as plain row objects, for asserting on tables no
+ * exported action function reads (meeting_log_targets, odoo_selected_targets). */
+export function rows(db: Database, sql: string): Record<string, unknown>[] {
+  const stmt = db.prepare(sql);
+  const out: Record<string, unknown>[] = [];
+  while (stmt.step()) out.push(stmt.getAsObject());
+  stmt.free();
+  return out;
+}
+
 // Mirrors the shared beforeEach in meeting-log.action.test.ts (chat-history,
 // chat-history-v8, odoo-contacts = migration 11, meeting-log-queue =
 // migration 12) so seedPre14's database matches what the app actually has

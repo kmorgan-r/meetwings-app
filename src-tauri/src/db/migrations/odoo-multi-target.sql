@@ -38,8 +38,9 @@ CREATE TABLE IF NOT EXISTS meeting_log_targets (
 -- one with row_id leftmost, which serves every WHERE row_id = ? lookup.
 
 -- Backfill the queue. A row with NEITHER id set is an unassigned meeting and
--- produces NO target - sending it down the res.partner branch would write
--- res_id = NULL against NOT NULL and abort the whole migration.
+-- produces NO target. INSERT OR IGNORE would skip such a row anyway, on the
+-- res_id NOT NULL violation - the WHERE below states that intent explicitly
+-- instead of leaning on a constraint failure as control flow.
 INSERT OR IGNORE INTO meeting_log_targets (id, row_id, model, res_id, name, status,
                                            attachment_id, message_id, created_at, sent_at)
 SELECT hex(randomblob(16)),
@@ -55,8 +56,9 @@ SELECT hex(randomblob(16)),
 
 -- Migrate the singleton by the same coalesce rule and the same gate. A
 -- both-NULL singleton cannot be written by this app, but loadTarget already
--- guards against reading one back, so the gate costs one clause and the
--- absence of it costs Database.load.
+-- guards against reading one back. INSERT OR IGNORE would skip it anyway, on
+-- the same NOT NULL violation - the WHERE states that intent explicitly
+-- instead of leaning on a constraint failure as control flow.
 INSERT OR IGNORE INTO odoo_selected_targets (instance, model, res_id, name,
                                              conversation_id, selected_at)
 SELECT instance,

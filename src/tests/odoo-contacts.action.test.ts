@@ -40,17 +40,7 @@ import {
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import type { OdooContact } from "@/types";
-import { applyMigration14, seedPre14, seedPre14Singleton } from "./helpers/migration-14";
-
-/** Reads a query back as plain row objects, for asserting on a table no
- * exported action function reads yet (odoo_selected_targets). */
-function rows(database: SqlJsDatabase, sql: string): Record<string, unknown>[] {
-  const stmt = database.prepare(sql);
-  const out: Record<string, unknown>[] = [];
-  while (stmt.step()) out.push(stmt.getAsObject());
-  stmt.free();
-  return out;
-}
+import { applyMigration14, rows, seedPre14, seedPre14Singleton } from "./helpers/migration-14";
 
 const MIGRATION = path.resolve(
   __dirname,
@@ -336,8 +326,12 @@ describe("migration 14 backfill", () => {
   });
 
   it("migrates a contact-only singleton with a null name", async () => {
+    // lead_name is deliberately non-null here: a contact-only row (lead_id
+    // NULL) has no business reading it at all. A null lead_name fixture
+    // would pass this test even if the migration's CASE let lead_name
+    // through unguarded - this one requires the CASE to actually discard it.
     const db = await seedPre14Singleton({
-      instance: "i1", contact_id: 7, lead_id: null, lead_name: null,
+      instance: "i1", contact_id: 7, lead_id: null, lead_name: "Solar deal",
     });
     await applyMigration14(db);
     expect(rows(db, "SELECT * FROM odoo_selected_targets")[0]).toMatchObject({
@@ -345,6 +339,10 @@ describe("migration 14 backfill", () => {
     });
   });
 
+  // This assertion holds identically with or without the migration's WHERE
+  // guard: INSERT OR IGNORE already skips a row that would violate res_id
+  // NOT NULL, so a both-NULL singleton produces zero rows either way. The
+  // guard states that intent explicitly rather than being load-bearing for it.
   it("backfills a both-NULL singleton to zero rows", async () => {
     const db = await seedPre14Singleton({
       instance: "i1", contact_id: null, lead_id: null, lead_name: null,
