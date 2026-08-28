@@ -742,7 +742,20 @@ AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
                  WHERE row_id = meeting_log_queue.id AND status = 'sent')
 ```
 
-so a partially-sent row falls through to `deleteTerminalRow` and the honest
+**And `deleteTerminalRow` must be widened in the same change**, or the row
+becomes permanently undeletable. Its predicate is `status IN ('sent',
+'cancelled')`, and a partially-sent parent derives `pending` or `failed` — so
+with only the change above, *both* statements refuse and `deleteMeetingLog`
+returns `conflict` forever. It gains:
+
+```sql
+OR EXISTS (SELECT 1 FROM meeting_log_targets
+            WHERE row_id = meeting_log_queue.id AND status = 'sent')
+```
+
+The two predicates are then complementary, and `deleteMeetingLog`'s existing
+try-`deleteRow`-then-`deleteTerminalRow` routing works unchanged: a
+partially-sent row falls through to `deleteTerminalRow` and the honest
 `deleted-after-send` copy.
 
 ### Retry and Assign tell the same lie, and get the same fix
@@ -845,13 +858,27 @@ on every add and remove while the picker is open. Reserving the worst-case
 five-row height on open was the alternative and is rejected: in a 54px
 overlay it hands back a large empty panel to the common case of one target.
 
-The count has to travel the wrong way down the existing wiring, so the
-mechanism is named rather than left to an implementer: today `isPickerOpen`
-and `setIsPickerOpen` are threaded **down** from `useCompletion` into
-`useOdooTarget`, and the resize effect lives in `useCompletion`, which has no
-other reason to know anything about the selection. `UseOdooTargetReturn`
-therefore gains `targetCount: number`, which `useCompletion` reads and adds to
-the effect's dependency list.
+The count has to travel the wrong way down the existing wiring, and the
+mechanism must be a **push, not a pull**. `useCompletion` does not call
+`useOdooTarget` — they are siblings. `<Completion />` calls `useCompletion()`
+first, and only then calls `useOdooTarget({ isPickerOpen:
+completion.isContactPickerOpen, … })`. The resize effect and its dependency
+array live inside `useCompletion`'s body, so they can close over nothing
+`useOdooTarget` returns: that value does not exist yet when `useCompletion()`
+runs. Reading `targetCount` off `UseOdooTargetReturn` from inside
+`useCompletion` is not something an implementer can do.
+
+So it mirrors the idiom already in place for `isPickerOpen`:
+
+- `useCompletion` owns a `targetCount` / `setTargetCount` state pair and adds
+  `targetCount` to its own resize effect's dependencies.
+- `setTargetCount` is threaded **down** into `useOdooTarget`'s params,
+  alongside `setIsPickerOpen`.
+- `useOdooTarget` calls it whenever the target list changes.
+
+The alternative — moving the resize effect out of `useCompletion` into
+`<Completion />`, where both values are in scope after both hooks return —
+was rejected: it splits the resize logic across two files for one dependency.
 
 ### Rows are toggles
 
