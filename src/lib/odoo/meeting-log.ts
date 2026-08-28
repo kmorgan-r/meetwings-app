@@ -314,9 +314,17 @@ export type QueueGroup =
  * other-instance `failed` row in needs-attention, where the page offers a Retry
  * that `pushQueuedRow` refuses at its instance check - a button that does
  * nothing at all and looks broken.
+ *
+ * `failedTargets` is OPTIONAL, defaulting to 0, and carried on the row object
+ * rather than a third positional parameter - every existing caller already
+ * passes a row, so widening it here needs no call-site change. Nothing
+ * computes a real value for it yet; the callers that derive it from
+ * `row.targets` are Tasks 13 and 14.
  */
 export function groupOf(
-  row: Pick<MeetingLogListRow, "instance" | "status" | "attempts">,
+  row: Pick<MeetingLogListRow, "instance" | "status" | "attempts"> & {
+    failedTargets?: number;
+  },
   instance: string
 ): QueueGroup {
   if (row.instance !== instance) {
@@ -328,6 +336,13 @@ export function groupOf(
       ? "other-database"
       : null;
   }
+  // A row derives `pending` under deriveRowStatus's rule 1 whenever ANY
+  // target is still retryable, even with a terminally failed sibling on the
+  // same row - so this check runs BEFORE the status switch below and wins
+  // over whatever the parent status says. Without it such a row is filed
+  // under "waiting", where a "1 of 3 failed" summary would sit beside a
+  // "Waiting to be sent" line for the same meeting.
+  if ((row.failedTargets ?? 0) > 0) return "needs-attention";
   if (row.status === "failed") return "needs-attention";
   if (row.status === "pending" && row.attempts >= ESCALATE_AFTER_ATTEMPTS) {
     return "needs-attention";

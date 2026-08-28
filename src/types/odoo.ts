@@ -185,7 +185,9 @@ export interface DbMeetingLogRow {
 }
 
 /**
- * What the queue page's list query returns: every column EXCEPT `transcript`.
+ * What the queue page's list query returns: every column EXCEPT `transcript`,
+ * plus every target row for that meeting, attached in memory by
+ * `listActionableRows` (one extra query for the whole list, not N+1).
  *
  * A distinct type, and load-bearing. Typing list rows as `DbMeetingLogRow`
  * would let one be handed straight to `pushQueuedRow` and still compile - and
@@ -193,5 +195,13 @@ export interface DbMeetingLogRow {
  * is then `undefined`, the slice is empty, and the push uploads an EMPTY
  * attachment plus the "Summarization failed" fallback note to a customer
  * record. The compiler should refuse that, not a test.
+ *
+ * `targets` is OPTIONAL here, deliberately: making it required would stop
+ * every existing fixture object literal in meeting-log-page.test.tsx from
+ * type-checking, three tasks before the one that replaces them. It is what
+ * lets `groupOf` and AssignDialog's Confirm gate read a row's per-target
+ * failure state instead of only its collapsed parent status.
  */
-export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript">;
+export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
+  targets?: MeetingLogTarget[];
+};

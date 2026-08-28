@@ -52,6 +52,23 @@ const spyOnExecute = (fn: (sql: string) => void) => {
   });
 };
 
+/**
+ * Same idea as spyOnExecute, but for `select` and returning the captured SQL
+ * text directly, rather than taking a callback - Task 8's N+1 test needs to
+ * count how many `select` calls mention `meeting_log_targets`, not just
+ * observe their order. Delegates to rawSelect for the same reason
+ * spyOnExecute delegates to rawExecute: a spy that does not delegate would
+ * see listActionableRows read an empty database.
+ */
+const spyOnSelect = () => {
+  const calls: string[] = [];
+  select.mockImplementation(async (sql: string, args?: unknown[]) => {
+    calls.push(sql);
+    return rawSelect(sql, args);
+  });
+  return { calls };
+};
+
 import {
   QUEUE_SQL,
   assignQueueRow,
@@ -584,6 +601,67 @@ describe("getQueueCounts", () => {
       waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
     });
   });
+
+  it("counts a partly-failed row under needs-attention, not waiting", async () => {
+    // Below ESCALATE_AFTER_ATTEMPTS, so the OLD needs-attention arm would
+    // miss it entirely and the old waiting arm would claim it - the exact
+    // "1 of 3 failed" summary next to "Waiting to be sent" this task exists
+    // to remove.
+    seed({ id: "r1", session_key: "r1", status: "pending", attempts: 0 });
+    seedTargets("r1", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    const c = await getQueueCounts(INSTANCE);
+    expect(c.needsAttention).toBe(1);
+    expect(c.waiting).toBe(0);
+  });
+
+  it("does not let another instance's failed target leak into this instance's needsAttention", async () => {
+    // Regression test for the AND/OR precedence trap named in the plan - the
+    // same one deleteTerminalRow hit. A bare `OR EXISTS (...)` appended
+    // without the enclosing parens escapes the `instance = ?1` scoping
+    // entirely, and this row (a different instance, a failed target, a
+    // needs-attention-shaped status) is exactly what would leak through.
+    seed({ id: "other", session_key: "other", status: "pending", attempts: 0, instance: OTHER });
+    seedTargets("other", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    const c = await getQueueCounts(INSTANCE);
+    expect(c.needsAttention).toBe(0);
+    expect(c.otherInstance).toBe(1);
+  });
+
+  it("does not let another instance's partly-failed row leak into lastError", async () => {
+    // Same precedence trap, applied to QUEUE_SQL.lastError's own OR group -
+    // a malformed parse there drops BOTH `instance = ?` and
+    // `last_error IS NOT NULL` from the EXISTS disjunct, surfacing any
+    // instance's reason text.
+    seed({
+      id: "other", session_key: "other", status: "pending", attempts: 0,
+      instance: OTHER, last_error: "should not surface",
+    });
+    seedTargets("other", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    expect((await getQueueCounts(INSTANCE)).lastError).toBeNull();
+  });
+
+  it("surfaces a reason for a partly-failed row below the escalation threshold", async () => {
+    seed({ id: "r1", session_key: "r1", status: "pending", attempts: 0 });
+    seedTargets("r1", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastError: "boom", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    // QUEUE_SQL.lastError selects from meeting_log_queue and filters
+    // `last_error IS NOT NULL`, so the PARENT's mirror must exist - seeding
+    // the child alone leaves the row excluded however the status predicate is
+    // widened. Derive it, which is what the push does.
+    await deriveRowStatus("r1", "pending", 1_000);
+    expect((await getQueueCounts(INSTANCE)).lastError).toBe("boom");
+  });
 });
 
 describe("countAllQueued", () => {
@@ -602,6 +680,17 @@ describe("countAllQueued", () => {
   });
 
   it("is 0 on an empty queue", async () => {
+    expect(await countAllQueued()).toBe(0);
+  });
+
+  it("excludes a partly-failed row from countAllQueued's promise", async () => {
+    seed({ id: "r1", session_key: "r1", status: "pending", attempts: 0 });
+    seedTargets("r1", [
+      { resId: 1, status: "pending" },
+      { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+    ]);
+    // countAllQueued takes NO arguments - "regardless of instance", per its
+    // own doc comment. QueueCounts has no `all`.
     expect(await countAllQueued()).toBe(0);
   });
 });
@@ -1121,6 +1210,21 @@ describe("listActionableRows", () => {
     const [row] = await listActionableRows(INSTANCE);
     expect(row).not.toHaveProperty("transcript");
     expect(row).toMatchObject({ id: "r", status: "failed" });
+  });
+
+  it("attaches targets to every listed row with one extra query, not N+1", async () => {
+    const spy = spyOnSelect();
+    seed({ id: "r1", session_key: "r1", status: "pending" });
+    seed({ id: "r2", session_key: "r2", status: "failed" });
+    seedTargets("r1", [{ resId: 1, status: "pending" }]);
+    seedTargets("r2", [{ resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
+
+    const rows = await listActionableRows(INSTANCE);
+
+    expect(rows.map((r) => (r.targets ?? []).length)).toEqual([1, 1]);
+    // ONE select against meeting_log_targets for the whole list - a JOIN
+    // would multiply parent rows, and N+1 would be one select per row.
+    expect(spy.calls.filter((s) => s.includes("meeting_log_targets"))).toHaveLength(1);
   });
 
   it.each(["sent", "cancelled", "deleted"])("excludes a %s row", async (status) => {

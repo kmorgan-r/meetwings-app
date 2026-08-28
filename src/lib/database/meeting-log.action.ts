@@ -149,12 +149,39 @@ SELECT * FROM meeting_log_queue
  WHERE instance = ? AND status = 'held' AND created_at > ?
  ORDER BY created_at DESC LIMIT 1`,
 
+  // The needs-attention and waiting arms both gain a matching, complementary
+  // condition on top of their pre-Task-8 shape: a row can derive `pending`
+  // under deriveRowStatus's rule 1 (any target still retryable wins) while
+  // ONE of its other targets is terminally `failed`, and without this it is
+  // counted as waiting - promised by countAll, described as "Waiting to be
+  // sent" - while a "1 of 3 failed" summary sits beside it.
+  //
+  // THE PARENTHESES ARE LOAD-BEARING, on both arms. `AND` binds tighter than
+  // `OR`, so a bare `... AND status = 'failed' OR EXISTS (...)` (needs-
+  // attention) or `... AND attempts < ?2 OR EXISTS (...)` (nonsense on
+  // waiting's NOT EXISTS, but the same class of bug) would escape the
+  // `instance = ?1` scoping and count every database's rows, not just this
+  // one's - the same precedence trap as deleteTerminalRow.
+  //
+  // The trailing `status IN ('pending','failed')` on the needs-attention arm
+  // is equally load-bearing. deleteRow only flips the parent to `deleted` and
+  // leaves its children behind, so without this scope a deleted meeting's
+  // failed child would count under needs-attention and feed
+  // getQueueCounts().lastError FOREVER, while groupOf returns null for that
+  // row and the page never lists it to act on.
   counts: `
 SELECT
   SUM(CASE WHEN instance = ?1 AND status IN ('pending','held') AND attempts < ?2
-           THEN 1 ELSE 0 END) AS waiting,
-  SUM(CASE WHEN instance = ?1 AND (status = 'failed'
-            OR (status = 'pending' AND attempts >= ?2)) THEN 1 ELSE 0 END) AS needs_attention,
+           AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
+                            WHERE row_id = meeting_log_queue.id AND status = 'failed')
+          THEN 1 ELSE 0 END) AS waiting,
+  SUM(CASE WHEN instance = ?1
+           AND ( status = 'failed'
+                 OR (status = 'pending' AND attempts >= ?2)
+                 OR EXISTS (SELECT 1 FROM meeting_log_targets
+                             WHERE row_id = meeting_log_queue.id AND status = 'failed') )
+           AND status IN ('pending','failed')
+          THEN 1 ELSE 0 END) AS needs_attention,
   SUM(CASE WHEN instance = ?1 AND status = 'unassigned' THEN 1 ELSE 0 END) AS unassigned,
   -- The status predicate is NOT optional here. Nothing ever deletes queue rows
   -- (meeting_log_queue is deliberately exempt from purgeOtherInstances), so
@@ -170,14 +197,32 @@ FROM meeting_log_queue`,
   // feeds promises "finish setting Odoo up and they will be sent". `failed` is
   // terminal until slice 3's manual retry and `unassigned` needs a contact, not
   // credentials - counting either would make that promise routinely false.
+  //
+  // The `NOT EXISTS` guard is the same promise applied to a MULTI-target row:
+  // one with a retryable target and a terminally failed sibling derives
+  // `pending` under deriveRowStatus's rule 1, so without this it is counted
+  // here too - and finishing the credentials will not send it, because
+  // nothing about a failed target is a credentials problem.
   countAll: `
 SELECT COUNT(*) AS n FROM meeting_log_queue
- WHERE status IN ('held','pending','sending')`,
+ WHERE status IN ('held','pending','sending')
+   AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
+                    WHERE row_id = meeting_log_queue.id AND status = 'failed')`,
 
+  // Same widening as counts.needs_attention, and for the same reason: a row
+  // that derives `pending` with a terminally failed sibling target must still
+  // surface ITS OWN parent-mirrored reason here, not just count as
+  // needs-attention with nothing to say why. The trailing
+  // `status IN ('pending','failed')` scope is the same deleted-row guard as
+  // counts.needs_attention - see that statement's comment.
   lastError: `
 SELECT last_error FROM meeting_log_queue
  WHERE instance = ? AND last_error IS NOT NULL
-   AND (status = 'failed' OR (status = 'pending' AND attempts >= ?))
+   AND ( status = 'failed'
+         OR (status = 'pending' AND attempts >= ?)
+         OR EXISTS (SELECT 1 FROM meeting_log_targets
+                     WHERE row_id = meeting_log_queue.id AND status = 'failed') )
+   AND status IN ('pending','failed')
  ORDER BY created_at DESC LIMIT 1`,
 
   meetingMessages: `
@@ -353,6 +398,13 @@ UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
 
   targetsByRow: `SELECT * FROM meeting_log_targets
     WHERE row_id = ? ORDER BY created_at, id`,
+
+  // Deliberately incomplete, like reclaimBase above - the caller appends the
+  // generated `?,?,...) ORDER BY ...`. The `Base` suffix is what tells you
+  // that. listActionableRows uses this to fetch every target for the LISTED
+  // ids in ONE statement, not N+1 - and not a SQL JOIN, which would multiply
+  // each parent row once per child instead of once per row.
+  targetsByRowsBase: `SELECT * FROM meeting_log_targets WHERE row_id IN (`,
 
   // Orphans only. The NOT IN half is as load-bearing as the age gate: a
   // cancelled row's children are NOT orphans, because the parent still exists.
@@ -569,7 +621,18 @@ export async function deriveRowStatus(
     next = "unassigned";
   } else if (targets.some((t) => t.status === "pending")) {
     next = "pending";
-    source = withError.find((t) => t.status === "pending");
+    // Prefers a PENDING target's own carried-over error - a residual reason
+    // from an earlier attempt on the SAME target that is still retryable -
+    // but falls back to a co-existing FAILED sibling's reason when no
+    // pending target carries one. Without the fallback, a row with one clean
+    // pending target and one terminally failed target mirrors NOTHING onto
+    // the parent: last_error stays whatever it already was (often null), and
+    // QUEUE_SQL.lastError - the one thing telling a user WHY a
+    // needs-attention row needs attention - has nothing to show, even though
+    // a target row is carrying a real one.
+    source =
+      withError.find((t) => t.status === "pending") ??
+      withError.find((t) => t.status === "failed");
   } else if (targets.some((t) => t.status === "failed")) {
     next = "failed";
     source = withError.find((t) => t.status === "failed");
@@ -910,13 +973,36 @@ export async function deleteQueueRow(id: string): Promise<boolean> {
   return (result.rowsAffected ?? 0) === 1;
 }
 
+/**
+ * Every listed row, with its targets attached.
+ *
+ * The targets are fetched in ONE extra query for the whole page, not N+1 -
+ * and joined in MEMORY below, not with a SQL JOIN, which would multiply each
+ * parent row once per target instead of attaching an array to it.
+ */
 export async function listActionableRows(instance: string): Promise<MeetingLogListRow[]> {
   const db = await getDatabase();
-  const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.listActionable, [
+  const parents = await db.select<Record<string, unknown>[]>(QUEUE_SQL.listActionable, [
     instance,
     ESCALATE_AFTER_ATTEMPTS,
   ]);
-  return rows as unknown as MeetingLogListRow[];
+
+  const ids = parents.map((p) => p.id as string);
+  const targetRows = ids.length
+    ? await db.select<Record<string, unknown>[]>(
+        `${QUEUE_SQL.targetsByRowsBase}${ids.map(() => "?").join(",")}) ORDER BY created_at, id`,
+        ids,
+      )
+    : [];
+  const byRow = new Map<string, MeetingLogTarget[]>();
+  for (const t of targetRows.map(toMeetingLogTarget)) {
+    (byRow.get(t.rowId) ?? byRow.set(t.rowId, []).get(t.rowId)!).push(t);
+  }
+
+  return parents.map((p) => ({
+    ...(p as unknown as MeetingLogListRow),
+    targets: byRow.get(p.id as string) ?? [],
+  }));
 }
 
 /** `null` means NO ROW. `""` means the transcript was removed. Not the same thing. */
