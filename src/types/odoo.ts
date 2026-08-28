@@ -54,18 +54,59 @@ export interface DbOdooContact {
   synced_at: number;
 }
 
+/**
+ * One `crm.lead` row, of EITHER kind.
+ *
+ * The name says "opportunity" and the model does not: Odoo keeps leads and
+ * opportunities in the same `crm.lead` table, separated only by the `type`
+ * column, and the picker offers both. The name is kept because the persisted
+ * side is already lead-named end to end (`odoo_selected_target.lead_id`,
+ * `ResolvedTarget.leadId`, `meeting-log-push`'s `crm.lead`), so renaming this
+ * one type would churn six files and every fixture for no behaviour change.
+ *
+ * `type` is what the UI needs: posting a meeting to a lead and posting it to
+ * an opportunity are the same write to the same model, but they are not the
+ * same thing to say out loud, and the row label and the destination sentence
+ * both have to name the right one.
+ */
 export interface OdooOpportunity {
   id: number;
   name: string;
+  type: "lead" | "opportunity";
   stageName: string | null;
   partnerId: number | null;
   partnerName: string | null;
+  /**
+   * `contact_name` and `email_from`: the free text a crm.lead carries when it
+   * has no partner at all, which is Odoo default for an unconverted lead and
+   * the only thing tying such a row to the contact on screen.
+   */
+  contactName: string | null;
+  email: string | null;
 }
 
-/** What slice 2 consumes. Written whole, never field-by-field. */
+/**
+ * What slice 2 consumes. Written whole, never field-by-field.
+ *
+ * `contactId` is NULLABLE, and that is not defensive. A crm.lead picked
+ * straight out of the lead search has no res.partner behind it at all -
+ * Odoo's default for an unconverted lead is free-text contact details and no
+ * partner - so there is no contact to name. The push already handles it:
+ * `meeting-log-push` resolves a non-null `lead_id` to `crm.lead` and never
+ * looks at `contact_id` in that case.
+ *
+ * BOTH being null is not a target and is never stored; `useOdooTarget` clears
+ * the row instead.
+ *
+ * `leadName` is persisted rather than resolved because nothing else can name
+ * a lead. A contact is named from the synced cache; a lead is not in it by
+ * definition, and the in-memory list a lookup produced does not survive a
+ * <Completion /> remount.
+ */
 export interface ResolvedTarget {
-  contactId: number;
+  contactId: number | null;
   leadId: number | null;
+  leadName: string | null;
 }
 
 export interface SyncResult {

@@ -56,6 +56,10 @@ vi.mock("@/lib/odoo/client", () => client);
 const opportunities = vi.hoisted(() => ({
   fetchOpportunities: vi.fn(),
   OPPORTUNITY_LIMIT: 20,
+  // NOT a spy. It is a pure string function the dialog calls during render, and
+  // a `vi.fn()` returning undefined renders every row with a blank kind - the
+  // one thing these rows now have to state.
+  kindLabel: (type: string) => (type === "lead" ? "Lead" : "Opportunity"),
 }));
 vi.mock("@/lib/odoo/opportunities", () => opportunities);
 
@@ -158,9 +162,12 @@ function opportunity(over: Partial<OdooOpportunity> = {}): OdooOpportunity {
   return {
     id: 500,
     name: "Heat pumps for the north wing",
+    type: "opportunity",
     stageName: "Proposal",
     partnerId: 7,
     partnerName: "Ada Lovelace",
+    contactName: null,
+    email: null,
     ...over,
   };
 }
@@ -1136,12 +1143,30 @@ describe("the contact map", () => {
     expect(contacts.listContacts).toHaveBeenCalledTimes(db.listActionableRows.mock.calls.length);
   });
 
-  it("marks a row targeting an opportunity", async () => {
+  // A lead picked out of the search has NO res.partner behind it, so the row
+  // carries a lead_id and no contact_id. Reading that as "No contact chosen"
+  // offers to assign a meeting that is already correctly targeted - and the
+  // queue stores no lead name, so the id is all there is to name it by.
+  it("does not call a lead-only row unassigned", async () => {
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "lo", status: "pending", contact_id: null, lead_id: 42 }),
+    ]);
+    await renderPage();
+    expect(await screen.findByText("Lead or opportunity #42")).toBeInTheDocument();
+    expect(screen.queryByText("No contact chosen")).toBeNull();
+  });
+
+  // NEUTRAL between the two kinds, and that is the assertion. The queue stores
+  // `lead_id` and never its type, so naming one would be a guess printed beside
+  // a customer's name - the marker's job is only to say "not the contact
+  // record".
+  it("marks a row targeting a crm.lead without guessing which kind", async () => {
     db.listActionableRows.mockResolvedValue([
       row({ id: "na", status: "failed", contact_id: 7, lead_id: 42 }),
     ]);
     await renderPage();
-    expect(await screen.findByText("Ada Lovelace (opportunity)")).toBeInTheDocument();
+    expect(await screen.findByText("Ada Lovelace (lead or opportunity)")).toBeInTheDocument();
+    expect(screen.queryByText("Ada Lovelace (opportunity)")).toBeNull();
   });
 });
 
@@ -1224,8 +1249,14 @@ describe("the assign dialog's client", () => {
     // that happened to be memoised on the config would pass a count assertion.
     expect(opportunities.fetchOpportunities.mock.calls[0][0]).toBe(CLIENT);
     expect(opportunities.fetchOpportunities.mock.calls[1][0]).toBe(CLIENT);
-    // The parent is carried through, or a company's deals never surface.
-    expect(opportunities.fetchOpportunities.mock.calls[1].slice(1)).toEqual([8, 9]);
+    // The parent is carried through, or a company's deals never surface - and
+    // so are the name and email, which are the only way an UNLINKED lead is
+    // ever found.
+    expect(opportunities.fetchOpportunities.mock.calls[1][1]).toMatchObject({
+      id: 8,
+      parentId: 9,
+      name: "Bea Nordvik",
+    });
   });
 
   it("builds a fresh client for a SECOND dialog session", async () => {
@@ -1398,10 +1429,10 @@ describe("the assign dialog's opportunity step", () => {
     await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
 
     expect(
-      await screen.findByText(/The opportunities for this contact could not be read/)
+      await screen.findByText(/The opportunities and leads for this contact could not be read/)
     ).toBeInTheDocument();
     // THE KILLER ASSERTION. A failed fetch must never read as "no open deals".
-    expect(screen.queryByText("No open opportunities for this contact.")).toBeNull();
+    expect(screen.queryByText("No open opportunities or leads for this contact.")).toBeNull();
     // The code only - never the raw thrown text.
     expect(document.body.textContent).not.toContain("crm.lead blew up");
 
@@ -1423,17 +1454,60 @@ describe("the assign dialog's opportunity step", () => {
 
     await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
     expect(
-      await screen.findByText("No open opportunities for this contact.")
+      await screen.findByText("No open opportunities or leads for this contact.")
     ).toBeInTheDocument();
     expect(screen.queryByText(/could not be read/)).toBeNull();
+  });
+
+  // Leads and opportunities are one Odoo table and one write, but they are not
+  // the same thing to say out loud - and this dialog's sentence is the only
+  // place the record's kind is stated before a push that cannot be taken back.
+  it("marks lead rows and names a lead as a lead in the destination sentence", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([
+      opportunity({ id: 700, name: "Website enquiry", type: "lead", stageName: "New" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    const leadRow = await screen.findByRole("button", { name: /Lead . Website enquiry/ });
+    await userEvent.click(leadRow);
+
+    expect(
+      screen.getByText("This meeting will be logged on the lead Website enquiry.")
+    ).toBeInTheDocument();
+  });
+
+  it("labels an opportunity as an opportunity, in the row and in the sentence", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([opportunity()]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "un", status: "unassigned", contact_id: null }),
+    ]);
+    await renderPage();
+    await openAssignReady("un");
+
+    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    const oppRow = await screen.findByRole("button", { name: /Heat pumps for the north wing/ });
+    expect(oppRow.textContent).toMatch(/^Opportunity ·/);
+    expect(oppRow.textContent).not.toMatch(/Lead/);
+    await userEvent.click(oppRow);
+
+    expect(
+      screen.getByText(
+        "This meeting will be logged on the opportunity Heat pumps for the north wing."
+      )
+    ).toBeInTheDocument();
   });
 
   it("is token-ordered on the RESOLVE path: a slow lookup cannot paint under a newer contact", async () => {
     const gateA = deferred<OdooOpportunity[]>();
     const gateB = deferred<OdooOpportunity[]>();
     opportunities.fetchOpportunities.mockImplementation(
-      (_client: unknown, contactId: number) =>
-        contactId === 7 ? gateA.promise : gateB.promise
+      (_client: unknown, picked: { id: number }) =>
+        picked.id === 7 ? gateA.promise : gateB.promise
     );
     contacts.listContacts.mockResolvedValue([
       contact(),
@@ -1472,8 +1546,8 @@ describe("the assign dialog's opportunity step", () => {
     const gateA = deferred<OdooOpportunity[]>();
     const gateB = deferred<OdooOpportunity[]>();
     opportunities.fetchOpportunities.mockImplementation(
-      (_client: unknown, contactId: number) =>
-        contactId === 7 ? gateA.promise : gateB.promise
+      (_client: unknown, picked: { id: number }) =>
+        picked.id === 7 ? gateA.promise : gateB.promise
     );
     contacts.listContacts.mockResolvedValue([
       contact(),

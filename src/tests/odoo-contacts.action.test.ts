@@ -45,6 +45,15 @@ const MIGRATION = path.resolve(
   __dirname,
   "../../src-tauri/src/db/migrations/odoo-contacts.sql"
 );
+// Applied IN ORDER, exactly as the app does. Migration 13 rebuilds
+// odoo_selected_target to drop its NOT NULL on contact_id, so running only
+// migration 11 here would test these functions against a schema no installed
+// copy of the app has - and every lead-only save would fail on a constraint
+// the real database no longer carries.
+const MIGRATION_13 = path.resolve(
+  __dirname,
+  "../../src-tauri/src/db/migrations/odoo-lead-only-target.sql"
+);
 const INSTANCE = "http://h:8069|odoo";
 const OTHER = "http://h:8069|staging";
 
@@ -76,6 +85,7 @@ beforeEach(async () => {
   const SQL = await initSqlJs({ wasmBinary });
   db = new SQL.Database();
   db.run(fs.readFileSync(MIGRATION, "utf8"));
+  db.run(fs.readFileSync(MIGRATION_13, "utf8"));
 });
 
 describe("the migration", () => {
@@ -147,7 +157,10 @@ describe("purgeOtherInstances", () => {
   it("removes every trace of a switched-away instance", async () => {
     await upsertContacts(OTHER, [contact({ id: 77 })], 1000);
     await finishSync(OTHER, "2026-08-01 10:00:00", 1000, 0);
-    await saveTarget({ instance: OTHER, contactId: 77, leadId: null, conversationId: null }, 1000);
+    await saveTarget(
+      { instance: OTHER, contactId: 77, leadId: null, leadName: null, conversationId: null },
+      1000
+    );
 
     await purgeOtherInstances(INSTANCE);
 
@@ -227,19 +240,72 @@ describe("sync state", () => {
 
 describe("the selected target", () => {
   it("is a singleton - a second save replaces, never accumulates", async () => {
-    await saveTarget({ instance: INSTANCE, contactId: 1, leadId: 5, conversationId: null }, 1000);
-    await saveTarget({ instance: INSTANCE, contactId: 2, leadId: null, conversationId: "c" }, 2000);
+    await saveTarget(
+      { instance: INSTANCE, contactId: 1, leadId: 5, leadName: "Solar", conversationId: null },
+      1000
+    );
+    await saveTarget(
+      { instance: INSTANCE, contactId: 2, leadId: null, leadName: null, conversationId: "c" },
+      2000
+    );
     expect(db.exec("SELECT COUNT(*) FROM odoo_selected_target")[0].values[0][0]).toBe(1);
-    await expect(loadTarget(INSTANCE)).resolves.toEqual({ contactId: 2, leadId: null });
+    await expect(loadTarget(INSTANCE)).resolves.toEqual({
+      contactId: 2,
+      leadId: null,
+      leadName: null,
+    });
+  });
+
+  // A lead is not in the contact cache by definition, and the in-memory list a
+  // lookup produced does not survive a <Completion /> remount - so the name
+  // stored beside the id is the ONLY thing that can name a lead-only target.
+  // Dropped here, the picker rehydrates to "Who are you meeting?" over a
+  // meeting already queued against a real record.
+  it("round-trips a lead-only target, name and all", async () => {
+    await saveTarget(
+      {
+        instance: INSTANCE,
+        contactId: null,
+        leadId: 90,
+        leadName: "Partnership with ECS",
+        conversationId: null,
+      },
+      1000
+    );
+    await expect(loadTarget(INSTANCE)).resolves.toEqual({
+      contactId: null,
+      leadId: 90,
+      leadName: "Partnership with ECS",
+    });
+  });
+
+  // Not writable through saveTarget - `commit` clears instead of storing an
+  // empty target - but a row can predate that rule or be left by a partial
+  // write. Read back as a target it hands slice 2 something it can only file
+  // as unassigned, while the picker claims a selection is in place.
+  it("refuses a row that names neither a contact nor a lead", async () => {
+    db.run(
+      `INSERT INTO odoo_selected_target
+         (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
+       VALUES ('current', ?, NULL, NULL, NULL, NULL, 1000)`,
+      [INSTANCE]
+    );
+    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
   });
 
   it("does not return a target belonging to another instance", async () => {
-    await saveTarget({ instance: OTHER, contactId: 1, leadId: null, conversationId: null }, 1000);
+    await saveTarget(
+      { instance: OTHER, contactId: 1, leadId: null, leadName: null, conversationId: null },
+      1000
+    );
     await expect(loadTarget(INSTANCE)).resolves.toBeNull();
   });
 
   it("clears", async () => {
-    await saveTarget({ instance: INSTANCE, contactId: 1, leadId: null, conversationId: null }, 1000);
+    await saveTarget(
+      { instance: INSTANCE, contactId: 1, leadId: null, leadName: null, conversationId: null },
+      1000
+    );
     await clearTarget();
     await expect(loadTarget(INSTANCE)).resolves.toBeNull();
   });

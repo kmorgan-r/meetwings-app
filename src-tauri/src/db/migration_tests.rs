@@ -78,4 +78,26 @@ mod tests {
             "meeting log queue migration must embed migrations/meeting-log-queue.sql"
         );
     }
+
+    /// Same reasoning again. This one rebuilds a table migration 11 already
+    /// created, so registering it at an ALREADY-APPLIED version would not
+    /// merely collide on a checksum - the rebuild would never run at all on an
+    /// existing install, and every lead-only selection would fail its NOT NULL
+    /// constraint at the point of a click.
+    #[test]
+    fn lead_only_target_migration_is_version_13_and_points_at_its_own_file() {
+        let lead_only = migrations()
+            .into_iter()
+            .find(|m| m.description == "allow_lead_only_selected_target")
+            .expect("lead-only target migration must be registered");
+        assert_eq!(
+            lead_only.version, 13,
+            "lead-only target migration must be version 13"
+        );
+        assert_eq!(
+            lead_only.sql,
+            include_str!("migrations/odoo-lead-only-target.sql"),
+            "lead-only target migration must embed migrations/odoo-lead-only-target.sql"
+        );
+    }
 }

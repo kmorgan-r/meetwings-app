@@ -27,6 +27,8 @@ import {
   OdooError,
   reportOdooError,
   runSync,
+  searchLeads,
+  LEAD_SEARCH_MIN_CHARS,
 } from "@/lib/odoo";
 import { loadOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type { OdooContact, OdooOpportunity, ResolvedTarget } from "@/types";
@@ -106,9 +108,30 @@ export function useOdooTarget({
   const [opportunities, setOpportunities] = useState<OdooOpportunity[] | null>(null);
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
+  /**
+   * The lead SEARCH, which is a different read from the opportunity lookup and
+   * keeps its own state for it.
+   *
+   * The lookup hangs off a chosen contact; this one hangs off the text in the
+   * search box and is the only way to reach a lead that has no res.partner
+   * behind it at all. Sharing one `isLookingUp`/`opportunityError` pair
+   * between them would paint a failed search as a failed lookup under a
+   * contact the user had already picked successfully.
+   */
+  const [leadResults, setLeadResults] = useState<OdooOpportunity[] | null>(null);
+  const [leadSearchError, setLeadSearchError] = useState<string | null>(null);
+  const [isSearchingLeads, setIsSearchingLeads] = useState(false);
 
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
+  /**
+   * Its OWN token, not `selectionToken`.
+   *
+   * Searches are superseded by later SEARCHES, not by selections - and a
+   * selection made while a search is in flight must not silently discard the
+   * results the user is about to pick from.
+   */
+  const searchToken = useRef(0);
   // Remembers the contact behind the current opportunity lookup, so retry can
   // re-run it without asking the caller to hand a whole OdooContact back in.
   const contactRef = useRef<OdooContact | null>(null);
@@ -143,6 +166,17 @@ export function useOdooTarget({
   const targetRef = useRef<ResolvedTarget | null>(null);
   useLayoutEffect(() => {
     targetRef.current = target;
+  });
+
+  /**
+   * Read by `onSelectOpportunity`, which runs from a click handler rather than
+   * during render. Mirrored so that callback keeps the stable identity
+   * ContactPicker's React.memo depends on - taking `opportunities` as a dep
+   * would give it a new identity on every lookup.
+   */
+  const opportunitiesRef = useRef(opportunities);
+  useLayoutEffect(() => {
+    opportunitiesRef.current = opportunities;
   });
 
   // Read from onRetryOpportunities' fallback, which is called from an
@@ -198,7 +232,13 @@ export function useOdooTarget({
         if (next) {
           const instance = await resolveInstance();
           await saveTarget(
-            { instance, contactId: next.contactId, leadId: next.leadId, conversationId: null },
+            {
+              instance,
+              contactId: next.contactId,
+              leadId: next.leadId,
+              leadName: next.leadName,
+              conversationId: null,
+            },
             Date.now()
           );
         } else {
@@ -403,7 +443,7 @@ export function useOdooTarget({
       setOpportunityError(null);
       setIsLookingUp(!contact.isColleague);
 
-      await commit({ contactId: contact.id, leadId: null }, token);
+      await commit({ contactId: contact.id, leadId: null, leadName: null }, token);
 
       // Cosmetic recency stamp. Fired AFTER the load-bearing commit, never
       // awaited by it - a locked DB here must not take the commit down with
@@ -424,7 +464,7 @@ export function useOdooTarget({
 
       try {
         const client = await getClient();
-        const rows = await fetchOpportunities(client, contact.id, contact.parentId);
+        const rows = await fetchOpportunities(client, contact);
         if (token !== selectionToken.current) return;
         setOpportunities(rows);
         setIsLookingUp(false);
@@ -442,9 +482,87 @@ export function useOdooTarget({
     async (leadId: number | null) => {
       const current = targetRef.current;
       if (!current) return;
-      await commit({ contactId: current.contactId, leadId }, selectionToken.current);
+      // Captured HERE, from the list that is on screen, because this is the
+      // last moment anything knows it: `opportunities` is in-memory state and
+      // a <Completion /> remount takes it with it, leaving a persisted lead id
+      // with nothing able to name it.
+      const name =
+        leadId === null
+          ? null
+          : (opportunitiesRef.current?.find((o) => o.id === leadId)?.name ?? null);
+      await commit(
+        { contactId: current.contactId, leadId, leadName: name },
+        selectionToken.current
+      );
     },
     [commit]
+  );
+
+  /**
+   * A crm.lead picked straight out of the search, with no contact step.
+   *
+   * `contactId` is the lead's OWN partner when it has one - keeping that link
+   * costs nothing and the queue page can name the row from it - and null when
+   * it does not, which is the case this whole path exists for.
+   *
+   * The opportunity lookup is reset rather than re-run: the user has already
+   * named the record they mean, and re-running it under a partner they did not
+   * choose would paint a list of that partner's other deals beneath it.
+   */
+  const onSelectLead = useCallback(
+    async (lead: OdooOpportunity) => {
+      selectionToken.current += 1;
+      const token = selectionToken.current;
+      // A lead-only target has no contact to retry a lookup for. Left set,
+      // `onRetryOpportunities` would fetch the PREVIOUS contact's deals and
+      // paint them under this lead.
+      contactRef.current = null;
+      setOpportunities(null);
+      setOpportunityError(null);
+      setIsLookingUp(false);
+      await commit(
+        { contactId: lead.partnerId, leadId: lead.id, leadName: lead.name },
+        token
+      );
+    },
+    [commit]
+  );
+
+  /**
+   * NEVER REJECTS - the picker calls it from a debounce timer, where a
+   * rejection is unhandled by construction.
+   */
+  const onSearchLeads = useCallback(
+    async (query: string) => {
+      searchToken.current += 1;
+      const token = searchToken.current;
+      const trimmed = query.trim();
+
+      if (trimmed.length < LEAD_SEARCH_MIN_CHARS) {
+        // Not an empty RESULT - no search at all. `null` is what the picker
+        // renders as "nothing asked for yet"; [] would say "none found" for a
+        // query nobody ran.
+        setLeadResults(null);
+        setLeadSearchError(null);
+        setIsSearchingLeads(false);
+        return;
+      }
+
+      setLeadSearchError(null);
+      setIsSearchingLeads(true);
+      try {
+        const client = await getClient();
+        const rows = await searchLeads(client, trimmed);
+        if (token !== searchToken.current) return;
+        setLeadResults(rows);
+        setIsSearchingLeads(false);
+      } catch (err) {
+        if (token !== searchToken.current) return;
+        setLeadSearchError(reportOdooError(err, "search leads").code);
+        setIsSearchingLeads(false);
+      }
+    },
+    [getClient]
   );
 
   /**
@@ -472,7 +590,7 @@ export function useOdooTarget({
     setIsLookingUp(true);
     try {
       const client = await getClient();
-      const rows = await fetchOpportunities(client, contact.id, contact.parentId);
+      const rows = await fetchOpportunities(client, contact);
       if (token !== selectionToken.current) return;
       setOpportunities(rows);
       setIsLookingUp(false);
@@ -545,7 +663,13 @@ export function useOdooTarget({
   const pickerProps: ContactPickerProps = {
     contactId: target?.contactId ?? null,
     leadId: target?.leadId ?? null,
+    leadName: target?.leadName ?? null,
     contactName,
+    leadResults,
+    leadSearchError,
+    isSearchingLeads,
+    onSelectLead,
+    onSearchLeads,
     cache,
     opportunities,
     opportunityError,

@@ -75,6 +75,8 @@ const odoo = vi.hoisted(() => ({
   currentInstance: vi.fn(async () => "http://h:8069|odoo"),
   createOdooClient: vi.fn(() => ({ authenticate: vi.fn(), execute: vi.fn(), serverDate: null })),
   fetchOpportunities: vi.fn(async () => []),
+  searchLeads: vi.fn(async () => []),
+  LEAD_SEARCH_MIN_CHARS: 2,
 }));
 vi.mock("@/lib/odoo", async () => {
   const errors = await vi.importActual<Record<string, unknown>>("@/lib/odoo/errors");
@@ -116,6 +118,7 @@ beforeEach(() => {
   action.stampLastMeeting.mockResolvedValue(undefined);
   action.setColleague.mockResolvedValue(undefined);
   odoo.fetchOpportunities.mockResolvedValue([]);
+  odoo.searchLeads.mockResolvedValue([]);
   odoo.currentInstance.mockResolvedValue("http://h:8069|odoo");
   odoo.runSync.mockResolvedValue({
     ran: true,
@@ -381,7 +384,7 @@ describe("persisting a selection", () => {
     await act(async () => {
       result.current.pickerProps.onSelect(ada);
     });
-    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
   });
 
   // Added during self-review: pin the exact scenario the hook's own doc
@@ -410,13 +413,13 @@ describe("persisting a selection", () => {
     await act(async () => {
       await result.current.pickerProps.onSelect(colleague); // token 2, saveTarget resolves
     });
-    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
 
     await act(async () => {
       rejectAdaSave(new Error("database is locked"));
     });
 
-    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 });
 
@@ -425,7 +428,16 @@ describe("the opportunity panel", () => {
   // skips the lookup entirely - stale deals would otherwise stay forever.
   it("clears the previous contact's opportunities before the next selection", async () => {
     odoo.fetchOpportunities.mockResolvedValue([
-      { id: 5, name: "Heat pump", stageName: null, partnerId: 1, partnerName: "Ada" },
+      {
+        id: 5,
+        name: "Heat pump",
+        type: "opportunity",
+        stageName: null,
+        partnerId: 1,
+        partnerName: "Ada",
+        contactName: null,
+        email: null,
+      },
     ]);
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
@@ -483,7 +495,7 @@ describe("the opportunity panel", () => {
   // the hook's contactRef is empty, so retry must fall back to the cache or the
   // button is dead on the one path it was added for.
   it("retries for a rehydrated target that was never selected in this session", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
     expect(result.current.pickerProps.opportunities).toBeNull();
@@ -493,8 +505,7 @@ describe("the opportunity panel", () => {
     });
     expect(odoo.fetchOpportunities).toHaveBeenCalledWith(
       expect.anything(),
-      1,
-      ada.parentId
+      expect.objectContaining({ id: 1, parentId: ada.parentId })
     );
   });
 });
@@ -570,10 +581,10 @@ describe("cross-window credential changes", () => {
   // subsequent onSelectOpportunity would then commit that stale contactId
   // under the NEW instance's fingerprint, writing a poisoned row.
   it("clears the in-memory target when the instance changes, matching the DB purge", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
     const { result } = mount();
     await waitFor(() =>
-      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null })
+      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
     );
 
     action.loadTarget.mockClear();
@@ -623,9 +634,9 @@ describe("selecting", () => {
 
     // The user picked a person. If an unmount or a meeting-ended landed here,
     // waiting for the second click would file the meeting as unassigned.
-    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
     expect(action.saveTarget).toHaveBeenCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: null }),
+      expect.objectContaining({ contactId: 1, leadId: null, leadName: null }),
       expect.any(Number)
     );
     await act(async () => resolveLookup([]));
@@ -651,7 +662,7 @@ describe("selecting", () => {
       result.current.pickerProps.onSelect(colleague);
     });
     expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
-    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 
   // A colleague selection leaves opportunities === null (onSelect never looks
@@ -680,7 +691,10 @@ describe("selecting", () => {
       result.current.pickerProps.onSelect(ada);
     });
     await waitFor(() =>
-      expect(odoo.fetchOpportunities).toHaveBeenCalledWith(expect.anything(), 1, 9)
+      expect(odoo.fetchOpportunities).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ id: 1, parentId: 9 })
+      )
     );
   });
 
@@ -705,7 +719,18 @@ describe("selecting", () => {
     // A resolves last, with A's opportunity.
     await act(async () => {
       deferred[1]?.([]);
-      deferred[0]?.([{ id: 99, name: "A's deal", stageName: null, partnerId: 1, partnerName: "Ada" }]);
+      deferred[0]?.([
+        {
+          id: 99,
+          name: "A's deal",
+          type: "opportunity",
+          stageName: null,
+          partnerId: 1,
+          partnerName: "Ada",
+          contactName: null,
+          email: null,
+        },
+      ]);
     });
 
     expect(result.current.targetRef.current?.contactId).toBe(3);
@@ -724,7 +749,7 @@ describe("selecting", () => {
       expect(result.current.pickerProps.opportunityError).toBe("ODOO_UNREACHABLE")
     );
     // Still usable: the partner record is a valid target.
-    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
   });
 
   it("writes contactId and leadId together when an opportunity is picked", async () => {
@@ -736,9 +761,17 @@ describe("selecting", () => {
     await act(async () => {
       result.current.pickerProps.onSelectOpportunity(7);
     });
-    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: 7 });
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 1,
+      leadId: 7,
+      // Captured from the list on screen. `opportunities` is in-memory state
+      // that a <Completion /> remount destroys, so this is the last moment
+      // anything can name the record - and the fixture's lookup returned [],
+      // which is exactly the case where there is nothing to name it from.
+      leadName: null,
+    });
     expect(action.saveTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: 7 }),
+      expect.objectContaining({ contactId: 1, leadId: 7, leadName: null }),
       expect.any(Number)
     );
   });
@@ -748,10 +781,10 @@ describe("rehydrate", () => {
   // <Completion /> can unmount mid-call: the setup gate at
   // src/pages/app/index.tsx:84 is reactive, not latched.
   it("restores the target from the singleton row on mount", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 4, leadId: 8 });
+    action.loadTarget.mockResolvedValue({ contactId: 4, leadId: 8, leadName: null });
     const { result } = mount();
     await waitFor(() =>
-      expect(result.current.targetRef.current).toEqual({ contactId: 4, leadId: 8 })
+      expect(result.current.targetRef.current).toEqual({ contactId: 4, leadId: 8, leadName: null })
     );
   });
 
@@ -767,8 +800,8 @@ describe("rehydrate", () => {
     await act(async () => {
       result.current.pickerProps.onSelect(colleague);
     });
-    await act(async () => resolveLoad({ contactId: 4, leadId: 8 }));
-    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+    await act(async () => resolveLoad({ contactId: 4, leadId: 8, leadName: null }));
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 });
 
@@ -785,7 +818,7 @@ describe("the ref mirror", () => {
       result.current.pickerProps.onSelect(colleague);
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null });
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 });
 
@@ -813,10 +846,10 @@ describe("a sync that archives the selected partner", () => {
 // Input.tsx's keepEngaged close button) funnels through.
 describe("starting a new chat", () => {
   it("clears both the in-memory target and the persisted row", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
     const { result } = mount();
     await waitFor(() =>
-      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null })
+      expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
     );
 
     await act(async () => {
@@ -850,5 +883,139 @@ describe("the picker's open state", () => {
 
     result.current.pickerProps.onOpenChange(true);
     expect(setIsPickerOpen).toHaveBeenCalledWith(true);
+  });
+});
+
+/**
+ * A crm.lead reached WITHOUT a contact.
+ *
+ * The contact list is an offline filter over synced res.partner rows. Odoo
+ * default for an unconverted lead is free-text contact details and no partner
+ * at all, so such a record is not in that list and never will be - this search
+ * is the only way to it.
+ */
+describe("the lead search", () => {
+  const found = {
+    id: 90,
+    name: "Partnership with ECS",
+    type: "lead" as const,
+    stageName: "New",
+    partnerId: null,
+    partnerName: null,
+    contactName: "Christian Carron",
+    email: "cc@ecs.example",
+  };
+
+  it("searches, and holds the results for the picker", async () => {
+    odoo.searchLeads.mockResolvedValue([found]);
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.pickerProps.onSearchLeads("carron");
+    });
+    expect(odoo.searchLeads).toHaveBeenCalledWith(expect.anything(), "carron");
+    expect(result.current.pickerProps.leadResults).toEqual([found]);
+    expect(result.current.pickerProps.leadSearchError).toBeNull();
+  });
+
+  // `null` is "nothing asked for yet"; `[]` says "none found" for a query
+  // nobody ran. The picker renders them differently and must be able to.
+  it("clears back to 'not searched' below the minimum, without a call", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.pickerProps.onSearchLeads("c");
+    });
+    expect(odoo.searchLeads).not.toHaveBeenCalled();
+    expect(result.current.pickerProps.leadResults).toBeNull();
+  });
+
+  // Same reasoning as the opportunity lookup's own token: type "carr", then
+  // "carron"; the slower FIRST response landing last would paint results for a
+  // query no longer on screen.
+  it("discards a search that a later search has superseded", async () => {
+    const gates: ((v: unknown) => void)[] = [];
+    odoo.searchLeads.mockImplementation(
+      () => new Promise((resolve) => gates.push(resolve))
+    );
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      void result.current.pickerProps.onSearchLeads("carr");
+      void result.current.pickerProps.onSearchLeads("carron");
+    });
+    await act(async () => {
+      gates[1]?.([found]);
+      gates[0]?.([{ ...found, id: 91, name: "Stale" }]);
+    });
+
+    expect(result.current.pickerProps.leadResults).toEqual([found]);
+  });
+
+  it("reports a failed search as a code, and not as an empty result", async () => {
+    const { odooError } = await import("@/lib/odoo/errors");
+    odoo.searchLeads.mockRejectedValue(odooError("ODOO_UNREACHABLE", "down"));
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.pickerProps.onSearchLeads("carron");
+    });
+    expect(result.current.pickerProps.leadSearchError).toBe("ODOO_UNREACHABLE");
+    expect(result.current.pickerProps.leadResults).toBeNull();
+  });
+
+  // THE POINT OF THE WHOLE PATH. contactId null is a legitimate target: the
+  // push resolves a non-null lead_id to crm.lead and never reads contact_id.
+  it("commits a lead with no contact behind it, name and all", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.pickerProps.onSelectLead(found);
+    });
+
+    expect(result.current.targetRef.current).toEqual({
+      contactId: null,
+      leadId: 90,
+      // Persisted, because nothing else can name it: a lead is not in the
+      // contact cache by definition, and the in-memory list does not survive a
+      // <Completion /> remount.
+      leadName: "Partnership with ECS",
+    });
+    expect(action.saveTarget).toHaveBeenLastCalledWith(
+      expect.objectContaining({ contactId: null, leadId: 90, leadName: "Partnership with ECS" }),
+      expect.any(Number)
+    );
+  });
+
+  // Free, and the queue page can name the row from it.
+  it("keeps the lead's own partner as the contact when it has one", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      await result.current.pickerProps.onSelectLead({ ...found, partnerId: 4 });
+    });
+    expect(result.current.targetRef.current).toMatchObject({ contactId: 4, leadId: 90 });
+  });
+
+  // Left set, `onRetryOpportunities` would fetch the PREVIOUS contact's deals
+  // and paint them under a lead the user reached by a different route.
+  it("leaves no contact behind for a retry to look deals up against", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada);
+    });
+    odoo.fetchOpportunities.mockClear();
+
+    await act(async () => {
+      await result.current.pickerProps.onSelectLead(found);
+    });
+    await act(async () => {
+      await result.current.pickerProps.onRetryOpportunities();
+    });
+    expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
+    expect(result.current.pickerProps.opportunities).toBeNull();
   });
 });

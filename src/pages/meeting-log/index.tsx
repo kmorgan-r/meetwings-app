@@ -172,12 +172,27 @@ function plural(n: number): string {
  * `crm.lead`, so one map serves both. A miss is NORMAL, not exceptional:
  * `purgeOtherInstances` deletes other-instance contacts on every sync, so every
  * row in the other-database group resolves to `Contact #<id>` by construction.
+ *
+ * The marker is NEUTRAL between the two kinds of crm.lead on purpose. The
+ * queue stores `lead_id` and never its type, so this row knows the meeting is
+ * going somewhere other than the contact record - which is the whole point of
+ * the marker - and cannot know which. It said "(opportunity)" back when the
+ * picker only offered opportunities; now that it offers leads too, that word
+ * would be a guess printed beside a customer's name.
  */
 function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
-  if (row.contact_id === null) return "No contact chosen";
+  // A row can have a crm.lead and NO contact: a lead picked out of the search
+  // has no res.partner behind it. Reading that as "No contact chosen" would
+  // offer to assign a meeting that is already correctly targeted, and the id
+  // is all there is to name it by - the queue stores no lead name.
+  if (row.contact_id === null) {
+    return row.lead_id === null
+      ? "No contact chosen"
+      : `Lead or opportunity #${row.lead_id}`;
+  }
   const cached = contacts.get(row.contact_id);
   const base = cached ? cached.name : `Contact #${row.contact_id}`;
-  return row.lead_id === null ? base : `${base} (opportunity)`;
+  return row.lead_id === null ? base : `${base} (lead or opportunity)`;
 }
 
 type ConfigState = "loading" | "absent" | "incomplete" | "complete";
