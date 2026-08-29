@@ -1181,12 +1181,25 @@ describe("Task 11: the multi-target list", () => {
   it("hands ContactPicker a referentially stable list at zero targets", async () => {
     const { result, rerender } = renderHook(() => useOdooTarget(opts));
     const first = result.current.targets;
+    // Pinned to a real, empty array up front: against a hook build that
+    // dropped the `targets` field entirely, `first` would be `undefined` and
+    // the `.toBe` below would pass vacuously (undefined === undefined) even
+    // though nothing was actually being tested. `toEqual([])` fails that
+    // build outright instead of rubber-stamping it.
+    expect(first).toEqual([]);
     // Settled BEFORE asserting, not just captured before the mount effect's
     // async loadTargets([]) has a chance to run - a version that allocated a
     // fresh [] on that no-op write would only fail this once the effect has
     // actually landed.
     await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
     rerender();
+    // Object identity, not just deep equality: a version of applyTargets that
+    // unconditionally called setTargets(next) on the mount effect's resolved
+    // (but still-empty) array would swap in a NEW [] here, still passing
+    // toEqual([]) while breaking the no-op-write guarantee this test exists
+    // for. Verified this catches that exact regression by temporarily
+    // simplifying applyTargets to `setTargets(next)` and re-running - the
+    // test failed with "expected [] to be []" (Object.is), as intended.
     expect(result.current.targets).toBe(first);
   });
 

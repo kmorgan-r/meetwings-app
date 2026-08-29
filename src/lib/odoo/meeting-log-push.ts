@@ -421,7 +421,11 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
           // The claim is gone or unprovable. RETURN, not break: the terminal
           // derive below CASes on 'sending' and would match the NEW owner's
           // row, overwriting their state mid-push. A `return` in a `finally`
-          // overrides a pending `break`, which is exactly what is wanted.
+          // overrides a pending `break`, which is exactly what is wanted:
+          // deliberate override, not an accidental swallow. The only
+          // exception that can be pending here comes from the internally
+          // guarded `catch` a few lines up, so nothing escapes unnoticed.
+          // eslint-disable-next-line no-unsafe-finally -- see comment above
           return;
         }
       }
