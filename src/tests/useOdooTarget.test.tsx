@@ -430,6 +430,42 @@ describe("persisting a selection", () => {
 
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
+
+  // Fix round 1, finding 3: the add and the compensating remove are two
+  // independent writes now, not one atomic UPSERT the way the dropped
+  // saveTarget was. Picking Bea persists Bea's row; if the compensating
+  // remove of Ada's earlier row then rejects, the OLD code just reverted to
+  // Ada in memory while the database still held BOTH rows with Bea's the
+  // more recent - resurrecting, on the very next rehydrate, the exact
+  // selection this toast just told the user had failed. The re-read must
+  // reflect what is ACTUALLY there (Bea), not the pre-commit guess (Ada).
+  it("reflects the database, not a guess, when the compensating remove rejects after a successful add", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.pickerProps.onSelect(ada); // token 1, persists Ada's row
+    });
+    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
+
+    action.removeSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+    // What actually persisted: Bea's add succeeded (default mock), Ada's
+    // compensating remove is the one that just rejected - so BOTH rows are
+    // still there, Bea's the more recent by selected_at.
+    action.loadTargets.mockResolvedValueOnce([
+      { model: "res.partner", resId: 1, name: null },
+      { model: "res.partner", resId: 2, name: null },
+    ]);
+
+    await act(async () => {
+      await result.current.pickerProps.onSelect(colleague); // token 2, Bea
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // NOT Ada (the pre-commit guess) and NOT null - the database's own most
+    // recent row, which is what actually happened.
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
+  });
 });
 
 describe("the opportunity panel", () => {
@@ -1299,5 +1335,112 @@ describe("Task 11: the multi-target list", () => {
       expect(r).toMatchObject({ ok: false, reason: "cap" });
     });
     expect(result.current.targets).toHaveLength(5);
+  });
+
+  // Fix round 1, finding 1: every other write path in this file (commit,
+  // handleNewChat, reload's archival loop) reports a failure through
+  // toast.error instead of letting it escape a click handler unhandled.
+  // addTarget/removeTarget did not - a `resolveInstance` or
+  // `addSelectedTarget` rejection just vanished, and this `await` proves it
+  // would otherwise be an unhandled rejection out of the test itself.
+  it("reports and swallows a failed add instead of leaving it invisible", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    action.addSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+
+    let r: { ok: boolean; reason?: "cap" } | undefined;
+    await act(async () => {
+      r = await result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+    });
+
+    expect(r).toEqual({ ok: false });
+    expect(toastError).toHaveBeenCalled();
+    expect(result.current.targets).toHaveLength(0);
+  });
+
+  it("reports and swallows a failed remove instead of leaving it invisible", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [{ model: "res.partner", resId: 1, name: "A" }]);
+    action.removeSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // The remove never persisted, so the in-memory list must not diverge
+    // from the database by dropping it anyway.
+    expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
+  });
+
+  // Fix round 1, finding 4 (minor): no test called removeTarget at all.
+  it("filters targets and calls removeSelectedTarget with the right arguments", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [
+      { model: "res.partner", resId: 1, name: "A" },
+      { model: "crm.lead", resId: 8, name: "Deal" },
+    ]);
+
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+
+    expect(action.removeSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      "res.partner",
+      1
+    );
+    expect(result.current.targets.map((t) => ({ model: t.model, resId: t.resId }))).toEqual([
+      { model: "crm.lead", resId: 8 },
+    ]);
+  });
+
+  // Fix round 1, finding 2: both writes below settle inside the SAME
+  // microtask flush, before any render can catch `targetsRef` up to either
+  // one - the exact window in which a post-await `targetsRef.current`
+  // snapshot goes stale. A version that derives the next array from that
+  // ref instead of from `applyTargets`'s own `prev` drops whichever add's
+  // continuation ran against the OTHER call's now-stale snapshot.
+  it("keeps both targets when two adds settle out of order", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+
+    let releaseFirst: (v: { ok: boolean }) => void = () => {};
+    let releaseSecond: (v: { ok: boolean }) => void = () => {};
+    action.addSelectedTarget
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecond = resolve;
+          })
+      );
+
+    let p1!: ReturnType<typeof result.current.addTarget>;
+    let p2!: ReturnType<typeof result.current.addTarget>;
+    // The async form: it flushes enough microtasks (resolveInstance's own
+    // await) for BOTH calls to actually reach addSelectedTarget and capture
+    // their release functions - the sync form leaves both sitting before
+    // that call, and releaseFirst/releaseSecond below would still be the
+    // no-op defaults.
+    await act(async () => {
+      p1 = result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+      p2 = result.current.addTarget({ model: "res.partner", resId: 2, name: "B" });
+    });
+
+    // The SECOND call's write settles first, and both settle together,
+    // before React gets a chance to commit a render between them.
+    await act(async () => {
+      releaseSecond({ ok: true });
+      releaseFirst({ ok: true });
+      await Promise.all([p1, p2]);
+    });
+
+    expect(result.current.targets.map((t) => t.resId).sort()).toEqual([1, 2]);
   });
 });

@@ -349,10 +349,27 @@ export function useOdooTarget({
    * exactly the failure the initial `useState<SelectedTargets>([])` above was
    * chosen to avoid; this is the same guarantee applied to every LATER write,
    * not just the first render.
+   *
+   * `next` may also be an updater `(prev) => SelectedTargets`, mirroring
+   * React's own `setState` overload. `addTarget`/`removeTarget` MUST use this
+   * form: computing the next array from `targetsRef.current` after an
+   * `await` reads a snapshot that a second, faster in-flight call can have
+   * already moved past, so two adds resolving out of order would both
+   * persist to the database but only the LAST one's snapshot survives in
+   * memory - the earlier target silently vanishes from `targets` even though
+   * `odoo_selected_targets` still holds its row. Deriving from `prev` inside
+   * `setTargets`'s own updater instead makes every update see whatever the
+   * previous update actually landed, in call order, not snapshot order.
    */
-  const applyTargets = useCallback((next: SelectedTargets) => {
-    setTargets((prev) => (prev.length === 0 && next.length === 0 ? prev : next));
-  }, []);
+  const applyTargets = useCallback(
+    (next: SelectedTargets | ((prev: SelectedTargets) => SelectedTargets)) => {
+      setTargets((prev) => {
+        const resolved = typeof next === "function" ? next(prev) : next;
+        return prev.length === 0 && resolved.length === 0 ? prev : resolved;
+      });
+    },
+    []
+  );
 
   /**
    * `token !== selectionToken.current` is re-checked on BOTH the entry and the
@@ -369,14 +386,27 @@ export function useOdooTarget({
    * the new row is added before the old one - if it named a DIFFERENT row -
    * is removed, so a failed add never leaves the previous selection's row
    * deleted out from under it.
+   *
+   * Fix round 1: the add and the remove below are two INDEPENDENT writes,
+   * not one atomic UPSERT the way the dropped `saveTarget` was - so the add
+   * can succeed and the compensating remove can still reject. Rolling back
+   * to `previous` in that case would be a GUESS: the new row is already
+   * persisted, carries the later `selected_at`, and the next rehydrate would
+   * silently restore the very selection this toast just reported as failed.
+   * The rejection path re-reads `loadTargets` and reflects whatever is
+   * ACTUALLY there instead - the database is the source of truth on any
+   * failure here, never an in-memory guess. Falls back to `previous` only if
+   * that re-read itself fails too (the database is unreachable, not just the
+   * original write), so the UI does not hang on `next` forever.
    */
   const commit = useCallback(
     async (next: ResolvedTarget | null, token: number) => {
       if (token !== selectionToken.current) return;
       const previous = targetRef.current;
       setTarget(next);
+      let instance: string | null = null;
       try {
-        const instance = await resolveInstance();
+        instance = await resolveInstance();
         const nextKey = next ? toSelectedTarget(next) : null;
         const previousKey = previous ? toSelectedTarget(previous) : null;
 
@@ -398,7 +428,18 @@ export function useOdooTarget({
         }
       } catch (err) {
         if (token !== selectionToken.current) return;
-        setTarget(previous);
+        try {
+          const confirmedInstance = instance ?? (await resolveInstance());
+          const persisted = await loadTargets(confirmedInstance);
+          if (token !== selectionToken.current) return;
+          const last = persisted[persisted.length - 1];
+          setTarget(last ? fromSelectedTarget(last) : null);
+        } catch {
+          // The re-read itself failed too (the database is unreachable, not
+          // just the original write) - fall back to the pre-commit guess
+          // rather than leaving `target` stuck on `next` forever.
+          setTarget(previous);
+        }
         const report = reportOdooError(err, "save target");
         toast.error(`${report.code}: ${report.message}`);
       }
@@ -894,32 +935,62 @@ export function useOdooTarget({
    * surfaces that rejection verbatim rather than re-implementing the count
    * itself, and writes `targets` only on success so a capped call leaves the
    * list exactly as it was.
+   *
+   * Fix round 1, two defects:
+   *
+   * 1. Wrapped in try/catch like every other write path in this file (see
+   *    the doc comment at `resolveInstance`) - a raw throw out of a
+   *    click-triggered async function is an unhandled rejection.
+   *    `resolveInstance` rejecting (e.g. `ODOO_NOT_CONFIGURED`) or
+   *    `addSelectedTarget` hitting a busy database used to just vanish: the
+   *    user clicks Add, nothing happens, nothing is reported anywhere.
+   *
+   * 2. The next list is derived INSIDE `applyTargets`'s own functional
+   *    updater, from `prev`, never from `targetsRef.current` re-read after
+   *    the `await` above it. Two `addTarget` calls (picking two contacts -
+   *    the exact interaction this feature exists for) can resolve out of
+   *    order; a ref snapshot taken post-await only reflects whichever call
+   *    happened to read it last, so the earlier target's row persists in
+   *    the database but silently drops out of `targets` in memory. Deriving
+   *    from `prev` makes each update see whatever the previous one actually
+   *    landed, in call order.
    */
   const addTarget = useCallback(
     async (t: SelectedTarget): Promise<{ ok: boolean; reason?: "cap" }> => {
-      const instance = await resolveInstance();
-      const result = await addSelectedTarget(instance, t, null, Date.now());
-      if (result.ok) {
-        const current = targetsRef.current;
-        const existingIndex = current.findIndex(
-          (x) => x.model === t.model && x.resId === t.resId
-        );
-        applyTargets(
-          existingIndex === -1
-            ? [...current, t]
-            : current.map((x, i) => (i === existingIndex ? t : x))
-        );
+      try {
+        const instance = await resolveInstance();
+        const result = await addSelectedTarget(instance, t, null, Date.now());
+        if (result.ok) {
+          applyTargets((prev) => {
+            const existingIndex = prev.findIndex(
+              (x) => x.model === t.model && x.resId === t.resId
+            );
+            return existingIndex === -1
+              ? [...prev, t]
+              : prev.map((x, i) => (i === existingIndex ? t : x));
+          });
+        }
+        return result;
+      } catch (err) {
+        const report = reportOdooError(err, "add target");
+        toast.error(`${report.code}: ${report.message}`);
+        return { ok: false };
       }
-      return result;
     },
     [applyTargets, resolveInstance]
   );
 
+  /** Same two fixes as `addTarget` above: try/catch, and `prev`-derived. */
   const removeTarget = useCallback(
     async (model: SelectedTarget["model"], resId: number): Promise<void> => {
-      const instance = await resolveInstance();
-      await removeSelectedTarget(instance, model, resId);
-      applyTargets(targetsRef.current.filter((x) => !(x.model === model && x.resId === resId)));
+      try {
+        const instance = await resolveInstance();
+        await removeSelectedTarget(instance, model, resId);
+        applyTargets((prev) => prev.filter((x) => !(x.model === model && x.resId === resId)));
+      } catch (err) {
+        const report = reportOdooError(err, "remove target");
+        toast.error(`${report.code}: ${report.message}`);
+      }
     },
     [applyTargets, resolveInstance]
   );
