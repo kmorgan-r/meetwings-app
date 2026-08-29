@@ -1,9 +1,13 @@
+import { getDatabase } from "@/lib/database/config";
 import {
   assignQueueRow,
   deleteQueueRow,
   deleteTerminalQueueRow,
+  deriveRowStatus,
   getQueueRow,
+  listTargets,
   pruneTranscripts,
+  QUEUE_SQL,
   retryQueueRow,
 } from "@/lib/database/meeting-log.action";
 import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
@@ -35,6 +39,13 @@ export type ActionOutcome =
   | { kind: "no-op" }
   | { kind: "still-sending" }
   | { kind: "push-failed" }
+  /**
+   * At least one target reached Odoo and at least one did not, read from the
+   * AFTER-STATE of every target (not the delta this pass produced) - a retry
+   * that re-faults the same target must still report the targets that were
+   * already sent, not fall through to `push-failed`'s "nothing was sent" copy.
+   */
+  | { kind: "push-partial"; sentCount: number; failedCount: number; pendingCount: number }
   | { kind: "conflict" }
   | { kind: "moved-unknown" }
   /**
@@ -221,13 +232,33 @@ async function runAction(
     // after the per-target loop) - so a retryable failure leaves the row
     // `pending` and a deterministic one leaves it `failed`, both already
     // bumped `attempts` via the claim and both with last_error written from
-    // whichever target carried a reason. Without this gate such a row falls
+    // whichever target carried a reason. Without a gate here such a row falls
     // through to `degraded` or `ok` - and one network outage produces exactly
     // that pairing, because it kills the Odoo call AND the AI call, and
     // generateMeetingLogSummary swallows its throw and returns null. The page
     // would then print "Sent - but the note shows the transcript's first
     // lines" directly beside the row's own freshly written last_error, telling
     // the user a note is live on a customer's record when nothing reached Odoo.
+    //
+    // But the PARENT'S status alone is not the whole story on a multi-target
+    // row: a pass that lands notes on two of three targets derives `pending`
+    // or `failed` on the parent (deriveRowStatus's precedence, rule 1/2), so a
+    // blanket `after.status !== "sent"` here would tell the user NOTHING was
+    // sent while two notes are already live on two customers' chatter - the
+    // falsehood this task exists to remove. Re-read the children (the parent
+    // alone cannot distinguish "0 sent" from "2 of 3 sent") and classify on
+    // THEIR after-state, not the delta this pass produced: a retry that
+    // re-faults the SAME target must still report the targets that were
+    // already sent from an earlier pass, not fall through to push-failed's
+    // "nothing was sent" copy just because this pass changed nothing.
+    const targetsAfter = await listTargets(id);
+    const sentCount = targetsAfter.filter((t) => t.status === "sent").length;
+    const failedCount = targetsAfter.filter((t) => t.status === "failed").length;
+    const pendingCount = targetsAfter.filter((t) => t.status === "pending").length;
+    if (sentCount > 0 && (failedCount > 0 || pendingCount > 0)) {
+      return { kind: "push-partial", sentCount, failedCount, pendingCount };
+    }
+
     if (after.status !== "sent") return { kind: "push-failed" };
 
     if (didSummarize() === false) return { kind: "degraded" };
@@ -239,8 +270,105 @@ async function runAction(
   }
 }
 
+/**
+ * The whole-row retry's CAS. Flips the parent first via the real `retryRow`
+ * predicate (`status IN ('failed','pending')`); only on a successful flip does
+ * it reset every FAILED child to `pending` - never a `sent` one. Gating the
+ * child writes on the parent CAS, rather than doing them first, means a
+ * refused retry (the row moved to `sending` underneath the caller) leaves the
+ * children untouched instead of resetting them out from under a push that may
+ * already be mid-flight.
+ *
+ * The reset is the load-bearing half regardless of order: pushQueuedRow's loop
+ * only picks up targets with status = 'pending' (meeting-log-push.ts:326), so
+ * flipping only the parent leaves every failed target untouched and the next
+ * push a no-op against exactly what the user clicked Retry to fix.
+ */
+async function retryRowAndFailedChildren(id: string): Promise<boolean> {
+  if (!(await retryQueueRow(id))) return false;
+  const db = await getDatabase();
+  for (const t of await listTargets(id)) {
+    if (t.status === "failed") {
+      await db.execute(QUEUE_SQL.targetToPending, [null, null, t.id]);
+    }
+  }
+  return true;
+}
+
 export function retryMeetingLog(id: string, deps: ActionDeps): Promise<ActionOutcome> {
-  return runAction(id, () => retryQueueRow(id), deps);
+  return runAction(id, () => retryRowAndFailedChildren(id), deps);
+}
+
+/** What a per-target action reports. Distinct from `ActionOutcome`: neither
+ * function here ever pushes, so there is no `degraded`/`still-sending`/etc to
+ * conflate with. */
+export type TargetActionOutcome =
+  | { kind: "ok" }
+  | { kind: "gone" }
+  | { kind: "refused" }
+  | { kind: "conflict" };
+
+/**
+ * Retries ONE target on an otherwise-untouched row: resets that child to
+ * `pending` and flips the parent back to `pending` so the next sweep or push
+ * picks it up.
+ */
+export async function retryTarget(rowId: string, targetId: string): Promise<TargetActionOutcome> {
+  const target = (await listTargets(rowId)).find((t) => t.id === targetId);
+  if (!target) return { kind: "gone" };
+  // Mirror removeQueueTarget: a sent target is immutable. targetToPending's
+  // own `AND status <> 'sent'` is the backstop; this is the honest answer to
+  // the caller - a silent no-op there would tell the UI a retry happened when
+  // nothing was written.
+  if (target.status === "sent") return { kind: "refused" };
+
+  const db = await getDatabase();
+  // The child reset is the load-bearing half: pushQueuedRow's loop only picks
+  // up targets with status = 'pending' (meeting-log-push.ts:326), so flipping
+  // only the parent leaves this a no-op against the very target the button
+  // names.
+  await db.execute(QUEUE_SQL.targetToPending, [null, null, targetId]);
+  // retryRow's own predicate is `WHERE id = ? AND status IN ('failed','pending')`.
+  // A row that moved to `sending` between the read above and this write
+  // matches nothing - surface that as a refusal rather than a false `ok`.
+  const res = await db.execute(QUEUE_SQL.retryRow, [rowId]);
+  if ((res.rowsAffected ?? 0) === 0) return { kind: "conflict" };
+  return { kind: "ok" };
+}
+
+/**
+ * Removes one target from a row and re-derives the parent's status from what
+ * remains - including the zero-target case, which lands on `unassigned`
+ * (`deriveRowStatus` rule 0): a row with nothing left to send should not sit
+ * in a `pending`/`failed` group implying otherwise.
+ */
+export async function removeQueueTarget(
+  rowId: string, targetId: string
+): Promise<TargetActionOutcome> {
+  const target = (await listTargets(rowId)).find((t) => t.id === targetId);
+  if (!target) return { kind: "gone" };
+  // Global Constraint: a sent target row is immutable - it is the only record
+  // that the note exists at all.
+  if (target.status === "sent") return { kind: "refused" };
+
+  const before = (await getQueueRow(rowId))?.status;
+  if (!before) return { kind: "gone" };
+  // `held` is deliberately absent from DERIVE_FORBIDDEN in the DB layer -
+  // nothing before this function ever calls deriveRowStatus with an observed
+  // `held`, and doing so here would CAS the row out of `held` early, ending
+  // the 30s undo window because a target happened to be removed mid-hold.
+  // Refuse rather than become the first caller to reach that combination.
+  if (before === "held") return { kind: "refused" };
+
+  const db = await getDatabase();
+  await db.execute(QUEUE_SQL.deleteTargetById, [targetId]);
+  // The read-then-derive window is a real TOCTOU, but a fail-safe one: the CAS
+  // inside deriveRowStatus turns a row that moved between the read above and
+  // this call into zero rows affected - reported as a conflict, not silently
+  // discarded.
+  const { changed } = await deriveRowStatus(rowId, before, Date.now());
+  if (!changed) return { kind: "conflict" };
+  return { kind: "ok" };
 }
 
 export function assignMeetingLog(

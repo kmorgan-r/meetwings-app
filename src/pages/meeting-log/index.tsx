@@ -149,6 +149,13 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
     case "push-failed":
       // Defers to the row's own last_error and never claims a send.
       return "This meeting could not be sent. The error on the row says why.";
+    // TASK 10 BRIDGE, owned by Task 13 (the per-target UI): a real rendering
+    // of sentCount/failedCount/pendingCount belongs there, once the page shows
+    // per-target rows at all. This line only has to satisfy the one constraint
+    // that made Task 10 exist - it must never say nothing reached Odoo when
+    // `sentCount > 0` - so it does not, and nothing more.
+    case "push-partial":
+      return `Sent to ${outcome.sentCount} of ${outcome.sentCount + outcome.failedCount + outcome.pendingCount} - the rest will be retried or need attention.`;
     case "conflict":
       return "This meeting changed in another window.";
     case "moved-unknown":
