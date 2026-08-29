@@ -32,13 +32,7 @@ import {
   LEAD_SEARCH_MIN_CHARS,
 } from "@/lib/odoo";
 import { loadOdooConfig } from "@/lib/storage/odoo-config.storage";
-import type {
-  OdooContact,
-  OdooOpportunity,
-  ResolvedTarget,
-  SelectedTarget,
-  SelectedTargets,
-} from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
 import type {
   ContactPickerProps,
   PickerCacheState,
@@ -69,23 +63,40 @@ const contactsOf = (state: PickerCacheState): OdooContact[] =>
   state.kind === "ready" ? state.contacts : [];
 
 /**
- * The single-flow's own persistence key, coalescing a `ResolvedTarget` down
+ * The single-select flow's own in-memory shape - the picker's original
+ * "who are you meeting?" pick, which names a contact, or a lead/opportunity,
+ * or both (a lead picked under a contact keeps that contact's id too). This
+ * used to be a type shared through `@/types`; Task 14 retired that shared
+ * export once every OTHER caller (`useMeetingLog`'s `targetRef` chief among
+ * them) moved onto the flat `SelectedTargets` list below, and this hook is
+ * the shape's only remaining consumer - so it is local now, under a name
+ * that does not imply anything outside this file still shares it.
+ */
+type SingleTarget = {
+  contactId: number | null;
+  leadId: number | null;
+  leadName: string | null;
+};
+
+/**
+ * The single-flow's own persistence key, coalescing a `SingleTarget` down
  * to the one `SelectedTarget` row it maps onto in `odoo_selected_targets`.
  *
- * Mirrors `useMeetingLog.ts`'s `resolvedToSelected` exactly (lead wins, name
- * only kept for a lead) - which itself matches migration 14's own backfill
- * SQL (`CASE WHEN lead_id IS NOT NULL THEN 'crm.lead' ELSE 'res.partner' END,
- * COALESCE(lead_id, contact_id)`). `saveTarget`/`loadTarget` queried
+ * Matches migration 14's own backfill SQL exactly (lead wins, name only
+ * kept for a lead): `CASE WHEN lead_id IS NOT NULL THEN 'crm.lead' ELSE
+ * 'res.partner' END, COALESCE(lead_id, contact_id)`. `useMeetingLog.ts` no
+ * longer does any coalescing of its own - since Task 14 it reads the flat
+ * `SelectedTargets` list straight off `targetsRef`. `saveTarget`/`loadTarget` queried
  * `odoo_selected_target`, a table migration 14 drops - this hook's
  * persistence goes through the shared multi-target table instead, Task 4's
  * `addSelectedTarget`/`removeSelectedTarget`.
  *
- * Returns null rather than asserting: `ResolvedTarget.contactId` is
+ * Returns null rather than asserting: `SingleTarget.contactId` is
  * `number | null` and `SelectedTarget.resId` is `number`, so an assertion
  * would fail TS strict. `commit`'s own null-target callers already treat
  * "nothing selected" as "nothing to write".
  */
-function toSelectedTarget(t: ResolvedTarget): SelectedTarget | null {
+function toSelectedTarget(t: SingleTarget): SelectedTarget | null {
   if (t.leadId !== null) return { model: "crm.lead", resId: t.leadId, name: t.leadName };
   if (t.contactId !== null) return { model: "res.partner", resId: t.contactId, name: null };
   return null;
@@ -98,7 +109,7 @@ function toSelectedTarget(t: ResolvedTarget): SelectedTarget | null {
  * loss migration 14's backfill already accepts), so a rehydrated lead target
  * always comes back with `contactId: null`.
  */
-function fromSelectedTarget(t: SelectedTarget): ResolvedTarget {
+function fromSelectedTarget(t: SelectedTarget): SingleTarget {
   return t.model === "crm.lead"
     ? { contactId: null, leadId: t.resId, leadName: t.name }
     : { contactId: t.resId, leadId: null, leadName: null };
@@ -126,14 +137,27 @@ function isNotConfigured(err: unknown): boolean {
  * user believes they picked someone.
  */
 export interface UseOdooTargetReturn {
-  targetRef: RefObject<ResolvedTarget | null>;
+  /**
+   * The single-select flow's own ref, used ONLY by this hook's internal
+   * writers (`commit`, `reload`, `onSelectOpportunity`, ...) and by
+   * `pickerProps` below. Nothing outside this file reads it any more - see
+   * `targetsRef` for what `useMeetingLog` actually consumes now.
+   */
+  targetRef: RefObject<SingleTarget | null>;
   pickerProps: ContactPickerProps;
   /**
-   * The multi-target selection (Task 4's `odoo_selected_targets`), separate
-   * from `targetRef`'s single flow above. NOT wired into `useMeetingLog` yet
-   * - `targetRef` stays what slice 2 pushes until Task 14 - this is purely
-   * picker-facing state for Task 12's UI.
+   * Task 14: what `useMeetingLog`'s `targetRef` param is fed at the
+   * `<Completion />` call site now - the flat multi-target list (Task 4's
+   * `odoo_selected_targets`), not the single-select flow's own `targetRef`
+   * above. `commit` (the single flow's own committer) mirrors every add/
+   * remove into this same list via `applyTargets`, so a pick made through
+   * the "Who are you meeting?" section still reaches a finished meeting's
+   * targets - without that mirror, picking a single contact would show its
+   * name in the trigger while `targetsRef.current` stayed `[]` and the
+   * meeting enqueued `unassigned`, exactly the "UI asserts what the log
+   * contradicts" failure this feature exists to remove.
    */
+  targetsRef: RefObject<SelectedTargets>;
   targets: SelectedTargets;
   targetCount: number;
   addTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
@@ -168,7 +192,7 @@ export function useOdooTarget({
   // whenever `targets` changes, never from render.
   setTargetCount: (count: number) => void;
 }): UseOdooTargetReturn {
-  const [target, setTarget] = useState<ResolvedTarget | null>(null);
+  const [target, setTarget] = useState<SingleTarget | null>(null);
   const [cache, setCache] = useState<PickerCacheState>({ kind: "never-synced" });
   const [opportunities, setOpportunities] = useState<OdooOpportunity[] | null>(null);
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
@@ -251,7 +275,7 @@ export function useOdooTarget({
    * async listen() gap each time during which a real meeting-ended is lost.
    * See useMeetingAutoRecord.ts:646-654.
    */
-  const targetRef = useRef<ResolvedTarget | null>(null);
+  const targetRef = useRef<SingleTarget | null>(null);
   useLayoutEffect(() => {
     targetRef.current = target;
   });
@@ -418,9 +442,20 @@ export function useOdooTarget({
    * failure here, never an in-memory guess. Falls back to `previous` only if
    * that re-read itself fails too (the database is unreachable, not just the
    * original write), so the UI does not hang on `next` forever.
+   *
+   * Task 14: EVERY successful write here is also mirrored into `targets` via
+   * `applyTargets`, using the same functional-updater form `addTarget`/
+   * `removeTarget` use for exactly the same reason (see `applyTargets`'s own
+   * doc comment) - `useMeetingLog`'s `targetRef` now reads the flat list, not
+   * this function's own `target` state, so a pick made through this single
+   * flow that never touched `targets` would show its name in the trigger
+   * while nothing was actually queued when the meeting ended. The rejection
+   * path's re-read already re-derives `target` from the database; it
+   * reconciles `targets` from that SAME re-read rather than guessing, for
+   * the identical reason.
    */
   const commit = useCallback(
-    async (next: ResolvedTarget | null, token: number) => {
+    async (next: SingleTarget | null, token: number) => {
       if (token !== selectionToken.current) return;
       const previous = targetRef.current;
       setTarget(next);
@@ -439,12 +474,21 @@ export function useOdooTarget({
               { reason: result.reason ?? "unknown" }
             );
           }
+          applyTargets((prev) => {
+            const idx = prev.findIndex(
+              (x) => x.model === nextKey.model && x.resId === nextKey.resId
+            );
+            return idx === -1 ? [...prev, nextKey] : prev.map((x, i) => (i === idx ? nextKey : x));
+          });
         }
         if (
           previousKey &&
           (!nextKey || previousKey.model !== nextKey.model || previousKey.resId !== nextKey.resId)
         ) {
           await removeSelectedTarget(instance, previousKey.model, previousKey.resId);
+          applyTargets((prev) =>
+            prev.filter((x) => !(x.model === previousKey.model && x.resId === previousKey.resId))
+          );
         }
       } catch (err) {
         if (token !== selectionToken.current) return;
@@ -454,6 +498,10 @@ export function useOdooTarget({
           if (token !== selectionToken.current) return;
           const last = persisted[persisted.length - 1];
           setTarget(last ? fromSelectedTarget(last) : null);
+          // Authoritative re-read - reconciles `targets` to whatever the
+          // database actually holds, rather than leaving it on an optimistic
+          // mirror that may not match what persisted.
+          applyTargets(persisted);
         } catch {
           // Fix round 2: re-checked here too, not just on the success
           // sub-path above - this catch runs after TWO more awaits
@@ -474,7 +522,7 @@ export function useOdooTarget({
         toast.error(`${report.code}: ${report.message}`);
       }
     },
-    [resolveInstance]
+    [applyTargets, resolveInstance]
   );
 
   /**
@@ -1125,6 +1173,7 @@ export function useOdooTarget({
 
   return {
     targetRef,
+    targetsRef,
     pickerProps,
     targets,
     targetCount: targets.length,

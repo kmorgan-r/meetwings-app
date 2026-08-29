@@ -253,22 +253,20 @@ export async function purgeOtherInstances(instance: string): Promise<void> {
 }
 
 /**
- * The selected target was a SINGLETON row, id = 'current'.
+ * The selected target used to be a SINGLETON row, id = 'current'.
  *
  * `saveTarget`/`loadTarget` used to live here, writing and reading it. Both
  * are deleted as of Task 11: `useOdooTarget` was their last consumer, and
  * migration 14 (below) drops `odoo_selected_target` outright, so calling
  * either against a post-migration database threw "no such table". The single
  * flow now persists through `addSelectedTarget`/`removeSelectedTarget` below,
- * coalescing a `ResolvedTarget` down to one `SelectedTarget` row.
+ * coalescing the single-select flow's own in-memory shape down to one
+ * `SelectedTarget` row.
  *
- * `clearTarget` stays - nothing calls it anymore, but it is not this task's
- * job to delete it.
+ * `clearTarget` (singular) is deleted as of Task 14: it queried the same
+ * dropped `odoo_selected_target` table, so any surviving call would have
+ * thrown "no such table" - it had no callers left even before this task.
  */
-export async function clearTarget(): Promise<void> {
-  const db = await getDatabase();
-  await db.execute("DELETE FROM odoo_selected_target WHERE id = 'current'");
-}
 
 /**
  * Migration 14's replacement for the singleton above: up to MAX_TARGETS rows

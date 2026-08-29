@@ -93,12 +93,14 @@ export const Completion = ({
     return provider ? { provider, selectedProvider: selectedAIProvider } : undefined;
   }, [useMeetwingsAPI, allAiProviders, selectedAIProvider]);
 
-  // Slice 2. Mounted beside useOdooTarget because it reads the SAME targetRef,
+  // Slice 2. Mounted beside useOdooTarget because it reads its `targetsRef`,
   // and beside useMeetingAutoRecord because it owns the other half of the
   // meeting lifecycle. It registers its own meeting-ended listener rather than
   // hooking handleStop - see the hook's doc comment.
   const meetingLog = useMeetingLog({
-    targetRef: odoo.targetRef,
+    // Task 14: the flat multi-target list, not the single-select flow's own
+    // ref - see useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
+    targetRef: odoo.targetsRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     meetingAssistMode: completion.meetingAssistMode,

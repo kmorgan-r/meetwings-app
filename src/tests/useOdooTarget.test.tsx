@@ -1013,6 +1013,46 @@ describe("starting a new chat", () => {
   });
 });
 
+/**
+ * Task 14: `useMeetingLog`'s `targetRef` param now reads `targetsRef`
+ * (`targets`, not `target`). Without `commit` mirroring its own add/remove
+ * into `targets`, a pick made through this single flow would show the
+ * contact's name in the trigger while `targetsRef.current` stayed `[]` -
+ * the meeting would then enqueue `unassigned` despite the UI naming a
+ * contact, exactly the "UI asserts what the log contradicts" failure this
+ * feature exists to remove.
+ */
+describe("Task 14: the single-select flow also feeds the flat list", () => {
+  it("mirrors a pick into targets/targetsRef, so useMeetingLog's list sees it too", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada);
+    });
+    await waitFor(() =>
+      expect(result.current.targets).toEqual([{ model: "res.partner", resId: 1, name: null }])
+    );
+    expect(result.current.targetsRef.current).toEqual([
+      { model: "res.partner", resId: 1, name: null },
+    ]);
+  });
+
+  it("removes the earlier pick from targets when a different contact is chosen", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada);
+    });
+    await waitFor(() => expect(result.current.targets).toHaveLength(1));
+    await act(async () => {
+      result.current.pickerProps.onSelect(colleague);
+    });
+    await waitFor(() =>
+      expect(result.current.targets).toEqual([{ model: "res.partner", resId: 2, name: null }])
+    );
+  });
+});
+
 // Finding 1: ContactPicker's open state must be observable by useCompletion's
 // resize effect (the overlay window is 600x54 and grows only through that
 // effect). This hook does not own the state - it is threaded through from

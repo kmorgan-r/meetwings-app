@@ -108,7 +108,7 @@ import { HOLD_MS, UNDO_BLOCKED_MS } from "@/lib/odoo/meeting-log";
 // this suite - the actions module is not mocked here, so the real prune
 // latch stays under test.
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
-import type { ResolvedTarget, TranscriptEntry } from "@/types";
+import type { SelectedTargets, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
 
@@ -116,12 +116,16 @@ function entry(timestamp: number, original = "hello"): TranscriptEntry {
   return { original, timestamp, audioSource: "microphone" };
 }
 
-const DEFAULT_TARGET: ResolvedTarget = { contactId: 42, leadId: null };
+// Task 14: `targetRef` now carries the flat multi-target list directly - the
+// exact shape `useOdooTarget`'s `targetsRef` mirrors - rather than a single
+// contact/lead pick adapted through `resolvedToSelected`. One target,
+// matching what that adapter used to coalesce a contact-only pick into.
+const DEFAULT_TARGETS: SelectedTargets = [{ model: "res.partner", resId: 42, name: null }];
 
 /**
  * Renders the hook with a live targetRef, like <Completion /> does.
  *
- * PRESENCE CHECKS, not `??`. With `??` an explicit `target: null` falls through
+ * PRESENCE CHECKS, not `??`. With `??` an explicit `targets: []` falls through
  * to the default and `currentConversationId: null` falls through to "conv-1" -
  * so the two cases that need those exact nulls (an unassigned meeting, and no
  * conversation id anywhere) could not be expressed at all.
@@ -130,9 +134,9 @@ function render(initial: Record<string, unknown> = {}) {
   const props0 = { meetingTranscript: [entry(1000)], ...initial };
   return renderHook(
     (props: Record<string, unknown>) => {
-      const target = ("target" in props ? props.target : DEFAULT_TARGET) as ResolvedTarget | null;
-      const targetRef = useRef<ResolvedTarget | null>(target);
-      targetRef.current = target;
+      const targets = ("targets" in props ? props.targets : DEFAULT_TARGETS) as SelectedTargets;
+      const targetRef = useRef<SelectedTargets>(targets);
+      targetRef.current = targets;
       return useMeetingLog({
         targetRef,
         meetingTranscript: (props.meetingTranscript as TranscriptEntry[]) ?? [],

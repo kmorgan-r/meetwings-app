@@ -1,4 +1,5 @@
 export * from "./updater";
+export * from "./AddToggle";
 export * from "./ui";
 export * from "./Markdown";
 export * from "./Header";

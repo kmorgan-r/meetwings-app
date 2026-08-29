@@ -29,7 +29,7 @@ import {
   loadOdooConfigState,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { ResolvedTarget, SelectedTarget, TranscriptEntry } from "@/types";
+import type { SelectedTargets, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
 
 type ProviderConfig = {
@@ -113,26 +113,16 @@ export function resetOrphanSweepGuard(): void {
   orphanSweepRan = false;
 }
 
-/**
- * The single-target caller's adapter, until Task 14 replaces targetRef with
- * a real multi-select. Lead wins, matching the migration 14 backfill's own
- * coalesce. Returns null rather than asserting: ResolvedTarget.contactId is
- * `number | null` and SelectedTarget.resId is `number`, so an assertion
- * would fail TS strict.
- */
-function resolvedToSelected(t: ResolvedTarget): SelectedTarget | null {
-  if (t.leadId !== null) {
-    return { model: "crm.lead", resId: t.leadId, name: t.leadName };
-  }
-  if (t.contactId !== null) {
-    return { model: "res.partner", resId: t.contactId, name: null };
-  }
-  return null; // neither id set: not a target, same as today
-}
-
 export interface UseMeetingLogOptions {
-  /** Slice 1's ref. Already mirrored in a useLayoutEffect (useOdooTarget.ts:143-146). */
-  targetRef: RefObject<ResolvedTarget | null>;
+  /**
+   * Task 14: `useOdooTarget`'s `targetsRef` - the flat multi-target list,
+   * already mirrored in a useLayoutEffect (useOdooTarget.ts). Until this
+   * task it was the single-select flow's own single-target ref, adapted here
+   * through a `resolvedToSelected` shim; every caller now holds a real
+   * `SelectedTargets` list, so the adapter is gone and this reads
+   * `targetRef.current` directly.
+   */
+  targetRef: RefObject<SelectedTargets>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
   meetingAssistMode: boolean;
@@ -282,7 +272,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // Snapshot SYNCHRONOUSLY, before any await. Without it a user clearing
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
-    const target = targetRef.current;
+    const targets = targetRef.current;
     const conversationId = conversationIdRef.current;
 
     // The consumed span, from the SAME synchronous snapshot.
@@ -360,11 +350,6 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
 
       const slice = sliceTranscript(all, watermark);
       if (!slice) return; // a genuinely silent meeting is not a meeting
-
-      // Deleted in Task 14, when targetRef becomes a real multi-select.
-      const targets = [target ? resolvedToSelected(target) : null].filter(
-        (t): t is SelectedTarget => t !== null
-      );
 
       const rowId = crypto.randomUUID();
       const created = await insertQueueRow({

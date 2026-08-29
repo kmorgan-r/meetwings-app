@@ -108,7 +108,7 @@ vi.mock("@/layouts", () => ({
 import { ESCALATE_AFTER_ATTEMPTS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { setOdooRedactor } from "@/lib/odoo/redactor";
 import MeetingLog from "@/pages/meeting-log";
-import { QueueRow } from "@/pages/meeting-log/components";
+import { AssignDialog, QueueRow } from "@/pages/meeting-log/components";
 import type { MeetingLogListRow, MeetingLogTarget, OdooContact, OdooOpportunity } from "@/types";
 
 const INSTANCE = "http://h:8069|odoo";
@@ -892,6 +892,79 @@ describe("outcome copy", () => {
   });
 });
 
+/**
+ * Task 14, decision 6: Task 13's review left this gap explicitly for this
+ * task to close - nothing in index.tsx had direct test coverage, so the
+ * `push-partial` copy (the single line this whole feature exists to
+ * produce) was verified only by a reviewer reading it. These two exercise
+ * `targetOutcomeCopy` and `outcomeCopy`'s `push-partial` branch through the
+ * REAL page, not a directly-rendered `<QueueRow>`.
+ */
+describe("push-partial and per-target outcome copy, through the real page", () => {
+  function targetFixture(over: Partial<MeetingLogTarget> = {}): MeetingLogTarget {
+    return {
+      id: "t1",
+      rowId: "na",
+      model: "res.partner",
+      resId: 1,
+      name: "Ada Lovelace",
+      status: "pending",
+      attachmentId: null,
+      messageId: null,
+      lastError: null,
+      lastErrorCode: null,
+      createdAt: 0,
+      sentAt: null,
+      ...over,
+    };
+  }
+
+  it("names the sent count on a push-partial retry, and never calls a pending target failed", async () => {
+    actions.retryMeetingLog.mockResolvedValue({
+      kind: "push-partial",
+      sentCount: 2,
+      failedCount: 1,
+      pendingCount: 1,
+    });
+    db.listActionableRows.mockResolvedValue([row({ id: "na", status: "failed" })]);
+    await renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    const line = await screen.findByText(/^Sent to 2 of 4\./);
+    expect(line.textContent).toContain("1 will be retried automatically.");
+    expect(line.textContent).toContain("1 needs attention — see below.");
+    // sentCount is stated first and never folded into failedCount/pendingCount
+    // - the constraint Task 10 exists to enforce, and the one no line in this
+    // feature may violate: this must never say nothing reached Odoo when
+    // something did, and the one PENDING target (queued for automatic retry)
+    // must never be counted among the one that actually failed.
+    expect(line.textContent).not.toMatch(/nothing reached Odoo/);
+    expect(line.textContent).not.toMatch(/2 need attention/);
+  });
+
+  it("does not render removed-parent-stale with conflict's 'this did not happen' copy", async () => {
+    // TargetActionOutcome's own doc comment (meeting-log-actions.ts) states
+    // the prohibition explicitly: the DELETE already committed here - only
+    // the parent's derived status lost its own race on the way out - so
+    // conflict's copy would be false about a removal that already happened.
+    actions.removeQueueTarget.mockResolvedValue({ kind: "removed-parent-stale" });
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "na", status: "failed", targets: [targetFixture({ status: "failed" })] }),
+    ]);
+    await renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /expand/i }));
+    await userEvent.click(await screen.findByRole("button", { name: "Remove" }));
+
+    expect(
+      await screen.findByText(
+        "Removed from this meeting. The overall status will catch up shortly."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Nothing changed. Try again.")).toBeNull();
+    expect(screen.queryByText("This meeting changed in another window.")).toBeNull();
+  });
+});
+
 describe("outcomes whose row leaves the list", () => {
   it("promotes the message out of the unmounting row, still naming the meeting", async () => {
     // A successful retry writes status = 'sent', which listActionable's WHERE
@@ -1228,6 +1301,103 @@ describe("refreshing", () => {
   });
 });
 
+/**
+ * Task 14, brief Step 1: `<AssignDialog>` rendered DIRECTLY, not through the
+ * full page - these four assert the dialog's own contract in isolation.
+ * Tests 4 and 5 from the brief live elsewhere in this file instead of being
+ * duplicated here: 4 as "QueueRow > is unreachable on a row with a sent
+ * target" (it is QueueRow's own render gate, not the dialog's), and 5 as
+ * "what the assign dialog hands up > surfaces a zero-row assign CAS instead
+ * of swallowing it" (it needs the page's own outcome-copy rendering, which a
+ * bare `<AssignDialog>` has nowhere to show).
+ */
+describe("AssignDialog", () => {
+  const CHRISTIAN = contact({ id: 1, name: "Christian Carron" });
+  const BENTLEY_AS = contact({ id: 3, name: "Bentley AS" });
+
+  function assignDialogProps() {
+    return {
+      row: row({ id: "un", status: "unassigned", contact_id: null }),
+      instance: INSTANCE,
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+    };
+  }
+
+  it("hands up a list of targets", async () => {
+    contacts.listContacts.mockResolvedValue([CHRISTIAN, BENTLEY_AS]);
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+
+    await userEvent.click(screen.getByRole("button", { name: /add Christian Carron/i }));
+    await userEvent.click(screen.getByRole("button", { name: /add Bentley AS/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+    expect(props.onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [
+          { model: "res.partner", resId: 1, name: "Christian Carron" },
+          { model: "res.partner", resId: 3, name: "Bentley AS" },
+        ],
+      })
+    );
+  });
+
+  it("lets a target be taken back off before confirming", async () => {
+    // Decision 5 (carried into this task): Confirm is gated on a non-empty
+    // selection, so the brief's own snippet - confirming an EMPTY set - is
+    // unreachable against this implementation on purpose; see the dedicated
+    // "gates Confirm" test below for that guard itself. The same underlying
+    // guarantee (a target can be removed before Confirm is clicked) is
+    // proven here over TWO targets, leaving one behind instead of zero.
+    contacts.listContacts.mockResolvedValue([CHRISTIAN, BENTLEY_AS]);
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+
+    await userEvent.click(screen.getByRole("button", { name: /add Christian Carron/i }));
+    await userEvent.click(screen.getByRole("button", { name: /add Bentley AS/i }));
+    await userEvent.click(screen.getByRole("button", { name: /added Christian Carron/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+    expect(props.onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [{ model: "res.partner", resId: 3, name: "Bentley AS" }],
+      })
+    );
+  });
+
+  it("gates Confirm on a non-empty selection", async () => {
+    contacts.listContacts.mockResolvedValue([CHRISTIAN]);
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+
+    expect(screen.getByRole("button", { name: "Log this meeting" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /add Christian Carron/i }));
+    expect(screen.getByRole("button", { name: "Log this meeting" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: /added Christian Carron/i }));
+    expect(screen.getByRole("button", { name: "Log this meeting" })).toBeDisabled();
+    expect(props.onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("enforces the cap in the dialog", async () => {
+    const letters = ["A", "B", "C", "D", "E", "F"];
+    contacts.listContacts.mockResolvedValue(
+      letters.map((n, i) => contact({ id: i + 1, name: n }))
+    );
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+
+    for (const n of ["A", "B", "C", "D", "E"]) {
+      await userEvent.click(screen.getByRole("button", { name: new RegExp(`add ${n}`, "i") }));
+    }
+    expect(screen.getByRole("button", { name: /add F/i })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
 describe("the assign dialog's client", () => {
   it("builds ONE client across two opportunity lookups in one session", async () => {
     // Slice 1's open follow-up: useOdooTarget.ts:162-167 builds a fresh client
@@ -1245,9 +1415,9 @@ describe("the assign dialog's client", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
-    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Bea Nordvik" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
 
     expect(client.createOdooClient).toHaveBeenCalledTimes(1);
@@ -1305,7 +1475,7 @@ describe("the assign dialog's client", () => {
     await userEvent.click(dialog().getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByPlaceholderText("Search contacts")).toBeInTheDocument();
-    expect(await dialog().findByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+    expect(await dialog().findByRole("button", { name: "Ada Lovelace" })).toBeInTheDocument();
     // The second attempt really re-resolved rather than reusing a cached
     // promise: under `??=` this stays at 1 and the contacts never appear.
     expect(storage.requireOdooConfig).toHaveBeenCalledTimes(2);
@@ -1382,8 +1552,8 @@ describe("the assign dialog's contact list", () => {
     await renderPage();
     await openAssignReady("un");
 
-    expect(dialog().getByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
-    expect(dialog().getByRole("button", { name: /Bea Nordvik/ })).toBeInTheDocument();
+    expect(dialog().getByRole("button", { name: "Ada Lovelace" })).toBeInTheDocument();
+    expect(dialog().getByRole("button", { name: "Bea Nordvik" })).toBeInTheDocument();
     // Scoped to the live instance, or another database's contacts are offered.
     expect(contacts.listContacts).toHaveBeenLastCalledWith(INSTANCE);
   });
@@ -1400,8 +1570,8 @@ describe("the assign dialog's contact list", () => {
     await openAssignReady("un");
 
     await userEvent.type(screen.getByPlaceholderText("Search contacts"), "bea");
-    expect(dialog().getByRole("button", { name: /Bea Nordvik/ })).toBeInTheDocument();
-    expect(dialog().queryByRole("button", { name: /Ada Lovelace/ })).toBeNull();
+    expect(dialog().getByRole("button", { name: "Bea Nordvik" })).toBeInTheDocument();
+    expect(dialog().queryByRole("button", { name: "Ada Lovelace" })).toBeNull();
   });
 
   it("refuses an archived contact, which is the target Reassign exists to escape", async () => {
@@ -1414,7 +1584,10 @@ describe("the assign dialog's contact list", () => {
     await renderPage();
     await openAssignReady("na", "Reassign");
 
-    expect(dialog().getByRole("button", { name: /Gone Partner/ })).toBeDisabled();
+    // Two buttons now share the archived contact's row - the preview button
+    // and its AddToggle - so both must refuse the pick, not just one.
+    expect(dialog().getByRole("button", { name: "Gone Partner Archived" })).toBeDisabled();
+    expect(dialog().getByRole("button", { name: /add Gone Partner/i })).toBeDisabled();
   });
 });
 
@@ -1433,7 +1606,7 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
 
     expect(
       await screen.findByText(/The opportunities and leads for this contact could not be read/)
@@ -1459,7 +1632,7 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
     expect(
       await screen.findByText("No open opportunities or leads for this contact.")
     ).toBeInTheDocument();
@@ -1479,16 +1652,21 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    const leadRow = await screen.findByRole("button", { name: /Lead . Website enquiry/ });
-    await userEvent.click(leadRow);
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
+    // getByText matches on a node's OWN direct text, not its descendants'
+    // (unlike the accessible-name computation `getByRole` uses) - "Lead · "
+    // sits in its own nested span, so the row is found via its bare name and
+    // its full recursive `.textContent` is what the prefix check needs.
+    const leadText = await screen.findByText("Website enquiry");
+    expect(leadText.textContent).toMatch(/^Lead ·/);
+    await userEvent.click(screen.getByRole("button", { name: /add Website enquiry/i }));
 
     expect(
-      screen.getByText("This meeting will be logged on the lead Website enquiry.")
+      screen.getByText("This meeting will be logged on 1 record: the lead Website enquiry.")
     ).toBeInTheDocument();
   });
 
-  it("labels an opportunity as an opportunity, in the row and in the sentence", async () => {
+  it("labels an opportunity as an opportunity in the row, though the destination sentence cannot", async () => {
     opportunities.fetchOpportunities.mockResolvedValue([opportunity()]);
     db.listActionableRows.mockResolvedValue([
       row({ id: "un", status: "unassigned", contact_id: null }),
@@ -1496,15 +1674,22 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    const oppRow = await screen.findByRole("button", { name: /Heat pumps for the north wing/ });
-    expect(oppRow.textContent).toMatch(/^Opportunity ·/);
-    expect(oppRow.textContent).not.toMatch(/Lead/);
-    await userEvent.click(oppRow);
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
+    // The ROW distinguishes lead vs opportunity - `kindLabel` reads `type`.
+    const oppText = await screen.findByText(/Heat pumps for the north wing/);
+    expect(oppText.textContent).toMatch(/^Opportunity ·/);
+    expect(oppText.textContent).not.toMatch(/Lead/);
+    await userEvent.click(screen.getByRole("button", { name: /add Heat pumps/i }));
 
+    // The destination SENTENCE cannot: `SelectedTarget` carries only `model`
+    // ("res.partner" | "crm.lead"), never `type` ("lead" | "opportunity") -
+    // a crm.lead target loses that distinction the moment it is added, the
+    // same limitation ContactPicker.tsx's own `describeTargetForSentence`
+    // documents. Every crm.lead target is worded "the lead X" regardless of
+    // which one it actually is in Odoo.
     expect(
       screen.getByText(
-        "This meeting will be logged on the opportunity Heat pumps for the north wing."
+        "This meeting will be logged on 1 record: the lead Heat pumps for the north wing."
       )
     ).toBeInTheDocument();
   });
@@ -1526,9 +1711,9 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
-    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Bea Nordvik" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
 
     await act(async () => {
@@ -1566,9 +1751,9 @@ describe("the assign dialog's opportunity step", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
-    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Bea Nordvik" }));
     await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(2));
 
     await act(async () => {
@@ -1584,14 +1769,13 @@ describe("the assign dialog's opportunity step", () => {
   });
 });
 
-// BRIDGE, for Task 7's assignMeetingLog(id, contactId, leadId, deps) ->
-// assignMeetingLog(id, targets, deps) signature change, same as the marker in
-// meeting-log-actions.test.ts. Every call-site assertion in this describe
-// block, plus one in "the assign dialog's provider pre-flight" below, still
-// destructured/indexed the old 4-arg shape. Updated to read the new
-// `targets: SelectedTargets` array at index 1 instead of `contactId`/`leadId`
-// at indices 1/2, and `deps` at index 2 instead of index 3. Pure signature
-// bridge, not new coverage. Tasks 13/14 own this file's real conversion.
+// Task 14: `assignMeetingLog(id, targets, deps)` reads real `SelectedTargets`
+// straight from `AssignPayload.targets` now - `assignPayloadToTargets`, the
+// bridge Task 7 left in place until this task, is gone. Every add/remove
+// below goes through the dialog's own `+ add` / `✓ added` rows, the same
+// control ContactPicker uses (`@/components/AddToggle`), never a "select"
+// click - clicking a contact or opportunity row PREVIEWS it; it does not by
+// itself add anything.
 describe("what the assign dialog hands up", () => {
   it("passes the provider config derived from @/contexts, never null", async () => {
     // This is the case that kills "wired to the wrong useApp", "missing
@@ -1603,8 +1787,7 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     // Confirm closes the dialog immediately, same as Cancel - it does not wait
@@ -1616,7 +1799,9 @@ describe("what the assign dialog hands up", () => {
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     const [id, targets, deps] = actions.assignMeetingLog.mock.calls[0];
     expect(id).toBe("un");
-    expect(targets).toEqual([{ model: "res.partner", resId: 7, name: null }]);
+    // The real name travels now, unlike the old single-select bridge which
+    // always wrote `name: null` - AddToggle is handed `c.name` directly.
+    expect(targets).toEqual([{ model: "res.partner", resId: 7, name: "Ada Lovelace" }]);
     expect(deps.providerConfig).toEqual({ provider: PROVIDER, selectedProvider: SELECTED });
     // The page owns the push, so it - not the dialog - supplies the CAS hook.
     expect(deps.onCommitted).toBeTypeOf("function");
@@ -1624,7 +1809,13 @@ describe("what the assign dialog hands up", () => {
     expect(deps.client).toBeUndefined();
   });
 
-  it("carries the chosen opportunity's id, and lets it be taken back off", async () => {
+  it("lets an added opportunity be taken back off, keeping the contact", async () => {
+    // The single-exclusive-pick flow this replaces used to auto-drop the
+    // contact the moment an opportunity was chosen, and "Contact record
+    // only" was the sole way back. Multi-select has no such exclusivity -
+    // any combination can be added or removed independently - so the same
+    // "take a target back off before confirming" guarantee is proven here
+    // over TWO independent targets sharing one contact instead.
     opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
     db.listActionableRows.mockResolvedValue([
       row({ id: "un", status: "unassigned", contact_id: null }),
@@ -1632,22 +1823,25 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
+    await userEvent.click(await dialog().findByRole("button", { name: /add Heat pumps/i }));
+    // "the lead X", not "the opportunity X" - see the destination-sentence
+    // limitation documented on the opportunity-step test above.
     expect(
-      await screen.findByText(/will be logged on the opportunity/)
+      screen.getByText(/logged on 2 records: Ada Lovelace and the lead Heat pumps/)
     ).toBeInTheDocument();
 
-    await userEvent.click(dialog().getByRole("button", { name: "Contact record only" }));
+    await userEvent.click(dialog().getByRole("button", { name: /added Heat pumps/i }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
-      { model: "res.partner", resId: 7, name: null },
+      { model: "res.partner", resId: 7, name: "Ada Lovelace" },
     ]);
   });
 
-  it("keeps the opportunity when it is the one confirmed", async () => {
+  it("confirms a contact AND its opportunity together - multi-select has no exclusivity", async () => {
     opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
     db.listActionableRows.mockResolvedValue([
       row({ id: "un", status: "unassigned", contact_id: null }),
@@ -1655,20 +1849,24 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
+    await userEvent.click(await dialog().findByRole("button", { name: /add Heat pumps/i }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
-      { model: "crm.lead", resId: 500, name: null },
+      { model: "res.partner", resId: 7, name: "Ada Lovelace" },
+      { model: "crm.lead", resId: 500, name: "Heat pumps for the north wing" },
     ]);
   });
 
-  it("drops a stale opportunity when the contact is changed after picking one", async () => {
-    // lead_id and contact_id are written by ONE statement. A leadId left over
-    // from the previous contact would file the meeting on a deal that belongs
-    // to somebody else.
+  it("does not touch the staged targets when switching which contact's deals are previewed", async () => {
+    // Previewing a contact's deals (clicking its row) is side-effect-free on
+    // `targets` - only its OWN AddToggle, or an opportunity's, ever writes
+    // to the staged list. The single-select flow this replaces used to reset
+    // its one exclusive pick on every new selection; nothing here resets
+    // anything, because nothing is implicitly selected by a preview.
     opportunities.fetchOpportunities.mockResolvedValue([opportunity({ id: 500 })]);
     contacts.listContacts.mockResolvedValue([
       contact(),
@@ -1680,14 +1878,14 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
-    await userEvent.click(await dialog().findByRole("button", { name: /Heat pumps/ }));
-    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
+    await userEvent.click(dialog().getByRole("button", { name: "Bea Nordvik" }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     expect(actions.assignMeetingLog.mock.calls[0][1]).toEqual([
-      { model: "res.partner", resId: 8, name: null },
+      { model: "res.partner", resId: 7, name: "Ada Lovelace" },
     ]);
   });
 
@@ -1706,13 +1904,13 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("na", "Reassign");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Bea Nordvik/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Bea Nordvik" }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
     expect(actions.assignMeetingLog.mock.calls[0].slice(0, 2)).toEqual([
       "na",
-      [{ model: "res.partner", resId: 8, name: null }],
+      [{ model: "res.partner", resId: 8, name: "Bea Nordvik" }],
     ]);
     // The row left the list on `sent`, so its outcome is promoted rather than
     // lost with the unmounting row.
@@ -1720,6 +1918,12 @@ describe("what the assign dialog hands up", () => {
     expect(notice.textContent).toContain("Sent to Odoo.");
   });
 
+  // Task 14, brief test 5: assignQueueRow returns Promise<boolean>. Mocking
+  // an object here is always truthy, so `if (!(await assignQueueRow(...)))`
+  // would read the refusal as success and this test could never pass against
+  // that mutant - runAction's own CAS check turns a `false` resolve into
+  // {kind:"conflict"}, which reaches this page as ASSIGN_CONFLICT_COPY, not
+  // outcomeCopy's generic conflict text (see that constant's own comment).
   it("surfaces a zero-row assign CAS instead of swallowing it", async () => {
     actions.assignMeetingLog.mockResolvedValue({ kind: "conflict" });
     db.listActionableRows.mockResolvedValue([
@@ -1728,12 +1932,13 @@ describe("what the assign dialog hands up", () => {
     await renderPage();
     await openAssignReady("un");
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
-    expect(
-      await screen.findByText("This meeting changed in another window.")
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/could not be reassigned/i)).toBeVisible();
+    // And NEVER the generic copy other conflicting actions use - conflating
+    // the two teaches a user to distrust which of the seven lines they got.
+    expect(screen.queryByText("This meeting changed in another window.")).toBeNull();
   });
 
   it("refuses to confirm before a contact is chosen", async () => {
@@ -1798,12 +2003,11 @@ describe("the assign dialog's provider pre-flight", () => {
     // Opening warns. It does not push.
     expect(actions.assignMeetingLog).not.toHaveBeenCalled();
 
-    await userEvent.click(dialog().getByRole("button", { name: /Ada Lovelace/ }));
+    await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
     await userEvent.click(dialog().getByRole("button", { name: "Log this meeting" }));
 
     await waitFor(() => expect(actions.assignMeetingLog).toHaveBeenCalled());
-    // deps moved from index 3 to index 2 - see the BRIDGE comment above
-    // "what the assign dialog hands up".
+    // deps at index 2: assignMeetingLog(id, targets, deps).
     expect(actions.assignMeetingLog.mock.calls[0][2].providerConfig).toBeNull();
   });
 
@@ -1825,7 +2029,7 @@ describe("the assign dialog's provider pre-flight", () => {
     await openAssignReady("un");
 
     expect(screen.queryByText(/No AI provider is set up/)).toBeNull();
-    expect(dialog().getByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+    expect(dialog().getByRole("button", { name: "Ada Lovelace" })).toBeInTheDocument();
   });
 });
 
@@ -1960,6 +2164,22 @@ describe("QueueRow", () => {
   it("says a partly-failed row needs attention, not that it is waiting", () => {
     render(<QueueRow {...props} row={{ ...pendingRow, targets: [pending(), failed()] }} />);
     expect(screen.queryByText(/waiting to be sent/i)).toBeNull();
+  });
+
+  // Task 14: assignQueueRow's own upfront gate refuses a reassign on a row
+  // with any sent target outright, even though `row.status` (here `failed`,
+  // otherwise reassignable) would pass `canAssign`'s status check alone -
+  // the exact push-partial shape (one sent, one failed). Not merely
+  // `disabled`: `queryByRole` finds a disabled button too, and offering a
+  // control that always errors is worse than not offering it.
+  it("is unreachable on a row with a sent target", () => {
+    render(
+      <QueueRow
+        {...props}
+        row={{ ...pendingRow, status: "failed", targets: [sent(), failed()] }}
+      />
+    );
+    expect(screen.queryByRole("button", { name: /assign/i })).toBeNull();
   });
 
   it("re-renders when a target's status changes", () => {

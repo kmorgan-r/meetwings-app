@@ -26,7 +26,7 @@ import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, MeetingLogTarget, OdooContact, SelectedTargets } from "@/types";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
 import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
@@ -121,6 +121,17 @@ function describeLoadFailure(code: string): string {
 const SENT_COPY = "Sent to Odoo.";
 
 /**
+ * Assign/Reassign's own `conflict` copy - the generic "changed in another
+ * window" would be true but would not say the ONE thing this action needed
+ * to promise and didn't: the reassign itself did not happen. Retry and
+ * Delete keep the generic copy (`outcomeCopy`'s default) - only Confirm
+ * performs the insert-new/delete-old/flip-parent operation whose zero-row
+ * CAS this line exists to name honestly.
+ */
+const ASSIGN_CONFLICT_COPY =
+  "This meeting could not be reassigned — it changed in another window.";
+
+/**
  * Delete's own success line, and the negative clause is the whole point.
  *
  * `deleteMeetingLog` returns `{kind:"ok"}` like everything else, but the
@@ -135,8 +146,16 @@ const DELETED_COPY = "Removed from the queue. Nothing was sent to Odoo.";
  * Conflating any two teaches users to distrust the page - most sharply
  * `degraded`, which is the difference between a real summary and a
  * "Summarization failed" note live on a customer's record.
+ *
+ * `conflictCopy` is an OPTIONAL per-action override of the `conflict` case
+ * alone - see `ASSIGN_CONFLICT_COPY`'s own doc comment for why Assign needs
+ * one and Retry/Delete do not.
  */
-function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
+function outcomeCopy(
+  outcome: ActionOutcome,
+  successCopy: string,
+  conflictCopy?: string
+): string {
   switch (outcome.kind) {
     case "ok":
       // Per action, never one shared string. Delete pushes nothing.
@@ -175,7 +194,7 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
       return parts.join(" ");
     }
     case "conflict":
-      return "This meeting changed in another window.";
+      return conflictCopy ?? "This meeting changed in another window.";
     case "moved-unknown":
       return "This meeting was moved, but the result could not be read.";
     case "deleted-after-send":
@@ -257,24 +276,6 @@ function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>
   const cached = contacts.get(row.contact_id);
   const base = cached ? cached.name : `Contact #${row.contact_id}`;
   return row.lead_id === null ? base : `${base} (lead or opportunity)`;
-}
-
-/**
- * BRIDGE, for Task 7's `assignMeetingLog` signature change - Task 14 deletes
- * this once AssignDialog produces a real `SelectedTargets` payload itself.
- *
- * Lead wins over contact, matching the migration 14 backfill's own coalesce
- * (the same rule useMeetingLog.ts's `resolvedToSelected` applies on the
- * enqueue side). `AssignPayload.contactId` is non-nullable - the dialog's
- * Confirm button is disabled until a contact is selected - so the "neither
- * set" case that adapter also guards can't occur here; there is always
- * exactly one target.
- */
-function assignPayloadToTargets(payload: AssignPayload): SelectedTargets {
-  if (payload.leadId !== null) {
-    return [{ model: "crm.lead", resId: payload.leadId, name: null }];
-  }
-  return [{ model: "res.partner", resId: payload.contactId, name: null }];
 }
 
 type ConfigState = "loading" | "absent" | "incomplete" | "complete";
@@ -490,7 +491,8 @@ export default function MeetingLog() {
     async (
       row: MeetingLogListRow,
       run: () => Promise<ActionOutcome>,
-      successCopy: string
+      successCopy: string,
+      conflictCopy?: string
     ): Promise<ActionOutcome | null> => {
       if (busyRef.current.has(row.id)) return null;
       // Defensive. The buttons are gone once the config stops being complete,
@@ -515,7 +517,7 @@ export default function MeetingLog() {
 
       try {
         const outcome = await run();
-        setResult(row.id, { label, text: outcomeCopy(outcome, successCopy) });
+        setResult(row.id, { label, text: outcomeCopy(outcome, successCopy, conflictCopy) });
         return outcome;
       } catch (err) {
         // Unreachable today: runAction catches at both boundaries and
@@ -593,7 +595,19 @@ export default function MeetingLog() {
     [runRowAction, refineResult]
   );
 
+  /**
+   * Does not open the dialog when any target is already `sent`.
+   *
+   * `assignQueueRow`'s own upfront gate refuses that write outright - the
+   * reassign rule forbids the insert-new/delete-old/flip-parent operation on
+   * a partially-sent row - so this is defensive, not the primary gate:
+   * `QueueRow`'s own Assign/Reassign button is already hidden for exactly
+   * this case (see its `hasSentTarget`). Kept here too because `handleAssign`
+   * is the ONE path that opens the dialog, and a future second caller must
+   * not rediscover the rule the button already enforces.
+   */
   const handleAssign = useCallback((row: MeetingLogListRow) => {
+    if ((row.targets ?? []).some((t) => t.status === "sent")) return;
     setAssignRow(row);
   }, []);
 
@@ -613,14 +627,15 @@ export default function MeetingLog() {
       void runRowAction(
         row,
         () =>
-          assignMeetingLog(row.id, assignPayloadToTargets(payload), {
+          assignMeetingLog(row.id, payload.targets, {
             providerConfig: payload.providerConfig,
             // `summary_json` is null on an unassigned row, so this push makes
             // the AI call - up to 210s for a reassign. Without this hook the
             // row renders its pre-click status for all of it.
             onCommitted: () => void loaderRef.current(),
           }),
-        SENT_COPY
+        SENT_COPY,
+        ASSIGN_CONFLICT_COPY
       );
     },
     [runRowAction]

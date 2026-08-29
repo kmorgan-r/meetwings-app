@@ -163,6 +163,10 @@ describe("<Completion /> mounts the auto-record hook", () => {
       // the useMeetingAutoRecord assertions below ever run.
       useOdooTarget: () => ({
         targetRef: { current: null },
+        // Task 14: <Completion /> now feeds useMeetingLog's `targetRef` from
+        // THIS field, not the single-select `targetRef` above - see
+        // useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
+        targetsRef: { current: [] },
         pickerProps: {
           contactId: null,
           leadId: null,
@@ -305,6 +309,10 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
+        // Task 14: <Completion /> now feeds useMeetingLog's `targetRef` from
+        // THIS field, not the single-select `targetRef` above - see
+        // useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
+        targetsRef: { current: [] },
         pickerProps: {
           contactId: null,
           leadId: null,
@@ -439,6 +447,10 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
+        // Task 14: <Completion /> now feeds useMeetingLog's `targetRef` from
+        // THIS field, not the single-select `targetRef` above - see
+        // useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
+        targetsRef: { current: [] },
         pickerProps: {
           contactId: null,
           leadId: null,

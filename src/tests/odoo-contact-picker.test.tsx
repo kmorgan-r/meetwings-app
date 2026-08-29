@@ -820,10 +820,9 @@ describe("the popover open state", () => {
 
 /**
  * Task 12: the flat multi-target list. `contactId`/`leadId`/`opportunities`
- * above are the single-select flow (`ResolvedTarget`, retired in Task 14) and
- * untouched by anything below - this describe block drives exclusively off
- * `targets`, mirroring `useOdooTarget.ts`'s own separation between `target`
- * and `targets`.
+ * above are the single-select flow's own primitives, untouched by anything
+ * below - this describe block drives exclusively off `targets`, mirroring
+ * `useOdooTarget.ts`'s own separation between `target` and `targets`.
  */
 describe("logging to several records", () => {
   // Named to match the fixtures useOdooTarget.test.tsx's own "Task 11: the

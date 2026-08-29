@@ -73,9 +73,9 @@ export function meetingDateOf(row: MeetingLogListRow): string {
 /**
  * `meeting_log_targets.name` -> the contact cache -> a generic placeholder.
  *
- * Every backfilled pre-14 target, and every target the page's current
- * `assignPayloadToTargets` bridge inserts (it always writes `name: null`),
- * has a NULL name and hits this chain in full.
+ * Every backfilled pre-14 target has a NULL name and hits this chain in
+ * full. A target staged through the AssignDialog now carries a real name
+ * (via `AddToggle`), so this fallback chain matters most for old rows.
  *
  * The SAME fallback shape as ContactPicker.tsx's `nameForTarget` - that
  * file's own comment names this function as its forward reference. Kept
@@ -194,20 +194,27 @@ function QueueRowInner({
 
   const otherDatabase = row.instance !== instance;
   const sending = row.status === "sending";
+  const targets = row.targets ?? [];
+  const failedTargets = targets.filter((t) => t.status === "failed").length;
+  // Task 14: a row can carry a `sent` target and still derive `failed` or
+  // `pending` on the parent (deriveRowStatus's precedence, when a sibling
+  // target is retryable or terminally failed) - the exact push-partial
+  // shape. Confirm would then perform the insert-new/delete-old/flip-parent
+  // operation the reassign rule forbids on a partially-sent row; the write
+  // predicate refuses it anyway (assignQueueRow's own upfront gate), so this
+  // keeps the button from ever offering an action that would be rejected.
+  const hasSentTarget = targets.some((t) => t.status === "sent");
   // `sending` WINS OVER INSTANCE. deleteRow's CAS refuses `sending`, so an
   // enabled Delete on an other-database sending row is the do-nothing button
   // this page's rules exist to prevent.
   const canRetry =
     row.status === "failed" ||
     (row.status === "pending" && row.attempts >= ESCALATE_AFTER_ATTEMPTS);
-  const canAssign = row.status === "unassigned" || row.status === "failed";
+  const canAssign = (row.status === "unassigned" || row.status === "failed") && !hasSentTarget;
 
   const retryDisabled = busy || sending || otherDatabase || !canRetry;
   const assignDisabled = busy || sending || otherDatabase || !canAssign;
   const deleteDisabled = busy || sending;
-
-  const targets = row.targets ?? [];
-  const failedTargets = targets.filter((t) => t.status === "failed").length;
   // Mirrors removeQueueTarget's own allowlist (meeting-log-actions.ts): that
   // function refuses a target write unless the PARENT row is `pending` or
   // `failed`, so gating the buttons the same way keeps a `refused` outcome
@@ -329,14 +336,24 @@ function QueueRowInner({
           <Button size="sm" disabled={retryDisabled} onClick={() => onRetry(row)}>
             Retry
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={assignDisabled}
-            onClick={() => onAssign(row)}
-          >
-            {row.status === "failed" ? "Reassign" : "Assign"}
-          </Button>
+          {/*
+            Not merely `disabled` on a sent target: `assignQueueRow`'s own
+            reassign write is refused outright there (see `hasSentTarget`
+            above), so offering a control that always errors is worse than
+            not offering it - and unlike every other disable reason here
+            (busy/sending/otherDatabase/status), this one can never resolve
+            by the user waiting or the page re-reading.
+          */}
+          {!hasSentTarget && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={assignDisabled}
+              onClick={() => onAssign(row)}
+            >
+              {row.status === "failed" ? "Reassign" : "Assign"}
+            </Button>
+          )}
           <Button
             size="sm"
             variant="outline"

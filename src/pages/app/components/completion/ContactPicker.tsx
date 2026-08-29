@@ -1,6 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
-import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
+import { AddToggle, Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts, kindLabel, MAX_TARGETS } from "@/lib/odoo";
 import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
 import { CheckIcon, ChevronDownIcon, StarIcon, UsersIcon } from "lucide-react";
@@ -41,87 +40,11 @@ export type PickerCacheState =
   | { kind: "sync-failed"; code: string };
 
 /**
- * Task 12: the one control shared by contact rows, the per-contact deal
- * disclosure and the lead-search results - "Contact rows, deal rows and
- * lead-search results all get + add / ✓ added; clicking an added row removes
- * it. Under a flat list they all produce the same kind of thing."
- *
- * `aria-disabled`, never the native `disabled` attribute, for the CAP: the
- * native one drops the control from the tab order and blurs it with no
- * defined recovery target. An archived contact's own row passes its own
- * native `disabled` in through `disabled` instead - that disablement is
- * static at render time, not a side effect of another row's interaction, so
- * the focus hazard the cap treatment exists to avoid does not apply to it.
+ * Task 12 built this file's own `+ add` / `✓ added` control; Task 14
+ * extracted it to `@/components/AddToggle` (imported above) so `AssignDialog`
+ * - the dashboard's own multi-target picker - could use the identical
+ * control instead of reimplementing it.
  */
-function AddToggle({
-  model,
-  resId,
-  name,
-  targets,
-  atCap,
-  disabled,
-  onAdd,
-  onRemove,
-}: {
-  model: SelectedTarget["model"];
-  resId: number;
-  name: string;
-  targets: SelectedTargets;
-  atCap: boolean;
-  disabled?: boolean;
-  onAdd: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
-  onRemove: (model: SelectedTarget["model"], resId: number) => Promise<void>;
-}) {
-  const added = targets.some((t) => t.model === model && t.resId === resId);
-  // Removing an already-added row is never blocked by the cap - only adding
-  // a NEW one is.
-  const blocked = !disabled && !added && atCap;
-
-  const handleClick = () => {
-    if (blocked) return;
-    if (added) {
-      void onRemove(model, resId);
-      return;
-    }
-    void (async () => {
-      const result = await onAdd({ model, resId, name });
-      // A THROWN failure is already reported by the hook's own catch (see
-      // addTarget's own catch in useOdooTarget.ts) - toasting it again here
-      // would double it. A `{ ok: false, reason: "cap" }` RETURN is not an
-      // exception and is not reported anywhere else: `atCap` is computed
-      // once per render from `targets.length`, so two `+ add` clicks fired
-      // before either resolves both read `blocked === false` and both call
-      // `onAdd` - the loser legitimately loses the race against
-      // addSelectedTarget's own database-side count check. Without this,
-      // the user clicks, nothing is added, and nothing says why.
-      if (!result.ok && result.reason === "cap") {
-        toast.error("Could not add target", {
-          description: `Only ${MAX_TARGETS} records can be logged to a meeting at once.`,
-        });
-      }
-    })();
-  };
-
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      aria-disabled={blocked ? true : undefined}
-      aria-pressed={added}
-      aria-label={`${added ? "added" : "add"} ${name}`}
-      onClick={handleClick}
-      className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] ${
-        added
-          ? "bg-primary/10 text-primary"
-          : blocked
-            ? "text-muted-foreground/50"
-            : "text-muted-foreground hover:bg-muted/50"
-      }`}
-    >
-      {added ? "✓ added" : "+ add"}
-    </button>
-  );
-}
 
 /** `null`/cache-fallback chain, the same shape Task 13's targetNameOf uses. */
 function nameForTarget(target: SelectedTarget, contacts: OdooContact[]): string {
@@ -187,8 +110,9 @@ export interface ContactPickerProps {
   /**
    * Task 12: the flat multi-target list (Task 11's `useOdooTarget.targets`).
    * Separate from `contactId`/`leadId`/`opportunities` above, which are the
-   * single-select flow (`ResolvedTarget`) and untouched by this task -
-   * `ResolvedTarget` is retired in Task 14, not here.
+   * single-select flow's own primitives and untouched by this task. Task 14
+   * retired that flow's own shared type in favour of one local to
+   * `useOdooTarget.ts`; this component's own props never named it.
    */
   targets: SelectedTargets;
   onAddTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
@@ -286,10 +210,13 @@ export const ContactPicker = memo(function ContactPicker({
   }, [cache, query]);
 
   /**
-   * WHICH RECORD this meeting lands on, spelled out - the same sentence the
-   * dashboard's AssignDialog carries, and needed more here than there: this is
-   * the live-meeting path, res.partner vs crm.lead is invisible in the button
-   * labels, and it cannot be undone once the row is `sent`.
+   * WHICH RECORD this meeting lands on, spelled out, for the single-select
+   * flow (`leadId`/`contactId`, not the flat `targets` list below). Task 14
+   * retired the dashboard AssignDialog's own version of this sentence in
+   * favor of the multi-target `destinationSentence` further down - this one
+   * is needed here regardless: this is the live-meeting path, res.partner vs
+   * crm.lead is invisible in the button labels, and it cannot be undone once
+   * the row is `sent`.
    *
    * Three branches, not two. `leadId` is persisted in odoo_selected_target
    * while `opportunities` is in-memory, so a target rehydrated after a
