@@ -1,4 +1,5 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import { Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts, kindLabel, MAX_TARGETS } from "@/lib/odoo";
 import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
@@ -75,6 +76,32 @@ function AddToggle({
   // Removing an already-added row is never blocked by the cap - only adding
   // a NEW one is.
   const blocked = !disabled && !added && atCap;
+
+  const handleClick = () => {
+    if (blocked) return;
+    if (added) {
+      void onRemove(model, resId);
+      return;
+    }
+    void (async () => {
+      const result = await onAdd({ model, resId, name });
+      // A THROWN failure is already reported by the hook's own catch (see
+      // addTarget's own catch in useOdooTarget.ts) - toasting it again here
+      // would double it. A `{ ok: false, reason: "cap" }` RETURN is not an
+      // exception and is not reported anywhere else: `atCap` is computed
+      // once per render from `targets.length`, so two `+ add` clicks fired
+      // before either resolves both read `blocked === false` and both call
+      // `onAdd` - the loser legitimately loses the race against
+      // addSelectedTarget's own database-side count check. Without this,
+      // the user clicks, nothing is added, and nothing says why.
+      if (!result.ok && result.reason === "cap") {
+        toast.error("Could not add target", {
+          description: `Only ${MAX_TARGETS} records can be logged to a meeting at once.`,
+        });
+      }
+    })();
+  };
+
   return (
     <button
       type="button"
@@ -82,11 +109,7 @@ function AddToggle({
       aria-disabled={blocked ? true : undefined}
       aria-pressed={added}
       aria-label={`${added ? "added" : "add"} ${name}`}
-      onClick={() => {
-        if (blocked) return;
-        if (added) void onRemove(model, resId);
-        else void onAdd({ model, resId, name });
-      }}
+      onClick={handleClick}
       className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] ${
         added
           ? "bg-primary/10 text-primary"

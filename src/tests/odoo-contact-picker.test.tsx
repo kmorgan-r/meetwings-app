@@ -2,6 +2,7 @@ import { useState } from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import {
   ContactPicker,
   LEAD_SEARCH_DEBOUNCE_MS,
@@ -9,6 +10,14 @@ import {
   type ContactPickerProps,
 } from "@/pages/app/components/completion/ContactPicker";
 import type { OdooContact, OdooOpportunity, SelectedTarget } from "@/types";
+
+// Task 12 fix round 1: AddToggle's add branch now surfaces a `{ok:false,
+// reason:"cap"}` return via toast.error - the same mock shape
+// useCompletion.meeting-assist.test.tsx and useOdooTarget.test.tsx already
+// use for the same library.
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
 
 function contact(over: Partial<OdooContact> = {}): OdooContact {
   return {
@@ -974,5 +983,58 @@ describe("logging to several records", () => {
     expect(
       screen.getByRole("button", { name: /add Colleague Cole/i })
     ).toBeInTheDocument();
+  });
+
+  // Fix round 1, Important: AddToggle used to discard onAdd's result
+  // entirely. `atCap` is computed once per render from `targets.length`, so
+  // two `+ add` clicks fired before either resolves both read
+  // `blocked === false` and both call onAdd - the loser legitimately loses
+  // the race against addSelectedTarget's own database-side count check, and
+  // used to leave the user with no add and no explanation. Reproduced here
+  // WITHOUT the client-side cap (4 targets, `atCap` false) so the click goes
+  // through un-blocked and the rejection can only be caught by awaiting
+  // onAddTarget's own return value.
+  it("tells the user when an add is rejected at the cap, not just silently doing nothing", async () => {
+    vi.mocked(toast.error).mockClear();
+    const props = setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: fiveTargets.slice(0, 4),
+      onAddTarget: vi.fn(async () => ({ ok: false, reason: "cap" as const })),
+    });
+    await openPopover();
+    const add = screen.getByRole("button", { name: /add Bentley AS/i });
+    // Not blocked client-side - `atCap` reads false with only 4 targets.
+    expect(add).not.toHaveAttribute("aria-disabled");
+    await userEvent.click(add);
+    expect(props.onAddTarget).toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  // Fix round 1, Minor: the lead-search row's own AddToggle had no test at
+  // all - added on Step 4's prose alone. model is "crm.lead" regardless of
+  // whether the result is a "lead" or an "opportunity" (both live in the
+  // same crm.lead table; SelectedTarget carries no `type`).
+  it("adds a lead-search result as its own target", async () => {
+    const searchLead: OdooOpportunity = {
+      id: 90,
+      name: "Partnership with ECS",
+      type: "lead",
+      stageName: "New",
+      partnerId: null,
+      partnerName: null,
+      contactName: "Christian Carron",
+      email: "cc@ecs.example",
+    };
+    const props = setup({ leadResults: [searchLead] });
+    await openPopover();
+    const row = screen.getByTestId("lead-search-row");
+    await userEvent.click(
+      within(row).getByRole("button", { name: /add Partnership with ECS/i })
+    );
+    expect(props.onAddTarget).toHaveBeenCalledWith({
+      model: "crm.lead",
+      resId: 90,
+      name: "Partnership with ECS",
+    });
   });
 });
