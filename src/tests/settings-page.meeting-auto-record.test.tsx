@@ -177,6 +177,16 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onRetryOpportunities: vi.fn(),
           onRefresh: vi.fn(),
           onOpenSettings: vi.fn(),
+          // Task 12 bridge: ContactPicker (real, unmocked here) reads
+          // targets.length unconditionally on every render, so a stub
+          // missing it throws before any assertion in this file runs.
+          targets: [],
+          onAddTarget: vi.fn(),
+          onRemoveTarget: vi.fn(),
+          onExpandContact: vi.fn(),
+          opportunitiesFor: vi.fn(() => null),
+          errorFor: vi.fn(() => null),
+          onRetryContactOpportunities: vi.fn(),
           open: false,
           onOpenChange: vi.fn(),
         },
@@ -309,6 +319,16 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onRetryOpportunities: vi.fn(),
           onRefresh: vi.fn(),
           onOpenSettings: vi.fn(),
+          // Task 12 bridge: ContactPicker (real, unmocked here) reads
+          // targets.length unconditionally on every render, so a stub
+          // missing it throws before any assertion in this file runs.
+          targets: [],
+          onAddTarget: vi.fn(),
+          onRemoveTarget: vi.fn(),
+          onExpandContact: vi.fn(),
+          opportunitiesFor: vi.fn(() => null),
+          errorFor: vi.fn(() => null),
+          onRetryContactOpportunities: vi.fn(),
           open: false,
           onOpenChange: vi.fn(),
         },
@@ -433,6 +453,16 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onRetryOpportunities: vi.fn(),
           onRefresh: vi.fn(),
           onOpenSettings: vi.fn(),
+          // Task 12 bridge: ContactPicker (real, unmocked here) reads
+          // targets.length unconditionally on every render, so a stub
+          // missing it throws before any assertion in this file runs.
+          targets: [],
+          onAddTarget: vi.fn(),
+          onRemoveTarget: vi.fn(),
+          onExpandContact: vi.fn(),
+          opportunitiesFor: vi.fn(() => null),
+          errorFor: vi.fn(() => null),
+          onRetryContactOpportunities: vi.fn(),
           open: true,
           onOpenChange: vi.fn(),
         },

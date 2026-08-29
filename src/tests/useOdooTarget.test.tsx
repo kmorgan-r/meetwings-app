@@ -136,9 +136,18 @@ beforeEach(() => {
   });
 });
 
-function mount(meetingAssistMode = false, isPickerOpen = false, setIsPickerOpen = vi.fn()) {
+// Task 12 bridge: useOdooTarget gained a required setTargetCount param.
+// A no-op default here keeps every pre-existing call through mount()/opts
+// (below) working without touching what each of those tests actually means
+// to exercise.
+function mount(
+  meetingAssistMode = false,
+  isPickerOpen = false,
+  setIsPickerOpen = vi.fn(),
+  setTargetCount = vi.fn()
+) {
   return renderHook(() =>
-    useOdooTarget({ meetingAssistMode, isPickerOpen, setIsPickerOpen })
+    useOdooTarget({ meetingAssistMode, isPickerOpen, setIsPickerOpen, setTargetCount })
   );
 }
 
@@ -1013,7 +1022,13 @@ describe("the picker's open state", () => {
   it("passes the caller's isPickerOpen/setIsPickerOpen straight through to pickerProps", async () => {
     const setIsPickerOpen = vi.fn();
     const { result, rerender } = renderHook(
-      ({ open }) => useOdooTarget({ meetingAssistMode: false, isPickerOpen: open, setIsPickerOpen }),
+      ({ open }) =>
+        useOdooTarget({
+          meetingAssistMode: false,
+          isPickerOpen: open,
+          setIsPickerOpen,
+          setTargetCount: vi.fn(), // Task 12 bridge: see mount()'s comment above.
+        }),
       { initialProps: { open: false } }
     );
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
@@ -1181,7 +1196,13 @@ describe("Task 11: the multi-target list", () => {
   };
   const COLLEAGUE_ID = colleagueContact.id;
 
-  const opts = { meetingAssistMode: false, isPickerOpen: false, setIsPickerOpen: vi.fn() };
+  // Task 12 bridge: see mount()'s comment above.
+  const opts = {
+    meetingAssistMode: false,
+    isPickerOpen: false,
+    setIsPickerOpen: vi.fn(),
+    setTargetCount: vi.fn(),
+  };
 
   function opp(id: number, name: string): OdooOpportunity {
     return {
@@ -1521,5 +1542,41 @@ describe("Task 11: the multi-target list", () => {
     });
 
     expect(result.current.targets.map((t) => t.resId).sort()).toEqual([1, 2]);
+  });
+});
+
+/**
+ * Task 12: setTargetCount is a NEW required param, not exercised by any test
+ * above (they all default it to a no-op vi.fn() bridge - see mount()'s and
+ * opts's own comments). Proven here directly so deleting the effect that
+ * calls it does not survive both of Task 12's own test files - the
+ * unkillable-mutant shape this plan has hit repeatedly when a behaviour is
+ * assumed covered transitively but never actually asserted on by name.
+ */
+describe("Task 12: setTargetCount", () => {
+  it("reports the list's size to the caller on mount and after every add/remove", async () => {
+    const setTargetCount = vi.fn();
+    action.listContacts.mockResolvedValue([]);
+    const { result } = renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: false,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount,
+      })
+    );
+    await waitFor(() => expect(setTargetCount).toHaveBeenCalledWith(0));
+
+    setTargetCount.mockClear();
+    await act(async () => {
+      await result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+    });
+    expect(setTargetCount).toHaveBeenCalledWith(1);
+
+    setTargetCount.mockClear();
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+    expect(setTargetCount).toHaveBeenCalledWith(0);
   });
 });

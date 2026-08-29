@@ -127,6 +127,14 @@ export const useCompletion = () => {
   // Popover is controlled from here, and this hook's resize effect below can
   // see it open/close. See Finding 1 in the odoo-contact-picker review.
   const [isContactPickerOpen, setIsContactPickerOpen] = useState(false);
+  // Task 12: the size of useOdooTarget's flat multi-target list. Threaded
+  // down to useOdooTarget as setTargetCount (see
+  // src/pages/app/components/completion/index.tsx), which calls it whenever
+  // its own `targets` changes - mirroring isContactPickerOpen's own pattern
+  // exactly, and for the same reason: useCompletion runs BEFORE useOdooTarget
+  // in <Completion />, so this hook cannot read targetCount off
+  // useOdooTarget's return value, only own a slot the other hook writes into.
+  const [targetCount, setTargetCount] = useState(0);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
 
@@ -1858,6 +1866,14 @@ export const useCompletion = () => {
     hasMeetingTranscript;
 
   useEffect(() => {
+    // targetCount is read but not otherwise used below: the "Logging to"
+    // section's height is CONTENT-driven, not flag-driven like every other
+    // entry in this OR list - adding or removing a target inside an
+    // already-open picker never toggles isContactPickerOpen, so without this
+    // dependency the effect would never re-run and the window would never be
+    // asked to re-apply around the new row. See the doc comment at
+    // targetCount's declaration above.
+    void targetCount;
     resizeWindow(
       isPopoverOpen ||
         micOpen ||
@@ -1872,6 +1888,7 @@ export const useCompletion = () => {
     resizeWindow,
     isFilesPopoverOpen,
     isContactPickerOpen,
+    targetCount,
   ]);
 
   // Auto scroll to bottom when response updates
@@ -2245,6 +2262,8 @@ export const useCompletion = () => {
     setIsFilesPopoverOpen,
     isContactPickerOpen,
     setIsContactPickerOpen,
+    targetCount,
+    setTargetCount,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,

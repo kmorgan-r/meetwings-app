@@ -8,7 +8,7 @@ import {
   MAX_RENDERED_ROWS,
   type ContactPickerProps,
 } from "@/pages/app/components/completion/ContactPicker";
-import type { OdooContact, OdooOpportunity } from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget } from "@/types";
 
 function contact(over: Partial<OdooContact> = {}): OdooContact {
   return {
@@ -48,8 +48,13 @@ function Harness(props: ContactPickerProps) {
   );
 }
 
-function setup(over: Partial<ContactPickerProps> = {}) {
-  const props: ContactPickerProps = {
+// Split from setup() (Task 12) so a test that only needs a props object -
+// never rendering it itself, e.g. the trigger-label test below, which renders
+// a bare <ContactPicker> instead of the open-state Harness - can build one
+// without a second, redundant render leaving two matching trigger buttons in
+// the document.
+function defaultProps(over: Partial<ContactPickerProps> = {}): ContactPickerProps {
+  return {
     contactId: null,
     leadId: null,
     leadName: null,
@@ -70,20 +75,36 @@ function setup(over: Partial<ContactPickerProps> = {}) {
     onRetryOpportunities: vi.fn(async () => {}),
     onRefresh: vi.fn(async () => {}),
     onOpenSettings: vi.fn(),
+    // Task 12: the flat multi-target list and its own per-contact deal
+    // lookup, mirroring useOdooTarget.ts's UseOdooTargetReturn field names
+    // exactly (verified against source) so wiring pickerProps there is a
+    // straight pass-through.
+    targets: [],
+    onAddTarget: vi.fn(async () => ({ ok: true })),
+    onRemoveTarget: vi.fn(async () => {}),
+    onExpandContact: vi.fn(async () => {}),
+    opportunitiesFor: vi.fn(() => null),
+    errorFor: vi.fn(() => null),
+    onRetryContactOpportunities: vi.fn(async () => {}),
     open: false,
     onOpenChange: vi.fn(),
     ...over,
   };
+}
+
+function setup(over: Partial<ContactPickerProps> = {}) {
+  const props = defaultProps(over);
   render(<Harness {...props} />);
   return props;
 }
 
 
-// The chip is the popover TRIGGER and lives outside the popover content, so a
-// name query is safe here - the rows do not exist until it is clicked. Inside
-// the popover, always query rows by testid; see the note in Step 3.
+// The trigger's own label is no longer a fixed set of strings once `targets`
+// is non-empty (Task 12: it shows "<first target> + N more"), so a name-based
+// query on it is no longer stable. Queried by testid instead - the rows still
+// do not exist until it is clicked.
 async function openPopover() {
-  await userEvent.click(screen.getByRole("button", { name: /who are you meeting|ada/i }));
+  await userEvent.click(screen.getByTestId("contact-picker-trigger"));
 }
 
 /** The select button inside a row, addressed without touching the star. */
@@ -606,7 +627,13 @@ describe("the lead search", () => {
   it("lists a result and hands the whole record up when it is picked", async () => {
     const props = setup({ leadResults: [lead()] });
     await openPopover();
-    await userEvent.click(screen.getByRole("button", { name: /partnership with ECS/i }));
+    // Task 12: each row also carries an add/remove toggle whose own
+    // accessible name ("add Partnership with ECS") contains the lead's name
+    // too, so a bare name query now matches two buttons. Scoped to the row
+    // and the SELECT button's fixed position (index 0, same convention as
+    // rowButton() above) instead.
+    const row = screen.getByTestId("lead-search-row");
+    await userEvent.click(within(row).getAllByRole("button")[0]);
     // The whole record, not an id: the caller has to persist the NAME beside
     // the id, and take the lead's own partner as the contact when it has one.
     expect(props.onSelectLead).toHaveBeenCalledWith(lead());
@@ -615,13 +642,14 @@ describe("the lead search", () => {
   it("names an unlinked result by its own contact details, under its kind", async () => {
     setup({ leadResults: [lead(), lead({ id: 91, name: "Solar tender", type: "opportunity" })] });
     await openPopover();
-    const row = screen.getByRole("button", { name: /partnership with ECS/i });
-    expect(row.textContent).toContain("Christian Carron");
-    expect(row.textContent).toMatch(/^Lead ·/);
+    const rows = screen.getAllByTestId("lead-search-row");
+    const ecsRow = within(rows[0]).getAllByRole("button")[0];
+    expect(ecsRow.textContent).toContain("Christian Carron");
+    expect(ecsRow.textContent).toMatch(/^Lead ·/);
     // A search hits both kinds, so the results have to tell them apart too.
-    expect(
-      screen.getByRole("button", { name: /solar tender/i }).textContent
-    ).toMatch(/^Opportunity ·/);
+    expect(within(rows[1]).getAllByRole("button")[0].textContent).toMatch(
+      /^Opportunity ·/
+    );
   });
 
   // Three states that must never look alike: nothing typed, a search that
@@ -658,13 +686,15 @@ describe("the lead search", () => {
       leadResults: [lead(), lead({ id: 91, name: "Solar tender" })],
     });
     await openPopover();
-    expect(screen.getByRole("button", { name: /solar tender/i })).toHaveAttribute(
+    const rows = screen.getAllByTestId("lead-search-row");
+    expect(within(rows[1]).getAllByRole("button")[0]).toHaveAttribute(
       "aria-pressed",
       "true"
     );
-    expect(
-      screen.getByRole("button", { name: /partnership with ECS/i })
-    ).toHaveAttribute("aria-pressed", "false");
+    expect(within(rows[0]).getAllByRole("button")[0]).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
   });
 
   // Live results arrive later than the offline contact filter, and this list
@@ -768,21 +798,7 @@ describe("the popover open state", () => {
     const onOpenChange = vi.fn();
     render(
       <ContactPicker
-        {...{
-          contactId: null,
-          leadId: null,
-          contactName: null,
-          cache: { kind: "ready", contacts: [contact()], lastError: null },
-          opportunities: null,
-          opportunityError: null,
-          isLookingUp: false,
-          onSelect: vi.fn(async () => {}),
-          onSelectOpportunity: vi.fn(async () => {}),
-          onToggleColleague: vi.fn(async () => {}),
-          onRetryOpportunities: vi.fn(async () => {}),
-          onRefresh: vi.fn(async () => {}),
-          onOpenSettings: vi.fn(),
-        }}
+        {...defaultProps()}
         open={false}
         onOpenChange={onOpenChange}
       />
@@ -790,5 +806,173 @@ describe("the popover open state", () => {
     await openPopover();
     expect(onOpenChange).toHaveBeenCalledWith(true);
     expect(screen.queryByPlaceholderText(/search/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Task 12: the flat multi-target list. `contactId`/`leadId`/`opportunities`
+ * above are the single-select flow (`ResolvedTarget`, retired in Task 14) and
+ * untouched by anything below - this describe block drives exclusively off
+ * `targets`, mirroring `useOdooTarget.ts`'s own separation between `target`
+ * and `targets`.
+ */
+describe("logging to several records", () => {
+  // Named to match the fixtures useOdooTarget.test.tsx's own "Task 11: the
+  // multi-target list" block already uses (christian id 1, bentley id 2), so
+  // a reader who has seen one recognises the other.
+  const christian = contact({ id: 1, name: "Christian Carron" });
+  const bentleyAS = contact({ id: 2, name: "Bentley AS" });
+  const colleague = contact({ id: 3, name: "Colleague Cole", isColleague: true });
+
+  let nextTargetId = 1000;
+  function t(name: string, model: SelectedTarget["model"] = "res.partner"): SelectedTarget {
+    nextTargetId += 1;
+    return { model, resId: nextTargetId, name };
+  }
+
+  // Five ALREADY-selected targets, deliberately not overlapping bentleyAS.id
+  // (2) or christian.id (1) - the cap tests need "Bentley AS" to still be
+  // addable-but-blocked, not already-added.
+  const fiveTargets: SelectedTarget[] = [1, 2, 3, 4, 5].map((n) => ({
+    model: "res.partner",
+    resId: 100 + n,
+    name: `Existing ${n}`,
+  }));
+
+  // Reactive on top of the plain open-state Harness above: `onExpandContact`
+  // is a spy in defaultProps() (it does no actual lookup), so this is the
+  // thing that makes `opportunitiesFor` actually start returning data after
+  // an expand click resolves - mirroring what useOdooTarget.ts's own
+  // rowCache/setRowCache does for real, just held in local component state
+  // instead of the hook.
+  function ExpandHarness({
+    lookups,
+    ...props
+  }: ContactPickerProps & { lookups: Record<number, OdooOpportunity[]> }) {
+    const [open, setOpen] = useState(props.open);
+    const [resolved, setResolved] = useState<Record<number, OdooOpportunity[]>>({});
+    return (
+      <ContactPicker
+        {...props}
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          props.onOpenChange(next);
+        }}
+        onExpandContact={async (contactId) => {
+          await props.onExpandContact(contactId);
+          if (contactId in lookups) {
+            setResolved((prev) => ({ ...prev, [contactId]: lookups[contactId] }));
+          }
+        }}
+        opportunitiesFor={(contactId) => resolved[contactId] ?? props.opportunitiesFor(contactId)}
+      />
+    );
+  }
+
+  it("shows the count in the trigger line", () => {
+    const props = defaultProps({ targets: [t("Christian Carron"), t("B"), t("C")] });
+    render(<ContactPicker {...props} />);
+    expect(
+      screen.getByRole("button", { name: /Christian Carron \+ 2 more/ })
+    ).toBeVisible();
+  });
+
+  it("adds a deal as its own line, not attached to the contact", async () => {
+    const deal: OdooOpportunity = {
+      id: 90,
+      name: "Partnership with ECS",
+      type: "lead",
+      stageName: "New",
+      partnerId: null,
+      partnerName: null,
+      contactName: "Christian Carron",
+      email: "cc@ecs.example",
+    };
+    const props = defaultProps({
+      cache: { kind: "ready", contacts: [christian], lastError: null },
+    });
+    render(<ExpandHarness {...props} lookups={{ [christian.id]: [deal] }} />);
+    await openPopover();
+    await userEvent.click(screen.getByRole("button", { name: /expand Christian Carron/i }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add Partnership with ECS/i })
+    );
+    expect(props.onAddTarget).toHaveBeenCalledWith({
+      model: "crm.lead",
+      resId: 90,
+      name: "Partnership with ECS",
+    });
+  });
+
+  it("uses aria-disabled at the cap, keeping the control focusable", async () => {
+    setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: fiveTargets,
+    });
+    await openPopover();
+    // Step 3's exact header copy, pinned - otherwise it has no coverage.
+    expect(
+      screen.getByText(/Logging to \(5\) · limit reached/)
+    ).toBeVisible();
+    const add = screen.getByRole("button", { name: /add Bentley AS/i });
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    expect(add).not.toHaveAttribute("disabled");
+    add.focus();
+    expect(add).toHaveFocus();
+  });
+
+  it("removes a target when its added row is clicked again", async () => {
+    const props = setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: [{ model: "res.partner", resId: bentleyAS.id, name: "Bentley AS" }],
+    });
+    await openPopover();
+    // Proves the toggle actually flips both ways and that onRemoveTarget is
+    // called with the hook's real two-positional-argument shape
+    // (removeTarget(model, resId), confirmed against useOdooTarget.ts) rather
+    // than the single-object shape onAddTarget takes.
+    await userEvent.click(screen.getByRole("button", { name: /added Bentley AS/i }));
+    expect(props.onRemoveTarget).toHaveBeenCalledWith("res.partner", bentleyAS.id);
+  });
+
+  it("keeps native disabled on an archived contact", async () => {
+    const archived = contact({ id: 5, name: "Archived Person", active: false });
+    setup({ cache: { kind: "ready", contacts: [archived], lastError: null } });
+    await openPopover();
+    expect(rowButton()).toBeDisabled();
+    // The add-toggle is a NEW control on the same row and must be statically
+    // disabled the same way, for the same reason (Step 4): an archived
+    // contact cannot become a target either.
+    expect(screen.getByRole("button", { name: /add Archived Person/i })).toBeDisabled();
+  });
+
+  it("pluralises the destination sentence and names each record's kind", async () => {
+    setup({
+      targets: [
+        t("Christian Carron", "res.partner"),
+        t("Partnership with ECS", "crm.lead"),
+        t("Bentley AS"),
+      ],
+    });
+    await openPopover();
+    expect(
+      screen.getByText(
+        /logged on 3 records: Christian Carron, the lead Partnership with ECS, and Bentley AS\./
+      )
+    ).toBeVisible();
+  });
+
+  it("renders static text for a colleague's expanded row, with no dead control", async () => {
+    setup({ cache: { kind: "ready", contacts: [colleague], lastError: null } });
+    await openPopover();
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+    expect(screen.queryByRole("button", { name: /look up/i })).toBeNull();
+    // The row is still a valid target (only the crm.lead LOOKUP is skipped
+    // for a colleague, not the contact itself - onSelect commits a colleague
+    // exactly like anyone else), so its own add-toggle must survive.
+    expect(
+      screen.getByRole("button", { name: /add Colleague Cole/i })
+    ).toBeInTheDocument();
   });
 });

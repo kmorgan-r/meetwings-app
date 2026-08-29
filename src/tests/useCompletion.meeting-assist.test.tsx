@@ -536,4 +536,27 @@ describe("useCompletion meeting assist mode", () => {
     });
     expect(resizeWindow).toHaveBeenLastCalledWith(false);
   });
+
+  // Task 12: the "Logging to" section's height is CONTENT-driven, not
+  // flag-driven like every other entry in the resize effect's OR list -
+  // adding or removing a target inside an already-open picker never toggles
+  // isContactPickerOpen, so without targetCount in the dependency array the
+  // window would never be asked to re-apply around the new row. useOdooTarget
+  // pushes the count in via setTargetCount (see its own test coverage in
+  // useOdooTarget.test.tsx, "Task 12: setTargetCount") - this test only pins
+  // useCompletion's own half: that the effect actually re-fires when the
+  // count it owns changes, mirroring "grows the window..." above exactly.
+  it("re-runs the resize effect when a target is added while the picker is open", () => {
+    const { result } = renderHook(() => useCompletion());
+
+    act(() => {
+      result.current.setIsContactPickerOpen(true);
+    });
+    resizeWindow.mockClear();
+
+    act(() => {
+      result.current.setTargetCount(2);
+    });
+    expect(resizeWindow).toHaveBeenCalled();
+  });
 });

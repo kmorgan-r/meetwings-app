@@ -159,6 +159,9 @@ function mountCombined() {
       meetingAssistMode: completion.meetingAssistMode,
       isPickerOpen: false,
       setIsPickerOpen: vi.fn(),
+      // Task 12 bridge: mirrors index.tsx's real wiring exactly, since this
+      // helper's whole point is mirroring that composition.
+      setTargetCount: completion.setTargetCount,
     });
     return { completion, odoo };
   });

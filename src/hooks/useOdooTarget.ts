@@ -149,6 +149,7 @@ export function useOdooTarget({
   meetingAssistMode,
   isPickerOpen,
   setIsPickerOpen,
+  setTargetCount,
 }: {
   meetingAssistMode: boolean;
   // Threaded through from useCompletion (see Files.tsx's isFilesPopoverOpen
@@ -160,6 +161,12 @@ export function useOdooTarget({
   // popover exactly like it already observes the Files popover.
   isPickerOpen: boolean;
   setIsPickerOpen: (open: boolean) => void;
+  // Task 12. useCompletion owns targetCount because it runs BEFORE this hook
+  // in <Completion /> and so cannot read a count off this hook's own return
+  // value - it can only own a slot this hook writes into, mirroring
+  // isPickerOpen/setIsPickerOpen exactly. Called from an effect below
+  // whenever `targets` changes, never from render.
+  setTargetCount: (count: number) => void;
 }): UseOdooTargetReturn {
   const [target, setTarget] = useState<ResolvedTarget | null>(null);
   const [cache, setCache] = useState<PickerCacheState>({ kind: "never-synced" });
@@ -189,6 +196,19 @@ export function useOdooTarget({
    * chunk.
    */
   const [targets, setTargets] = useState<SelectedTargets>([]);
+
+  /**
+   * Task 12: pushes the list's SIZE out to useCompletion, which cannot read
+   * `targets` itself (this hook mounts after useCompletion in <Completion />,
+   * so nothing here exists yet when useCompletion's own resize effect is
+   * defined - see setTargetCount's doc comment above). Every write to
+   * `targets` funnels through `applyTargets`, so watching `targets` itself
+   * here - rather than trying to hook each individual writer - is the one
+   * place this can never miss a change.
+   */
+  useEffect(() => {
+    setTargetCount(targets.length);
+  }, [targets, setTargetCount]);
 
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
@@ -1085,6 +1105,22 @@ export function useOdooTarget({
     onOpenSettings,
     open: isPickerOpen,
     onOpenChange: setIsPickerOpen,
+    // Task 12: the flat multi-target list, named identically to this hook's
+    // own return fields below (targets/addTarget/removeTarget/expandContact/
+    // opportunitiesFor/errorFor/retryOpportunitiesFor) so this is a straight
+    // pass-through with no renaming to keep straight. onAddTarget/
+    // onRemoveTarget carry the "on" prefix ContactPickerProps already uses
+    // for every other click-triggered action (onSelect, onRefresh, ...);
+    // opportunitiesFor/errorFor keep the hook's own bare names since they are
+    // getters, not handlers, matching how `opportunities`/`opportunityError`
+    // above are plain data rather than "on"-prefixed too.
+    targets,
+    onAddTarget: addTarget,
+    onRemoveTarget: removeTarget,
+    onExpandContact: expandContact,
+    opportunitiesFor,
+    errorFor,
+    onRetryContactOpportunities: retryOpportunitiesFor,
   };
 
   return {

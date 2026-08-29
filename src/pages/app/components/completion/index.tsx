@@ -49,6 +49,13 @@ export const Completion = ({
     meetingAssistMode: completion.meetingAssistMode,
     isPickerOpen: completion.isContactPickerOpen,
     setIsPickerOpen: completion.setIsContactPickerOpen,
+    // Task 12: permanent wiring, not a bridge to remove later - useCompletion
+    // owns targetCount/setTargetCount for its own resize effect (it cannot
+    // read targets off this hook, which mounts after it), and this is the
+    // only production call site. The brief's own Files list omitted this
+    // file even though useOdooTarget's param list gained a new required
+    // field; without this the call here would not compile.
+    setTargetCount: completion.setTargetCount,
   });
 
   // The AI provider, built exactly as useCompletion.ts:1313-1324 does it.
