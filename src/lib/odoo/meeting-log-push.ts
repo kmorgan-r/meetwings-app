@@ -131,7 +131,19 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
   // Read the children BEFORE the claim, and decline before it when there are
   // none - the way this push always returned before the CAS on a null resId,
   // so a mismatch moves neither status nor attempts.
-  const targets = await listTargets(row.id);
+  //
+  // Guarded like the claim's own handler just below: listTargets calls
+  // db.select, which rejects on a transient SQLITE_BUSY same as any other
+  // write, and an unguarded await here would reject pushQueuedRow itself -
+  // contradicting its own NEVER THROWS contract for a reason no worse than
+  // "the database hiccuped before any wire call happened."
+  let targets;
+  try {
+    targets = await listTargets(row.id);
+  } catch (err) {
+    console.error("[Odoo] meeting log target read failed:", err);
+    return;
+  }
   if (targets.length === 0) {
     // Derive before returning. deriveRowStatus is CAS'd on the observed
     // status and safe without a claim. Returning bare would leave a `pending`
@@ -233,17 +245,28 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
       }
     }
 
-    // One body, one attachment name, one payload - built ONCE for the whole
-    // row and reused across every target. attachmentNameFor takes the PARENT
-    // queue row's id, not a target's: it is what lets the retry search on a
-    // LATER attempt find the SAME attachment this attempt (or an earlier one)
-    // already created for that target.
+    // One attachment name, built ONCE for the whole row and reused across
+    // every target. attachmentNameFor takes the PARENT queue row's id, not a
+    // target's: it is what lets the retry search on a LATER attempt find the
+    // SAME attachment this attempt (or an earlier one) already created for
+    // that target. Cheap (string formatting), so it stays eager - and every
+    // target needs it for the search even on a pass that creates nothing.
     const name = attachmentNameFor(row.id, row.transcript_start_at);
-    const datas = toBase64Utf8(renderTranscript(slice.entries) || row.transcript);
-    const body = buildNoteBody(summary, slice, row.meeting_started_at ?? row.transcript_start_at);
+
+    // `datas` (a full base64 encode of the transcript) and `body` (the
+    // rendered note) are NOT cheap, and a pass where every target is already
+    // `sent` - or already carries both ids - makes zero wire calls that would
+    // need either. Computed lazily, on first actual use, and cached so a
+    // SECOND target needing one this same pass does not redo the work.
+    let datas: string | null = null;
+    const getDatas = (): string =>
+      (datas ??= toBase64Utf8(renderTranscript(slice.entries) || row.transcript));
+    let body: string | null = null;
+    const getBody = (): string =>
+      (body ??= buildNoteBody(summary, slice, row.meeting_started_at ?? row.transcript_start_at));
 
     // ---- Per-target adopt-or-create helpers, closed over the row-wide -----
-    // ---- name/datas/body built just above. ---------------------------
+    // ---- name/getDatas/getBody built just above. --------------------------
     async function createOrAdoptAttachment(
       target: MeetingLogTarget, attemptsBefore: number, deps: PushDeps
     ): Promise<number> {
@@ -258,7 +281,7 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
       }
       return expectInt(
         await deps.client.execute("ir.attachment", "create", [
-          { name, res_model: target.model, res_id: target.resId, datas },
+          { name, res_model: target.model, res_id: target.resId, datas: getDatas() },
         ]),
         "attachment id"
       );
@@ -280,7 +303,7 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
       }
       return expectInt(
         await deps.client.execute(target.model, "message_post", [[target.resId]], {
-          body,
+          body: getBody(),
           attachment_ids: [attachmentId],
           // Pinned, not left to Odoo's default. The default IS an internal
           // note today, but nothing enforces that across Odoo versions or

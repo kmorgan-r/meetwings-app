@@ -216,12 +216,14 @@ async function runAction(
     if (after.status === "sending") return { kind: "still-sending" };
 
     // THE PUSH CAN ALSO HAVE FAILED, and neither check above sees it.
-    // pushQueuedRow's post-wire catch calls releaseRowToPending (retryable) or
-    // failRow (deterministic); BOTH already bumped `attempts` via the claim and
-    // BOTH leave a non-`sending` status with last_error written
-    // (meeting-log-push.ts:282-305). Without this gate such a row falls through
-    // to `degraded` or `ok` - and one network outage produces exactly that
-    // pairing, because it kills the Odoo call AND the AI call, and
+    // pushQueuedRow records every per-target outcome on the children, then
+    // derives the parent's status from them (deriveRowStatus, called once
+    // after the per-target loop) - so a retryable failure leaves the row
+    // `pending` and a deterministic one leaves it `failed`, both already
+    // bumped `attempts` via the claim and both with last_error written from
+    // whichever target carried a reason. Without this gate such a row falls
+    // through to `degraded` or `ok` - and one network outage produces exactly
+    // that pairing, because it kills the Odoo call AND the AI call, and
     // generateMeetingLogSummary swallows its throw and returns null. The page
     // would then print "Sent - but the note shows the transcript's first
     // lines" directly beside the row's own freshly written last_error, telling

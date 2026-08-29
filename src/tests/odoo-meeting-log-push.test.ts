@@ -18,6 +18,11 @@ const { failNextWrite } = vi.hoisted(() => ({ failNextWrite: { value: null as st
 // pusher's write SUCCEED and then contests the claim underneath it.
 const { stealClaim } = vi.hoisted(() => ({ stealClaim: { rowId: null as string | null } }));
 
+// One-shot SELECT failure, mirroring failNextWrite but for db.select - proves
+// the pre-claim listTargets read (a select, not a write) is guarded too.
+// Named distinctly from the local failNextSelect() helper below, which sets it.
+const { nextSelectFailure } = vi.hoisted(() => ({ nextSelectFailure: { value: null as string | null } }));
+
 const SENT_TARGET_RE = /UPDATE meeting_log_targets\s+SET status = 'sent'/;
 
 vi.mock("@/lib/database/config", () => ({
@@ -37,6 +42,10 @@ vi.mock("@/lib/database/config", () => ({
       return result;
     },
     select: async (sql: string, params: unknown[] = []) => {
+      if (nextSelectFailure.value && sql.trim().startsWith(nextSelectFailure.value)) {
+        nextSelectFailure.value = null;
+        throw new Error("database is locked");
+      }
       const stmt = db.prepare(sql);
       stmt.bind(params as never[]);
       const rows: Record<string, unknown>[] = [];
@@ -222,6 +231,7 @@ beforeEach(async () => {
   tauriFetch.mockReset();
   claimed.clear();
   failNextWrite.value = null;
+  nextSelectFailure.value = null;
   stealClaim.rowId = null;
   stampLastMeeting.mockClear();
   store.clear();
@@ -820,6 +830,10 @@ describe("the push loop, per target", () => {
     failNextWrite.value = prefix;
   }
 
+  function failNextSelect(prefix: string) {
+    nextSelectFailure.value = prefix;
+  }
+
   function stealClaimAfterFirstTarget(rowId: string) {
     stealClaim.rowId = rowId;
   }
@@ -1041,29 +1055,34 @@ describe("the push loop, per target", () => {
     expect(await readRow("r1")).toMatchObject({ status: "unassigned", attempts: 0 });
   });
 
-  it("re-stamps the claim after a deterministic failure too", async () => {
+  // REVIEW FIX (Important #1) - the pre-claim `listTargets` read sat outside
+  // every try/catch, so a transient SQLITE_BUSY on that SELECT rejected
+  // pushQueuedRow itself, breaking its own documented NEVER THROWS contract.
+  // Mirrors the neighbouring "leaves the row alone when the claim itself
+  // cannot be written" test, but for the read one step earlier.
+  it("never throws when the pre-claim target read itself fails", async () => {
     seedRow({ id: "r1", status: "pending" });
-    seedTargets("r1", [{ resId: 1, status: "pending" }, { resId: 2, status: "pending" }]);
-    failPostFor(client, 1, odooFault());
-    const clock = vi.fn().mockReturnValueOnce(1_000).mockReturnValue(9_000);
-    await pushQueuedRow(await readRow("r1"), { ...deps, now: clock });
-    // Target 1 failed deterministically. If the re-stamp lived in the success
-    // branch instead of the finally, the claim would never have been refreshed.
-    expect((await readRow("r1")).claimed_at).not.toBe(1_000);
+    failNextSelect("SELECT * FROM meeting_log_targets");
+    await expect(pushQueuedRow(await readRow("r1"), deps)).resolves.toBeUndefined();
+    // Not claimed (the read failed before the CAS), and left exactly as it was.
+    expect(await readRow("r1")).toMatchObject({ status: "pending", attempts: 0 });
   });
 
-  // SUPPLEMENTAL - added because the mutation check above passed vacuously.
-  // With TWO targets, moving the re-stamp into the success branch still
-  // fires it once, for target 2 (which succeeds) - masking the very mutant
-  // this test names, because claimed_at ends up refreshed either way. A row
-  // with exactly ONE target, which fails deterministically, isolates the
-  // failure path: nothing else in the pass can refresh the clock. The FINAL
-  // claimed_at can't be the signal here either (the terminal derive that
-  // runs after the loop unconditionally nulls it on any successful CAS
-  // match, same as the neighbouring "tracking the last one" test) - so this
-  // counts clock reads instead: claim + finally-restamp + terminal-derive is
-  // 3 on a correct implementation; a re-stamp that only runs on success skips
-  // the middle one for a target that never succeeds, leaving 2.
+  // DELETED "re-stamps the claim after a deterministic failure too" (the
+  // brief's own given test), on review: it asserted
+  // `expect((await readRow("r1")).claimed_at).not.toBe(1_000)` with TWO
+  // targets, both of which terminate (target 1 fails deterministically,
+  // target 2 succeeds) - so the terminal derive's CAS matches and
+  // QUEUE_SQL.deriveStatus sets `claimed_at = NULL` unconditionally
+  // regardless of whether the re-stamp ran at all. `expect(null).not.toBe(
+  // 1_000)` is a tautology: it passes under every implementation, including
+  // one with the re-stamp deleted outright. Same unreachability as the
+  // "tracking the last one" test's original `toBe(3_000)`, just not carried
+  // across to this sibling the first time. The test below already covers the
+  // same scenario correctly (a single target, so nothing else in the pass
+  // can refresh the clock, and it counts clock reads instead of the final
+  // value, which the terminal derive erases either way) and is the mutant-8
+  // killer of record - see Step 7 in the report.
   it("reads the clock in finally even when the row's only target fails deterministically", async () => {
     seedRow({ id: "r1", status: "pending" });
     seedTargets("r1", [{ resId: 1, status: "pending" }]);

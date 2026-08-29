@@ -81,11 +81,15 @@ export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * fixed cost. What actually keeps a live push from crossing STALE_CLAIM_MS is
  * pushQueuedRow re-stamping `claimed_at` after EVERY target it finishes, not
  * once for the whole row - so the budget that matters per claim window is one
- * target's worth of Odoo calls (two, at up to 30s each, client.ts:21 - an
- * attachment create/adopt and a message post/adopt), not five targets'. 60s
- * for the summarize call plus 60s for one target's Odoo calls is comfortably
- * under STALE_CLAIM_MS (300s), with the re-stamp keeping every LATER target
- * from ever needing to borrow from that same budget. A timed-out summarize
+ * target's worth of Odoo calls, not five targets'. On a RETRY pass
+ * (attemptsBefore > 0) that is FOUR calls, not two - an attachment search
+ * that finds nothing falls through to a create, and a message search that
+ * finds nothing falls through to a post (client.ts:21, up to 30s each) - so
+ * 120s of wire for the first target. `summary_json` can legitimately still be
+ * null on a retry (a previous summarize failed), adding this 60s call ahead
+ * of it: 180s total for the first claim window, comfortably under
+ * STALE_CLAIM_MS (300s), with the re-stamp keeping every LATER target from
+ * ever needing to borrow from that same budget. A timed-out summarize
  * resolves null, which pushQueuedRow already handles by taking the fallback
  * body: degrading a note is not comparable to duplicating one.
  */
