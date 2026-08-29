@@ -435,6 +435,16 @@ export function useOdooTarget({
           const last = persisted[persisted.length - 1];
           setTarget(last ? fromSelectedTarget(last) : null);
         } catch {
+          // Fix round 2: re-checked here too, not just on the success
+          // sub-path above - this catch runs after TWO more awaits
+          // (resolveInstance, loadTargets), during which a newer commit can
+          // have already superseded this one. Falling through unconditionally
+          // used to revert the UI to `previous` - a value that was already
+          // stale before THIS commit even began - and toast an error for
+          // work the user has moved past, overwriting whatever the newer,
+          // successfully-persisted commit had just shown. A superseded
+          // commit leaves no visible trace: no reverted selection, no toast.
+          if (token !== selectionToken.current) return;
           // The re-read itself failed too (the database is unreachable, not
           // just the original write) - fall back to the pre-commit guess
           // rather than leaving `target` stuck on `next` forever.

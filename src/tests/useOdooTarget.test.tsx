@@ -466,6 +466,85 @@ describe("persisting a selection", () => {
     // recent row, which is what actually happened.
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
+
+  // Fix round 2: the re-read above runs after TWO more awaits
+  // (resolveInstance, loadTargets) past commit's own token check on catch
+  // entry - a newer commit can supersede this one in that window. If the
+  // re-read ALSO fails, round 1's code fell through to setTarget(previous)
+  // and a toast unconditionally, even though `previous` (Ada) was already
+  // stale before this commit even began, and a NEWER selection (Carla) has
+  // since persisted cleanly - silently reverting the UI over it.
+  it("leaves no trace when a superseded commit's own re-read also fails", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    // Pick Ada - persists cleanly, nothing to compensate for yet.
+    await act(async () => {
+      await result.current.pickerProps.onSelect(ada);
+    });
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 1,
+      leadId: null,
+      leadName: null,
+    });
+
+    // Pick Bea (token 2): the add succeeds (default mock), but the
+    // compensating remove of Ada's row is held open so Carla's pick below
+    // can land while this commit is still in flight.
+    let rejectRemove: (err: unknown) => void = () => {};
+    action.removeSelectedTarget.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRemove = reject;
+        })
+    );
+    let beaSelect!: Promise<void>;
+    await act(async () => {
+      beaSelect = result.current.pickerProps.onSelect(colleague);
+    });
+    await waitFor(() => expect(action.removeSelectedTarget).toHaveBeenCalled());
+
+    // The remove is about to reject, driving commit into its catch - whose
+    // own re-read is ALSO held open, so it does not settle before Carla's
+    // pick below lands.
+    let rejectReread: (err: unknown) => void = () => {};
+    action.loadTargets.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectReread = reject;
+        })
+    );
+    await act(async () => {
+      rejectRemove(new Error("database is locked"));
+    });
+    await waitFor(() => expect(action.loadTargets).toHaveBeenCalledTimes(2));
+
+    // Carla (token 3) persists cleanly while Bea's commit is still stuck in
+    // its catch, waiting on the re-read.
+    const carla: OdooContact = { ...colleague, id: 3, name: "Carla" };
+    await act(async () => {
+      await result.current.pickerProps.onSelect(carla);
+    });
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 3,
+      leadId: null,
+      leadName: null,
+    });
+
+    // NOW Bea's re-read fails too. Token 2 is superseded by token 3 - this
+    // must leave no trace at all: no reverted selection, no toast.
+    await act(async () => {
+      rejectReread(new Error("database is unreachable"));
+      await beaSelect;
+    });
+
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 3,
+      leadId: null,
+      leadName: null,
+    });
+    expect(toastError).not.toHaveBeenCalled();
+  });
 });
 
 describe("the opportunity panel", () => {
