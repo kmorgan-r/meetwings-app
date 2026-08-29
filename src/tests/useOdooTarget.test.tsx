@@ -1,4 +1,5 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const windowLabel = vi.hoisted(() => ({ value: "main" }));
@@ -57,9 +58,13 @@ const action = vi.hoisted(() => ({
   getSyncState: vi.fn(async () => null as unknown),
   setColleague: vi.fn(async () => {}),
   stampLastMeeting: vi.fn(async () => {}),
-  saveTarget: vi.fn(async () => {}),
-  loadTarget: vi.fn(async () => null as unknown),
-  clearTarget: vi.fn(async () => {}),
+  // Task 11: the shared multi-target table, which `useOdooTarget`'s single
+  // flow now persists through too - `saveTarget`/`loadTarget` queried
+  // `odoo_selected_target`, a table migration 14 drops.
+  loadTargets: vi.fn(async () => [] as unknown[]),
+  addSelectedTarget: vi.fn(async () => ({ ok: true }) as { ok: boolean; reason?: "cap" }),
+  removeSelectedTarget: vi.fn(async () => {}),
+  clearTargets: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/database/odoo-contacts.action", () => action);
 
@@ -88,7 +93,7 @@ vi.mock("@/lib/storage/odoo-config.storage", () => ({
 }));
 
 import { useOdooTarget } from "@/hooks/useOdooTarget";
-import type { OdooContact } from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget } from "@/types";
 
 const ada: OdooContact = {
   id: 1,
@@ -112,9 +117,11 @@ beforeEach(() => {
   listeners.clear();
   windowLabel.value = "main";
   action.listContacts.mockResolvedValue([ada, colleague]);
-  action.loadTarget.mockResolvedValue(null);
+  action.loadTargets.mockResolvedValue([]);
   action.getSyncState.mockResolvedValue({ last_sync_at: 1000, last_error_code: null });
-  action.saveTarget.mockResolvedValue(undefined);
+  action.addSelectedTarget.mockResolvedValue({ ok: true });
+  action.removeSelectedTarget.mockResolvedValue(undefined);
+  action.clearTargets.mockResolvedValue(undefined);
   action.stampLastMeeting.mockResolvedValue(undefined);
   action.setColleague.mockResolvedValue(undefined);
   odoo.fetchOpportunities.mockResolvedValue([]);
@@ -339,7 +346,7 @@ describe("the app-start sync", () => {
 describe("persisting a selection", () => {
   // instanceRef is filled by the async mount effect, and the picker is usable
   // before it resolves. Writing a null instance violates
-  // odoo_selected_target.instance TEXT NOT NULL - thrown out of a click
+  // odoo_selected_targets.instance TEXT NOT NULL - thrown out of a click
   // handler, i.e. an unhandled rejection.
   it("never writes a null instance, even mid-rehydrate", async () => {
     let releaseInstance: (v: string) => void = () => {};
@@ -355,17 +362,18 @@ describe("persisting a selection", () => {
     await act(async () => {
       releaseInstance("http://h:8069|odoo");
     });
-    await waitFor(() => expect(action.saveTarget).toHaveBeenCalled());
-    expect(action.saveTarget.mock.calls[0][0]).toMatchObject({
-      instance: "http://h:8069|odoo",
-    });
+    await waitFor(() => expect(action.addSelectedTarget).toHaveBeenCalled());
+    // instance is the FIRST positional arg of addSelectedTarget(instance, t,
+    // conversationId, at) - not an object property, unlike the old saveTarget.
+    expect(action.addSelectedTarget.mock.calls[0][0]).toBe("http://h:8069|odoo");
   });
 
-  // A rejected saveTarget with the selection already in state leaves targetRef
-  // claiming something that was never written - so the next remount loses it
-  // silently, which is exactly what the persisted singleton row exists to stop.
+  // A rejected addSelectedTarget with the selection already in state leaves
+  // targetRef claiming something that was never written - so the next
+  // remount loses it silently, which is exactly what the persisted row
+  // exists to stop.
   it("does not leave targetRef claiming an unpersisted selection", async () => {
-    action.saveTarget.mockRejectedValue(new Error("database is locked"));
+    action.addSelectedTarget.mockRejectedValue(new Error("database is locked"));
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
     await act(async () => {
@@ -389,16 +397,17 @@ describe("persisting a selection", () => {
 
   // Added during self-review: pin the exact scenario the hook's own doc
   // comment on commit()'s rejection path describes, and which no other test
-  // here exercises. Pick Ada (token 1, saveTarget hangs); pick Bea (token 2,
-  // saveTarget resolves - the row now names Bea); THEN Ada's write rejects.
-  // Without re-checking the token in the rejection path, the rollback would
-  // restore `previous` (null, captured before Ada's commit) over Bea's
-  // already-persisted selection - the picker would show nothing chosen while
-  // SQLite still holds Bea, silently reintroducing the unassigned-meeting
-  // failure through the error handling meant to prevent it.
+  // here exercises. Pick Ada (token 1, addSelectedTarget hangs); pick Bea
+  // (token 2, addSelectedTarget resolves - the row now names Bea); THEN
+  // Ada's write rejects. Without re-checking the token in the rejection
+  // path, the rollback would restore `previous` (null, captured before
+  // Ada's commit) over Bea's already-persisted selection - the picker would
+  // show nothing chosen while SQLite still holds Bea, silently
+  // reintroducing the unassigned-meeting failure through the error handling
+  // meant to prevent it.
   it("does not let a stale commit's rejection roll back a newer, already-persisted selection", async () => {
     let rejectAdaSave: (err: unknown) => void = () => {};
-    action.saveTarget.mockImplementationOnce(
+    action.addSelectedTarget.mockImplementationOnce(
       () =>
         new Promise((_resolve, reject) => {
           rejectAdaSave = reject;
@@ -408,10 +417,10 @@ describe("persisting a selection", () => {
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
 
     await act(async () => {
-      result.current.pickerProps.onSelect(ada); // token 1, saveTarget pending
+      result.current.pickerProps.onSelect(ada); // token 1, addSelectedTarget pending
     });
     await act(async () => {
-      await result.current.pickerProps.onSelect(colleague); // token 2, saveTarget resolves
+      await result.current.pickerProps.onSelect(colleague); // token 2, addSelectedTarget resolves
     });
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
 
@@ -479,14 +488,14 @@ describe("the opportunity panel", () => {
     await act(async () => {
       await result.current.pickerProps.onSelect(ada);
     });
-    const savesAfterSelect = action.saveTarget.mock.calls.length;
+    const savesAfterSelect = action.addSelectedTarget.mock.calls.length;
 
     odoo.fetchOpportunities.mockResolvedValue([]);
     await act(async () => {
       await result.current.pickerProps.onRetryOpportunities();
     });
     expect(odoo.fetchOpportunities).toHaveBeenCalledTimes(2);
-    expect(action.saveTarget.mock.calls).toHaveLength(savesAfterSelect);
+    expect(action.addSelectedTarget.mock.calls).toHaveLength(savesAfterSelect);
   });
 
   // Task 11's `opportunities === null` branch — the one that renders the Look
@@ -495,7 +504,7 @@ describe("the opportunity panel", () => {
   // the hook's contactRef is empty, so retry must fall back to the cache or the
   // button is dead on the one path it was added for.
   it("retries for a rehydrated target that was never selected in this session", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: "Ada Lovelace" }]);
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
     expect(result.current.pickerProps.opportunities).toBeNull();
@@ -581,21 +590,21 @@ describe("cross-window credential changes", () => {
   // subsequent onSelectOpportunity would then commit that stale contactId
   // under the NEW instance's fingerprint, writing a poisoned row.
   it("clears the in-memory target when the instance changes, matching the DB purge", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mount();
     await waitFor(() =>
       expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
     );
 
-    action.loadTarget.mockClear();
-    action.loadTarget.mockResolvedValue(null);
+    action.loadTargets.mockClear();
+    action.loadTargets.mockResolvedValue([]);
     await act(async () => {
       await emitInstanceChanged();
     });
 
     expect(result.current.targetRef.current).toBeNull();
     // Re-resolved for the NEW instance, not just cleared and left stale.
-    expect(action.loadTarget).toHaveBeenCalled();
+    expect(action.loadTargets).toHaveBeenCalled();
   });
 
   it("triages a still-unconfigured instance rather than rejecting", async () => {
@@ -635,8 +644,10 @@ describe("selecting", () => {
     // The user picked a person. If an unmount or a meeting-ended landed here,
     // waiting for the second click would file the meeting as unassigned.
     expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
-    expect(action.saveTarget).toHaveBeenCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: null, leadName: null }),
+    expect(action.addSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      { model: "res.partner", resId: 1, name: null },
+      null,
       expect.any(Number)
     );
     await act(async () => resolveLookup([]));
@@ -770,8 +781,10 @@ describe("selecting", () => {
       // which is exactly the case where there is nothing to name it from.
       leadName: null,
     });
-    expect(action.saveTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: 7, leadName: null }),
+    expect(action.addSelectedTarget).toHaveBeenLastCalledWith(
+      "http://h:8069|odoo",
+      { model: "crm.lead", resId: 7, name: null },
+      null,
       expect.any(Number)
     );
   });
@@ -780,18 +793,24 @@ describe("selecting", () => {
 describe("rehydrate", () => {
   // <Completion /> can unmount mid-call: the setup gate at
   // src/pages/app/index.tsx:84 is reactive, not latched.
-  it("restores the target from the singleton row on mount", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 4, leadId: 8, leadName: null });
+  //
+  // The row rehydrates from `odoo_selected_targets` now, coalesced to at
+  // most one row per selection (Task 11) - a lead-only row never recorded
+  // the partner it was picked under, so a rehydrated `crm.lead` target
+  // always comes back with `contactId: null`. That loss is the same one
+  // migration 14's own backfill already accepts.
+  it("restores the target from the most recent row on mount", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "crm.lead", resId: 8, name: null }]);
     const { result } = mount();
     await waitFor(() =>
-      expect(result.current.targetRef.current).toEqual({ contactId: 4, leadId: 8, leadName: null })
+      expect(result.current.targetRef.current).toEqual({ contactId: null, leadId: 8, leadName: null })
     );
   });
 
   // A mid-call remount is exactly when the user is likeliest to re-pick.
   it("does not clobber a selection committed during the rehydrate round trip", async () => {
     let resolveLoad: (v: unknown) => void = () => {};
-    action.loadTarget.mockReturnValue(
+    action.loadTargets.mockReturnValue(
       new Promise((resolve) => {
         resolveLoad = resolve;
       })
@@ -800,7 +819,7 @@ describe("rehydrate", () => {
     await act(async () => {
       result.current.pickerProps.onSelect(colleague);
     });
-    await act(async () => resolveLoad({ contactId: 4, leadId: 8, leadName: null }));
+    await act(async () => resolveLoad([{ model: "crm.lead", resId: 8, name: null }]));
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 });
@@ -836,7 +855,13 @@ describe("a sync that archives the selected partner", () => {
     });
 
     await waitFor(() => expect(result.current.targetRef.current).toBeNull());
-    expect(action.clearTarget).toHaveBeenCalled();
+    // The single flow's coalesced row is removed individually, not a full
+    // clearTargets - Task 11's per-target archival rule.
+    expect(action.removeSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      "res.partner",
+      1
+    );
   });
 });
 
@@ -845,8 +870,8 @@ describe("a sync that archives the selected partner", () => {
 // (the newConversation request event, a deleted-conversation fallback, and
 // Input.tsx's keepEngaged close button) funnels through.
 describe("starting a new chat", () => {
-  it("clears both the in-memory target and the persisted row", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+  it("clears both the in-memory target and the persisted rows", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mount();
     await waitFor(() =>
       expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
@@ -859,7 +884,8 @@ describe("starting a new chat", () => {
     });
 
     expect(result.current.targetRef.current).toBeNull();
-    expect(action.clearTarget).toHaveBeenCalled();
+    expect(result.current.targets).toEqual([]);
+    expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo");
   });
 });
 
@@ -983,8 +1009,10 @@ describe("the lead search", () => {
       // <Completion /> remount.
       leadName: "Partnership with ECS",
     });
-    expect(action.saveTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({ contactId: null, leadId: 90, leadName: "Partnership with ECS" }),
+    expect(action.addSelectedTarget).toHaveBeenLastCalledWith(
+      "http://h:8069|odoo",
+      { model: "crm.lead", resId: 90, name: "Partnership with ECS" },
+      null,
       expect.any(Number)
     );
   });
@@ -1017,5 +1045,246 @@ describe("the lead search", () => {
     });
     expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
     expect(result.current.pickerProps.opportunities).toBeNull();
+  });
+});
+
+/**
+ * Task 11: the list of targets and the per-contact "Logging to" disclosure
+ * cache, both new hook-return fields - `targets`, `targetCount`, `addTarget`,
+ * `removeTarget`, `expandContact`, `opportunitiesFor`, `errorFor`,
+ * `retryOpportunitiesFor`. Nothing here touches `pickerProps`/`targetRef`;
+ * that suite above is untouched except for the persistence-mock retargeting.
+ */
+describe("Task 11: the multi-target list", () => {
+  const christian: OdooContact = { ...ada, id: 1, name: "Christian Carron" };
+  const bentley: OdooContact = { ...ada, id: 2, name: "Bentley AS" };
+  const colleagueContact: OdooContact = {
+    ...ada,
+    id: 99,
+    name: "Colleague",
+    isColleague: true,
+  };
+  const COLLEAGUE_ID = colleagueContact.id;
+
+  const opts = { meetingAssistMode: false, isPickerOpen: false, setIsPickerOpen: vi.fn() };
+
+  function opp(id: number, name: string): OdooOpportunity {
+    return {
+      id,
+      name,
+      type: "opportunity",
+      stageName: null,
+      partnerId: null,
+      partnerName: null,
+      contactName: null,
+      email: null,
+    };
+  }
+
+  // Keyed by the CONTACT id fetchOpportunities was called for, so two
+  // concurrent lookups can be settled independently and out of order.
+  let pending: Map<number, { resolve: (v: OdooOpportunity[]) => void; reject: (e: unknown) => void }>;
+
+  beforeEach(() => {
+    action.listContacts.mockResolvedValue([christian, bentley, colleagueContact]);
+    pending = new Map();
+    odoo.fetchOpportunities.mockImplementation(
+      (_client: unknown, contact: OdooContact) =>
+        new Promise<OdooOpportunity[]>((resolve, reject) => {
+          pending.set(contact.id, { resolve, reject });
+        })
+    );
+  });
+
+  async function resolveOpportunities(contactId: number, rows: OdooOpportunity[]) {
+    const deferred = pending.get(contactId);
+    if (!deferred) throw new Error(`no pending fetchOpportunities call for contact ${contactId}`);
+    pending.delete(contactId);
+    await act(async () => {
+      deferred.resolve(rows);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function rejectOpportunities(contactId: number, err: unknown) {
+    const deferred = pending.get(contactId);
+    if (!deferred) throw new Error(`no pending fetchOpportunities call for contact ${contactId}`);
+    pending.delete(contactId);
+    await act(async () => {
+      deferred.reject(err);
+      await Promise.resolve().catch(() => {});
+      await Promise.resolve();
+    });
+  }
+
+  async function addTargets(
+    result: { current: ReturnType<typeof useOdooTarget> },
+    items: SelectedTarget[]
+  ) {
+    for (const t of items) {
+      await act(async () => {
+        await result.current.addTarget(t);
+      });
+    }
+  }
+
+  // Deviates from a literal transcription of the brief's snippet, which calls
+  // `archiveContactAndReload(1)` with no `result` argument: this helper needs
+  // a specific hook instance to drive `onRefresh` on, exactly like
+  // `addTargets` above already takes one.
+  async function archiveContactAndReload(
+    result: { current: ReturnType<typeof useOdooTarget> },
+    contactId: number
+  ) {
+    action.listContacts.mockResolvedValue(
+      [christian, bentley, colleagueContact].map((c) =>
+        c.id === contactId ? { ...c, active: false } : c
+      )
+    );
+    await act(async () => {
+      await result.current.pickerProps.onRefresh();
+    });
+  }
+
+  /**
+   * Test-only stand-in for the "Logging to" row Task 12 builds. Renders
+   * Christian's expand control UNCONDITIONALLY, decoupled from the async
+   * cache load - `expandContact` itself still needs that cache populated to
+   * find the contact, which `cache-ready` below lets the test wait for
+   * deterministically instead of racing userEvent's own internal timing.
+   *
+   * This is the render-level harness the brief's own comment calls for: a
+   * ref-only version of the disclosure cache passes every hook-level
+   * assertion above and still leaves this button stuck on nothing - only a
+   * real render catches a `useRef` write that schedules no re-render.
+   */
+  function Harness() {
+    const odoo = useOdooTarget(opts);
+    const ready = odoo.pickerProps.cache.kind === "ready";
+    const rows = odoo.opportunitiesFor(christian.id) ?? [];
+    return (
+      <div>
+        <span data-testid="cache-ready">{String(ready)}</span>
+        <button type="button" onClick={() => void odoo.expandContact(christian.id)}>
+          {`expand ${christian.name}`}
+        </button>
+        {rows.map((o) => (
+          <button key={o.id} type="button">
+            {`add ${o.name}`}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  it("hands ContactPicker a referentially stable list at zero targets", async () => {
+    const { result, rerender } = renderHook(() => useOdooTarget(opts));
+    const first = result.current.targets;
+    // Settled BEFORE asserting, not just captured before the mount effect's
+    // async loadTargets([]) has a chance to run - a version that allocated a
+    // fresh [] on that no-op write would only fail this once the effect has
+    // actually landed.
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    rerender();
+    expect(result.current.targets).toBe(first);
+  });
+
+  it("re-renders the picker when a row's lookup resolves", async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getByTestId("cache-ready")).toHaveTextContent("true"));
+    await userEvent.click(screen.getByRole("button", { name: /expand Christian Carron/i }));
+    await resolveOpportunities(1, [opp(9, "Partnership with ECS")]);
+    expect(
+      await screen.findByRole("button", { name: /add Partnership with ECS/i })
+    ).toBeVisible();
+  });
+
+  it("keys the deal lookup per contact, so adding a target does not strand an open row", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    // The async form: it flushes enough microtasks (resolveInstance,
+    // getClient's loadOdooConfig) for fetchOpportunities to actually be
+    // CALLED and its promise captured in `pending` - the sync form leaves
+    // the call sitting before its first await, and resolveOpportunities
+    // below would find nothing pending yet.
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+    await act(async () => {
+      await result.current.addTarget({ model: "res.partner", resId: 2, name: "B" });
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1); // not stuck loading
+  });
+
+  it("empties the disclosure cache when the instance changes", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1);
+
+    // Driven through the existing Tauri-event helper rather than widening
+    // UseOdooTargetReturn with a `handleInstanceChanged` field the Interfaces
+    // section does not list - the brief's literal
+    // `result.current.handleInstanceChanged()` would work too, but this is
+    // the minimal surface.
+    await act(async () => {
+      await emitInstanceChanged();
+    });
+    expect(result.current.opportunitiesFor(1)).toBeNull();
+  });
+
+  it("keys the lookup error per contact", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+      void result.current.expandContact(2);
+    });
+    await rejectOpportunities(1, new Error("boom"));
+    await resolveOpportunities(2, [opp(9, "Deal")]);
+    expect(result.current.errorFor(1)).not.toBeNull();
+    expect(result.current.errorFor(2)).toBeNull();
+  });
+
+  it("skips the lookup for a colleague", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    act(() => {
+      void result.current.expandContact(COLLEAGUE_ID);
+    });
+    expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
+  });
+
+  it("drops only the archived contact's target, not the selection", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [
+      { model: "res.partner", resId: 1, name: "A" },
+      { model: "res.partner", resId: 2, name: "B" },
+    ]);
+    await archiveContactAndReload(result, 1);
+    expect(result.current.targets.map((t) => t.resId)).toEqual([2]);
+  });
+
+  it("refuses a sixth target and surfaces the cap", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(
+      result,
+      [1, 2, 3, 4, 5].map((resId) => ({
+        model: "res.partner" as const,
+        resId,
+        name: `C${resId}`,
+      }))
+    );
+    action.addSelectedTarget.mockResolvedValueOnce({ ok: false, reason: "cap" });
+    await act(async () => {
+      const r = await result.current.addTarget({ model: "res.partner", resId: 6, name: "C6" });
+      expect(r).toMatchObject({ ok: false, reason: "cap" });
+    });
+    expect(result.current.targets).toHaveLength(5);
   });
 });

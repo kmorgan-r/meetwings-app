@@ -102,6 +102,13 @@ export interface OdooOpportunity {
  * a lead. A contact is named from the synced cache; a lead is not in it by
  * definition, and the in-memory list a lookup produced does not survive a
  * <Completion /> remount.
+ *
+ * Persisted through `odoo_selected_targets` (Task 11 on), coalesced down to
+ * at most one `SelectedTarget` row - lead wins, matching migration 14's own
+ * backfill rule - by `useOdooTarget.ts`'s `toSelectedTarget`/
+ * `fromSelectedTarget` and `useMeetingLog.ts`'s `resolvedToSelected`. This
+ * type is the single-select flow's own shape and is retired in Task 14, once
+ * every caller holds a real `SelectedTargets` list instead.
  */
 export interface ResolvedTarget {
   contactId: number | null;

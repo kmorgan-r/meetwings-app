@@ -29,17 +29,14 @@ vi.mock("@/lib/database/config", () => ({
 import {
   addSelectedTarget,
   claimSync,
-  clearTarget,
   clearTargets,
   failSync,
   finishSync,
   listContacts,
-  loadTarget,
   loadTargets,
   purgeOtherInstances,
   releaseSync,
   removeSelectedTarget,
-  saveTarget,
   setColleague,
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
@@ -196,9 +193,10 @@ describe("purgeOtherInstances", () => {
 describe("selected targets", () => {
   // odoo_selected_targets only exists once migration 14 has run, and its
   // backfill reads FROM meeting_log_queue, so migration 12 goes first. The
-  // outer beforeEach stops at migration 13 deliberately - see "the selected
-  // target" above, which pins saveTarget/loadTarget against the pre-14
-  // odoo_selected_target table that migration 14 drops.
+  // outer beforeEach stops at migration 13 deliberately (shared with
+  // "purgeOtherInstances" above, which layers the same two migrations on
+  // top), so this block applies 14 itself rather than pulling every other
+  // describe block in the file forward to a schema it does not need.
   beforeEach(() => {
     db.run(readMigration("meeting-log-queue.sql"));
     db.run(readMigration("odoo-multi-target.sql"));
@@ -311,78 +309,6 @@ describe("sync state", () => {
   });
 });
 
-describe("the selected target", () => {
-  it("is a singleton - a second save replaces, never accumulates", async () => {
-    await saveTarget(
-      { instance: INSTANCE, contactId: 1, leadId: 5, leadName: "Solar", conversationId: null },
-      1000
-    );
-    await saveTarget(
-      { instance: INSTANCE, contactId: 2, leadId: null, leadName: null, conversationId: "c" },
-      2000
-    );
-    expect(db.exec("SELECT COUNT(*) FROM odoo_selected_target")[0].values[0][0]).toBe(1);
-    await expect(loadTarget(INSTANCE)).resolves.toEqual({
-      contactId: 2,
-      leadId: null,
-      leadName: null,
-    });
-  });
-
-  // A lead is not in the contact cache by definition, and the in-memory list a
-  // lookup produced does not survive a <Completion /> remount - so the name
-  // stored beside the id is the ONLY thing that can name a lead-only target.
-  // Dropped here, the picker rehydrates to "Who are you meeting?" over a
-  // meeting already queued against a real record.
-  it("round-trips a lead-only target, name and all", async () => {
-    await saveTarget(
-      {
-        instance: INSTANCE,
-        contactId: null,
-        leadId: 90,
-        leadName: "Partnership with ECS",
-        conversationId: null,
-      },
-      1000
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toEqual({
-      contactId: null,
-      leadId: 90,
-      leadName: "Partnership with ECS",
-    });
-  });
-
-  // Not writable through saveTarget - `commit` clears instead of storing an
-  // empty target - but a row can predate that rule or be left by a partial
-  // write. Read back as a target it hands slice 2 something it can only file
-  // as unassigned, while the picker claims a selection is in place.
-  it("refuses a row that names neither a contact nor a lead", async () => {
-    db.run(
-      `INSERT INTO odoo_selected_target
-         (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
-       VALUES ('current', ?, NULL, NULL, NULL, NULL, 1000)`,
-      [INSTANCE]
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
-  });
-
-  it("does not return a target belonging to another instance", async () => {
-    await saveTarget(
-      { instance: OTHER, contactId: 1, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
-  });
-
-  it("clears", async () => {
-    await saveTarget(
-      { instance: INSTANCE, contactId: 1, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
-    await clearTarget();
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
-  });
-});
 
 describe("migration 14 backfill", () => {
   // Each test builds its own pre-14 sql.js database via the shared helpers -

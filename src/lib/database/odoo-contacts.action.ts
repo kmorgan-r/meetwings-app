@@ -1,4 +1,4 @@
-import type { DbOdooContact, OdooContact, ResolvedTarget, SelectedTarget, SelectedTargets } from "@/types";
+import type { DbOdooContact, OdooContact, SelectedTarget, SelectedTargets } from "@/types";
 import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import { getDatabase } from "./config";
 
@@ -253,64 +253,18 @@ export async function purgeOtherInstances(instance: string): Promise<void> {
 }
 
 /**
- * The selected target is a SINGLETON row, id = 'current'.
+ * The selected target was a SINGLETON row, id = 'current'.
  *
- * It is deliberately not keyed on a conversation id: currentConversationId
- * lives inside useCompletion (useCompletion.ts:118), starts null, is minted
- * lazily on the first submit, is reset by "new chat", and dies with the very
- * <Completion /> unmount this row exists to survive.
+ * `saveTarget`/`loadTarget` used to live here, writing and reading it. Both
+ * are deleted as of Task 11: `useOdooTarget` was their last consumer, and
+ * migration 14 (below) drops `odoo_selected_target` outright, so calling
+ * either against a post-migration database threw "no such table". The single
+ * flow now persists through `addSelectedTarget`/`removeSelectedTarget` below,
+ * coalescing a `ResolvedTarget` down to one `SelectedTarget` row.
  *
- * contact_id and lead_id are always written TOGETHER. Patching one without the
- * other is how a target ends up naming two different customers.
+ * `clearTarget` stays - nothing calls it anymore, but it is not this task's
+ * job to delete it.
  */
-export async function saveTarget(
-  target: ResolvedTarget & { instance: string; conversationId: string | null },
-  at: number
-): Promise<void> {
-  const db = await getDatabase();
-  await db.execute(
-    `INSERT INTO odoo_selected_target (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
-     VALUES ('current', ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       instance        = excluded.instance,
-       contact_id      = excluded.contact_id,
-       lead_id         = excluded.lead_id,
-       lead_name       = excluded.lead_name,
-       conversation_id = excluded.conversation_id,
-       selected_at     = excluded.selected_at`,
-    [
-      target.instance,
-      target.contactId,
-      target.leadId,
-      target.leadName,
-      target.conversationId,
-      at,
-    ]
-  );
-}
-
-export async function loadTarget(instance: string): Promise<ResolvedTarget | null> {
-  const db = await getDatabase();
-  const rows = await db.select<
-    { contact_id: number | null; lead_id: number | null; lead_name: string | null }[]
-  >(
-    "SELECT contact_id, lead_id, lead_name FROM odoo_selected_target WHERE id = 'current' AND instance = ?",
-    [instance]
-  );
-  const row = rows[0];
-  if (!row) return null;
-  // A row with NEITHER id is not a target. It cannot be written by this app -
-  // `commit` clears instead - but reading it back as a target would hand slice
-  // 2 something it can only file as unassigned while the picker claims a
-  // selection.
-  if (row.contact_id === null && row.lead_id === null) return null;
-  return {
-    contactId: row.contact_id,
-    leadId: row.lead_id,
-    leadName: row.lead_name,
-  };
-}
-
 export async function clearTarget(): Promise<void> {
   const db = await getDatabase();
   await db.execute("DELETE FROM odoo_selected_target WHERE id = 'current'");
@@ -318,10 +272,8 @@ export async function clearTarget(): Promise<void> {
 
 /**
  * Migration 14's replacement for the singleton above: up to MAX_TARGETS rows
- * per instance instead of one. `saveTarget` / `loadTarget` / `clearTarget`
- * stay in this file - `useOdooTarget` still calls them until Task 11 - but
- * they are runtime-dead from here on, since odoo_selected_target no longer
- * exists once migration 14 has run.
+ * per instance instead of one. `useOdooTarget`'s single flow persists through
+ * this too now (Task 11), coalescing down to one row per selection.
  *
  * Every statement is exported, alongside QUEUE_SQL in meeting-log.action.ts,
  * so the no-BEGIN/no-COMMIT scan in meeting-log.action.test.ts can see it too.

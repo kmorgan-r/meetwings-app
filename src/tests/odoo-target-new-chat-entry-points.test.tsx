@@ -87,14 +87,19 @@ vi.mock("@/lib/functions/meeting-summarizer", () => ({
 // `vi.hoisted`, not a bare `const` - see src/tests/useMeetingAutoRecord.lifecycle.test.tsx:12-15
 // for why a factory closing over a plain outer const dies at load with a TDZ
 // ReferenceError instead of reporting a failing test.
+// Task 11 bridge: useOdooTarget's single flow now persists through the
+// shared odoo_selected_targets table (loadTargets/addSelectedTarget/
+// removeSelectedTarget/clearTargets) rather than the dropped
+// odoo_selected_target singleton (saveTarget/loadTarget/clearTarget).
 const action = vi.hoisted(() => ({
   listContacts: vi.fn(async () => []),
   getSyncState: vi.fn(async () => null as unknown),
   setColleague: vi.fn(async () => {}),
   stampLastMeeting: vi.fn(async () => {}),
-  saveTarget: vi.fn(async () => {}),
-  loadTarget: vi.fn(async () => null as unknown),
-  clearTarget: vi.fn(async () => {}),
+  loadTargets: vi.fn(async () => [] as unknown[]),
+  addSelectedTarget: vi.fn(async () => ({ ok: true }) as { ok: boolean; reason?: "cap" }),
+  removeSelectedTarget: vi.fn(async () => {}),
+  clearTargets: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/database/odoo-contacts.action", () => action);
 
@@ -127,12 +132,13 @@ beforeEach(() => {
   windowLabel.value = "main";
   vi.mocked(localStorage.getItem).mockReturnValue(null);
   action.listContacts.mockResolvedValue([]);
-  action.loadTarget.mockResolvedValue(null);
+  action.loadTargets.mockResolvedValue([]);
   action.getSyncState.mockResolvedValue({ last_sync_at: 1000, last_error_code: null });
-  action.saveTarget.mockResolvedValue(undefined);
+  action.addSelectedTarget.mockResolvedValue({ ok: true });
+  action.removeSelectedTarget.mockResolvedValue(undefined);
   action.stampLastMeeting.mockResolvedValue(undefined);
   action.setColleague.mockResolvedValue(undefined);
-  action.clearTarget.mockResolvedValue(undefined);
+  action.clearTargets.mockResolvedValue(undefined);
   odoo.fetchOpportunities.mockResolvedValue([]);
   odoo.currentInstance.mockResolvedValue("http://h:8069|odoo");
   odoo.runSync.mockResolvedValue({
@@ -162,10 +168,14 @@ describe("clearing the Odoo target from the meeting-transcript reset paths", () 
   // MeetingTranscriptPanel.tsx:114 - onClick={clearMeetingTranscript}, no
   // other logic in between.
   it("clears via the meeting-transcript panel's Clear button", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mountCombined();
     await waitFor(() =>
-      expect(result.current.odoo.targetRef.current).toEqual({ contactId: 1, leadId: null })
+      expect(result.current.odoo.targetRef.current).toEqual({
+        contactId: 1,
+        leadId: null,
+        leadName: null,
+      })
     );
 
     await act(async () => {
@@ -173,16 +183,20 @@ describe("clearing the Odoo target from the meeting-transcript reset paths", () 
     });
 
     await waitFor(() => expect(result.current.odoo.targetRef.current).toBeNull());
-    expect(action.clearTarget).toHaveBeenCalled();
+    expect(action.clearTargets).toHaveBeenCalled();
   });
 
   // Input.tsx:194-199 - the X button's non-keepEngaged, meeting-assist-mode
   // branch: reset() then clearMeetingTranscript(), in that order.
   it("clears via the Input X button's non-keepEngaged meeting-assist branch", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mountCombined();
     await waitFor(() =>
-      expect(result.current.odoo.targetRef.current).toEqual({ contactId: 1, leadId: null })
+      expect(result.current.odoo.targetRef.current).toEqual({
+        contactId: 1,
+        leadId: null,
+        leadName: null,
+      })
     );
 
     act(() => {
@@ -197,6 +211,6 @@ describe("clearing the Odoo target from the meeting-transcript reset paths", () 
     });
 
     await waitFor(() => expect(result.current.odoo.targetRef.current).toBeNull());
-    expect(action.clearTarget).toHaveBeenCalled();
+    expect(action.clearTargets).toHaveBeenCalled();
   });
 });
