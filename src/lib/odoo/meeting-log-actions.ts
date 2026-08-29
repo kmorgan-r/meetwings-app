@@ -299,14 +299,26 @@ export function retryMeetingLog(id: string, deps: ActionDeps): Promise<ActionOut
   return runAction(id, () => retryRowAndFailedChildren(id), deps);
 }
 
-/** What a per-target action reports. Distinct from `ActionOutcome`: neither
+/**
+ * What a per-target action reports. Distinct from `ActionOutcome`: neither
  * function here ever pushes, so there is no `degraded`/`still-sending`/etc to
- * conflate with. */
+ * conflate with.
+ *
+ * `conflict` means NOTHING was written - matching every other use of that
+ * kind in this codebase (`runAction`'s instance-mismatch check,
+ * `deleteMeetingLog`'s fallback). `removed-parent-stale` is a DIFFERENT
+ * claim: the target row IS gone (an irreversible DELETE already committed)
+ * and only the PARENT's derived status lost its own CAS on the way out - the
+ * parent is stale, not the removal. It self-corrects the next time anything
+ * re-derives that row (another push, another queue action). Task 13 must not
+ * render `removed-parent-stale` with `conflict`'s "this did not happen" copy.
+ */
 export type TargetActionOutcome =
   | { kind: "ok" }
   | { kind: "gone" }
   | { kind: "refused" }
-  | { kind: "conflict" };
+  | { kind: "conflict" }
+  | { kind: "removed-parent-stale" };
 
 /**
  * Retries ONE target on an otherwise-untouched row: resets that child to
@@ -326,7 +338,12 @@ export async function retryTarget(rowId: string, targetId: string): Promise<Targ
   // The child reset is the load-bearing half: pushQueuedRow's loop only picks
   // up targets with status = 'pending' (meeting-log-push.ts:326), so flipping
   // only the parent leaves this a no-op against the very target the button
-  // names.
+  // names. Written UNCONDITIONALLY, before the parent CAS below is even known
+  // to succeed - deliberate, not an oversight: unlike removeQueueTarget's
+  // DELETE, this write is idempotent and recoverable (a child already
+  // pending or failed just gets its error columns cleared again), so a
+  // parent CAS that then reports `conflict` has not made anything
+  // irreversible happen.
   await db.execute(QUEUE_SQL.targetToPending, [null, null, targetId]);
   // retryRow's own predicate is `WHERE id = ? AND status IN ('failed','pending')`.
   // A row that moved to `sending` between the read above and this write
@@ -353,21 +370,42 @@ export async function removeQueueTarget(
 
   const before = (await getQueueRow(rowId))?.status;
   if (!before) return { kind: "gone" };
-  // `held` is deliberately absent from DERIVE_FORBIDDEN in the DB layer -
-  // nothing before this function ever calls deriveRowStatus with an observed
-  // `held`, and doing so here would CAS the row out of `held` early, ending
-  // the 30s undo window because a target happened to be removed mid-hold.
-  // Refuse rather than become the first caller to reach that combination.
-  if (before === "held") return { kind: "refused" };
+  // A strict ALLOWLIST, not an exclusion list - this action's documented
+  // contract is that it only ever observes `pending` or `failed`. Both other
+  // reachable statuses are unsafe here, for different reasons:
+  //
+  //   - `held`: deliberately absent from DERIVE_FORBIDDEN in the DB layer.
+  //     Nothing before this function ever called deriveRowStatus with an
+  //     observed `held`; doing so would CAS the row out of `held` early,
+  //     ending the 30s undo window because a target happened to be removed
+  //     mid-hold.
+  //   - `sending`: ALSO absent from DERIVE_FORBIDDEN - the push itself must
+  //     be able to CAS out of it - so deriveRowStatus's CAS below would
+  //     MATCH an observed `sending`, not land in the zero-rows fail-safe
+  //     branch its comment describes. It would write a new status and clear
+  //     claimed_at out from under a push that can hold `sending` for up to
+  //     ~30s per target across five targets. The live push's next
+  //     restampClaim then sees 0 rows and aborts (self-correcting on its
+  //     own), but the row is now claimable by a second sweep before the
+  //     first notices - the duplicate-note race the claim mechanism exists
+  //     to prevent. `retryTarget` is only accidentally safe from this:
+  //     `retryRow`'s CAS predicate happens to exclude `sending` already.
+  //
+  // Do not narrow this back to excluding only `held`.
+  if (before !== "pending" && before !== "failed") return { kind: "refused" };
 
   const db = await getDatabase();
   await db.execute(QUEUE_SQL.deleteTargetById, [targetId]);
-  // The read-then-derive window is a real TOCTOU, but a fail-safe one: the CAS
-  // inside deriveRowStatus turns a row that moved between the read above and
-  // this call into zero rows affected - reported as a conflict, not silently
-  // discarded.
+  // The delete above is IRREVERSIBLE and already committed by this point - a
+  // lost CAS below is not "nothing happened", so it must never be reported as
+  // `conflict` (every other use of that kind in this codebase means nothing
+  // was written - see TargetActionOutcome's doc comment). The read-then-derive
+  // window is a real TOCTOU, but a fail-safe one: a row that moved between the
+  // read above and this call just leaves the PARENT's status stale until the
+  // next thing re-derives it (another push, another queue action) - report
+  // that honestly instead of claiming the removal itself failed.
   const { changed } = await deriveRowStatus(rowId, before, Date.now());
-  if (!changed) return { kind: "conflict" };
+  if (!changed) return { kind: "removed-parent-stale" };
   return { kind: "ok" };
 }
 

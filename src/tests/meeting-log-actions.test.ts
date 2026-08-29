@@ -839,6 +839,52 @@ describe("queue-page per-target actions", () => {
       expect(await readRow("r1")).toMatchObject({ status: "held" });
       expect(await listTargets("r1")).toHaveLength(1);
     });
+
+    // Review round 1, Important finding #1: `sending` is deliberately absent
+    // from DERIVE_FORBIDDEN (the push itself must CAS out of it), so an
+    // unguarded removeQueueTarget's deriveRowStatus call would MATCH an
+    // observed `sending` instead of landing in the zero-rows fail-safe branch
+    // - clearing claimed_at and writing a new status out from under a push
+    // that can hold `sending` for up to ~30s per target across five targets.
+    // The live push's restampClaim then aborts (self-correcting), but the row
+    // becomes claimable by a second sweep before the first notices - the
+    // duplicate-note race the claim mechanism exists to prevent.
+    it("refuses to remove a target while the row is sending, closing the duplicate-note race", async () => {
+      seedRow({ id: "r1", status: "sending" });
+      seedTargets("r1", [{ resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
+      const t = (await listTargets("r1"))[0];
+
+      expect(await removeQueueTarget("r1", t.id)).toMatchObject({ kind: "refused" });
+
+      expect(await readRow("r1")).toMatchObject({ status: "sending" });
+      expect(await listTargets("r1")).toHaveLength(1);
+    });
+
+    // Review round 1, Important finding #2: the delete is irreversible and
+    // already committed by the time the parent's re-derive could lose its own
+    // CAS - that must never be reported as `conflict` (which means nothing
+    // was written everywhere else in this codebase). Models a genuine TOCTOU:
+    // something else (a real concurrent claim) moves the row between
+    // removeQueueTarget's `before` read and its deriveRowStatus call, by
+    // intercepting exactly that one read and mutating the row via raw SQL
+    // before returning the value the function actually observed.
+    it("reports the removal as done, not a conflict, when the parent's re-derive loses its race", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 1, status: "failed", lastErrorCode: "ODOO_FAULT" }]);
+      const t = (await listTargets("r1"))[0];
+
+      action.getQueueRow.mockImplementationOnce(async () => {
+        const [raw] = await rawSelect("SELECT * FROM meeting_log_queue WHERE id = ?", ["r1"]);
+        await rawExecute("UPDATE meeting_log_queue SET status = 'sending' WHERE id = ?", ["r1"]);
+        return raw as unknown as DbMeetingLogRow;
+      });
+
+      const res = await removeQueueTarget("r1", t.id);
+
+      expect(res).toMatchObject({ kind: "removed-parent-stale" });
+      // The removal itself DID happen - that is the whole point of the outcome.
+      expect(await listTargets("r1")).toHaveLength(0);
+    });
   });
 
   describe("cancel and the orphan sweep", () => {

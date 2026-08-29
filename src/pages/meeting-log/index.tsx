@@ -155,7 +155,7 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
     // that made Task 10 exist - it must never say nothing reached Odoo when
     // `sentCount > 0` - so it does not, and nothing more.
     case "push-partial":
-      return `Sent to ${outcome.sentCount} of ${outcome.sentCount + outcome.failedCount + outcome.pendingCount} - the rest will be retried or need attention.`;
+      return `Sent to ${outcome.sentCount} of ${outcome.sentCount + outcome.failedCount + outcome.pendingCount} — the rest will be retried or need attention.`;
     case "conflict":
       return "This meeting changed in another window.";
     case "moved-unknown":
