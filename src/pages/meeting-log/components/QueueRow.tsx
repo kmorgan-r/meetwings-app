@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { Button } from "@/components";
 import { ESCALATE_AFTER_ATTEMPTS } from "@/lib/odoo/meeting-log";
-import type { MeetingLogListRow } from "@/types";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
 
 /**
  * The expanded transcript, as four distinct outcomes rather than one nullable
@@ -43,11 +43,20 @@ export interface QueueRowProps {
   outcome: string | null;
   /** `null` when collapsed. */
   transcript: TranscriptView | null;
+  /**
+   * The same cache `targetName` was already resolved from, handed down raw
+   * this time so `targetNameOf` can resolve each of `row.targets`
+   * individually - a single row can carry up to MAX_TARGETS different
+   * contacts, not just the one `targetName` names.
+   */
+  contacts: Map<number, OdooContact>;
   onRetry: (row: MeetingLogListRow) => void;
   onAssign: (row: MeetingLogListRow) => void;
   onDelete: (row: MeetingLogListRow) => void;
   onToggleTranscript: (row: MeetingLogListRow) => void;
   onReloadTranscript: (row: MeetingLogListRow) => void;
+  onRetryTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
+  onRemoveTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
 }
 
 /**
@@ -61,11 +70,33 @@ export function meetingDateOf(row: MeetingLogListRow): string {
   return new Date(row.meeting_started_at ?? row.transcript_start_at).toLocaleString();
 }
 
+/**
+ * `meeting_log_targets.name` -> the contact cache -> a generic placeholder.
+ *
+ * Every backfilled pre-14 target, and every target the page's current
+ * `assignPayloadToTargets` bridge inserts (it always writes `name: null`),
+ * has a NULL name and hits this chain in full.
+ *
+ * The SAME fallback shape as ContactPicker.tsx's `nameForTarget` - that
+ * file's own comment names this function as its forward reference. Kept
+ * separate rather than shared: the two operate on different types
+ * (`SelectedTarget` there, `MeetingLogTarget` here) in different modules with
+ * different owners, and ContactPicker.tsx is outside this task's files.
+ */
+function targetNameOf(target: MeetingLogTarget, contacts: Map<number, OdooContact>): string {
+  if (target.name) return target.name;
+  if (target.model === "res.partner") {
+    return contacts.get(target.resId)?.name ?? `Contact #${target.resId}`;
+  }
+  return `Lead or opportunity #${target.resId}`;
+}
+
 function statusLine(
   row: MeetingLogListRow,
   busy: boolean,
   stale: boolean,
-  otherDatabase: boolean
+  otherDatabase: boolean,
+  failedTargets: number
 ): string {
   if (busy) return "Sending…";
   // Closing the dashboard window mid-push destroys the JS context with no
@@ -83,6 +114,16 @@ function statusLine(
     return otherDatabase
       ? "Interrupted. It will not be retried until Meetwings points back at that Odoo database."
       : "Interrupted. This will be retried the next time Meetwings starts.";
+  }
+  // BEFORE the status switch, and wins over EVERY branch below it - including
+  // `failed`, whose "Could not be sent" is a Global Constraint violation on a
+  // row with any sent target: it claims nothing reached Odoo when something
+  // did. Mirrors groupOf's own precedence (meeting-log.ts) for the identical
+  // reason: a row derives `pending` whenever any target is still retryable,
+  // even beside a terminally failed sibling, so the parent's own status alone
+  // cannot be trusted to describe a partly-failed row.
+  if (failedTargets > 0) {
+    return `${failedTargets} of ${row.targets?.length ?? 0} failed`;
   }
   switch (row.status) {
     case "sending":
@@ -139,13 +180,17 @@ function QueueRowInner({
   stale,
   outcome,
   transcript,
+  contacts,
   onRetry,
   onAssign,
   onDelete,
   onToggleTranscript,
   onReloadTranscript,
+  onRetryTarget,
+  onRemoveTarget,
 }: QueueRowProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [targetsExpanded, setTargetsExpanded] = useState(false);
 
   const otherDatabase = row.instance !== instance;
   const sending = row.status === "sending";
@@ -161,6 +206,19 @@ function QueueRowInner({
   const assignDisabled = busy || sending || otherDatabase || !canAssign;
   const deleteDisabled = busy || sending;
 
+  const targets = row.targets ?? [];
+  const failedTargets = targets.filter((t) => t.status === "failed").length;
+  // Mirrors removeQueueTarget's own allowlist (meeting-log-actions.ts): that
+  // function refuses a target write unless the PARENT row is `pending` or
+  // `failed`, so gating the buttons the same way keeps a `refused` outcome
+  // race-only rather than a routine click result. Retry is gated on
+  // `otherDatabase` too, on top of that - retryTarget flips the parent back
+  // to `pending`, but selectSweepable never sweeps a foreign-instance row, so
+  // a retry offered here is a promise nothing keeps, the same reason the
+  // row-level Retry button is disabled for it.
+  const targetActionsAllowed =
+    !busy && (row.status === "pending" || row.status === "failed");
+
   const meetingDate = meetingDateOf(row);
 
   return (
@@ -173,7 +231,9 @@ function QueueRowInner({
         <span className="text-xs text-muted-foreground">{meetingDate}</span>
       </div>
 
-      <p className="text-xs text-muted-foreground">{statusLine(row, busy, stale, otherDatabase)}</p>
+      <p className="text-xs text-muted-foreground">
+        {statusLine(row, busy, stale, otherDatabase, failedTargets)}
+      </p>
 
       {/*
         Rendered from the COLUMN, verbatim, and in every group. queueErrorText
@@ -188,6 +248,59 @@ function QueueRowInner({
           <span>{row.last_error}</span>
           <span className="text-muted-foreground">{` (attempt ${row.attempts})`}</span>
         </p>
+      )}
+
+      {targets.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="self-start"
+            aria-expanded={targetsExpanded}
+            onClick={() => setTargetsExpanded((prev) => !prev)}
+          >
+            {targetsExpanded ? "Collapse targets" : "Expand targets"}
+          </Button>
+          {/*
+            The name and any error text are ALWAYS rendered, expand toggle or
+            not - the same "never hide a real failure" rule row.last_error
+            already follows above. Only the interactive half (the `group` role
+            and the Retry/Remove buttons) is gated on `targetsExpanded`; that is
+            what "re-renders when a target's status changes" (this file's test
+            suite) depends on being independent of row.status/row.last_error,
+            and what a partly-failed row needs to show WHICH target failed
+            without the user clicking anything.
+          */}
+          {targets.map((t) => {
+            const name = targetNameOf(t, contacts);
+            const groupProps = targetsExpanded
+              ? { role: "group" as const, "aria-label": name }
+              : {};
+            return (
+              <div key={t.id} {...groupProps} className="flex flex-wrap items-center gap-2 text-xs">
+                <span>{name}</span>
+                {t.status === "failed" && (
+                  <span className="text-destructive">{t.lastError ?? "Could not be sent"}</span>
+                )}
+                {targetsExpanded && targetActionsAllowed && t.status === "failed" && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={otherDatabase}
+                      onClick={() => onRetryTarget(row, t)}
+                    >
+                      Retry this one
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => onRemoveTarget(row, t)}>
+                      Remove
+                    </Button>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
 
       {confirmingDelete ? (
@@ -257,6 +370,42 @@ function sameTranscript(a: TranscriptView | null, b: TranscriptView | null): boo
 }
 
 /**
+ * Length plus, per target, `id`/`status`/`lastError` - the same shape as
+ * `sameTranscript` above. `name` itself is not compared: it is written once
+ * at insert (meeting-log.action.ts's `insertTarget`) and never updated after,
+ * so an unchanged `id` already proves an unchanged `name`.
+ *
+ * The RESOLVED name is compared instead, via `targetNameOf(t, contacts)` -
+ * NOT `contacts` itself by reference. `contacts` is rebuilt into a brand-new
+ * Map on every reload (index.tsx's `reload`), so comparing it directly would
+ * fail on every row every time, the exact disaster this comparator exists to
+ * prevent. Resolving through it and comparing the resulting STRING keeps the
+ * "same-cycle re-read" purpose `targetName` already serves at the row level -
+ * a target whose name only exists in the contact cache re-renders the moment
+ * that cache actually resolves it, and not one reload cycle sooner.
+ */
+function sameTargets(
+  a: MeetingLogTarget[] | undefined,
+  b: MeetingLogTarget[] | undefined,
+  contactsA: Map<number, OdooContact>,
+  contactsB: Map<number, OdooContact>
+): boolean {
+  const listA = a ?? [];
+  const listB = b ?? [];
+  if (listA === listB) return true;
+  if (listA.length !== listB.length) return false;
+  return listA.every((t, i) => {
+    const other = listB[i];
+    return (
+      t.id === other.id &&
+      t.status === other.status &&
+      t.lastError === other.lastError &&
+      targetNameOf(t, contactsA) === targetNameOf(other, contactsB)
+    );
+  });
+}
+
+/**
  * EVERY PROP THE ROW RENDERS, not just the DB columns.
  *
  * React.memo's default shallow compare cannot work here: every refresh hands
@@ -289,11 +438,14 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.stale === b.stale &&
     a.outcome === b.outcome &&
     sameTranscript(a.transcript, b.transcript) &&
+    sameTargets(a.row.targets, b.row.targets, a.contacts, b.contacts) &&
     a.onRetry === b.onRetry &&
     a.onAssign === b.onAssign &&
     a.onDelete === b.onDelete &&
     a.onToggleTranscript === b.onToggleTranscript &&
-    a.onReloadTranscript === b.onReloadTranscript
+    a.onReloadTranscript === b.onReloadTranscript &&
+    a.onRetryTarget === b.onRetryTarget &&
+    a.onRemoveTarget === b.onRemoveTarget
   );
 }
 

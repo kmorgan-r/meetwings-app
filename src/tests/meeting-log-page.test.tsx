@@ -26,6 +26,12 @@ const actions = vi.hoisted(() => ({
   retryMeetingLog: vi.fn(),
   assignMeetingLog: vi.fn(),
   deleteMeetingLog: vi.fn(),
+  // The per-target actions QueueRow's own Retry/Remove buttons call through
+  // index.tsx's handlers. Not exercised by any full-page test in this file
+  // today (Task 13's given tests render <QueueRow> directly instead), but
+  // left undefined here would throw "not a function" the day one does.
+  retryTarget: vi.fn(),
+  removeQueueTarget: vi.fn(),
 }));
 vi.mock("@/lib/odoo/meeting-log-actions", () => actions);
 
@@ -102,7 +108,8 @@ vi.mock("@/layouts", () => ({
 import { ESCALATE_AFTER_ATTEMPTS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { setOdooRedactor } from "@/lib/odoo/redactor";
 import MeetingLog from "@/pages/meeting-log";
-import type { MeetingLogListRow, OdooContact, OdooOpportunity } from "@/types";
+import { QueueRow } from "@/pages/meeting-log/components";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact, OdooOpportunity } from "@/types";
 
 const INSTANCE = "http://h:8069|odoo";
 const OTHER = "http://elsewhere:8069|other";
@@ -1819,5 +1826,185 @@ describe("the assign dialog's provider pre-flight", () => {
 
     expect(screen.queryByText(/No AI provider is set up/)).toBeNull();
     expect(dialog().getByRole("button", { name: /Ada Lovelace/ })).toBeInTheDocument();
+  });
+});
+
+describe("QueueRow", () => {
+  const ROW_INSTANCE = "http://h:8069|odoo";
+
+  const pendingRow: MeetingLogListRow = {
+    id: "qr-1",
+    session_key: "s1",
+    conversation_id: null,
+    instance: ROW_INSTANCE,
+    contact_id: null,
+    lead_id: null,
+    transcript_start_at: MEETING_AT,
+    transcript_end_at: MEETING_AT + 60_000,
+    summary_json: null,
+    attachment_id: null,
+    message_id: null,
+    status: "pending",
+    attempts: 0,
+    claimed_at: null,
+    last_error: null,
+    last_error_code: null,
+    meeting_started_at: MEETING_AT,
+    created_at: CREATED_AT,
+    sent_at: null,
+    targets: [],
+  };
+
+  function rowWith(targets: MeetingLogTarget[]): MeetingLogListRow {
+    return { ...pendingRow, targets };
+  }
+
+  // `resIdFor` is keyed by NAME, not bumped unconditionally, so
+  // `pending("A")` and `failed("A")` land on the SAME id/resId - the same
+  // logical target across two renders, differing only in status/lastError.
+  // A comparator mutant that keys off id alone (rather than status) must not
+  // survive by accident because the fixtures handed it two different targets.
+  let targetSeq = 0;
+  const resIdByName = new Map<string, number>();
+  function resIdFor(name: string | null): number {
+    if (name === null) {
+      targetSeq += 1;
+      return targetSeq;
+    }
+    if (!resIdByName.has(name)) {
+      targetSeq += 1;
+      resIdByName.set(name, targetSeq);
+    }
+    return resIdByName.get(name)!;
+  }
+
+  function targetFixture(
+    name: string | null,
+    over: Partial<MeetingLogTarget> = {}
+  ): MeetingLogTarget {
+    const resId = resIdFor(name);
+    return {
+      id: `target-${resId}`,
+      rowId: pendingRow.id,
+      model: "res.partner",
+      resId,
+      name,
+      status: "pending",
+      attachmentId: null,
+      messageId: null,
+      lastError: null,
+      lastErrorCode: null,
+      createdAt: 0,
+      sentAt: null,
+      ...over,
+    };
+  }
+
+  const target: MeetingLogTarget = targetFixture(null);
+
+  function pending(name: string | null = null): MeetingLogTarget {
+    return targetFixture(name);
+  }
+  function sent(name: string | null = null): MeetingLogTarget {
+    return targetFixture(name, { status: "sent", sentAt: 1 });
+  }
+  function failed(name: string | null = null): MeetingLogTarget {
+    return targetFixture(name, {
+      status: "failed",
+      lastError: "ODOO_FAULT",
+      lastErrorCode: "ODOO_FAULT",
+    });
+  }
+
+  const props = {
+    row: pendingRow,
+    targetName: "Someone",
+    instance: ROW_INSTANCE,
+    busy: false,
+    stale: false,
+    outcome: null,
+    transcript: null,
+    contacts: new Map<number, OdooContact>(),
+    onRetry: vi.fn(),
+    onAssign: vi.fn(),
+    onDelete: vi.fn(),
+    onToggleTranscript: vi.fn(),
+    onReloadTranscript: vi.fn(),
+    onRetryTarget: vi.fn(),
+    onRemoveTarget: vi.fn(),
+  };
+
+  it("summarises how many targets failed", () => {
+    render(<QueueRow {...props} row={rowWith([sent(), sent(), failed()])} />);
+    expect(screen.getByText("1 of 3 failed")).toBeVisible();
+  });
+
+  it("expands to per-target state", async () => {
+    render(
+      <QueueRow {...props} row={rowWith([sent("Christian Carron"), failed("Bentley AS")])} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+    expect(screen.getByText("Christian Carron")).toBeVisible();
+    expect(screen.getByText("ODOO_FAULT")).toBeVisible();
+  });
+
+  it("offers Retry and Remove on a failed target only", async () => {
+    render(<QueueRow {...props} row={rowWith([sent("A"), failed("B")])} />);
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+    const rowB = screen.getByRole("group", { name: /B/ });
+    expect(within(rowB).getByRole("button", { name: /retry this one/i })).toBeVisible();
+    const rowA = screen.getByRole("group", { name: /A/ });
+    expect(within(rowA).queryByRole("button", { name: /remove/i })).toBeNull();
+  });
+
+  it("says a partly-failed row needs attention, not that it is waiting", () => {
+    render(<QueueRow {...props} row={{ ...pendingRow, targets: [pending(), failed()] }} />);
+    expect(screen.queryByText(/waiting to be sent/i)).toBeNull();
+  });
+
+  it("re-renders when a target's status changes", () => {
+    const { rerender } = render(<QueueRow {...props} row={rowWith([pending("A")])} />);
+    rerender(<QueueRow {...props} row={rowWith([failed("A")])} />);
+    expect(screen.getByText("ODOO_FAULT")).toBeVisible();
+  });
+
+  it("falls back through name, cache, then a generic placeholder", () => {
+    render(<QueueRow {...props} row={rowWith([{ ...target, name: null, resId: 12 }])} />);
+    expect(screen.getByText("Contact #12")).toBeVisible();
+  });
+
+  // Not in the brief - the cache branch of `targetNameOf`'s fallback chain
+  // (name -> cache -> placeholder) is otherwise never exercised: every
+  // brief-given test either supplies a name or misses the cache entirely.
+  it("resolves a null-name target through the contact cache before falling back", () => {
+    render(
+      <QueueRow
+        {...props}
+        contacts={new Map([[12, contact({ id: 12, name: "Real Name" })]])}
+        row={rowWith([{ ...target, name: null, resId: 12 }])}
+      />
+    );
+    expect(screen.getByText("Real Name")).toBeVisible();
+    expect(screen.queryByText("Contact #12")).toBeNull();
+  });
+
+  it("calls onRetryTarget/onRemoveTarget with the row and the clicked target", async () => {
+    const onRetryTarget = vi.fn();
+    const onRemoveTarget = vi.fn();
+    const b = failed("B");
+    const withRow = rowWith([b]);
+    render(
+      <QueueRow
+        {...props}
+        row={withRow}
+        onRetryTarget={onRetryTarget}
+        onRemoveTarget={onRemoveTarget}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+    await userEvent.click(screen.getByRole("button", { name: /retry this one/i }));
+    expect(onRetryTarget).toHaveBeenCalledWith(withRow, b);
+    await userEvent.click(screen.getByRole("button", { name: /^remove$/i }));
+    expect(onRemoveTarget).toHaveBeenCalledWith(withRow, b);
   });
 });

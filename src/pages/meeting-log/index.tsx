@@ -15,15 +15,18 @@ import { groupOf, isClaimStale, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
   assignMeetingLog,
   deleteMeetingLog,
+  removeQueueTarget,
   retryMeetingLog,
+  retryTarget,
   type ActionOutcome,
   type ProviderConfigLike,
+  type TargetActionOutcome,
 } from "@/lib/odoo/meeting-log-actions";
 import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, OdooContact, SelectedTargets } from "@/types";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact, SelectedTargets } from "@/types";
 import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
@@ -149,13 +152,28 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
     case "push-failed":
       // Defers to the row's own last_error and never claims a send.
       return "This meeting could not be sent. The error on the row says why.";
-    // TASK 10 BRIDGE, owned by Task 13 (the per-target UI): a real rendering
-    // of sentCount/failedCount/pendingCount belongs there, once the page shows
-    // per-target rows at all. This line only has to satisfy the one constraint
-    // that made Task 10 exist - it must never say nothing reached Odoo when
-    // `sentCount > 0` - so it does not, and nothing more.
-    case "push-partial":
-      return `Sent to ${outcome.sentCount} of ${outcome.sentCount + outcome.failedCount + outcome.pendingCount} — the rest will be retried or need attention.`;
+    // sentCount is never folded into failedCount/pendingCount and always
+    // stated first - the one constraint that made Task 10 exist, that this
+    // line must never say nothing reached Odoo when `sentCount > 0`.
+    // pendingCount and failedCount are kept SEPARATE, not summed into one
+    // "the rest": a pendingCount target is queued for automatic retry and
+    // needs nothing from the user, while a failedCount one is exactly the
+    // per-target state QueueRow's expansion exists to show.
+    case "push-partial": {
+      const total = outcome.sentCount + outcome.failedCount + outcome.pendingCount;
+      const parts = [`Sent to ${outcome.sentCount} of ${total}.`];
+      if (outcome.pendingCount > 0) {
+        parts.push(
+          `${outcome.pendingCount} will be retried automatically.`
+        );
+      }
+      if (outcome.failedCount > 0) {
+        parts.push(
+          `${outcome.failedCount} ${outcome.failedCount === 1 ? "needs" : "need"} attention — see below.`
+        );
+      }
+      return parts.join(" ");
+    }
     case "conflict":
       return "This meeting changed in another window.";
     case "moved-unknown":
@@ -172,6 +190,45 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
 
 function plural(n: number): string {
   return `${n} ${n === 1 ? "meeting is" : "meetings are"} waiting.`;
+}
+
+/**
+ * One line per `TargetActionOutcome` kind, distinct for the same reason
+ * `outcomeCopy` keeps its seven distinct: conflating any two teaches a user
+ * to distrust the page.
+ *
+ * `removed-parent-stale` MUST NOT share `conflict`'s copy - see that kind's
+ * own doc comment on `TargetActionOutcome` (meeting-log-actions.ts). The
+ * DELETE already committed there; only the parent row's re-derive lost its
+ * own race, and it self-corrects the next time anything re-derives that row.
+ * Saying "nothing changed" would be false about a removal that already
+ * happened.
+ *
+ * `refused`'s copy stays cause-neutral for `remove`: `removeQueueTarget`
+ * refuses both a `sent` target AND a parent row that moved out of
+ * `pending`/`failed` between this row's render and the click landing (its own
+ * allowlist, meeting-log-actions.ts) - QueueRow's button gating keeps the
+ * first cause unreachable from the UI, but not the second, so text claiming
+ * "already sent" would be wrong for the race case. `retryTarget` has only one
+ * refusal cause (a `sent` target), so its copy can name it.
+ */
+function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remove"): string {
+  switch (outcome.kind) {
+    case "ok":
+      return action === "retry"
+        ? "This target will be retried."
+        : "Removed from this meeting.";
+    case "gone":
+      return "That target is no longer part of this meeting.";
+    case "refused":
+      return action === "retry"
+        ? "That target has already been sent and cannot be retried."
+        : "That target could not be removed.";
+    case "conflict":
+      return "Nothing changed. Try again.";
+    case "removed-parent-stale":
+      return "Removed from this meeting. The overall status will catch up shortly.";
+  }
 }
 
 /**
@@ -575,6 +632,73 @@ export default function MeetingLog() {
     setAssignRow(null);
   }, []);
 
+  /**
+   * The per-target sibling of `runRowAction`, not a call to it: neither
+   * `retryTarget` nor `removeQueueTarget` ever pushes, so there is no
+   * `ActionOutcome` to classify, no `onCommitted` moment worth a hook, and no
+   * provider config to read - only `TargetActionOutcome` and the same
+   * busy/pinned/result bookkeeping `runRowAction` already does for the whole
+   * row. Sharing that bookkeeping (not the classification) is why this marks
+   * the ROW busy for a per-target click: it is the same row's other buttons
+   * (Retry/Assign/Delete) that must not run a second CAS while this write is
+   * in flight.
+   */
+  const runTargetAction = useCallback(
+    (
+      row: MeetingLogListRow,
+      run: () => Promise<TargetActionOutcome>,
+      action: "retry" | "remove"
+    ): void => {
+      if (busyRef.current.has(row.id)) return;
+      if (configRef.current !== "complete") return;
+
+      const label = `${meetingDateOf(row)} · ${targetNameOf(row, contactsRef.current)}`;
+
+      setBusy((prev) => new Set(prev).add(row.id));
+      setPinned((prev) => new Map(prev).set(row.id, row));
+      setResult(row.id, null);
+
+      void (async () => {
+        try {
+          const outcome = await run();
+          setResult(row.id, { label, text: targetOutcomeCopy(outcome, action) });
+        } catch (err) {
+          setResult(row.id, {
+            label,
+            text: describeFailure(reportOdooError(err, "meeting log target action").code),
+          });
+        } finally {
+          await loaderRef.current();
+          setBusy((prev) => {
+            const next = new Set(prev);
+            next.delete(row.id);
+            return next;
+          });
+          setPinned((prev) => {
+            const next = new Map(prev);
+            next.delete(row.id);
+            return next;
+          });
+        }
+      })();
+    },
+    [setResult]
+  );
+
+  const handleRetryTarget = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget) => {
+      runTargetAction(row, () => retryTarget(row.id, target.id), "retry");
+    },
+    [runTargetAction]
+  );
+
+  const handleRemoveTarget = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget) => {
+      runTargetAction(row, () => removeQueueTarget(row.id, target.id), "remove");
+    },
+    [runTargetAction]
+  );
+
   const readTranscript = useCallback((row: MeetingLogListRow) => {
     const id = row.id;
     setTranscript({ id, view: { state: "loading" } });
@@ -664,7 +788,14 @@ export default function MeetingLog() {
       GROUPS.map((g) => [g.key, []])
     );
     for (const row of rendered) {
-      const key = groupOf(row, instance);
+      // Real failedTargets, not the 0 default: without it a row with a
+      // retryable failed target alongside a sent one stays in "waiting"
+      // instead of "needs attention", the same bug Step 5 fixes in
+      // QueueRow's own statusLine, for the same reason (meeting-log.ts's
+      // groupOf doc comment names this call site and QueueRow's as its two
+      // callers).
+      const failedTargets = (row.targets ?? []).filter((t) => t.status === "failed").length;
+      const key = groupOf({ ...row, failedTargets }, instance);
       if (key) buckets.get(key)?.push(row);
     }
     return buckets;
@@ -783,11 +914,14 @@ export default function MeetingLog() {
                     stale={isClaimStale(row, now)}
                     outcome={results.get(row.id)?.text ?? null}
                     transcript={transcript?.id === row.id ? transcript.view : null}
+                    contacts={contacts}
                     onRetry={handleRetry}
                     onAssign={handleAssign}
                     onDelete={handleDelete}
                     onToggleTranscript={toggleTranscript}
                     onReloadTranscript={readTranscript}
+                    onRetryTarget={handleRetryTarget}
+                    onRemoveTarget={handleRemoveTarget}
                   />
                 ))}
               </ul>
