@@ -15,11 +15,16 @@ Everything below aims at **scratch records**, never a customer.
 node .livecheck/queue-poke.mjs backup
 
 # 2. Create the scratch contact + lead to aim at.
+#    SKIP THIS if a pair already exists - see below.
 ODOO_LIVE=1 npx vitest run --config .livecheck/vitest.scratch.config.ts
 ```
 
 The second command prints a contact id, a lead id, and working `/web#` links.
 Search the app's contact picker for **`ZZ Meetwings smoke GUI`**.
+
+> A pair was already created on 2026-08-30: **contact 47, lead 533**. Running
+> step 2 again just makes a second pair — harmless, the cleanup sweeps the whole
+> `ZZ Meetwings smoke` prefix — but there is no need.
 
 Migration 14 is already applied locally (`_sqlx_migrations` version 14,
 `success = 1`), so the one-way-migration warning does not apply to this machine.
@@ -62,6 +67,16 @@ node .livecheck/queue-poke.mjs unsend-write-failure
 That takes the most recently sent target, sets it back to `pending`, and
 **keeps its `message_id`** — precisely what a crash between `message_post`
 returning and the local write leaves.
+
+⚠️ **Drop the network before relaunching.** The row is `pending`, so the sweep
+fires on launch and the adopt-search converges it straight back to `sent` — very
+likely before you can look at it. Offline, the row stays `pending` and holds
+still while you inspect it. (Killing the network is one of the approved local
+failure manufactures; never send bad credentials.)
+
+That instant convergence is itself informative: if you *do* let it sweep online
+and the chatter still shows **exactly one note**, the adopt half of this leg has
+passed. Reconnect and retry deliberately, per question 2 below.
 
 Relaunch the app, open the meeting-log page, and answer three questions:
 
