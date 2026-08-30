@@ -27,6 +27,17 @@ describe("groupOf", () => {
     expect(escalated).not.toBe("waiting");
   });
 
+  it("groups a partly-failed pending row as needing attention", () => {
+    // A row derives `pending` under deriveRowStatus's rule 1 whenever any
+    // target is still retryable, even with a terminally failed sibling on
+    // the same row. Below the escalation threshold, the OLD implementation
+    // would call this "waiting" - burying the failure summary shown beside
+    // it.
+    const base = row("pending", { attempts: 0 });
+    expect(groupOf({ ...base, failedTargets: 1 }, HERE)).toBe("needs-attention");
+    expect(groupOf({ ...base, failedTargets: 0 }, HERE)).toBe("waiting");
+  });
+
   it("puts a current-instance sending row in waiting", () => {
     // Deliberate divergence from QUEUE_SQL.counts, which omits sending rows.
     // On a page, a row that vanished for the duration of a push and reappeared

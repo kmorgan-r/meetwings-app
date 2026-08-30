@@ -52,6 +52,18 @@ export function isClaimStale(
 /** Above this, a `pending` row stops being "waiting" and starts being visible. */
 export const ESCALATE_AFTER_ATTEMPTS = 5;
 
+/**
+ * How many Odoo records one meeting can be logged to.
+ *
+ * Enforced by REJECTING the write in odoo-contacts.action.ts's
+ * addSelectedTarget - the user picks fewer targets instead. The enqueue and
+ * retarget child inserts (meeting-log.action.ts, Tasks 6/7) cannot reject the
+ * same way: an overflow there would throw out of `trigger`, whose catch calls
+ * skipUnwritten() and advances the watermark, destroying the whole meeting.
+ * Those paths cap to five and record the error on the row instead.
+ */
+export const MAX_TARGETS = 5;
+
 /** How long a terminal row keeps its transcript text before retention blanks it. */
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -63,13 +75,23 @@ export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * the main window's reclaim re-push a live row, producing two attachments and
  * two customer-visible chatter notes.
  *
- * 60s, not 90s, because the paths ADD. A reassigned `failed` row takes five
- * Odoo calls at 30s (client.ts:21) AND an AI call, because `failRow` only runs
- * after a successful claim so attempts >= 1, and `summary_json` is legitimately
- * still null when a previous summarize failed. 150s + 60s = 210s against the
- * 300s gate. A timed-out summarize resolves null, which pushQueuedRow already
- * handles by taking the fallback body: degrading a note is not comparable to
- * duplicating one.
+ * The arithmetic this bound protects is NOT "summarize plus a fixed Odoo
+ * budget" any more - it cannot be, because the Odoo half now scales with the
+ * target count (up to MAX_TARGETS records per meeting) instead of being one
+ * fixed cost. What actually keeps a live push from crossing STALE_CLAIM_MS is
+ * pushQueuedRow re-stamping `claimed_at` after EVERY target it finishes, not
+ * once for the whole row - so the budget that matters per claim window is one
+ * target's worth of Odoo calls, not five targets'. On a RETRY pass
+ * (attemptsBefore > 0) that is FOUR calls, not two - an attachment search
+ * that finds nothing falls through to a create, and a message search that
+ * finds nothing falls through to a post (client.ts:21, up to 30s each) - so
+ * 120s of wire for the first target. `summary_json` can legitimately still be
+ * null on a retry (a previous summarize failed), adding this 60s call ahead
+ * of it: 180s total for the first claim window, comfortably under
+ * STALE_CLAIM_MS (300s), with the re-stamp keeping every LATER target from
+ * ever needing to borrow from that same budget. A timed-out summarize
+ * resolves null, which pushQueuedRow already handles by taking the fallback
+ * body: degrading a note is not comparable to duplicating one.
  */
 export const SUMMARIZE_TIMEOUT_MS = 60_000;
 
@@ -302,9 +324,17 @@ export type QueueGroup =
  * other-instance `failed` row in needs-attention, where the page offers a Retry
  * that `pushQueuedRow` refuses at its instance check - a button that does
  * nothing at all and looks broken.
+ *
+ * `failedTargets` is OPTIONAL, defaulting to 0, and carried on the row object
+ * rather than a third positional parameter - every existing caller already
+ * passes a row, so widening it here needs no call-site change. Nothing
+ * computes a real value for it yet; the callers that derive it from
+ * `row.targets` are Tasks 13 and 14.
  */
 export function groupOf(
-  row: Pick<MeetingLogListRow, "instance" | "status" | "attempts">,
+  row: Pick<MeetingLogListRow, "instance" | "status" | "attempts"> & {
+    failedTargets?: number;
+  },
   instance: string
 ): QueueGroup {
   if (row.instance !== instance) {
@@ -316,6 +346,13 @@ export function groupOf(
       ? "other-database"
       : null;
   }
+  // A row derives `pending` under deriveRowStatus's rule 1 whenever ANY
+  // target is still retryable, even with a terminally failed sibling on the
+  // same row - so this check runs BEFORE the status switch below and wins
+  // over whatever the parent status says. Without it such a row is filed
+  // under "waiting", where a "1 of 3 failed" summary would sit beside a
+  // "Waiting to be sent" line for the same meeting.
+  if ((row.failedTargets ?? 0) > 0) return "needs-attention";
   if (row.status === "failed") return "needs-attention";
   if (row.status === "pending" && row.attempts >= ESCALATE_AFTER_ATTEMPTS) {
     return "needs-attention";

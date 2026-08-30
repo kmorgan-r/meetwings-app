@@ -27,19 +27,27 @@ vi.mock("@/lib/database/config", () => ({
 }));
 
 import {
+  addSelectedTarget,
   claimSync,
-  clearTarget,
+  clearTargets,
   failSync,
   finishSync,
   listContacts,
-  loadTarget,
+  loadTargets,
   purgeOtherInstances,
   releaseSync,
-  saveTarget,
+  removeSelectedTarget,
   setColleague,
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import type { OdooContact } from "@/types";
+import {
+  applyMigration14,
+  readMigration,
+  rows,
+  seedPre14,
+  seedPre14Singleton,
+} from "./helpers/migration-14";
 
 const MIGRATION = path.resolve(
   __dirname,
@@ -154,18 +162,24 @@ describe("upsertContacts", () => {
 });
 
 describe("purgeOtherInstances", () => {
+  // purgeOtherInstances now deletes from odoo_selected_targets (migration 14),
+  // not the odoo_selected_target singleton the outer beforeEach's schema stops
+  // at. Migration 12 first, since migration 14's backfill reads FROM
+  // meeting_log_queue.
+  beforeEach(() => {
+    db.run(readMigration("meeting-log-queue.sql"));
+    db.run(readMigration("odoo-multi-target.sql"));
+  });
+
   it("removes every trace of a switched-away instance", async () => {
     await upsertContacts(OTHER, [contact({ id: 77 })], 1000);
     await finishSync(OTHER, "2026-08-01 10:00:00", 1000, 0);
-    await saveTarget(
-      { instance: OTHER, contactId: 77, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
+    await addSelectedTarget(OTHER, { model: "res.partner", resId: 77, name: "A" }, null, 1000);
 
     await purgeOtherInstances(INSTANCE);
 
     expect(await listContacts(OTHER)).toEqual([]);
-    expect(await loadTarget(OTHER)).toBeNull();
+    expect(await loadTargets(OTHER)).toEqual([]);
     // The third table, and the one that matters most. A purge that dropped the
     // contacts but left odoo_sync_state keeps the OLD instance's watermark
     // alive, so switching back re-pulls nothing and the cache silently holds
@@ -173,6 +187,63 @@ describe("purgeOtherInstances", () => {
     // fingerprint exists to close. Without this assertion that purge passes.
     const { getSyncState } = await import("@/lib/database/odoo-contacts.action");
     expect(await getSyncState(OTHER)).toBeNull();
+  });
+});
+
+describe("selected targets", () => {
+  // odoo_selected_targets only exists once migration 14 has run, and its
+  // backfill reads FROM meeting_log_queue, so migration 12 goes first. The
+  // outer beforeEach stops at migration 13 deliberately (shared with
+  // "purgeOtherInstances" above, which layers the same two migrations on
+  // top), so this block applies 14 itself rather than pulling every other
+  // describe block in the file forward to a schema it does not need.
+  beforeEach(() => {
+    db.run(readMigration("meeting-log-queue.sql"));
+    db.run(readMigration("odoo-multi-target.sql"));
+  });
+
+  it("purges other instances from the new table", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i2", { model: "res.partner", resId: 2, name: "B" }, null, 100);
+    await purgeOtherInstances("i1");
+    expect(await loadTargets("i1")).toHaveLength(1);
+    expect(await loadTargets("i2")).toHaveLength(0);
+  });
+
+  it("rejects a sixth target instead of truncating", async () => {
+    for (let i = 1; i <= 5; i++) {
+      const r = await addSelectedTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
+      expect(r.ok).toBe(true);
+    }
+    const sixth = await addSelectedTarget("i1", { model: "res.partner", resId: 6, name: "C6" }, null, 100);
+    expect(sixth).toEqual({ ok: false, reason: "cap" });
+    expect(await loadTargets("i1")).toHaveLength(5);
+  });
+
+  it("re-adding an existing target is not a new target", async () => {
+    for (let i = 1; i <= 5; i++) {
+      await addSelectedTarget("i1", { model: "res.partner", resId: i, name: `C${i}` }, null, 100);
+    }
+    const again = await addSelectedTarget("i1", { model: "res.partner", resId: 3, name: "C3" }, null, 200);
+    expect(again.ok).toBe(true);
+    expect(await loadTargets("i1")).toHaveLength(5);
+  });
+
+  it("removes one target and leaves the rest", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i1", { model: "crm.lead", resId: 9, name: "L" }, null, 100);
+    await removeSelectedTarget("i1", "res.partner", 1);
+    expect(await loadTargets("i1")).toEqual([
+      { model: "crm.lead", resId: 9, name: "L" },
+    ]);
+  });
+
+  it("clears every target for an instance, and leaves other instances alone", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "A" }, null, 100);
+    await addSelectedTarget("i2", { model: "res.partner", resId: 2, name: "B" }, null, 100);
+    await clearTargets("i1");
+    expect(await loadTargets("i1")).toEqual([]);
+    expect(await loadTargets("i2")).toHaveLength(1);
   });
 });
 
@@ -238,75 +309,49 @@ describe("sync state", () => {
   });
 });
 
-describe("the selected target", () => {
-  it("is a singleton - a second save replaces, never accumulates", async () => {
-    await saveTarget(
-      { instance: INSTANCE, contactId: 1, leadId: 5, leadName: "Solar", conversationId: null },
-      1000
-    );
-    await saveTarget(
-      { instance: INSTANCE, contactId: 2, leadId: null, leadName: null, conversationId: "c" },
-      2000
-    );
-    expect(db.exec("SELECT COUNT(*) FROM odoo_selected_target")[0].values[0][0]).toBe(1);
-    await expect(loadTarget(INSTANCE)).resolves.toEqual({
-      contactId: 2,
-      leadId: null,
-      leadName: null,
+
+describe("migration 14 backfill", () => {
+  // Each test builds its own pre-14 sql.js database via the shared helpers -
+  // it does not touch the file-level `db` / beforeEach above.
+  it("migrates a lead singleton whose lead_name migration 13 left NULL", async () => {
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: 7, lead_id: 90, lead_name: null,
+    });
+    await applyMigration14(db);
+    const s = rows(db, "SELECT * FROM odoo_selected_targets");
+    expect(s).toHaveLength(1);
+    expect(s[0]).toMatchObject({ model: "crm.lead", res_id: 90, name: null });
+  });
+
+  it("migrates a contact-only singleton with a null name", async () => {
+    // lead_name is deliberately non-null here: a contact-only row (lead_id
+    // NULL) has no business reading it at all. A null lead_name fixture
+    // would pass this test even if the migration's CASE let lead_name
+    // through unguarded - this one requires the CASE to actually discard it.
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: 7, lead_id: null, lead_name: "Solar deal",
+    });
+    await applyMigration14(db);
+    expect(rows(db, "SELECT * FROM odoo_selected_targets")[0]).toMatchObject({
+      model: "res.partner", res_id: 7, name: null,
     });
   });
 
-  // A lead is not in the contact cache by definition, and the in-memory list a
-  // lookup produced does not survive a <Completion /> remount - so the name
-  // stored beside the id is the ONLY thing that can name a lead-only target.
-  // Dropped here, the picker rehydrates to "Who are you meeting?" over a
-  // meeting already queued against a real record.
-  it("round-trips a lead-only target, name and all", async () => {
-    await saveTarget(
-      {
-        instance: INSTANCE,
-        contactId: null,
-        leadId: 90,
-        leadName: "Partnership with ECS",
-        conversationId: null,
-      },
-      1000
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toEqual({
-      contactId: null,
-      leadId: 90,
-      leadName: "Partnership with ECS",
+  // This assertion holds identically with or without the migration's WHERE
+  // guard: INSERT OR IGNORE already skips a row that would violate res_id
+  // NOT NULL, so a both-NULL singleton produces zero rows either way. The
+  // guard states that intent explicitly rather than being load-bearing for it.
+  it("backfills a both-NULL singleton to zero rows", async () => {
+    const db = await seedPre14Singleton({
+      instance: "i1", contact_id: null, lead_id: null, lead_name: null,
     });
+    await applyMigration14(db);
+    expect(rows(db, "SELECT * FROM odoo_selected_targets")).toHaveLength(0);
   });
 
-  // Not writable through saveTarget - `commit` clears instead of storing an
-  // empty target - but a row can predate that rule or be left by a partial
-  // write. Read back as a target it hands slice 2 something it can only file
-  // as unassigned, while the picker claims a selection is in place.
-  it("refuses a row that names neither a contact nor a lead", async () => {
-    db.run(
-      `INSERT INTO odoo_selected_target
-         (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
-       VALUES ('current', ?, NULL, NULL, NULL, NULL, 1000)`,
-      [INSTANCE]
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
-  });
-
-  it("does not return a target belonging to another instance", async () => {
-    await saveTarget(
-      { instance: OTHER, contactId: 1, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
-  });
-
-  it("clears", async () => {
-    await saveTarget(
-      { instance: INSTANCE, contactId: 1, leadId: null, leadName: null, conversationId: null },
-      1000
-    );
-    await clearTarget();
-    await expect(loadTarget(INSTANCE)).resolves.toBeNull();
+  it("drops the singleton table", async () => {
+    const db = await seedPre14([]);
+    await applyMigration14(db);
+    expect(() => db.exec("SELECT 1 FROM odoo_selected_target")).toThrow();
   });
 });

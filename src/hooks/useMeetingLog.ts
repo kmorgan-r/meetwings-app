@@ -9,6 +9,7 @@ import {
   getTranscriptWatermark,
   insertQueueRow,
   readMeetingMessages,
+  sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
 import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
 import { createOdooClient } from "@/lib/odoo/client";
@@ -28,7 +29,7 @@ import {
   loadOdooConfigState,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { ResolvedTarget, TranscriptEntry } from "@/types";
+import type { SelectedTargets, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
 
 type ProviderConfig = {
@@ -86,9 +87,42 @@ export function resetMeetingLogSweepGuard(): void {
   sweptThisProcess = false;
 }
 
+const ORPHAN_SWEEP_AGE_MS = 5 * 60 * 1000;
+let orphanSweepRan = false; // module scope: survives a <Completion /> remount
+
+/**
+ * Reclaims meeting_log_targets rows whose parent never got written - the
+ * crash window between insertQueueRow's ordered writes. Chained beside
+ * runTranscriptPrune, outside runMeetingLogSweep's `ran` guard: it needs no
+ * Odoo config, and gating it on one would leave orphans piling up for
+ * exactly the users least likely to ever have completed credentials.
+ */
+export async function runOrphanSweep(): Promise<void> {
+  if (orphanSweepRan) return;
+  orphanSweepRan = true;
+  try {
+    const n = await sweepOrphanTargets(Date.now() - ORPHAN_SWEEP_AGE_MS);
+    if (n > 0) console.info(`[meeting-log] swept ${n} orphaned target rows`);
+  } catch (e) {
+    console.warn("[meeting-log] orphan sweep failed", e);
+  }
+}
+
+/** Test-only. Lets a suite start each case from a clean process state. */
+export function resetOrphanSweepGuard(): void {
+  orphanSweepRan = false;
+}
+
 export interface UseMeetingLogOptions {
-  /** Slice 1's ref. Already mirrored in a useLayoutEffect (useOdooTarget.ts:143-146). */
-  targetRef: RefObject<ResolvedTarget | null>;
+  /**
+   * Task 14: `useOdooTarget`'s `targetsRef` - the flat multi-target list,
+   * already mirrored in a useLayoutEffect (useOdooTarget.ts). Until this
+   * task it was the single-select flow's own single-target ref, adapted here
+   * through a `resolvedToSelected` shim; every caller now holds a real
+   * `SelectedTargets` list, so the adapter is gone and this reads
+   * `targetRef.current` directly.
+   */
+  targetRef: RefObject<SelectedTargets>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
   meetingAssistMode: boolean;
@@ -181,7 +215,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       await pushQueuedRow(row, {
         client: createOdooClient(config),
         instance: instanceFingerprint(config.url, config.db),
-        now: Date.now(),
+        now: () => Date.now(),
         summarize: (slice) => summarize(slice.entries),
       });
     } catch (err) {
@@ -238,7 +272,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // Snapshot SYNCHRONOUSLY, before any await. Without it a user clearing
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
-    const target = targetRef.current;
+    const targets = targetRef.current;
     const conversationId = conversationIdRef.current;
 
     // The consumed span, from the SAME synchronous snapshot.
@@ -338,13 +372,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // getActiveConversationId(), losing the link slice 3 needs.
         conversationId: recoveryId,
         instance,
-        contactId: target?.contactId ?? null,
-        leadId: target?.leadId ?? null,
+        targets,
         transcript: renderTranscript(slice.entries),
         transcriptStartAt: slice.startAt,
         transcriptEndAt: slice.endAt,
         meetingStartedAt: slice.startAt,
-        status: target ? "held" : "unassigned",
+        status: targets.length ? "held" : "unassigned",
         createdAt: Date.now(),
       });
 
@@ -360,7 +393,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // Task 10's startHold reads the previous value to decide whether a
       // displaced row needs pushing, and a pre-assignment here would make
       // `displaced === rowId` on every call, silently disabling that branch.
-      if (target) startHold(rowId);
+      if (targets.length) startHold(rowId);
     } catch (err) {
       // SURFACED, not just logged. Reaching here means no row was written, so
       // to the user this is indistinguishable from "the meeting was silent" -
@@ -463,11 +496,15 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // Its OWN catch, not the sweep's: one shared chain would log a prune
       // failure under "[Odoo] meeting log sweep failed" and make the two
       // indistinguishable.
-      .then(() => runTranscriptPrune(Date.now()));
-    // NO trailing .catch here. `runTranscriptPrune` swallows and logs its own
-    // failure, so a second catch carrying the SAME message would be dead code
-    // in production and two copies of one string that can drift. The `void`
-    // plus the sweep's catch above already cover the sweep leg.
+      .then(() => runTranscriptPrune(Date.now()))
+      // Same reasoning as the prune above: UNCONDITIONAL, because an orphaned
+      // target row needs no Odoo config to exist. runOrphanSweep carries its
+      // own try/catch, so no trailing .catch is needed here either.
+      .then(() => runOrphanSweep());
+    // NO trailing .catch here. `runTranscriptPrune` and `runOrphanSweep` both
+    // swallow and log their own failure, so a second catch carrying one of
+    // their messages would be dead code in production and a copy that can
+    // drift. The `void` plus the sweep's catch above already cover the sweep leg.
   }, [isOwner, summarize]);
 
   /**

@@ -101,6 +101,19 @@ function seedRow(over: Partial<DbMeetingLogRow> = {}): DbMeetingLogRow {
   return row;
 }
 
+// Task 9 bridge: pushQueuedRow now reads meeting_log_targets, not the legacy
+// contact_id/lead_id columns, and declines pre-claim on a row with zero
+// targets. Every seedRow fixture in this file that expects the sweep to
+// actually push it now needs a matching target row too.
+function seedTargets(rowId: string, resId: number) {
+  db.run(
+    `INSERT INTO meeting_log_targets
+       (id, row_id, model, res_id, name, status, created_at)
+     VALUES (?, ?, 'res.partner', ?, NULL, 'pending', ?)`,
+    [`target-${rowId}`, rowId, resId, NOW]
+  );
+}
+
 function summary(over: Partial<SummarizationResult> = {}): SummarizationResult {
   return {
     title: "Kickoff", summary: "We agreed to start.", topics: [], goals: [],
@@ -138,6 +151,12 @@ beforeEach(async () => {
   const SQL = await initSqlJs({ wasmBinary });
   db = new SQL.Database();
   db.run(fs.readFileSync(path.join(MIGRATIONS, "meeting-log-queue.sql"), "utf8"));
+  // Task 9 bridge: odoo-contacts.sql creates odoo_selected_target, which
+  // migration 13 rebuilds and migration 14 reads from - so meeting_log_targets
+  // exists before any test body runs.
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-contacts.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-multi-target.sql"), "utf8"));
   tauriFetch.mockReset();
   claimed.clear();
   failNextWrite.value = null;
@@ -152,6 +171,8 @@ describe("runMeetingLogSweep", () => {
   it("pushes pending rows oldest-first and sequentially", async () => {
     seedRow({ id: "a", session_key: "a", created_at: NOW - 3000 });
     seedRow({ id: "b", session_key: "b", created_at: NOW - 1000 });
+    seedTargets("a", 42);
+    seedTargets("b", 42);
     const order: string[] = [];
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
@@ -179,6 +200,8 @@ describe("runMeetingLogSweep", () => {
     // extra authenticate each time. The sweep must build ONE client and reuse it.
     seedRow({ id: "a", session_key: "a" });
     seedRow({ id: "b", session_key: "b" });
+    seedTargets("a", 42);
+    seedTargets("b", 42);
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
@@ -192,6 +215,8 @@ describe("runMeetingLogSweep", () => {
     // Without per-row isolation a propagating failure abandons every later row.
     seedRow({ id: "bad", session_key: "bad", created_at: NOW - 3000 });
     seedRow({ id: "good", session_key: "good", created_at: NOW - 1000 });
+    seedTargets("bad", 42);
+    seedTargets("good", 42);
     let call = 0;
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
@@ -209,6 +234,7 @@ describe("runMeetingLogSweep", () => {
       id: "stale", session_key: "stale", status: "sending",
       claimed_at: NOW - STALE_CLAIM_MS - 1,
     });
+    seedTargets("stale", 42);
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
@@ -231,6 +257,7 @@ describe("runMeetingLogSweep", () => {
     // 72-111) including its polarity note: the latch is owned by the RUN and
     // clears itself in .finally(), so it is never re-armed in an effect body.
     seedRow({ id: "a", session_key: "a" });
+    seedTargets("a", 42);
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();

@@ -127,6 +127,14 @@ export const useCompletion = () => {
   // Popover is controlled from here, and this hook's resize effect below can
   // see it open/close. See Finding 1 in the odoo-contact-picker review.
   const [isContactPickerOpen, setIsContactPickerOpen] = useState(false);
+  // Task 12: the size of useOdooTarget's flat multi-target list. Threaded
+  // down to useOdooTarget as setTargetCount (see
+  // src/pages/app/components/completion/index.tsx), which calls it whenever
+  // its own `targets` changes - mirroring isContactPickerOpen's own pattern
+  // exactly, and for the same reason: useCompletion runs BEFORE useOdooTarget
+  // in <Completion />, so this hook cannot read targetCount off
+  // useOdooTarget's return value, only own a slot the other hook writes into.
+  const [targetCount, setTargetCount] = useState(0);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
 
@@ -753,9 +761,10 @@ export const useCompletion = () => {
     // In the keepEngaged close-button branch (Input.tsx), startNewConversation
     // and this function are BOTH awaited in sequence, so this dispatches a
     // second time there. That is safe, not a bug to guard against: the
-    // listener's clear is commit(null, ++token), and both setTarget(null) and
-    // clearTarget() are idempotent - a second clear of an already-null target
-    // is a harmless no-op DELETE, not a stale write.
+    // listener is useOdooTarget's handleNewChat, which bumps its own
+    // selection token and calls clearTargets(instance) - the plural,
+    // full-instance wipe, not commit() - so a second dispatch is a harmless
+    // no-op against an already-empty target list, not a stale write.
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [flushUnsavedMeetingTranscript]);
 
@@ -1858,6 +1867,14 @@ export const useCompletion = () => {
     hasMeetingTranscript;
 
   useEffect(() => {
+    // targetCount is read but not otherwise used below: the "Logging to"
+    // section's height is CONTENT-driven, not flag-driven like every other
+    // entry in this OR list - adding or removing a target inside an
+    // already-open picker never toggles isContactPickerOpen, so without this
+    // dependency the effect would never re-run and the window would never be
+    // asked to re-apply around the new row. See the doc comment at
+    // targetCount's declaration above.
+    void targetCount;
     resizeWindow(
       isPopoverOpen ||
         micOpen ||
@@ -1872,6 +1889,7 @@ export const useCompletion = () => {
     resizeWindow,
     isFilesPopoverOpen,
     isContactPickerOpen,
+    targetCount,
   ]);
 
   // Auto scroll to bottom when response updates
@@ -2245,6 +2263,8 @@ export const useCompletion = () => {
     setIsFilesPopoverOpen,
     isContactPickerOpen,
     setIsContactPickerOpen,
+    targetCount,
+    setTargetCount,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,

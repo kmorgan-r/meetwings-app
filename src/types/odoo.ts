@@ -61,8 +61,8 @@ export interface DbOdooContact {
  * opportunities in the same `crm.lead` table, separated only by the `type`
  * column, and the picker offers both. The name is kept because the persisted
  * side is already lead-named end to end (`odoo_selected_target.lead_id`,
- * `ResolvedTarget.leadId`, `meeting-log-push`'s `crm.lead`), so renaming this
- * one type would churn six files and every fixture for no behaviour change.
+ * `meeting-log-push`'s `crm.lead`), so renaming this one type would churn six
+ * files and every fixture for no behaviour change.
  *
  * `type` is what the UI needs: posting a meeting to a lead and posting it to
  * an opportunity are the same write to the same model, but they are not the
@@ -85,28 +85,29 @@ export interface OdooOpportunity {
   email: string | null;
 }
 
-/**
- * What slice 2 consumes. Written whole, never field-by-field.
- *
- * `contactId` is NULLABLE, and that is not defensive. A crm.lead picked
- * straight out of the lead search has no res.partner behind it at all -
- * Odoo's default for an unconverted lead is free-text contact details and no
- * partner - so there is no contact to name. The push already handles it:
- * `meeting-log-push` resolves a non-null `lead_id` to `crm.lead` and never
- * looks at `contact_id` in that case.
- *
- * BOTH being null is not a target and is never stored; `useOdooTarget` clears
- * the row instead.
- *
- * `leadName` is persisted rather than resolved because nothing else can name
- * a lead. A contact is named from the synced cache; a lead is not in it by
- * definition, and the in-memory list a lookup produced does not survive a
- * <Completion /> remount.
- */
-export interface ResolvedTarget {
-  contactId: number | null;
-  leadId: number | null;
-  leadName: string | null;
+export interface SelectedTarget {
+  model: "res.partner" | "crm.lead";
+  resId: number;
+  name: string | null;
+}
+
+export type SelectedTargets = SelectedTarget[];
+
+export type MeetingLogTargetStatus = "pending" | "sent" | "failed";
+
+export interface MeetingLogTarget {
+  id: string;
+  rowId: string;
+  model: "res.partner" | "crm.lead";
+  resId: number;
+  name: string | null;
+  status: MeetingLogTargetStatus;
+  attachmentId: number | null;
+  messageId: number | null;
+  lastError: string | null;
+  lastErrorCode: string | null;
+  createdAt: number;
+  sentAt: number | null;
 }
 
 export interface SyncResult {
@@ -160,7 +161,9 @@ export interface DbMeetingLogRow {
 }
 
 /**
- * What the queue page's list query returns: every column EXCEPT `transcript`.
+ * What the queue page's list query returns: every column EXCEPT `transcript`,
+ * plus every target row for that meeting, attached in memory by
+ * `listActionableRows` (one extra query for the whole list, not N+1).
  *
  * A distinct type, and load-bearing. Typing list rows as `DbMeetingLogRow`
  * would let one be handed straight to `pushQueuedRow` and still compile - and
@@ -168,5 +171,13 @@ export interface DbMeetingLogRow {
  * is then `undefined`, the slice is empty, and the push uploads an EMPTY
  * attachment plus the "Summarization failed" fallback note to a customer
  * record. The compiler should refuse that, not a test.
+ *
+ * `targets` is OPTIONAL here, deliberately: making it required would stop
+ * every existing fixture object literal in meeting-log-page.test.tsx from
+ * type-checking, three tasks before the one that replaces them. It is what
+ * lets `groupOf` and AssignDialog's Confirm gate read a row's per-target
+ * failure state instead of only its collapsed parent status.
  */
-export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript">;
+export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
+  targets?: MeetingLogTarget[];
+};

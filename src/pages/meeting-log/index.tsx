@@ -15,21 +15,34 @@ import { groupOf, isClaimStale, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
   assignMeetingLog,
   deleteMeetingLog,
+  removeQueueTarget,
   retryMeetingLog,
+  retryTarget,
   type ActionOutcome,
   type ProviderConfigLike,
+  type TargetActionOutcome,
 } from "@/lib/odoo/meeting-log-actions";
 import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, OdooContact } from "@/types";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
 import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
 // nullable column lets the notice, the row and the customer's chatter disagree
 // about the same meeting.
-import { meetingDateOf, type TranscriptView } from "./components/QueueRow";
+//
+// `targetNameOf` (aliased - this file has its own row-level function of the
+// same name) is imported for the identical reason: it is the one chain that
+// resolves a single target's name (`name` -> contact cache -> placeholder),
+// and this file's own row-level resolver below reuses it rather than
+// re-deriving a second copy.
+import {
+  meetingDateOf,
+  targetNameOf as targetNameOfSingle,
+  type TranscriptView,
+} from "./components/QueueRow";
 
 /**
  * The queue page. Dashboard window only - the overlay never navigates here.
@@ -118,6 +131,17 @@ function describeLoadFailure(code: string): string {
 const SENT_COPY = "Sent to Odoo.";
 
 /**
+ * Assign/Reassign's own `conflict` copy - the generic "changed in another
+ * window" would be true but would not say the ONE thing this action needed
+ * to promise and didn't: the reassign itself did not happen. Retry and
+ * Delete keep the generic copy (`outcomeCopy`'s default) - only Confirm
+ * performs the insert-new/delete-old/flip-parent operation whose zero-row
+ * CAS this line exists to name honestly.
+ */
+const ASSIGN_CONFLICT_COPY =
+  "This meeting could not be reassigned — it changed in another window.";
+
+/**
  * Delete's own success line, and the negative clause is the whole point.
  *
  * `deleteMeetingLog` returns `{kind:"ok"}` like everything else, but the
@@ -132,8 +156,16 @@ const DELETED_COPY = "Removed from the queue. Nothing was sent to Odoo.";
  * Conflating any two teaches users to distrust the page - most sharply
  * `degraded`, which is the difference between a real summary and a
  * "Summarization failed" note live on a customer's record.
+ *
+ * `conflictCopy` is an OPTIONAL per-action override of the `conflict` case
+ * alone - see `ASSIGN_CONFLICT_COPY`'s own doc comment for why Assign needs
+ * one and Retry/Delete do not.
  */
-function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
+function outcomeCopy(
+  outcome: ActionOutcome,
+  successCopy: string,
+  conflictCopy?: string
+): string {
   switch (outcome.kind) {
     case "ok":
       // Per action, never one shared string. Delete pushes nothing.
@@ -149,8 +181,30 @@ function outcomeCopy(outcome: ActionOutcome, successCopy: string): string {
     case "push-failed":
       // Defers to the row's own last_error and never claims a send.
       return "This meeting could not be sent. The error on the row says why.";
+    // sentCount is never folded into failedCount/pendingCount and always
+    // stated first - the one constraint that made Task 10 exist, that this
+    // line must never say nothing reached Odoo when `sentCount > 0`.
+    // pendingCount and failedCount are kept SEPARATE, not summed into one
+    // "the rest": a pendingCount target is queued for automatic retry and
+    // needs nothing from the user, while a failedCount one is exactly the
+    // per-target state QueueRow's expansion exists to show.
+    case "push-partial": {
+      const total = outcome.sentCount + outcome.failedCount + outcome.pendingCount;
+      const parts = [`Sent to ${outcome.sentCount} of ${total}.`];
+      if (outcome.pendingCount > 0) {
+        parts.push(
+          `${outcome.pendingCount} will be retried automatically.`
+        );
+      }
+      if (outcome.failedCount > 0) {
+        parts.push(
+          `${outcome.failedCount} ${outcome.failedCount === 1 ? "needs" : "need"} attention — see below.`
+        );
+      }
+      return parts.join(" ");
+    }
     case "conflict":
-      return "This meeting changed in another window.";
+      return conflictCopy ?? "This meeting changed in another window.";
     case "moved-unknown":
       return "This meeting was moved, but the result could not be read.";
     case "deleted-after-send":
@@ -168,10 +222,73 @@ function plural(n: number): string {
 }
 
 /**
- * `contact_id` is set for every assigned row, including those targeting a
- * `crm.lead`, so one map serves both. A miss is NORMAL, not exceptional:
- * `purgeOtherInstances` deletes other-instance contacts on every sync, so every
- * row in the other-database group resolves to `Contact #<id>` by construction.
+ * One line per `TargetActionOutcome` kind, distinct for the same reason
+ * `outcomeCopy` keeps its seven distinct: conflating any two teaches a user
+ * to distrust the page.
+ *
+ * `removed-parent-stale` MUST NOT share `conflict`'s copy - see that kind's
+ * own doc comment on `TargetActionOutcome` (meeting-log-actions.ts). The
+ * DELETE already committed there; only the parent row's re-derive lost its
+ * own race, and it self-corrects the next time anything re-derives that row.
+ * Saying "nothing changed" would be false about a removal that already
+ * happened.
+ *
+ * `refused`'s copy stays cause-neutral for `remove`: `removeQueueTarget`
+ * refuses both a `sent` target AND a parent row that moved out of
+ * `pending`/`failed` between this row's render and the click landing (its own
+ * allowlist, meeting-log-actions.ts) - QueueRow's button gating keeps the
+ * first cause unreachable from the UI, but not the second, so text claiming
+ * "already sent" would be wrong for the race case. `retryTarget` has only one
+ * refusal cause (a `sent` target), so its copy can name it.
+ */
+function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remove"): string {
+  switch (outcome.kind) {
+    case "ok":
+      return action === "retry"
+        ? "This target will be retried."
+        : "Removed from this meeting.";
+    case "gone":
+      return "That target is no longer part of this meeting.";
+    case "refused":
+      return action === "retry"
+        ? "That target has already been sent and cannot be retried."
+        : "That target could not be removed.";
+    case "conflict":
+      return "Nothing changed. Try again.";
+    case "removed-parent-stale":
+      return "Removed from this meeting. The overall status will catch up shortly.";
+  }
+}
+
+/**
+ * `row.targets` first, when there are any - the target rows are the source
+ * of truth as of migration 14: `insertQueueRow` (meeting-log.action.ts)
+ * writes `contact_id`/`lead_id` as `null, null` on every row it creates.
+ * Each target's own name is resolved through the imported `targetNameOfSingle`
+ * (QueueRow.tsx's exported `targetNameOf`) - the SAME chain (`name` -> the
+ * contact cache -> a generic placeholder) the per-target list under this row
+ * already renders every target through, so the heading and that list can
+ * never again disagree about what a target is called.
+ *
+ * Final whole-branch review, Critical 1: this function used to read
+ * `contact_id`/`lead_id` unconditionally and nothing else, so it printed
+ * "No contact chosen" for every post-migration-14 row no matter how many
+ * real targets it carried - those two columns are always null on such a row
+ * by construction, while the per-target list underneath rendered the real
+ * names, so the row contradicted itself.
+ *
+ * The two-column path below is reached only as the FALLBACK now: a
+ * pre-migration-14 row has no `meeting_log_targets` children at all (an
+ * empty/absent `targets`) and real ids in `contact_id`/`lead_id` instead. It
+ * also still covers the genuine zero-target case - a row that ended
+ * `unassigned` with nothing chosen has both an empty `targets` array and
+ * null legacy columns, so "No contact chosen" is reached exactly as before.
+ *
+ * `contact_id` is set for every assigned pre-14 row, including those
+ * targeting a `crm.lead`, so one map serves both. A miss is NORMAL, not
+ * exceptional: `purgeOtherInstances` deletes other-instance contacts on every
+ * sync, so every row in the other-database group resolves to `Contact #<id>`
+ * by construction.
  *
  * The marker is NEUTRAL between the two kinds of crm.lead on purpose. The
  * queue stores `lead_id` and never its type, so this row knows the meeting is
@@ -181,6 +298,11 @@ function plural(n: number): string {
  * would be a guess printed beside a customer's name.
  */
 function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
+  const targets = row.targets ?? [];
+  if (targets.length > 0) {
+    const names = targets.map((t) => targetNameOfSingle(t, contacts));
+    return names.length === 1 ? names[0] : `${names[0]} + ${names.length - 1} more`;
+  }
   // A row can have a crm.lead and NO contact: a lead picked out of the search
   // has no res.partner behind it. Reading that as "No contact chosen" would
   // offer to assign a meeting that is already correctly targeted, and the id
@@ -408,7 +530,8 @@ export default function MeetingLog() {
     async (
       row: MeetingLogListRow,
       run: () => Promise<ActionOutcome>,
-      successCopy: string
+      successCopy: string,
+      conflictCopy?: string
     ): Promise<ActionOutcome | null> => {
       if (busyRef.current.has(row.id)) return null;
       // Defensive. The buttons are gone once the config stops being complete,
@@ -433,7 +556,7 @@ export default function MeetingLog() {
 
       try {
         const outcome = await run();
-        setResult(row.id, { label, text: outcomeCopy(outcome, successCopy) });
+        setResult(row.id, { label, text: outcomeCopy(outcome, successCopy, conflictCopy) });
         return outcome;
       } catch (err) {
         // Unreachable today: runAction catches at both boundaries and
@@ -511,7 +634,19 @@ export default function MeetingLog() {
     [runRowAction, refineResult]
   );
 
+  /**
+   * Does not open the dialog when any target is already `sent`.
+   *
+   * `assignQueueRow`'s own upfront gate refuses that write outright - the
+   * reassign rule forbids the insert-new/delete-old/flip-parent operation on
+   * a partially-sent row - so this is defensive, not the primary gate:
+   * `QueueRow`'s own Assign/Reassign button is already hidden for exactly
+   * this case (see its `hasSentTarget`). Kept here too because `handleAssign`
+   * is the ONE path that opens the dialog, and a future second caller must
+   * not rediscover the rule the button already enforces.
+   */
   const handleAssign = useCallback((row: MeetingLogListRow) => {
+    if ((row.targets ?? []).some((t) => t.status === "sent")) return;
     setAssignRow(row);
   }, []);
 
@@ -531,14 +666,15 @@ export default function MeetingLog() {
       void runRowAction(
         row,
         () =>
-          assignMeetingLog(row.id, payload.contactId, payload.leadId, {
+          assignMeetingLog(row.id, payload.targets, {
             providerConfig: payload.providerConfig,
             // `summary_json` is null on an unassigned row, so this push makes
             // the AI call - up to 210s for a reassign. Without this hook the
             // row renders its pre-click status for all of it.
             onCommitted: () => void loaderRef.current(),
           }),
-        SENT_COPY
+        SENT_COPY,
+        ASSIGN_CONFLICT_COPY
       );
     },
     [runRowAction]
@@ -549,6 +685,73 @@ export default function MeetingLog() {
     // particular it does not mark the row busy - busy is set at Confirm.
     setAssignRow(null);
   }, []);
+
+  /**
+   * The per-target sibling of `runRowAction`, not a call to it: neither
+   * `retryTarget` nor `removeQueueTarget` ever pushes, so there is no
+   * `ActionOutcome` to classify, no `onCommitted` moment worth a hook, and no
+   * provider config to read - only `TargetActionOutcome` and the same
+   * busy/pinned/result bookkeeping `runRowAction` already does for the whole
+   * row. Sharing that bookkeeping (not the classification) is why this marks
+   * the ROW busy for a per-target click: it is the same row's other buttons
+   * (Retry/Assign/Delete) that must not run a second CAS while this write is
+   * in flight.
+   */
+  const runTargetAction = useCallback(
+    (
+      row: MeetingLogListRow,
+      run: () => Promise<TargetActionOutcome>,
+      action: "retry" | "remove"
+    ): void => {
+      if (busyRef.current.has(row.id)) return;
+      if (configRef.current !== "complete") return;
+
+      const label = `${meetingDateOf(row)} · ${targetNameOf(row, contactsRef.current)}`;
+
+      setBusy((prev) => new Set(prev).add(row.id));
+      setPinned((prev) => new Map(prev).set(row.id, row));
+      setResult(row.id, null);
+
+      void (async () => {
+        try {
+          const outcome = await run();
+          setResult(row.id, { label, text: targetOutcomeCopy(outcome, action) });
+        } catch (err) {
+          setResult(row.id, {
+            label,
+            text: describeFailure(reportOdooError(err, "meeting log target action").code),
+          });
+        } finally {
+          await loaderRef.current();
+          setBusy((prev) => {
+            const next = new Set(prev);
+            next.delete(row.id);
+            return next;
+          });
+          setPinned((prev) => {
+            const next = new Map(prev);
+            next.delete(row.id);
+            return next;
+          });
+        }
+      })();
+    },
+    [setResult]
+  );
+
+  const handleRetryTarget = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget) => {
+      runTargetAction(row, () => retryTarget(row.id, target.id), "retry");
+    },
+    [runTargetAction]
+  );
+
+  const handleRemoveTarget = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget) => {
+      runTargetAction(row, () => removeQueueTarget(row.id, target.id), "remove");
+    },
+    [runTargetAction]
+  );
 
   const readTranscript = useCallback((row: MeetingLogListRow) => {
     const id = row.id;
@@ -639,7 +842,14 @@ export default function MeetingLog() {
       GROUPS.map((g) => [g.key, []])
     );
     for (const row of rendered) {
-      const key = groupOf(row, instance);
+      // Real failedTargets, not the 0 default: without it a row with a
+      // retryable failed target alongside a sent one stays in "waiting"
+      // instead of "needs attention", the same bug Step 5 fixes in
+      // QueueRow's own statusLine, for the same reason (meeting-log.ts's
+      // groupOf doc comment names this call site and QueueRow's as its two
+      // callers).
+      const failedTargets = (row.targets ?? []).filter((t) => t.status === "failed").length;
+      const key = groupOf({ ...row, failedTargets }, instance);
       if (key) buckets.get(key)?.push(row);
     }
     return buckets;
@@ -758,11 +968,14 @@ export default function MeetingLog() {
                     stale={isClaimStale(row, now)}
                     outcome={results.get(row.id)?.text ?? null}
                     transcript={transcript?.id === row.id ? transcript.view : null}
+                    contacts={contacts}
                     onRetry={handleRetry}
                     onAssign={handleAssign}
                     onDelete={handleDelete}
                     onToggleTranscript={toggleTranscript}
                     onReloadTranscript={readTranscript}
+                    onRetryTarget={handleRetryTarget}
+                    onRemoveTarget={handleRemoveTarget}
                   />
                 ))}
               </ul>

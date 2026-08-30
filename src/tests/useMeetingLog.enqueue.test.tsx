@@ -36,6 +36,7 @@ const action = vi.hoisted(() => ({
   retryQueueRow: vi.fn(async () => true),
   assignQueueRow: vi.fn(async () => true),
   deleteQueueRow: vi.fn(async () => true),
+  sweepOrphanTargets: vi.fn(async () => 0),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 
@@ -101,13 +102,13 @@ const conversationStorage = vi.hoisted(() => {
 });
 vi.mock("@/lib/storage/active-conversation.storage", () => conversationStorage);
 
-import { resetMeetingLogSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
+import { resetMeetingLogSweepGuard, resetOrphanSweepGuard, useMeetingLog } from "@/hooks/useMeetingLog";
 // resetTranscriptPruneGuard ONLY. runTranscriptPrune is never referenced in
 // this suite - every prune assertion targets action.pruneTranscripts, the DB
 // wrapper the real runTranscriptPrune calls - and the actions module is not
 // mocked here, so the real single-flight latch stays under test.
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
-import type { ResolvedTarget, TranscriptEntry } from "@/types";
+import type { SelectedTargets, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
 
@@ -115,12 +116,16 @@ function entry(timestamp: number, original = "hello"): TranscriptEntry {
   return { original, timestamp, audioSource: "microphone" };
 }
 
-const DEFAULT_TARGET: ResolvedTarget = { contactId: 42, leadId: null };
+// Task 14: `targetRef` now carries the flat multi-target list directly - the
+// exact shape `useOdooTarget`'s `targetsRef` mirrors - rather than a single
+// contact/lead pick adapted through `resolvedToSelected`. One target,
+// matching what that adapter used to coalesce a contact-only pick into.
+const DEFAULT_TARGETS: SelectedTargets = [{ model: "res.partner", resId: 42, name: null }];
 
 /**
  * Renders the hook with a live targetRef, like <Completion /> does.
  *
- * PRESENCE CHECKS, not `??`. With `??` an explicit `target: null` falls through
+ * PRESENCE CHECKS, not `??`. With `??` an explicit `targets: []` falls through
  * to the default and `currentConversationId: null` falls through to "conv-1" -
  * so the two cases that need those exact nulls (an unassigned meeting, and no
  * conversation id anywhere) could not be expressed at all.
@@ -129,9 +134,9 @@ function render(initial: Record<string, unknown> = {}) {
   const props0 = { meetingTranscript: [entry(1000)], ...initial };
   return renderHook(
     (props: Record<string, unknown>) => {
-      const target = ("target" in props ? props.target : DEFAULT_TARGET) as ResolvedTarget | null;
-      const targetRef = useRef<ResolvedTarget | null>(target);
-      targetRef.current = target;
+      const targets = ("targets" in props ? props.targets : DEFAULT_TARGETS) as SelectedTargets;
+      const targetRef = useRef<SelectedTargets>(targets);
+      targetRef.current = targets;
       return useMeetingLog({
         targetRef,
         meetingTranscript: (props.meetingTranscript as TranscriptEntry[]) ?? [],
@@ -175,6 +180,7 @@ beforeEach(() => {
   windowLabel.value = "main";
   resetMeetingLogSweepGuard();
   resetTranscriptPruneGuard();
+  resetOrphanSweepGuard();
   listeners.clear();
   // Reset the STATE behind the stateful storage mocks, not just their call
   // history - vi.clearAllMocks() in afterEach clears .mock.calls but the
@@ -208,6 +214,7 @@ beforeEach(() => {
   action.retryQueueRow.mockResolvedValue(true);
   action.assignQueueRow.mockResolvedValue(true);
   action.deleteQueueRow.mockResolvedValue(true);
+  action.sweepOrphanTargets.mockResolvedValue(0);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
   summarizer.generateMeetingLogSummary.mockResolvedValue(null);
@@ -233,7 +240,7 @@ describe("the meeting-ended trigger", () => {
       status: "held",
       transcriptStartAt: 1000,
       transcriptEndAt: 1000,
-      contactId: 42,
+      targets: [{ model: "res.partner", resId: 42, name: null }],
     });
   });
 
@@ -271,12 +278,12 @@ describe("the meeting-ended trigger", () => {
   });
 
   it("writes an unassigned row with NO hold when nothing is selected", async () => {
-    render({ target: null });
+    render({ targets: [] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
-      status: "unassigned", contactId: null,
+      status: "unassigned", targets: [],
     });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
@@ -491,6 +498,21 @@ describe("the sweep kickoff", () => {
     render();
 
     await waitFor(() => expect(action.pruneTranscripts).toHaveBeenCalledTimes(1));
+  });
+
+  it("runs the orphan sweep on mount, even when the sweep reports it did not run", async () => {
+    // Chained after the sweep/prune, outside runMeetingLogSweep's `ran` guard -
+    // same reasoning as the prune sibling above. Without this, a mutant that
+    // deleted the runOrphanSweep() call, or that gated it inside
+    // `if (outcome.ran)`, would leave orphaned meeting_log_targets rows
+    // accumulating forever for exactly the users least likely to ever
+    // complete Odoo credentials, and every other test in this file would
+    // still pass.
+    push.runMeetingLogSweep.mockResolvedValue({ ran: false, pushed: 0 });
+
+    render();
+
+    await waitFor(() => expect(action.sweepOrphanTargets).toHaveBeenCalledTimes(1));
   });
 
   it("does not prune from the dashboard window", async () => {

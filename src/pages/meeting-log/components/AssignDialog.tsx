@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckIcon } from "lucide-react";
 import {
+  AddToggle,
   Button,
   Dialog,
   DialogContent,
@@ -15,27 +15,36 @@ import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { createOdooClient, type OdooClient } from "@/lib/odoo/client";
 import { compareContacts, filterContacts } from "@/lib/odoo/contact-ordering";
 import { reportOdooError } from "@/lib/odoo/errors";
+import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import type { ProviderConfigLike } from "@/lib/odoo/meeting-log-actions";
 import { fetchOpportunities, kindLabel } from "@/lib/odoo/opportunities";
 import { requireOdooConfig } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, OdooContact, OdooOpportunity } from "@/types";
+import type {
+  MeetingLogListRow,
+  OdooContact,
+  OdooOpportunity,
+  SelectedTarget,
+  SelectedTargets,
+} from "@/types";
 import { useProviderConfig } from "./ProviderConfigReader";
 import { meetingDateOf } from "./QueueRow";
 
 /**
  * The Assign / Reassign dialog.
  *
- * THE DIALOG OWNS NO PUSH. Confirm hands `{ contactId, leadId, providerConfig }`
- * UP to a page-owned handler, which is what calls `assignMeetingLog`, marks the
+ * THE DIALOG OWNS NO PUSH. Confirm hands `{ targets, providerConfig }` UP to
+ * a page-owned handler, which is what calls `assignMeetingLog`, marks the
  * row busy and re-reads. Both alternatives break a stated rule: a dialog that
  * closed on Confirm while owning the push would drive page state from an
  * unmounted child and "dispose" a client still in use minutes later; one that
  * stayed open would render "Sending…" in the list behind a modal whose Cancel
  * has no defined meaning mid-push.
  *
- * `useOdooTarget` IS NOT REUSED. It owns the singleton `odoo_selected_target`
- * row - the contact for the *next* meeting - so assigning a past meeting
- * through it would silently retarget the meeting the user is about to have.
+ * `useOdooTarget` IS NOT REUSED. It owns the persisted selection for the
+ * *next* meeting - assigning a past meeting through it would silently
+ * retarget the meeting the user is about to have. This dialog's own
+ * `targets` list is purely LOCAL, staged state: nothing is written to Odoo
+ * or to `odoo_selected_targets` until Confirm hands the whole list up.
  *
  * MOUNTED ONLY WHILE OPEN, so creation and disposal bracket exactly one
  * session. Rendered once at page level behind an `open` prop, "one client per
@@ -47,14 +56,15 @@ import { meetingDateOf } from "./QueueRow";
  *
  * Restated rather than imported across page trees: that constant is part of the
  * overlay picker's contract and its own tests, and importing it here would make
- * a change there silently change this dialog.
+ * a change there silently change this dialog. `MAX_TARGETS` (below) is NOT
+ * restated the same way - it is a real cap enforced server-side by
+ * `assignQueueRow`, and a copy here could drift from it.
  */
 const MAX_CONTACT_ROWS = 100;
 
-/** What Confirm hands up. Three members - see the note on `client`, below. */
+/** What Confirm hands up. */
 export interface AssignPayload {
-  contactId: number;
-  leadId: number | null;
+  targets: SelectedTargets;
   /**
    * Derived HERE, from `@/contexts`, and carried up because the page-owned
    * handler needs a real config for `ActionDeps.providerConfig`. `null` is a
@@ -65,7 +75,7 @@ export interface AssignPayload {
    * resolved (`meeting-log-actions.ts:149`), because `instanceFingerprint` is
    * url|db only, so a credential rotation while this dialog sat open still
    * matches the fingerprint and pushing with the dialog's client would hit
-   * revoked credentials and record a spurious ODOO_AUTH_FAILED. A fourth member
+   * revoked credentials and record a spurious ODOO_AUTH_FAILED. A third member
    * would be dead weight that reads as load-bearing.
    */
   providerConfig: ProviderConfigLike | null;
@@ -92,6 +102,38 @@ type Preflight =
   | { state: "ready" }
   | { state: "error"; code: string };
 
+/** `null`/generic-placeholder chain - the same shape `QueueRow.tsx`'s own `targetNameOf` uses. */
+function nameForTarget(t: SelectedTarget): string {
+  if (t.name) return t.name;
+  return t.model === "res.partner" ? `Contact #${t.resId}` : `Lead or opportunity #${t.resId}`;
+}
+
+/**
+ * NEUTRAL wording for a crm.lead target - `SelectedTarget` carries `model`,
+ * not `type` ("lead" vs "opportunity"), so naming one over the other here
+ * would be a guess. Matches ContactPicker.tsx's own `describeTargetForSentence`
+ * (that file's comment carries the full rationale). Final whole-branch
+ * review, Important 5: this used to say "the lead X" for every crm.lead
+ * target - a regression against e9df310 ("say Opportunity on a deal, not
+ * just Lead on a lead") - and, for an unnamed target, built a broken
+ * double-name ("the lead Lead or opportunity #123") by prefixing
+ * `nameForTarget`'s own generic-placeholder fallback. Two branches here, not
+ * a prefix onto `nameForTarget`, so that placeholder is never embedded
+ * inside this one.
+ */
+function describeTargetForSentence(t: SelectedTarget): string {
+  if (t.model !== "crm.lead") return nameForTarget(t);
+  return t.name !== null
+    ? `the lead or opportunity ${t.name}`
+    : `the lead or opportunity you picked earlier (#${t.resId})`;
+}
+
+function joinWithAnd(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
 export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialogProps) {
   // Consumed INSIDE the dialog, never in the page shell: AppProvider rebuilds
   // its value every render and calls loadData() on cross-window `storage`
@@ -104,11 +146,13 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   const [contacts, setContacts] = useState<OdooContact[]>([]);
   const [viaMeetwingsAPI, setViaMeetwingsAPI] = useState(false);
   const [query, setQuery] = useState("");
+  /** Which contact's deals are currently previewed below the list - see `selectContact`. */
   const [selected, setSelected] = useState<OdooContact | null>(null);
-  const [leadId, setLeadId] = useState<number | null>(null);
   const [opportunities, setOpportunities] = useState<OdooOpportunity[] | null>(null);
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
+  /** Task 14: the staged multi-target list. Nothing here is persisted until Confirm. */
+  const [targets, setTargets] = useState<SelectedTargets>([]);
 
   const clientRef = useRef<Promise<OdooClient> | null>(null);
   const selectionToken = useRef(0);
@@ -189,13 +233,14 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   }, [attempt, instance, getClient]);
 
   /**
-   * Step 2, TOKEN-ORDERED on both branches.
+   * Previews a contact's open opportunities/leads below the list - it does
+   * NOT add anything. Adding is the row's own `AddToggle`, independent of
+   * whether this contact's deals happen to be on screen.
    *
-   * Concurrent lookups are reachable by this dialog's own argument for the
-   * client promise ("two quick contact selections"), so contact A's slower
-   * lookup can resolve after contact B's and paint A's deals under B - Confirm
-   * then writes `lead_id` for the wrong customer, and the page pushes
-   * immediately with no undo. The rejection path matters as much: a stale
+   * TOKEN-ORDERED on both branches. Concurrent lookups are reachable by this
+   * dialog's own argument for the client promise ("two quick contact
+   * previews"), so contact A's slower lookup can resolve after contact B's
+   * and paint A's deals under B. The rejection path matters as much: a stale
    * `setOpportunityError` paints the wrong contact's failure.
    */
   const selectContact = useCallback(
@@ -204,11 +249,6 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
       const token = selectionToken.current;
 
       setSelected(contact);
-      // Reset unconditionally, FIRST. `lead_id` and `contact_id` are written by
-      // one statement, so a leadId left over from the previous contact would
-      // file the meeting on a deal belonging to somebody else - and contact A's
-      // deals would sit on screen under contact B until B's lookup lands.
-      setLeadId(null);
       setOpportunities(null);
       setOpportunityError(null);
       setIsLookingUp(true);
@@ -237,14 +277,50 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
     [contacts, query]
   );
 
-  const chosenOpportunity =
-    leadId === null ? null : (opportunities?.find((o) => o.id === leadId) ?? null);
-
   // Gated on `ready`, not rendered eagerly: before shouldUseMeetwingsAPI
   // settles the flag is at its initial `false`, so a licensed user would see
   // the warning flash and vanish on every open.
   const providerMissing =
     preflight.state === "ready" && !viaMeetwingsAPI && providerConfig === null;
+
+  const atCap = targets.length >= MAX_TARGETS;
+
+  /**
+   * Purely LOCAL staging - no database write, unlike `useOdooTarget`'s own
+   * `addTarget`/`removeTarget`. The cap check happens INSIDE the `setTargets`
+   * updater (not read from `atCap` beforehand) so two `+ add` clicks fired
+   * before either re-renders both see the TRUE prior state in call order,
+   * rather than racing a stale `targets.length` snapshot the way a database
+   * round trip would.
+   */
+  const addTarget = useCallback((t: SelectedTarget): Promise<{ ok: boolean; reason?: "cap" }> => {
+    let result: { ok: boolean; reason?: "cap" } = { ok: true };
+    setTargets((prev) => {
+      const idx = prev.findIndex((x) => x.model === t.model && x.resId === t.resId);
+      if (idx !== -1) return prev.map((x, i) => (i === idx ? t : x));
+      if (prev.length >= MAX_TARGETS) {
+        result = { ok: false, reason: "cap" };
+        return prev;
+      }
+      return [...prev, t];
+    });
+    return Promise.resolve(result);
+  }, []);
+
+  const removeTarget = useCallback(
+    (model: SelectedTarget["model"], resId: number): Promise<void> => {
+      setTargets((prev) => prev.filter((x) => !(x.model === model && x.resId === resId)));
+      return Promise.resolve();
+    },
+    []
+  );
+
+  const destinationSentence =
+    targets.length === 0
+      ? null
+      : `This meeting will be logged on ${targets.length} record${
+          targets.length === 1 ? "" : "s"
+        }: ${joinWithAnd(targets.map(describeTargetForSentence))}.`;
 
   return (
     <Dialog
@@ -292,6 +368,15 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
           </p>
         )}
 
+        {preflight.state === "ready" && targets.length > 0 && (
+          <div className="flex flex-col gap-1 border-b pb-2" data-testid="logging-to-section">
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              {`Logging to (${targets.length})${atCap ? " · limit reached" : ""}`}
+            </p>
+            <p className="text-xs">{destinationSentence}</p>
+          </div>
+        )}
+
         {preflight.state === "ready" && (
           <div className="flex flex-col gap-2">
             <Input
@@ -307,28 +392,39 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                 <p className="text-xs text-muted-foreground">No contacts match.</p>
               ) : (
                 visible.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    data-testid="assign-contact"
-                    // Reassign exists because a target Odoo archived is
-                    // unrecoverable; letting the user pick ANOTHER archived
-                    // partner reproduces the same terminal ODOO_FAULT.
-                    disabled={!c.active}
-                    aria-pressed={selected?.id === c.id}
-                    onClick={() => selectContact(c)}
-                    className={`rounded-lg px-2 py-1 text-left text-sm hover:bg-muted/50 ${
-                      selected?.id === c.id ? "bg-muted" : ""
-                    } ${c.active ? "" : "opacity-50"}`}
-                  >
-                    {c.name}
-                    {c.companyName && (
-                      <span className="text-muted-foreground">{` (${c.companyName})`}</span>
-                    )}
-                    {!c.active && (
-                      <span className="ml-1 text-xs text-muted-foreground">Archived</span>
-                    )}
-                  </button>
+                  <div key={c.id} className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      data-testid="assign-contact"
+                      // Reassign exists because a target Odoo archived is
+                      // unrecoverable; letting the user pick ANOTHER archived
+                      // partner reproduces the same terminal ODOO_FAULT.
+                      disabled={!c.active}
+                      aria-pressed={selected?.id === c.id}
+                      onClick={() => selectContact(c)}
+                      className={`flex-1 rounded-lg px-2 py-1 text-left text-sm hover:bg-muted/50 ${
+                        selected?.id === c.id ? "bg-muted" : ""
+                      } ${c.active ? "" : "opacity-50"}`}
+                    >
+                      {c.name}
+                      {c.companyName && (
+                        <span className="text-muted-foreground">{` (${c.companyName})`}</span>
+                      )}
+                      {!c.active && (
+                        <span className="ml-1 text-xs text-muted-foreground">Archived</span>
+                      )}
+                    </button>
+                    <AddToggle
+                      model="res.partner"
+                      resId={c.id}
+                      name={c.name}
+                      targets={targets}
+                      atCap={atCap}
+                      disabled={!c.active}
+                      onAdd={addTarget}
+                      onRemove={removeTarget}
+                    />
+                  </div>
                 ))
               )}
             </div>
@@ -346,10 +442,8 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                 {/*
                   NEVER an empty list. fetchOpportunities throws on the first
                   unreadable row and on any transport failure, and rendering
-                  that as "no open deals" sends the meeting to the res.partner
-                  instead of the crm.lead - silently, and irreversibly once it
-                  is `sent`. The second sentence is what stops Confirm being
-                  read as "this contact has none".
+                  that as "no open deals" would hide real records this dialog
+                  could otherwise offer as their own target.
                 */}
                 <p className="text-xs text-destructive">
                   {`The opportunities and leads for this contact could not be read (${opportunityError}). Whether ${selected.name} has open deals is unknown.`}
@@ -372,24 +466,8 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
               ) : (
                 <div className="flex flex-col gap-1">
                   {opportunities.map((opp) => (
-                    <button
-                      key={opp.id}
-                      type="button"
-                      aria-pressed={leadId === opp.id}
-                      onClick={() => setLeadId(opp.id)}
-                      className={`flex items-start gap-1.5 rounded-lg px-2 py-1 text-left text-xs hover:bg-muted/50 ${
-                        leadId === opp.id ? "bg-muted" : ""
-                      }`}
-                    >
-                      {/* Held, not conditionally rendered - see ContactPicker. */}
-                      <CheckIcon
-                        aria-hidden
-                        className={`mt-0.5 h-3 w-3 shrink-0 text-primary ${
-                          leadId === opp.id ? "" : "invisible"
-                        }`}
-                      />
-                      <span>
-                        {/* A prefix, on every row - see ContactPicker. */}
+                    <div key={opp.id} className="flex items-center gap-1.5">
+                      <span className="flex-1 text-left text-xs">
                         <span className="text-muted-foreground">
                           {`${kindLabel(opp.type)} · `}
                         </span>
@@ -404,41 +482,20 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                           </span>
                         )}
                       </span>
-                    </button>
+                      <AddToggle
+                        model="crm.lead"
+                        resId={opp.id}
+                        name={opp.name}
+                        targets={targets}
+                        atCap={atCap}
+                        onAdd={addTarget}
+                        onRemove={removeTarget}
+                      />
+                    </div>
                   ))}
-                  <button
-                    type="button"
-                    aria-pressed={leadId === null}
-                    onClick={() => setLeadId(null)}
-                    className={`flex items-start gap-1.5 rounded-lg px-2 py-1 text-left text-xs hover:bg-muted/50 ${
-                      leadId === null ? "bg-muted" : "text-muted-foreground"
-                    }`}
-                  >
-                    <CheckIcon
-                      aria-hidden
-                      className={`mt-0.5 h-3 w-3 shrink-0 text-primary ${
-                        leadId === null ? "" : "invisible"
-                      }`}
-                    />
-                    <span>Contact record only</span>
-                  </button>
                 </div>
               )
             )}
-
-            {/*
-              Which RECORD this lands on, spelled out. The difference between a
-              res.partner and a crm.lead is invisible in the button label and
-              cannot be undone once the row is `sent`.
-            */}
-            <p className="text-xs">
-              {chosenOpportunity === null
-                ? `This meeting will be logged on ${selected.name}'s contact record.`
-                : // Two branches, not the picker's three: `leadId` here is local
-                  // state set from the list that is on screen, so the record it
-                  // names is always present to name its own kind.
-                  `This meeting will be logged on the ${chosenOpportunity.type} ${chosenOpportunity.name}.`}
-            </p>
           </div>
         )}
 
@@ -447,10 +504,10 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
             Cancel
           </Button>
           <Button
-            disabled={selected === null}
+            disabled={targets.length === 0}
             onClick={() => {
-              if (selected === null) return;
-              onConfirm({ contactId: selected.id, leadId, providerConfig });
+              if (targets.length === 0) return;
+              onConfirm({ targets, providerConfig });
             }}
           >
             Log this meeting

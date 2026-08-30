@@ -11,11 +11,12 @@ import {
 } from "react";
 import { toast } from "sonner";
 import {
-  clearTarget,
+  addSelectedTarget,
+  clearTargets,
   getSyncState,
   listContacts,
-  loadTarget,
-  saveTarget,
+  loadTargets,
+  removeSelectedTarget,
   setColleague,
   stampLastMeeting,
 } from "@/lib/database/odoo-contacts.action";
@@ -31,7 +32,7 @@ import {
   LEAD_SEARCH_MIN_CHARS,
 } from "@/lib/odoo";
 import { loadOdooConfig } from "@/lib/storage/odoo-config.storage";
-import type { OdooContact, OdooOpportunity, ResolvedTarget } from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
 import type {
   ContactPickerProps,
   PickerCacheState,
@@ -61,6 +62,59 @@ import type {
 const contactsOf = (state: PickerCacheState): OdooContact[] =>
   state.kind === "ready" ? state.contacts : [];
 
+/**
+ * The single-select flow's own in-memory shape - the picker's original
+ * "who are you meeting?" pick, which names a contact, or a lead/opportunity,
+ * or both (a lead picked under a contact keeps that contact's id too). This
+ * used to be a type shared through `@/types`; Task 14 retired that shared
+ * export once every OTHER caller (`useMeetingLog`'s `targetRef` chief among
+ * them) moved onto the flat `SelectedTargets` list below, and this hook is
+ * the shape's only remaining consumer - so it is local now, under a name
+ * that does not imply anything outside this file still shares it.
+ */
+type SingleTarget = {
+  contactId: number | null;
+  leadId: number | null;
+  leadName: string | null;
+};
+
+/**
+ * The single-flow's own persistence key, coalescing a `SingleTarget` down
+ * to the one `SelectedTarget` row it maps onto in `odoo_selected_targets`.
+ *
+ * Matches migration 14's own backfill SQL exactly (lead wins, name only
+ * kept for a lead): `CASE WHEN lead_id IS NOT NULL THEN 'crm.lead' ELSE
+ * 'res.partner' END, COALESCE(lead_id, contact_id)`. `useMeetingLog.ts` no
+ * longer does any coalescing of its own - since Task 14 it reads the flat
+ * `SelectedTargets` list straight off `targetsRef`. `saveTarget`/`loadTarget` queried
+ * `odoo_selected_target`, a table migration 14 drops - this hook's
+ * persistence goes through the shared multi-target table instead, Task 4's
+ * `addSelectedTarget`/`removeSelectedTarget`.
+ *
+ * Returns null rather than asserting: `SingleTarget.contactId` is
+ * `number | null` and `SelectedTarget.resId` is `number`, so an assertion
+ * would fail TS strict. `commit`'s own null-target callers already treat
+ * "nothing selected" as "nothing to write".
+ */
+function toSelectedTarget(t: SingleTarget): SelectedTarget | null {
+  if (t.leadId !== null) return { model: "crm.lead", resId: t.leadId, name: t.leadName };
+  if (t.contactId !== null) return { model: "res.partner", resId: t.contactId, name: null };
+  return null;
+}
+
+/**
+ * The reverse of `toSelectedTarget`, for rehydrating the single flow's
+ * `target` from the shared table. LOSSY, on purpose and unavoidably: a
+ * `crm.lead` row never recorded the partner it was picked under (the same
+ * loss migration 14's backfill already accepts), so a rehydrated lead target
+ * always comes back with `contactId: null`.
+ */
+function fromSelectedTarget(t: SelectedTarget): SingleTarget {
+  return t.model === "crm.lead"
+    ? { contactId: null, leadId: t.resId, leadName: t.name }
+    : { contactId: t.resId, leadId: null, leadName: null };
+}
+
 /** True when `err` is the OdooError this feature raises for a busy sync claim. */
 function isSyncBusy(err: unknown): boolean {
   return err instanceof OdooError && err.code === "ODOO_SYNC_BUSY";
@@ -83,14 +137,45 @@ function isNotConfigured(err: unknown): boolean {
  * user believes they picked someone.
  */
 export interface UseOdooTargetReturn {
-  targetRef: RefObject<ResolvedTarget | null>;
+  /**
+   * The single-select flow's own ref, used ONLY by this hook's internal
+   * writers (`commit`, `reload`, `onSelectOpportunity`, ...) and by
+   * `pickerProps` below. Nothing outside this file reads it any more - see
+   * `targetsRef` for what `useMeetingLog` actually consumes now.
+   */
+  targetRef: RefObject<SingleTarget | null>;
   pickerProps: ContactPickerProps;
+  /**
+   * Task 14: what `useMeetingLog`'s `targetRef` param is fed at the
+   * `<Completion />` call site now - the flat multi-target list (Task 4's
+   * `odoo_selected_targets`), not the single-select flow's own `targetRef`
+   * above. `commit` (the single flow's own committer) mirrors every add/
+   * remove into this same list via `applyTargets`, so a pick made through
+   * the "Who are you meeting?" section still reaches a finished meeting's
+   * targets - without that mirror, picking a single contact would show its
+   * name in the trigger while `targetsRef.current` stayed `[]` and the
+   * meeting enqueued `unassigned`, exactly the "UI asserts what the log
+   * contradicts" failure this feature exists to remove.
+   */
+  targetsRef: RefObject<SelectedTargets>;
+  targets: SelectedTargets;
+  targetCount: number;
+  addTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
+  removeTarget: (model: SelectedTarget["model"], resId: number) => Promise<void>;
+  /** Drops every destination at once, database first. Confirmed in the picker. */
+  clearAllTargets: () => Promise<void>;
+  /** Runs (or joins) the per-contact deal lookup a "Logging to" row expands into. */
+  expandContact: (contactId: number) => Promise<void>;
+  opportunitiesFor: (contactId: number) => OdooOpportunity[] | null;
+  errorFor: (contactId: number) => string | null;
+  retryOpportunitiesFor: (contactId: number) => Promise<void>;
 }
 
 export function useOdooTarget({
   meetingAssistMode,
   isPickerOpen,
   setIsPickerOpen,
+  setTargetCount,
 }: {
   meetingAssistMode: boolean;
   // Threaded through from useCompletion (see Files.tsx's isFilesPopoverOpen
@@ -102,8 +187,14 @@ export function useOdooTarget({
   // popover exactly like it already observes the Files popover.
   isPickerOpen: boolean;
   setIsPickerOpen: (open: boolean) => void;
+  // Task 12. useCompletion owns targetCount because it runs BEFORE this hook
+  // in <Completion /> and so cannot read a count off this hook's own return
+  // value - it can only own a slot this hook writes into, mirroring
+  // isPickerOpen/setIsPickerOpen exactly. Called from an effect below
+  // whenever `targets` changes, never from render.
+  setTargetCount: (count: number) => void;
 }): UseOdooTargetReturn {
-  const [target, setTarget] = useState<ResolvedTarget | null>(null);
+  const [target, setTarget] = useState<SingleTarget | null>(null);
   const [cache, setCache] = useState<PickerCacheState>({ kind: "never-synced" });
   const [opportunities, setOpportunities] = useState<OdooOpportunity[] | null>(null);
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
@@ -121,6 +212,29 @@ export function useOdooTarget({
   const [leadResults, setLeadResults] = useState<OdooOpportunity[] | null>(null);
   const [leadSearchError, setLeadSearchError] = useState<string | null>(null);
   const [isSearchingLeads, setIsSearchingLeads] = useState(false);
+
+  /**
+   * Task 11's list. Non-nullable: `useState<SelectedTargets | null>(null)`
+   * would make the natural pickerProps fallback `targets: target ?? []`,
+   * which allocates a fresh array on every render at zero targets - the
+   * steady state before anyone picks anything - and a memoized picker's
+   * default shallow comparator would then re-render on every streamed AI
+   * chunk.
+   */
+  const [targets, setTargets] = useState<SelectedTargets>([]);
+
+  /**
+   * Task 12: pushes the list's SIZE out to useCompletion, which cannot read
+   * `targets` itself (this hook mounts after useCompletion in <Completion />,
+   * so nothing here exists yet when useCompletion's own resize effect is
+   * defined - see setTargetCount's doc comment above). Every write to
+   * `targets` funnels through `applyTargets`, so watching `targets` itself
+   * here - rather than trying to hook each individual writer - is the one
+   * place this can never miss a change.
+   */
+  useEffect(() => {
+    setTargetCount(targets.length);
+  }, [targets, setTargetCount]);
 
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
@@ -163,9 +277,19 @@ export function useOdooTarget({
    * async listen() gap each time during which a real meeting-ended is lost.
    * See useMeetingAutoRecord.ts:646-654.
    */
-  const targetRef = useRef<ResolvedTarget | null>(null);
+  const targetRef = useRef<SingleTarget | null>(null);
   useLayoutEffect(() => {
     targetRef.current = target;
+  });
+
+  /**
+   * Read by `reload`'s archival filter and by `addTarget`/`removeTarget`,
+   * neither of which may take `targets` itself as a dependency without
+   * rebinding on every list change - the same reasoning as `targetRef` above.
+   */
+  const targetsRef = useRef(targets);
+  useLayoutEffect(() => {
+    targetsRef.current = targets;
   });
 
   /**
@@ -187,6 +311,54 @@ export function useOdooTarget({
   useLayoutEffect(() => {
     cacheRef.current = cache;
   });
+
+  /**
+   * The per-contact deal-lookup cache backing each "Logging to" row's
+   * disclosure, keyed by contact id - independent of `opportunities`/
+   * `opportunityError` above, which back the single-select flow's own panel.
+   *
+   * `rowGen` is a per-contact generation, so adding or removing a target
+   * elsewhere in the list cannot invalidate an unrelated open disclosure -
+   * unlike the single flow's shared `selectionToken`, which would strand
+   * every other open row on "Looking up..." the moment any one of them
+   * changed. A ref: it backs no rendered UI.
+   */
+  const rowGen = useRef(new Map<number, number>());
+  // Mirrored so `expandContact`/`retryOpportunitiesFor` can read fresh values
+  // without taking rowCache/rowError as dependencies - same reasoning as
+  // cacheRef above.
+  const rowCacheRef = useRef(new Map<number, OdooOpportunity[]>());
+  const rowErrorRef = useRef(new Map<number, string>());
+  // RENDERED. A new Map on every write, or ContactPicker never learns a
+  // lookup landed and the row sits on "Looking up..." forever - a useRef
+  // write schedules no render, unlike every other ref above that backs
+  // rendered UI (opportunitiesRef, cacheRef).
+  const [rowCache, setRowCache] = useState<Map<number, OdooOpportunity[]>>(new Map());
+  const [rowError, setRowError] = useState<Map<number, string>>(new Map());
+  useLayoutEffect(() => {
+    rowCacheRef.current = rowCache;
+  });
+  useLayoutEffect(() => {
+    rowErrorRef.current = rowError;
+  });
+
+  /**
+   * NOT independent of everything, despite being keyed per contact.
+   * `handleInstanceChanged` bumps this precisely to supersede data from a
+   * database just switched away from - ContactPicker's rows are long-lived
+   * across that switch (Radix unmounts PopoverContent's subtree, not the
+   * component instance holding these maps), so without an epoch the cache
+   * would go on serving opportunities from the old database under contact
+   * ids that may now name entirely different Odoo records.
+   */
+  const epoch = useRef(0);
+
+  const bumpEpoch = useCallback(() => {
+    epoch.current += 1;
+    rowGen.current.clear(); // a ref: .current is right here
+    setRowCache(new Map()); // STATE: no .current, and a NEW Map, not .clear()
+    setRowError(new Map()); // an in-place clear schedules no render
+  }, []);
 
   /**
    * `createOdooClient(config)` is the only consumer of `loadOdooConfig` here -
@@ -216,42 +388,143 @@ export function useOdooTarget({
   }, []);
 
   /**
+   * Replaces `targets` wholesale, EXCEPT it skips the write when both the
+   * current and the next list are empty - so a mount/instance-change rehydrate
+   * that finds nothing to restore does not allocate a fresh `[]` over the
+   * initial one. `targets: target ?? []` allocating fresh at zero targets was
+   * exactly the failure the initial `useState<SelectedTargets>([])` above was
+   * chosen to avoid; this is the same guarantee applied to every LATER write,
+   * not just the first render.
+   *
+   * `next` may also be an updater `(prev) => SelectedTargets`, mirroring
+   * React's own `setState` overload. `addTarget`/`removeTarget` MUST use this
+   * form: computing the next array from `targetsRef.current` after an
+   * `await` reads a snapshot that a second, faster in-flight call can have
+   * already moved past, so two adds resolving out of order would both
+   * persist to the database but only the LAST one's snapshot survives in
+   * memory - the earlier target silently vanishes from `targets` even though
+   * `odoo_selected_targets` still holds its row. Deriving from `prev` inside
+   * `setTargets`'s own updater instead makes every update see whatever the
+   * previous update actually landed, in call order, not snapshot order.
+   */
+  const applyTargets = useCallback(
+    (next: SelectedTargets | ((prev: SelectedTargets) => SelectedTargets)) => {
+      setTargets((prev) => {
+        const resolved = typeof next === "function" ? next(prev) : next;
+        return prev.length === 0 && resolved.length === 0 ? prev : resolved;
+      });
+    },
+    []
+  );
+
+  /**
    * `token !== selectionToken.current` is re-checked on BOTH the entry and the
    * rejection path. Re-checking only on entry lets a stale commit's rollback
    * overwrite a NEWER selection that persisted fine: pick Ada (token 1, slow
    * write), pick Bea (token 2, writes, row = Bea), then Ada's write rejects and
    * rolls state back to null while SQLite still holds Bea. A superseded commit
    * must fail SILENTLY - no setTarget, no toast.
+   *
+   * Task 11: persists through the shared `odoo_selected_targets` table now,
+   * not the dropped `odoo_selected_target` singleton - `saveTarget`/
+   * `loadTarget` queried a table migration 14 drops. `next`/`previous` are
+   * each coalesced to at most one `SelectedTarget` row (`toSelectedTarget`);
+   * the new row is added before the old one - if it named a DIFFERENT row -
+   * is removed, so a failed add never leaves the previous selection's row
+   * deleted out from under it.
+   *
+   * Fix round 1: the add and the remove below are two INDEPENDENT writes,
+   * not one atomic UPSERT the way the dropped `saveTarget` was - so the add
+   * can succeed and the compensating remove can still reject. Rolling back
+   * to `previous` in that case would be a GUESS: the new row is already
+   * persisted, carries the later `selected_at`, and the next rehydrate would
+   * silently restore the very selection this toast just reported as failed.
+   * The rejection path re-reads `loadTargets` and reflects whatever is
+   * ACTUALLY there instead - the database is the source of truth on any
+   * failure here, never an in-memory guess. Falls back to `previous` only if
+   * that re-read itself fails too (the database is unreachable, not just the
+   * original write), so the UI does not hang on `next` forever.
+   *
+   * Task 14: EVERY successful write here is also mirrored into `targets` via
+   * `applyTargets`, using the same functional-updater form `addTarget`/
+   * `removeTarget` use for exactly the same reason (see `applyTargets`'s own
+   * doc comment) - `useMeetingLog`'s `targetRef` now reads the flat list, not
+   * this function's own `target` state, so a pick made through this single
+   * flow that never touched `targets` would show its name in the trigger
+   * while nothing was actually queued when the meeting ended. The rejection
+   * path's re-read already re-derives `target` from the database; it
+   * reconciles `targets` from that SAME re-read rather than guessing, for
+   * the identical reason.
    */
   const commit = useCallback(
-    async (next: ResolvedTarget | null, token: number) => {
+    async (next: SingleTarget | null, token: number) => {
       if (token !== selectionToken.current) return;
       const previous = targetRef.current;
       setTarget(next);
+      let instance: string | null = null;
       try {
-        if (next) {
-          const instance = await resolveInstance();
-          await saveTarget(
-            {
-              instance,
-              contactId: next.contactId,
-              leadId: next.leadId,
-              leadName: next.leadName,
-              conversationId: null,
-            },
-            Date.now()
+        instance = await resolveInstance();
+        const nextKey = next ? toSelectedTarget(next) : null;
+        const previousKey = previous ? toSelectedTarget(previous) : null;
+
+        if (nextKey) {
+          const result = await addSelectedTarget(instance, nextKey, null, Date.now());
+          if (!result.ok) {
+            throw odooError(
+              "ODOO_INTERNAL",
+              "Could not save the selected target",
+              { reason: result.reason ?? "unknown" }
+            );
+          }
+          applyTargets((prev) => {
+            const idx = prev.findIndex(
+              (x) => x.model === nextKey.model && x.resId === nextKey.resId
+            );
+            return idx === -1 ? [...prev, nextKey] : prev.map((x, i) => (i === idx ? nextKey : x));
+          });
+        }
+        if (
+          previousKey &&
+          (!nextKey || previousKey.model !== nextKey.model || previousKey.resId !== nextKey.resId)
+        ) {
+          await removeSelectedTarget(instance, previousKey.model, previousKey.resId);
+          applyTargets((prev) =>
+            prev.filter((x) => !(x.model === previousKey.model && x.resId === previousKey.resId))
           );
-        } else {
-          await clearTarget();
         }
       } catch (err) {
         if (token !== selectionToken.current) return;
-        setTarget(previous);
+        try {
+          const confirmedInstance = instance ?? (await resolveInstance());
+          const persisted = await loadTargets(confirmedInstance);
+          if (token !== selectionToken.current) return;
+          const last = persisted[persisted.length - 1];
+          setTarget(last ? fromSelectedTarget(last) : null);
+          // Authoritative re-read - reconciles `targets` to whatever the
+          // database actually holds, rather than leaving it on an optimistic
+          // mirror that may not match what persisted.
+          applyTargets(persisted);
+        } catch {
+          // Fix round 2: re-checked here too, not just on the success
+          // sub-path above - this catch runs after TWO more awaits
+          // (resolveInstance, loadTargets), during which a newer commit can
+          // have already superseded this one. Falling through unconditionally
+          // used to revert the UI to `previous` - a value that was already
+          // stale before THIS commit even began - and toast an error for
+          // work the user has moved past, overwriting whatever the newer,
+          // successfully-persisted commit had just shown. A superseded
+          // commit leaves no visible trace: no reverted selection, no toast.
+          if (token !== selectionToken.current) return;
+          // The re-read itself failed too (the database is unreachable, not
+          // just the original write) - fall back to the pre-commit guess
+          // rather than leaving `target` stuck on `next` forever.
+          setTarget(previous);
+        }
         const report = reportOdooError(err, "save target");
         toast.error(`${report.code}: ${report.message}`);
       }
     },
-    [resolveInstance]
+    [applyTargets, resolveInstance]
   );
 
   /**
@@ -292,12 +565,33 @@ export function useOdooTarget({
             await commit(null, token);
           }
         }
+
+        // Task 11: the SAME archival rule, applied PER TARGET to the list
+        // instead of clearing it wholesale. A `crm.lead` target is never
+        // touched here - contact sync says nothing about a lead's own
+        // lifecycle - and a `res.partner` target survives unless its contact
+        // is BOTH present and inactive, exactly the single-target rule above.
+        const currentTargets = targetsRef.current;
+        const survivors = currentTargets.filter((t) => {
+          if (t.model !== "res.partner") return true;
+          const row = contacts.find((c) => c.id === t.resId);
+          return !(row && !row.active);
+        });
+        if (survivors.length !== currentTargets.length) {
+          if (token !== selectionToken.current) return;
+          const dropped = currentTargets.filter((t) => !survivors.includes(t));
+          for (const t of dropped) {
+            await removeSelectedTarget(instance, t.model, t.resId);
+          }
+          if (token !== selectionToken.current) return;
+          applyTargets(survivors);
+        }
       } catch (err) {
         const report = reportOdooError(err, "load contacts");
         toast.error(`${report.code}: ${report.message}`);
       }
     },
-    [commit, resolveInstance]
+    [applyTargets, commit, resolveInstance]
   );
 
   const triageSyncFailure = useCallback(
@@ -328,9 +622,14 @@ export function useOdooTarget({
     void (async () => {
       try {
         const instance = await resolveInstance();
-        const persisted = await loadTarget(instance);
-        if (token === selectionToken.current && persisted) {
-          setTarget(persisted);
+        const persistedTargets = await loadTargets(instance);
+        if (token === selectionToken.current) {
+          applyTargets(persistedTargets);
+          // The single flow's own rehydrate: the MOST RECENT row (the list
+          // is `ORDER BY selected_at`), converted back through the same
+          // lossy coalesce `commit` writes through.
+          const last = persistedTargets[persistedTargets.length - 1];
+          if (last) setTarget(fromSelectedTarget(last));
         }
 
         if (getCurrentWindow().label === "main") {
@@ -369,19 +668,26 @@ export function useOdooTarget({
     // switch, exactly like onSelect does for its own stale writes.
     setTarget(null);
     targetRef.current = null;
+    // Task 11: the list gets the SAME eager reset, for the same reason - and
+    // the disclosure cache too, since a row's cached deals came from the
+    // database just switched away from.
+    applyTargets([]);
+    bumpEpoch();
 
     try {
       const instance = await resolveInstance();
       await runSync("refresh", meetingAssistModeRef.current);
-      const persisted = await loadTarget(instance);
-      if (token === selectionToken.current && persisted) {
-        setTarget(persisted);
+      const persistedTargets = await loadTargets(instance);
+      if (token === selectionToken.current) {
+        applyTargets(persistedTargets);
+        const last = persistedTargets[persistedTargets.length - 1];
+        if (last) setTarget(fromSelectedTarget(last));
       }
       await reload(token);
     } catch (err) {
       await triageSyncFailure(err, token);
     }
-  }, [reload, resolveInstance, triageSyncFailure]);
+  }, [applyTargets, bumpEpoch, reload, resolveInstance, triageSyncFailure]);
 
   /**
    * `listen()` returns a PROMISE of the unlisten function, so a plain
@@ -420,10 +726,31 @@ export function useOdooTarget({
    * (the newConversation request event, a deleted-conversation fallback, and
    * Input.tsx's keepEngaged close button) is covered from a single place.
    */
+  /**
+   * Bypasses `commit`: a new chat clears EVERYTHING (`clearTargets`, the
+   * full-instance wipe), not just the single flow's own coalesced row -
+   * `commit(null, token)`'s removal is scoped to one row and would leave the
+   * rest of `odoo_selected_targets` behind.
+   */
   const handleNewChat = useCallback(() => {
     selectionToken.current += 1;
-    void commit(null, selectionToken.current);
-  }, [commit]);
+    const token = selectionToken.current;
+    setTarget(null);
+    targetRef.current = null;
+    applyTargets([]);
+    bumpEpoch();
+    void (async () => {
+      try {
+        const instance = await resolveInstance();
+        if (token !== selectionToken.current) return;
+        await clearTargets(instance);
+      } catch (err) {
+        if (token !== selectionToken.current) return;
+        const report = reportOdooError(err, "clear targets");
+        toast.error(`${report.code}: ${report.message}`);
+      }
+    })();
+  }, [applyTargets, bumpEpoch, resolveInstance]);
 
   useEffect(() => {
     window.addEventListener("newConversationStarted", handleNewChat);
@@ -602,6 +929,194 @@ export function useOdooTarget({
     }
   }, [getClient]);
 
+  /**
+   * Shared by `expandContact` and `retryOpportunitiesFor`.
+   *
+   * The generation guard is PER CONTACT (`rowGen`), not the single flow's
+   * shared `selectionToken`: adding or removing a target elsewhere in the
+   * list must not strand this row's own in-flight lookup. `epoch` is the
+   * one thing that CAN still supersede it - an instance change invalidates
+   * every row at once, on purpose (see `bumpEpoch`'s doc comment).
+   */
+  const runContactLookup = useCallback(
+    async (contactId: number, contact: OdooContact) => {
+      const myEpoch = epoch.current;
+      const gen = (rowGen.current.get(contactId) ?? 0) + 1;
+      rowGen.current.set(contactId, gen);
+      try {
+        const client = await getClient();
+        const rows = await fetchOpportunities(client, contact);
+        if (epoch.current !== myEpoch || rowGen.current.get(contactId) !== gen) return;
+        setRowCache((prev) => new Map(prev).set(contactId, rows));
+        setRowError((prev) => {
+          if (!prev.has(contactId)) return prev;
+          const next = new Map(prev);
+          next.delete(contactId);
+          return next;
+        });
+      } catch (err) {
+        if (epoch.current !== myEpoch || rowGen.current.get(contactId) !== gen) return;
+        const report = reportOdooError(err, "fetch opportunities");
+        setRowError((prev) => {
+          const next = new Map(prev);
+          next.set(contactId, report.code);
+          return next;
+        });
+      }
+    },
+    [getClient]
+  );
+
+  /**
+   * Runs (or joins) a "Logging to" row's own deal lookup. Early-returns for a
+   * colleague (no crm.lead lookup to run, same as the single flow), when a
+   * fetch is already in flight for this contact (`rowGen` has an entry and
+   * neither `rowCache` nor `rowError` has settled it yet), or when the cache
+   * already holds a result - repeated expand/collapse must not re-fetch.
+   *
+   * A PREVIOUS FAILURE does not block a re-expand: only `rowCache` gates the
+   * skip, so closing and reopening a failed row tries again on its own,
+   * leaving `retryOpportunitiesFor` for the explicit Retry control on an
+   * already-open row.
+   */
+  const expandContact = useCallback(
+    async (contactId: number) => {
+      const contact = contactsOf(cacheRef.current).find((c) => c.id === contactId);
+      if (!contact || contact.isColleague) return;
+      if (rowCacheRef.current.has(contactId)) return;
+      const inFlight = rowGen.current.has(contactId) && !rowErrorRef.current.has(contactId);
+      if (inFlight) return;
+      await runContactLookup(contactId, contact);
+    },
+    [runContactLookup]
+  );
+
+  const retryOpportunitiesFor = useCallback(
+    async (contactId: number) => {
+      const contact = contactsOf(cacheRef.current).find((c) => c.id === contactId);
+      if (!contact || contact.isColleague) return;
+      await runContactLookup(contactId, contact);
+    },
+    [runContactLookup]
+  );
+
+  const opportunitiesFor = useCallback(
+    (contactId: number) => rowCache.get(contactId) ?? null,
+    [rowCache]
+  );
+
+  const errorFor = useCallback(
+    (contactId: number) => rowError.get(contactId) ?? null,
+    [rowError]
+  );
+
+  /**
+   * The cap is enforced by `addSelectedTarget` (Task 4), by REJECTING - this
+   * surfaces that rejection verbatim rather than re-implementing the count
+   * itself, and writes `targets` only on success so a capped call leaves the
+   * list exactly as it was.
+   *
+   * Fix round 1, two defects:
+   *
+   * 1. Wrapped in try/catch like every other write path in this file (see
+   *    the doc comment at `resolveInstance`) - a raw throw out of a
+   *    click-triggered async function is an unhandled rejection.
+   *    `resolveInstance` rejecting (e.g. `ODOO_NOT_CONFIGURED`) or
+   *    `addSelectedTarget` hitting a busy database used to just vanish: the
+   *    user clicks Add, nothing happens, nothing is reported anywhere.
+   *
+   * 2. The next list is derived INSIDE `applyTargets`'s own functional
+   *    updater, from `prev`, never from `targetsRef.current` re-read after
+   *    the `await` above it. Two `addTarget` calls (picking two contacts -
+   *    the exact interaction this feature exists for) can resolve out of
+   *    order; a ref snapshot taken post-await only reflects whichever call
+   *    happened to read it last, so the earlier target's row persists in
+   *    the database but silently drops out of `targets` in memory. Deriving
+   *    from `prev` makes each update see whatever the previous one actually
+   *    landed, in call order.
+   */
+  const addTarget = useCallback(
+    async (t: SelectedTarget): Promise<{ ok: boolean; reason?: "cap" }> => {
+      try {
+        const instance = await resolveInstance();
+        const result = await addSelectedTarget(instance, t, null, Date.now());
+        if (result.ok) {
+          applyTargets((prev) => {
+            const existingIndex = prev.findIndex(
+              (x) => x.model === t.model && x.resId === t.resId
+            );
+            return existingIndex === -1
+              ? [...prev, t]
+              : prev.map((x, i) => (i === existingIndex ? t : x));
+          });
+        }
+        return result;
+      } catch (err) {
+        const report = reportOdooError(err, "add target");
+        toast.error(`${report.code}: ${report.message}`);
+        return { ok: false };
+      }
+    },
+    [applyTargets, resolveInstance]
+  );
+
+  /** Same two fixes as `addTarget` above: try/catch, and `prev`-derived. */
+  const removeTarget = useCallback(
+    async (model: SelectedTarget["model"], resId: number): Promise<void> => {
+      try {
+        const instance = await resolveInstance();
+        await removeSelectedTarget(instance, model, resId);
+        applyTargets((prev) => prev.filter((x) => !(x.model === model && x.resId === resId)));
+      } catch (err) {
+        const report = reportOdooError(err, "remove target");
+        toast.error(`${report.code}: ${report.message}`);
+      }
+    },
+    [applyTargets, resolveInstance]
+  );
+
+  /**
+   * Drop EVERY destination at once - the explicit, user-initiated counterpart
+   * to `handleNewChat`'s wipe, reached from the picker behind a confirmation.
+   *
+   * The write ordering is deliberately the OPPOSITE of `handleNewChat`'s. That
+   * one empties the UI first and fires `clearTargets` best-effort, because a
+   * new chat's reset is unconditional and there is nothing to report back to.
+   * Here `odoo_selected_targets` is what the next `assignMeetingLog` reads, so
+   * an emptied UI sitting over a FAILED delete would show no destinations
+   * while the next meeting still posts a note to every record the user just
+   * asked to drop - up to five customer chatters. Persist first, then reflect.
+   *
+   * `setTarget(null)` as well as `applyTargets([])`: `commit` mirrors the
+   * single-select flow into `targets`, and `clearTargets` is a full-instance
+   * wipe that takes that mirrored row with it. Leaving `target` set would
+   * leave the trigger naming a contact, and the single-select destination
+   * sentence (gated on `targets.length === 0`) claiming a destination, with
+   * nothing behind either in the database.
+   *
+   * No `bumpEpoch()`, unlike `handleNewChat`: the per-contact deal caches it
+   * clears are keyed by contact id and stay correct here - which deals a
+   * contact has does not change because that contact stopped being a target -
+   * and bumping would discard any lookup in flight for no gain.
+   */
+  const clearAllTargets = useCallback(async (): Promise<void> => {
+    selectionToken.current += 1;
+    const token = selectionToken.current;
+    try {
+      const instance = await resolveInstance();
+      await clearTargets(instance);
+      if (token !== selectionToken.current) return;
+      setTarget(null);
+      targetRef.current = null;
+      applyTargets([]);
+    } catch (err) {
+      // UI state left ALONE on failure: the targets still on screen are still
+      // the ones the database will push to, which is the honest thing to show.
+      const report = reportOdooError(err, "clear targets");
+      toast.error(`${report.code}: ${report.message}`);
+    }
+  }, [applyTargets, resolveInstance]);
+
   const onToggleColleague = useCallback(
     async (contact: OdooContact) => {
       const nextValue = !contact.isColleague;
@@ -682,7 +1197,37 @@ export function useOdooTarget({
     onOpenSettings,
     open: isPickerOpen,
     onOpenChange: setIsPickerOpen,
+    // Task 12: the flat multi-target list, named identically to this hook's
+    // own return fields below (targets/addTarget/removeTarget/expandContact/
+    // opportunitiesFor/errorFor/retryOpportunitiesFor) so this is a straight
+    // pass-through with no renaming to keep straight. onAddTarget/
+    // onRemoveTarget carry the "on" prefix ContactPickerProps already uses
+    // for every other click-triggered action (onSelect, onRefresh, ...);
+    // opportunitiesFor/errorFor keep the hook's own bare names since they are
+    // getters, not handlers, matching how `opportunities`/`opportunityError`
+    // above are plain data rather than "on"-prefixed too.
+    targets,
+    onAddTarget: addTarget,
+    onRemoveTarget: removeTarget,
+    onClearTargets: clearAllTargets,
+    onExpandContact: expandContact,
+    opportunitiesFor,
+    errorFor,
+    onRetryContactOpportunities: retryOpportunitiesFor,
   };
 
-  return { targetRef, pickerProps };
+  return {
+    targetRef,
+    targetsRef,
+    pickerProps,
+    targets,
+    targetCount: targets.length,
+    addTarget,
+    removeTarget,
+    clearAllTargets,
+    expandContact,
+    opportunitiesFor,
+    errorFor,
+    retryOpportunitiesFor,
+  };
 }

@@ -2,13 +2,22 @@ import { useState } from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import {
   ContactPicker,
   LEAD_SEARCH_DEBOUNCE_MS,
   MAX_RENDERED_ROWS,
   type ContactPickerProps,
 } from "@/pages/app/components/completion/ContactPicker";
-import type { OdooContact, OdooOpportunity } from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget } from "@/types";
+
+// Task 12 fix round 1: AddToggle's add branch now surfaces a `{ok:false,
+// reason:"cap"}` return via toast.error - the same mock shape
+// useCompletion.meeting-assist.test.tsx and useOdooTarget.test.tsx already
+// use for the same library.
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
 
 function contact(over: Partial<OdooContact> = {}): OdooContact {
   return {
@@ -48,8 +57,13 @@ function Harness(props: ContactPickerProps) {
   );
 }
 
-function setup(over: Partial<ContactPickerProps> = {}) {
-  const props: ContactPickerProps = {
+// Split from setup() (Task 12) so a test that only needs a props object -
+// never rendering it itself, e.g. the trigger-label test below, which renders
+// a bare <ContactPicker> instead of the open-state Harness - can build one
+// without a second, redundant render leaving two matching trigger buttons in
+// the document.
+function defaultProps(over: Partial<ContactPickerProps> = {}): ContactPickerProps {
+  return {
     contactId: null,
     leadId: null,
     leadName: null,
@@ -70,20 +84,37 @@ function setup(over: Partial<ContactPickerProps> = {}) {
     onRetryOpportunities: vi.fn(async () => {}),
     onRefresh: vi.fn(async () => {}),
     onOpenSettings: vi.fn(),
+    // Task 12: the flat multi-target list and its own per-contact deal
+    // lookup, mirroring useOdooTarget.ts's UseOdooTargetReturn field names
+    // exactly (verified against source) so wiring pickerProps there is a
+    // straight pass-through.
+    targets: [],
+    onAddTarget: vi.fn(async () => ({ ok: true })),
+    onRemoveTarget: vi.fn(async () => {}),
+    onClearTargets: vi.fn(async () => {}),
+    onExpandContact: vi.fn(async () => {}),
+    opportunitiesFor: vi.fn(() => null),
+    errorFor: vi.fn(() => null),
+    onRetryContactOpportunities: vi.fn(async () => {}),
     open: false,
     onOpenChange: vi.fn(),
     ...over,
   };
+}
+
+function setup(over: Partial<ContactPickerProps> = {}) {
+  const props = defaultProps(over);
   render(<Harness {...props} />);
   return props;
 }
 
 
-// The chip is the popover TRIGGER and lives outside the popover content, so a
-// name query is safe here - the rows do not exist until it is clicked. Inside
-// the popover, always query rows by testid; see the note in Step 3.
+// The trigger's own label is no longer a fixed set of strings once `targets`
+// is non-empty (Task 12: it shows "<first target> + N more"), so a name-based
+// query on it is no longer stable. Queried by testid instead - the rows still
+// do not exist until it is clicked.
 async function openPopover() {
-  await userEvent.click(screen.getByRole("button", { name: /who are you meeting|ada/i }));
+  await userEvent.click(screen.getByTestId("contact-picker-trigger"));
 }
 
 /** The select button inside a row, addressed without touching the star. */
@@ -606,7 +637,13 @@ describe("the lead search", () => {
   it("lists a result and hands the whole record up when it is picked", async () => {
     const props = setup({ leadResults: [lead()] });
     await openPopover();
-    await userEvent.click(screen.getByRole("button", { name: /partnership with ECS/i }));
+    // Task 12: each row also carries an add/remove toggle whose own
+    // accessible name ("add Partnership with ECS") contains the lead's name
+    // too, so a bare name query now matches two buttons. Scoped to the row
+    // and the SELECT button's fixed position (index 0, same convention as
+    // rowButton() above) instead.
+    const row = screen.getByTestId("lead-search-row");
+    await userEvent.click(within(row).getAllByRole("button")[0]);
     // The whole record, not an id: the caller has to persist the NAME beside
     // the id, and take the lead's own partner as the contact when it has one.
     expect(props.onSelectLead).toHaveBeenCalledWith(lead());
@@ -615,13 +652,14 @@ describe("the lead search", () => {
   it("names an unlinked result by its own contact details, under its kind", async () => {
     setup({ leadResults: [lead(), lead({ id: 91, name: "Solar tender", type: "opportunity" })] });
     await openPopover();
-    const row = screen.getByRole("button", { name: /partnership with ECS/i });
-    expect(row.textContent).toContain("Christian Carron");
-    expect(row.textContent).toMatch(/^Lead ·/);
+    const rows = screen.getAllByTestId("lead-search-row");
+    const ecsRow = within(rows[0]).getAllByRole("button")[0];
+    expect(ecsRow.textContent).toContain("Christian Carron");
+    expect(ecsRow.textContent).toMatch(/^Lead ·/);
     // A search hits both kinds, so the results have to tell them apart too.
-    expect(
-      screen.getByRole("button", { name: /solar tender/i }).textContent
-    ).toMatch(/^Opportunity ·/);
+    expect(within(rows[1]).getAllByRole("button")[0].textContent).toMatch(
+      /^Opportunity ·/
+    );
   });
 
   // Three states that must never look alike: nothing typed, a search that
@@ -658,13 +696,15 @@ describe("the lead search", () => {
       leadResults: [lead(), lead({ id: 91, name: "Solar tender" })],
     });
     await openPopover();
-    expect(screen.getByRole("button", { name: /solar tender/i })).toHaveAttribute(
+    const rows = screen.getAllByTestId("lead-search-row");
+    expect(within(rows[1]).getAllByRole("button")[0]).toHaveAttribute(
       "aria-pressed",
       "true"
     );
-    expect(
-      screen.getByRole("button", { name: /partnership with ECS/i })
-    ).toHaveAttribute("aria-pressed", "false");
+    expect(within(rows[0]).getAllByRole("button")[0]).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
   });
 
   // Live results arrive later than the offline contact filter, and this list
@@ -768,21 +808,7 @@ describe("the popover open state", () => {
     const onOpenChange = vi.fn();
     render(
       <ContactPicker
-        {...{
-          contactId: null,
-          leadId: null,
-          contactName: null,
-          cache: { kind: "ready", contacts: [contact()], lastError: null },
-          opportunities: null,
-          opportunityError: null,
-          isLookingUp: false,
-          onSelect: vi.fn(async () => {}),
-          onSelectOpportunity: vi.fn(async () => {}),
-          onToggleColleague: vi.fn(async () => {}),
-          onRetryOpportunities: vi.fn(async () => {}),
-          onRefresh: vi.fn(async () => {}),
-          onOpenSettings: vi.fn(),
-        }}
+        {...defaultProps()}
         open={false}
         onOpenChange={onOpenChange}
       />
@@ -790,5 +816,352 @@ describe("the popover open state", () => {
     await openPopover();
     expect(onOpenChange).toHaveBeenCalledWith(true);
     expect(screen.queryByPlaceholderText(/search/i)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Task 12: the flat multi-target list. `contactId`/`leadId`/`opportunities`
+ * above are the single-select flow's own primitives, untouched by anything
+ * below - this describe block drives exclusively off `targets`, mirroring
+ * `useOdooTarget.ts`'s own separation between `target` and `targets`.
+ */
+describe("logging to several records", () => {
+  // Named to match the fixtures useOdooTarget.test.tsx's own "Task 11: the
+  // multi-target list" block already uses (christian id 1, bentley id 2), so
+  // a reader who has seen one recognises the other.
+  const christian = contact({ id: 1, name: "Christian Carron" });
+  const bentleyAS = contact({ id: 2, name: "Bentley AS" });
+  const colleague = contact({ id: 3, name: "Colleague Cole", isColleague: true });
+
+  let nextTargetId = 1000;
+  function t(name: string, model: SelectedTarget["model"] = "res.partner"): SelectedTarget {
+    nextTargetId += 1;
+    return { model, resId: nextTargetId, name };
+  }
+
+  // Five ALREADY-selected targets, deliberately not overlapping bentleyAS.id
+  // (2) or christian.id (1) - the cap tests need "Bentley AS" to still be
+  // addable-but-blocked, not already-added.
+  const fiveTargets: SelectedTarget[] = [1, 2, 3, 4, 5].map((n) => ({
+    model: "res.partner",
+    resId: 100 + n,
+    name: `Existing ${n}`,
+  }));
+
+  // Reactive on top of the plain open-state Harness above: `onExpandContact`
+  // is a spy in defaultProps() (it does no actual lookup), so this is the
+  // thing that makes `opportunitiesFor` actually start returning data after
+  // an expand click resolves - mirroring what useOdooTarget.ts's own
+  // rowCache/setRowCache does for real, just held in local component state
+  // instead of the hook.
+  function ExpandHarness({
+    lookups,
+    ...props
+  }: ContactPickerProps & { lookups: Record<number, OdooOpportunity[]> }) {
+    const [open, setOpen] = useState(props.open);
+    const [resolved, setResolved] = useState<Record<number, OdooOpportunity[]>>({});
+    return (
+      <ContactPicker
+        {...props}
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          props.onOpenChange(next);
+        }}
+        onExpandContact={async (contactId) => {
+          await props.onExpandContact(contactId);
+          if (contactId in lookups) {
+            setResolved((prev) => ({ ...prev, [contactId]: lookups[contactId] }));
+          }
+        }}
+        opportunitiesFor={(contactId) => resolved[contactId] ?? props.opportunitiesFor(contactId)}
+      />
+    );
+  }
+
+  it("shows the count in the trigger line", () => {
+    const props = defaultProps({ targets: [t("Christian Carron"), t("B"), t("C")] });
+    render(<ContactPicker {...props} />);
+    expect(
+      screen.getByRole("button", { name: /Christian Carron \+ 2 more/ })
+    ).toBeVisible();
+  });
+
+  it("adds a deal as its own line, not attached to the contact", async () => {
+    const deal: OdooOpportunity = {
+      id: 90,
+      name: "Partnership with ECS",
+      type: "lead",
+      stageName: "New",
+      partnerId: null,
+      partnerName: null,
+      contactName: "Christian Carron",
+      email: "cc@ecs.example",
+    };
+    const props = defaultProps({
+      cache: { kind: "ready", contacts: [christian], lastError: null },
+    });
+    render(<ExpandHarness {...props} lookups={{ [christian.id]: [deal] }} />);
+    await openPopover();
+    await userEvent.click(screen.getByRole("button", { name: /expand Christian Carron/i }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /add Partnership with ECS/i })
+    );
+    expect(props.onAddTarget).toHaveBeenCalledWith({
+      model: "crm.lead",
+      resId: 90,
+      name: "Partnership with ECS",
+    });
+  });
+
+  it("uses aria-disabled at the cap, keeping the control focusable", async () => {
+    setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: fiveTargets,
+    });
+    await openPopover();
+    // Step 3's exact header copy, pinned - otherwise it has no coverage.
+    expect(
+      screen.getByText(/Logging to \(5\) · limit reached/)
+    ).toBeVisible();
+    const add = screen.getByRole("button", { name: /add Bentley AS/i });
+    expect(add).toHaveAttribute("aria-disabled", "true");
+    expect(add).not.toHaveAttribute("disabled");
+    add.focus();
+    expect(add).toHaveFocus();
+  });
+
+  it("removes a target when its added row is clicked again", async () => {
+    const props = setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: [{ model: "res.partner", resId: bentleyAS.id, name: "Bentley AS" }],
+    });
+    await openPopover();
+    // Proves the toggle actually flips both ways and that onRemoveTarget is
+    // called with the hook's real two-positional-argument shape
+    // (removeTarget(model, resId), confirmed against useOdooTarget.ts) rather
+    // than the single-object shape onAddTarget takes.
+    await userEvent.click(screen.getByRole("button", { name: /added Bentley AS/i }));
+    expect(props.onRemoveTarget).toHaveBeenCalledWith("res.partner", bentleyAS.id);
+  });
+
+  it("keeps native disabled on an archived contact", async () => {
+    const archived = contact({ id: 5, name: "Archived Person", active: false });
+    setup({ cache: { kind: "ready", contacts: [archived], lastError: null } });
+    await openPopover();
+    expect(rowButton()).toBeDisabled();
+    // The add-toggle is a NEW control on the same row and must be statically
+    // disabled the same way, for the same reason (Step 4): an archived
+    // contact cannot become a target either.
+    expect(screen.getByRole("button", { name: /add Archived Person/i })).toBeDisabled();
+  });
+
+  // Final review, Important 5: `SelectedTarget` carries `model`, not `type`
+  // ("lead" vs "opportunity") - a crm.lead target loses that distinction the
+  // moment it is flattened into `targets`, so naming one over the other here
+  // would be a guess about the record this meeting is about to be written to.
+  // Neutral wording, matching `targetRecord`'s own single-select sentence
+  // (this file's "still names the lead when the list cannot identify it").
+  it("pluralises the destination sentence without guessing a crm.lead's kind", async () => {
+    setup({
+      targets: [
+        t("Christian Carron", "res.partner"),
+        t("Partnership with ECS", "crm.lead"),
+        t("Bentley AS"),
+      ],
+    });
+    await openPopover();
+    expect(
+      screen.getByText(
+        /logged on 3 records: Christian Carron, the lead or opportunity Partnership with ECS, and Bentley AS\./
+      )
+    ).toBeVisible();
+  });
+
+  // Final review, Important 5, the broken string it hid: `nameForTarget`'s
+  // own crm.lead fallback ("Lead or opportunity #123") used to be prefixed
+  // with "the lead ", producing "the lead Lead or opportunity #123" for an
+  // unnamed target. Not reachable through this component's own UI (every
+  // `+ add` click supplies a real name), so built directly the way a
+  // rehydrated target with no name would arrive.
+  it("does not double-name an unnamed crm.lead target in the destination sentence", async () => {
+    setup({ targets: [{ model: "crm.lead", resId: 123, name: null }] });
+    await openPopover();
+    expect(
+      screen.getByText(
+        "This meeting will be logged on 1 record: the lead or opportunity you picked earlier (#123)."
+      )
+    ).toBeVisible();
+    // The specific broken string this finding names, gone: `nameForTarget`'s
+    // own placeholder ("Lead or opportunity #123") still names the TRIGGER
+    // button for a single unnamed target - only the doubled "the lead
+    // Lead or opportunity #123" inside the sentence is the defect.
+    expect(screen.queryByText(/the lead Lead or opportunity #123/)).not.toBeInTheDocument();
+  });
+
+  // Final review, Important 4: `commit` mirrors every single-select into
+  // `targets`, and `addTarget` never clears the single-select state - so both
+  // this legacy block's own gate (contactId/leadId set) and the flat list's
+  // gate (targets.length > 0) are true at once after a single-select, and the
+  // two sentences can contradict each other (one contact vs a record count,
+  // "the lead X" vs "the opportunity X"). Reproduced directly with both sets
+  // of props supplied together, rather than by driving the picker through the
+  // click sequence useOdooTarget owns - this component alone must not render
+  // two contradicting sentences no matter how the props got that way.
+  it("renders only one destination sentence once the flat list holds anything", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Christian Carron",
+      leadId: null,
+      targets: [t("Christian Carron", "res.partner")],
+    });
+    await openPopover();
+
+    expect(screen.getAllByText(/This meeting will be logged on/)).toHaveLength(1);
+    expect(screen.queryByText(/'s contact record\./)).not.toBeInTheDocument();
+  });
+
+  it("renders static text for a colleague's expanded row, with no dead control", async () => {
+    setup({ cache: { kind: "ready", contacts: [colleague], lastError: null } });
+    await openPopover();
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+    expect(screen.queryByRole("button", { name: /look up/i })).toBeNull();
+    // The row is still a valid target (only the crm.lead LOOKUP is skipped
+    // for a colleague, not the contact itself - onSelect commits a colleague
+    // exactly like anyone else), so its own add-toggle must survive.
+    expect(
+      screen.getByRole("button", { name: /add Colleague Cole/i })
+    ).toBeInTheDocument();
+  });
+
+  // Fix round 1, Important: AddToggle used to discard onAdd's result
+  // entirely. `atCap` is computed once per render from `targets.length`, so
+  // two `+ add` clicks fired before either resolves both read
+  // `blocked === false` and both call onAdd - the loser legitimately loses
+  // the race against addSelectedTarget's own database-side count check, and
+  // used to leave the user with no add and no explanation. Reproduced here
+  // WITHOUT the client-side cap (4 targets, `atCap` false) so the click goes
+  // through un-blocked and the rejection can only be caught by awaiting
+  // onAddTarget's own return value.
+  it("tells the user when an add is rejected at the cap, not just silently doing nothing", async () => {
+    vi.mocked(toast.error).mockClear();
+    const props = setup({
+      cache: { kind: "ready", contacts: [bentleyAS], lastError: null },
+      targets: fiveTargets.slice(0, 4),
+      onAddTarget: vi.fn(async () => ({ ok: false, reason: "cap" as const })),
+    });
+    await openPopover();
+    const add = screen.getByRole("button", { name: /add Bentley AS/i });
+    // Not blocked client-side - `atCap` reads false with only 4 targets.
+    expect(add).not.toHaveAttribute("aria-disabled");
+    await userEvent.click(add);
+    expect(props.onAddTarget).toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  // Fix round 1, Minor: the lead-search row's own AddToggle had no test at
+  // all - added on Step 4's prose alone. model is "crm.lead" regardless of
+  // whether the result is a "lead" or an "opportunity" (both live in the
+  // same crm.lead table; SelectedTarget carries no `type`).
+  it("adds a lead-search result as its own target", async () => {
+    const searchLead: OdooOpportunity = {
+      id: 90,
+      name: "Partnership with ECS",
+      type: "lead",
+      stageName: "New",
+      partnerId: null,
+      partnerName: null,
+      contactName: "Christian Carron",
+      email: "cc@ecs.example",
+    };
+    const props = setup({ leadResults: [searchLead] });
+    await openPopover();
+    const row = screen.getByTestId("lead-search-row");
+    await userEvent.click(
+      within(row).getByRole("button", { name: /add Partnership with ECS/i })
+    );
+    expect(props.onAddTarget).toHaveBeenCalledWith({
+      model: "crm.lead",
+      resId: 90,
+      name: "Partnership with ECS",
+    });
+  });
+});
+
+
+describe("clearing every destination", () => {
+  const three: SelectedTarget[] = [
+    { model: "res.partner", resId: 201, name: "Christian Carron" },
+    { model: "res.partner", resId: 202, name: "Bentley AS" },
+    { model: "crm.lead", resId: 203, name: "Partnership with ECS" },
+  ];
+
+  it("offers no clear control when nothing is selected", async () => {
+    setup({ targets: [] });
+    await openPopover();
+    expect(screen.queryByTestId("logging-to-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clear-targets")).not.toBeInTheDocument();
+  });
+
+  // The whole point of the feature: one click must NOT be enough. This is the
+  // assertion that would fail if the confirmation were ever refactored away.
+  it("does not clear on the first click - it arms a warning", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    expect(props.onClearTargets).not.toHaveBeenCalled();
+    expect(screen.getByText(/Clear all destinations\?/i)).toBeVisible();
+  });
+
+  it("names the count and disclaims already-queued meetings", async () => {
+    setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    const warning = screen.getByTestId("logging-to-section");
+    expect(warning).toHaveTextContent("Removes all 3 destinations.");
+    expect(warning).toHaveTextContent(/Meetings already queued are unaffected/i);
+  });
+
+  it("swaps the destination list out rather than pushing it down", async () => {
+    setup({ targets: three });
+    await openPopover();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    // The popover lives in a 600x54 window grown only by a flag-driven resize
+    // effect, so the warning REPLACES the summary; both on screen at once
+    // would push content past the bottom edge.
+    expect(screen.getByTestId("logging-to-section")).not.toHaveTextContent(/Logging to \(3\)/);
+  });
+
+  it("clears once the warning is confirmed", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    await userEvent.click(screen.getByTestId("confirm-clear-targets"));
+    expect(props.onClearTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancelling leaves both the targets and the handler alone", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(props.onClearTargets).not.toHaveBeenCalled();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
+  });
+
+  // ContactPicker stays MOUNTED when the popover closes, so an armed warning
+  // would otherwise be the first thing on screen the next time it opens -
+  // with no memory of having asked for it.
+  it("disarms when the popover is closed and reopened", async () => {
+    setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    expect(screen.getByText(/Clear all destinations\?/i)).toBeVisible();
+
+    await userEvent.keyboard("{Escape}");
+    await openPopover();
+    expect(screen.queryByText(/Clear all destinations\?/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
   });
 });

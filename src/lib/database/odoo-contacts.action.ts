@@ -1,4 +1,5 @@
-import type { DbOdooContact, OdooContact, ResolvedTarget } from "@/types";
+import type { DbOdooContact, OdooContact, SelectedTarget, SelectedTargets } from "@/types";
+import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import { getDatabase } from "./config";
 
 /**
@@ -248,69 +249,107 @@ export async function purgeOtherInstances(instance: string): Promise<void> {
   // surfaces the stranded rows under their own wording.
   await db.execute("DELETE FROM odoo_contacts WHERE instance <> ?", [instance]);
   await db.execute("DELETE FROM odoo_sync_state WHERE instance <> ?", [instance]);
-  await db.execute("DELETE FROM odoo_selected_target WHERE instance <> ?", [instance]);
+  await db.execute("DELETE FROM odoo_selected_targets WHERE instance <> ?", [instance]);
 }
 
 /**
- * The selected target is a SINGLETON row, id = 'current'.
+ * The selected target used to be a SINGLETON row, id = 'current'.
  *
- * It is deliberately not keyed on a conversation id: currentConversationId
- * lives inside useCompletion (useCompletion.ts:118), starts null, is minted
- * lazily on the first submit, is reset by "new chat", and dies with the very
- * <Completion /> unmount this row exists to survive.
+ * `saveTarget`/`loadTarget` used to live here, writing and reading it. Both
+ * are deleted as of Task 11: `useOdooTarget` was their last consumer, and
+ * migration 14 (below) drops `odoo_selected_target` outright, so calling
+ * either against a post-migration database threw "no such table". The single
+ * flow now persists through `addSelectedTarget`/`removeSelectedTarget` below,
+ * coalescing the single-select flow's own in-memory shape down to one
+ * `SelectedTarget` row.
  *
- * contact_id and lead_id are always written TOGETHER. Patching one without the
- * other is how a target ends up naming two different customers.
+ * `clearTarget` (singular) is deleted as of Task 14: it queried the same
+ * dropped `odoo_selected_target` table, so any surviving call would have
+ * thrown "no such table" - it had no callers left even before this task.
  */
-export async function saveTarget(
-  target: ResolvedTarget & { instance: string; conversationId: string | null },
-  at: number
-): Promise<void> {
-  const db = await getDatabase();
-  await db.execute(
-    `INSERT INTO odoo_selected_target (id, instance, contact_id, lead_id, lead_name, conversation_id, selected_at)
-     VALUES ('current', ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       instance        = excluded.instance,
-       contact_id      = excluded.contact_id,
-       lead_id         = excluded.lead_id,
-       lead_name       = excluded.lead_name,
-       conversation_id = excluded.conversation_id,
-       selected_at     = excluded.selected_at`,
-    [
-      target.instance,
-      target.contactId,
-      target.leadId,
-      target.leadName,
-      target.conversationId,
-      at,
-    ]
-  );
-}
 
-export async function loadTarget(instance: string): Promise<ResolvedTarget | null> {
+/**
+ * Migration 14's replacement for the singleton above: up to MAX_TARGETS rows
+ * per instance instead of one. `useOdooTarget`'s single flow persists through
+ * this too now (Task 11), coalescing down to one row per selection.
+ *
+ * Every statement is exported, alongside QUEUE_SQL in meeting-log.action.ts,
+ * so the no-BEGIN/no-COMMIT scan in meeting-log.action.test.ts can see it too.
+ */
+export const SELECTED_TARGET_SQL = {
+  // Counts every OTHER row for the instance. Re-adding a target already in
+  // the set must update it, not count against the cap - the NOT (...) excludes
+  // the row being written from its own count.
+  countOthers: `SELECT COUNT(*) AS n FROM odoo_selected_targets
+      WHERE instance = ? AND NOT (model = ? AND res_id = ?)`,
+
+  upsert: `INSERT INTO odoo_selected_targets
+       (instance, model, res_id, name, conversation_id, selected_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(instance, model, res_id) DO UPDATE SET
+       name = excluded.name,
+       conversation_id = excluded.conversation_id,
+       selected_at = excluded.selected_at`,
+
+  list: `SELECT model, res_id, name FROM odoo_selected_targets
+      WHERE instance = ? ORDER BY selected_at`,
+
+  remove: `DELETE FROM odoo_selected_targets WHERE instance = ? AND model = ? AND res_id = ?`,
+
+  clear: `DELETE FROM odoo_selected_targets WHERE instance = ?`,
+};
+
+export async function loadTargets(instance: string): Promise<SelectedTargets> {
   const db = await getDatabase();
-  const rows = await db.select<
-    { contact_id: number | null; lead_id: number | null; lead_name: string | null }[]
-  >(
-    "SELECT contact_id, lead_id, lead_name FROM odoo_selected_target WHERE id = 'current' AND instance = ?",
+  const rows = await db.select<{ model: SelectedTarget["model"]; res_id: number; name: string | null }[]>(
+    SELECTED_TARGET_SQL.list,
     [instance]
   );
-  const row = rows[0];
-  if (!row) return null;
-  // A row with NEITHER id is not a target. It cannot be written by this app -
-  // `commit` clears instead - but reading it back as a target would hand slice
-  // 2 something it can only file as unassigned while the picker claims a
-  // selection.
-  if (row.contact_id === null && row.lead_id === null) return null;
-  return {
-    contactId: row.contact_id,
-    leadId: row.lead_id,
-    leadName: row.lead_name,
-  };
+  return rows.map((row) => ({ model: row.model, resId: row.res_id, name: row.name }));
 }
 
-export async function clearTarget(): Promise<void> {
+/**
+ * The cap is enforced HERE, by rejecting. It is NOT enforced by truncating -
+ * that would silently drop whichever target the caller thought it just added.
+ * Overflow at enqueue/retarget (meeting-log.action.ts, Tasks 6/7) instead caps
+ * to five and records the error on the row, because throwing there would
+ * surface out of `trigger`, whose catch calls skipUnwritten() and advances the
+ * watermark - destroying the whole meeting rather than one target.
+ */
+export async function addSelectedTarget(
+  instance: string,
+  t: SelectedTarget,
+  conversationId: string | null,
+  at: number
+): Promise<{ ok: boolean; reason?: "cap" }> {
   const db = await getDatabase();
-  await db.execute("DELETE FROM odoo_selected_target WHERE id = 'current'");
+  const existing = await db.select<{ n: number }[]>(SELECTED_TARGET_SQL.countOthers, [
+    instance,
+    t.model,
+    t.resId,
+  ]);
+  if ((existing[0]?.n ?? 0) >= MAX_TARGETS) return { ok: false, reason: "cap" };
+  await db.execute(SELECTED_TARGET_SQL.upsert, [
+    instance,
+    t.model,
+    t.resId,
+    t.name,
+    conversationId,
+    at,
+  ]);
+  return { ok: true };
+}
+
+export async function removeSelectedTarget(
+  instance: string,
+  model: string,
+  resId: number
+): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(SELECTED_TARGET_SQL.remove, [instance, model, resId]);
+}
+
+export async function clearTargets(instance: string): Promise<void> {
+  const db = await getDatabase();
+  await db.execute(SELECTED_TARGET_SQL.clear, [instance]);
 }

@@ -1,9 +1,13 @@
+import { getDatabase } from "@/lib/database/config";
 import {
   assignQueueRow,
   deleteQueueRow,
   deleteTerminalQueueRow,
+  deriveRowStatus,
   getQueueRow,
+  listTargets,
   pruneTranscripts,
+  QUEUE_SQL,
   retryQueueRow,
 } from "@/lib/database/meeting-log.action";
 import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
@@ -11,7 +15,7 @@ import {
   instanceFingerprint,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { SummarizationResult } from "@/types";
+import type { SelectedTargets, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
 import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
@@ -35,6 +39,13 @@ export type ActionOutcome =
   | { kind: "no-op" }
   | { kind: "still-sending" }
   | { kind: "push-failed" }
+  /**
+   * At least one target reached Odoo and at least one did not, read from the
+   * AFTER-STATE of every target (not the delta this pass produced) - a retry
+   * that re-faults the same target must still report the targets that were
+   * already sent, not fall through to `push-failed`'s "nothing was sent" copy.
+   */
+  | { kind: "push-partial"; sentCount: number; failedCount: number; pendingCount: number }
   | { kind: "conflict" }
   | { kind: "moved-unknown" }
   /**
@@ -200,32 +211,75 @@ async function runAction(
     await pushQueuedRow(fresh, {
       client,
       instance,
-      now: Date.now(),
+      now: () => Date.now(),
       summarize,
     });
 
     const after = await getQueueRow(id);
     if (!after) return { kind: "moved-unknown" };
 
-    // attempts unchanged => the claim never happened => the push never reached
-    // Odoo. One of pushQueuedRow's four silent early exits.
-    if (after.attempts === fresh.attempts) return { kind: "no-op" };
     // Claimed, but left `sending` with no error: the terminal status write
     // itself failed and the inner catch deliberately wrote nothing. An
-    // attempts-only comparison would call this success.
+    // attempts-only comparison would call this success. Checked BEFORE the
+    // no-op test below, on `after.status` alone - unaffected by the re-read
+    // that test now runs first.
     if (after.status === "sending") return { kind: "still-sending" };
 
-    // THE PUSH CAN ALSO HAVE FAILED, and neither check above sees it.
-    // pushQueuedRow's post-wire catch calls releaseRowToPending (retryable) or
-    // failRow (deterministic); BOTH already bumped `attempts` via the claim and
-    // BOTH leave a non-`sending` status with last_error written
-    // (meeting-log-push.ts:282-305). Without this gate such a row falls through
-    // to `degraded` or `ok` - and one network outage produces exactly that
-    // pairing, because it kills the Odoo call AND the AI call, and
+    // THE PUSH CAN ALSO HAVE FAILED, and no check above sees it.
+    // pushQueuedRow records every per-target outcome on the children, then
+    // derives the parent's status from them (deriveRowStatus, called once
+    // after the per-target loop) - so a retryable failure leaves the row
+    // `pending` and a deterministic one leaves it `failed`, both already
+    // bumped `attempts` via the claim and both with last_error written from
+    // whichever target carried a reason. Without a gate here such a row falls
+    // through to `degraded` or `ok` - and one network outage produces exactly
+    // that pairing, because it kills the Odoo call AND the AI call, and
     // generateMeetingLogSummary swallows its throw and returns null. The page
     // would then print "Sent - but the note shows the transcript's first
     // lines" directly beside the row's own freshly written last_error, telling
     // the user a note is live on a customer's record when nothing reached Odoo.
+    //
+    // But the PARENT'S status alone is not the whole story on a multi-target
+    // row: a pass that lands notes on two of three targets derives `pending`
+    // or `failed` on the parent (deriveRowStatus's precedence, rule 1/2), so a
+    // blanket `after.status !== "sent"` here would tell the user NOTHING was
+    // sent while two notes are already live on two customers' chatter - the
+    // falsehood this task exists to remove. Re-read the children (the parent
+    // alone cannot distinguish "0 sent" from "2 of 3 sent") and classify on
+    // THEIR after-state, not the delta this pass produced: a retry that
+    // re-faults the SAME target must still report the targets that were
+    // already sent from an earlier pass, not fall through to push-failed's
+    // "nothing was sent" copy just because this pass changed nothing.
+    //
+    // Final whole-branch review, Important 2: this re-read runs BEFORE the
+    // no-op check below now, not after it. A row with an earlier-pass `sent`
+    // target and a `failed` sibling derives `failed` on the parent, so Retry
+    // is offered; the CAS resets the failed child to `pending` and succeeds,
+    // but `pushQueuedRow` can still take a PRE-CLAIM early exit (`listTargets`
+    // throwing, or `claimRow` losing) that touches neither `attempts` nor any
+    // child row. `after.attempts === fresh.attempts` was then true with the
+    // earlier `sent` target still live on the customer's chatter, and the
+    // no-op check below - reached first in the old order - reported "nothing
+    // reached Odoo" beside it. A pre-claim exit can only ever leave the
+    // children exactly as the CAS left them (some `sent`, the rest `pending`,
+    // never `failed`), so `sentCount > 0` here is reachable ONLY through that
+    // scenario or through a genuine partial send further down this function -
+    // never through a row that truly sent nothing, which still falls through
+    // to `no-op` unchanged below.
+    const targetsAfter = await listTargets(id);
+    const sentCount = targetsAfter.filter((t) => t.status === "sent").length;
+    const failedCount = targetsAfter.filter((t) => t.status === "failed").length;
+    const pendingCount = targetsAfter.filter((t) => t.status === "pending").length;
+    if (sentCount > 0 && (failedCount > 0 || pendingCount > 0)) {
+      return { kind: "push-partial", sentCount, failedCount, pendingCount };
+    }
+
+    // attempts unchanged => the claim never happened => the push never reached
+    // Odoo. One of pushQueuedRow's four silent early exits. Reached only when
+    // the push-partial check above did not already classify this row - i.e.
+    // `sentCount` is 0, so nothing from any earlier pass is live either.
+    if (after.attempts === fresh.attempts) return { kind: "no-op" };
+
     if (after.status !== "sent") return { kind: "push-failed" };
 
     if (didSummarize() === false) return { kind: "degraded" };
@@ -237,14 +291,160 @@ async function runAction(
   }
 }
 
+/**
+ * The whole-row retry's CAS. Flips the parent first via the real `retryRow`
+ * predicate (`status IN ('failed','pending')`); only on a successful flip does
+ * it reset every FAILED child to `pending` - never a `sent` one. Gating the
+ * child writes on the parent CAS, rather than doing them first, means a
+ * refused retry (the row moved to `sending` underneath the caller) leaves the
+ * children untouched instead of resetting them out from under a push that may
+ * already be mid-flight.
+ *
+ * The reset is the load-bearing half regardless of order: pushQueuedRow's loop
+ * only picks up targets with status = 'pending' (meeting-log-push.ts:326), so
+ * flipping only the parent leaves every failed target untouched and the next
+ * push a no-op against exactly what the user clicked Retry to fix.
+ */
+async function retryRowAndFailedChildren(id: string): Promise<boolean> {
+  if (!(await retryQueueRow(id))) return false;
+  const db = await getDatabase();
+  for (const t of await listTargets(id)) {
+    if (t.status === "failed") {
+      await db.execute(QUEUE_SQL.targetToPending, [null, null, t.id]);
+    }
+  }
+  return true;
+}
+
 export function retryMeetingLog(id: string, deps: ActionDeps): Promise<ActionOutcome> {
-  return runAction(id, () => retryQueueRow(id), deps);
+  return runAction(id, () => retryRowAndFailedChildren(id), deps);
+}
+
+/**
+ * What a per-target action reports. Distinct from `ActionOutcome`: neither
+ * function here ever pushes, so there is no `degraded`/`still-sending`/etc to
+ * conflate with.
+ *
+ * `conflict` means NOTHING was written - matching every other use of that
+ * kind in this codebase (`runAction`'s instance-mismatch check,
+ * `deleteMeetingLog`'s fallback). `removed-parent-stale` is a DIFFERENT
+ * claim: the target row IS gone (an irreversible DELETE already committed)
+ * and only the PARENT's derived status lost its own CAS on the way out - the
+ * parent is stale, not the removal. It self-corrects the next time anything
+ * re-derives that row (another push, another queue action). Task 13 must not
+ * render `removed-parent-stale` with `conflict`'s "this did not happen" copy.
+ */
+export type TargetActionOutcome =
+  | { kind: "ok" }
+  | { kind: "gone" }
+  | { kind: "refused" }
+  | { kind: "conflict" }
+  | { kind: "removed-parent-stale" };
+
+/**
+ * Retries ONE target on an otherwise-untouched row: resets that child to
+ * `pending` and flips the parent back to `pending` so the next sweep or push
+ * picks it up.
+ */
+export async function retryTarget(rowId: string, targetId: string): Promise<TargetActionOutcome> {
+  const target = (await listTargets(rowId)).find((t) => t.id === targetId);
+  if (!target) return { kind: "gone" };
+  // Mirror removeQueueTarget: a sent target is immutable. targetToPending's
+  // own `AND status <> 'sent'` is the backstop; this is the honest answer to
+  // the caller - a silent no-op there would tell the UI a retry happened when
+  // nothing was written.
+  if (target.status === "sent") return { kind: "refused" };
+
+  const db = await getDatabase();
+  // The child reset is the load-bearing half: pushQueuedRow's loop only picks
+  // up targets with status = 'pending' (meeting-log-push.ts:326), so flipping
+  // only the parent leaves this a no-op against the very target the button
+  // names. Written UNCONDITIONALLY, before the parent CAS below is even known
+  // to succeed - deliberate, not an oversight: unlike removeQueueTarget's
+  // DELETE, this write is idempotent and recoverable (a child already
+  // pending or failed just gets its error columns cleared again), so a
+  // parent CAS that then reports `conflict` has not made anything
+  // irreversible happen.
+  await db.execute(QUEUE_SQL.targetToPending, [null, null, targetId]);
+  // retryRow's own predicate is `WHERE id = ? AND status IN ('failed','pending')`.
+  // A row that moved to `sending` between the read above and this write
+  // matches nothing - surface that as a refusal rather than a false `ok`.
+  const res = await db.execute(QUEUE_SQL.retryRow, [rowId]);
+  if ((res.rowsAffected ?? 0) === 0) return { kind: "conflict" };
+  return { kind: "ok" };
+}
+
+/**
+ * Removes one target from a row and re-derives the parent's status from what
+ * remains - including the zero-target case, which lands on `unassigned`
+ * (`deriveRowStatus` rule 0): a row with nothing left to send should not sit
+ * in a `pending`/`failed` group implying otherwise.
+ */
+export async function removeQueueTarget(
+  rowId: string, targetId: string
+): Promise<TargetActionOutcome> {
+  const target = (await listTargets(rowId)).find((t) => t.id === targetId);
+  if (!target) return { kind: "gone" };
+  // Global Constraint: a sent target row is immutable - it is the only record
+  // that the note exists at all. `status === "sent"` alone is not the whole
+  // test: `attachmentId`/`messageId` are persisted BEFORE the terminal
+  // `targetToSent` write (meeting-log-push.ts's claim loop sets each one, then
+  // writes `sent` last), so a target whose `message_post` succeeded and whose
+  // local status write did not ends `pending` with a real note already live
+  // on the chatter - the spec designs for this case explicitly. Final review,
+  // Important 3: refusing on EITHER id being set catches that target too, on
+  // top of every genuinely `sent` one - `deleteQueueRow`'s own
+  // `NOT EXISTS (... status='sent')` gate has no way to see a target this
+  // function has already deleted.
+  if (target.status === "sent" || target.attachmentId !== null || target.messageId !== null) {
+    return { kind: "refused" };
+  }
+
+  const before = (await getQueueRow(rowId))?.status;
+  if (!before) return { kind: "gone" };
+  // A strict ALLOWLIST, not an exclusion list - this action's documented
+  // contract is that it only ever observes `pending` or `failed`. Both other
+  // reachable statuses are unsafe here, for different reasons:
+  //
+  //   - `held`: deliberately absent from DERIVE_FORBIDDEN in the DB layer.
+  //     Nothing before this function ever called deriveRowStatus with an
+  //     observed `held`; doing so would CAS the row out of `held` early,
+  //     ending the 30s undo window because a target happened to be removed
+  //     mid-hold.
+  //   - `sending`: ALSO absent from DERIVE_FORBIDDEN - the push itself must
+  //     be able to CAS out of it - so deriveRowStatus's CAS below would
+  //     MATCH an observed `sending`, not land in the zero-rows fail-safe
+  //     branch its comment describes. It would write a new status and clear
+  //     claimed_at out from under a push that can hold `sending` for up to
+  //     ~30s per target across five targets. The live push's next
+  //     restampClaim then sees 0 rows and aborts (self-correcting on its
+  //     own), but the row is now claimable by a second sweep before the
+  //     first notices - the duplicate-note race the claim mechanism exists
+  //     to prevent. `retryTarget` is only accidentally safe from this:
+  //     `retryRow`'s CAS predicate happens to exclude `sending` already.
+  //
+  // Do not narrow this back to excluding only `held`.
+  if (before !== "pending" && before !== "failed") return { kind: "refused" };
+
+  const db = await getDatabase();
+  await db.execute(QUEUE_SQL.deleteTargetById, [targetId]);
+  // The delete above is IRREVERSIBLE and already committed by this point - a
+  // lost CAS below is not "nothing happened", so it must never be reported as
+  // `conflict` (every other use of that kind in this codebase means nothing
+  // was written - see TargetActionOutcome's doc comment). The read-then-derive
+  // window is a real TOCTOU, but a fail-safe one: a row that moved between the
+  // read above and this call just leaves the PARENT's status stale until the
+  // next thing re-derives it (another push, another queue action) - report
+  // that honestly instead of claiming the removal itself failed.
+  const { changed } = await deriveRowStatus(rowId, before, Date.now());
+  if (!changed) return { kind: "removed-parent-stale" };
+  return { kind: "ok" };
 }
 
 export function assignMeetingLog(
-  id: string, contactId: number, leadId: number | null, deps: ActionDeps
+  id: string, targets: SelectedTargets, deps: ActionDeps
 ): Promise<ActionOutcome> {
-  return runAction(id, () => assignQueueRow(id, contactId, leadId), deps);
+  return runAction(id, () => assignQueueRow(id, targets), deps);
 }
 
 /** No push, ever. Delete is a status flip and nothing reaches Odoo. */

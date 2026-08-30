@@ -1,20 +1,20 @@
+import { getDatabase } from "@/lib/database/config";
 import {
   claimRow,
-  failRow,
-  markSent,
+  deriveRowStatus,
+  listTargets,
+  QUEUE_SQL,
   reclaimStaleSending,
   recordErrorOnUnsent,
-  releaseRowToPending,
   selectSweepable,
-  setAttachmentId,
-  setMessageId,
   setSummaryJson,
 } from "@/lib/database/meeting-log.action";
+import { stampLastMeeting } from "@/lib/database/odoo-contacts.action";
 import {
   instanceFingerprint,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { DbMeetingLogRow, SummarizationResult } from "@/types";
+import type { DbMeetingLogRow, MeetingLogTarget, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { OdooError, odooError, toOdooError } from "./errors";
 import {
@@ -52,7 +52,14 @@ export interface PushDeps {
    * never post to database B after a credentials edit.
    */
   instance: string;
-  now: number;
+  /**
+   * Sampled fresh on EVERY call, not once by the caller. The push loop
+   * re-stamps the parent's claim after every target it processes - a scalar
+   * clock would write the identical value on every re-stamp, making a
+   * correct once-per-target cadence indistinguishable in the database from a
+   * broken once-per-row one.
+   */
+  now: () => number;
   /** Wrapped in its own try/catch here; may reject freely. */
   summarize: (slice: TranscriptSlice) => Promise<SummarizationResult | null>;
 }
@@ -104,8 +111,6 @@ function firstId(value: XmlRpcValue): number | null {
  * abandon every later one.
  */
 export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promise<void> {
-  const { client, now } = deps;
-
   // The caller resolved the credentials ONCE and passed the fingerprint in.
   //
   // An earlier draft called requireOdooConfig() here, per row. That was both
@@ -123,25 +128,38 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
   // Before the CAS, so a mismatch moves neither status nor attempts.
   if (row.instance !== deps.instance) return;
 
-  const model = row.lead_id !== null ? "crm.lead" : "res.partner";
-  const resId = row.lead_id ?? row.contact_id;
-  if (resId === null) return; // unassigned rows are slice 3's
+  // Read the children BEFORE the claim, and decline before it when there are
+  // none - the way this push always returned before the CAS on a null resId,
+  // so a mismatch moves neither status nor attempts.
+  //
+  // Guarded like the claim's own handler just below: listTargets calls
+  // db.select, which rejects on a transient SQLITE_BUSY same as any other
+  // write, and an unguarded await here would reject pushQueuedRow itself -
+  // contradicting its own NEVER THROWS contract for a reason no worse than
+  // "the database hiccuped before any wire call happened."
+  let targets;
+  try {
+    targets = await listTargets(row.id);
+  } catch (err) {
+    console.error("[Odoo] meeting log target read failed:", err);
+    return;
+  }
+  if (targets.length === 0) {
+    // Derive before returning. deriveRowStatus is CAS'd on the observed
+    // status and safe without a claim. Returning bare would leave a `pending`
+    // zero-target row uncorrected forever - reachable, because the assign
+    // dialog can confirm an empty set and assignQueueRow([]) CASes the parent
+    // to `pending`. The push would then decline pre-claim every sweep while
+    // the row sits under "Waiting to be sent" inside countAllQueued's promise.
+    try {
+      await deriveRowStatus(row.id, row.status, deps.now());
+    } catch (err) {
+      console.warn("[meeting-log] zero-target derive failed", err);
+    }
+    return;
+  }
 
   let claimedHere = false;
-  // Set by `persist()` below. Routing on the THROW SITE, not on whether an Odoo
-  // write happened this attempt: the adopt paths and the both-ids-stored
-  // short-circuit perform local writes with no Odoo call, and a rejection there
-  // must not fail a meeting whose attachment and note are already live.
-  let persistenceFailed = false;
-  /** Any local DB write after the claim. A rejection here is never a refusal. */
-  const persist = async (write: () => Promise<void>): Promise<void> => {
-    try {
-      await write();
-    } catch (err) {
-      persistenceFailed = true;
-      throw err;
-    }
-  };
   try {
     // The CAS runs UNCONDITIONALLY, regardless of row.status. `claimed` tracks
     // pushes this process has in flight, for the stale-claim reclaim
@@ -152,7 +170,7 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
     // this one is still running, dropping the exclusion mid-push.
     // claimRow's own `WHERE status IN ('pending','held')` already refuses
     // every `sending` row, which is what actually prevents the double push.
-    if (!(await claimRow(row.id, now))) return; // someone else owns it, or it is already in flight
+    if (!(await claimRow(row.id, deps.now()))) return; // someone else owns it, or it is already in flight
     claimed.add(row.id);
     claimedHere = true;
   } catch (err) {
@@ -165,8 +183,10 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
   }
 
   try {
-    // Built ONCE, before the summarize branch, and reused for the
-    // attachment/note body below. An earlier draft built a SEPARATE, empty
+    const db = await getDatabase();
+
+    // Built ONCE, before the summarize branch, and reused for every target's
+    // attachment/note below. An earlier draft built a SEPARATE, empty
     // `{ entries: [] }` slice just for `deps.summarize` - every real
     // summarizer treats an empty transcript as nothing to summarize and
     // returns null, so the AI summary never reached Odoo and every meeting
@@ -225,93 +245,205 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
       }
     }
 
-    // ---- Step 1: the attachment. ----------------------------------------
-    let attachmentId = row.attachment_id;
+    // One attachment name, built ONCE for the whole row and reused across
+    // every target. attachmentNameFor takes the PARENT queue row's id, not a
+    // target's: it is what lets the retry search on a LATER attempt find the
+    // SAME attachment this attempt (or an earlier one) already created for
+    // that target. Cheap (string formatting), so it stays eager - and every
+    // target needs it for the search even on a pass that creates nothing.
     const name = attachmentNameFor(row.id, row.transcript_start_at);
-    if (attachmentId === null) {
+
+    // `datas` (a full base64 encode of the transcript) and `body` (the
+    // rendered note) are NOT cheap, and a pass where every target is already
+    // `sent` - or already carries both ids - makes zero wire calls that would
+    // need either. Computed lazily, on first actual use, and cached so a
+    // SECOND target needing one this same pass does not redo the work.
+    let datas: string | null = null;
+    const getDatas = (): string =>
+      (datas ??= toBase64Utf8(renderTranscript(slice.entries) || row.transcript));
+    let body: string | null = null;
+    const getBody = (): string =>
+      (body ??= buildNoteBody(summary, slice, row.meeting_started_at ?? row.transcript_start_at));
+
+    // ---- Per-target adopt-or-create helpers, closed over the row-wide -----
+    // ---- name/getDatas/getBody built just above. --------------------------
+    async function createOrAdoptAttachment(
+      target: MeetingLogTarget, attemptsBefore: number, deps: PushDeps
+    ): Promise<number> {
       if (attemptsBefore > 0) {
         // Prove absence before writing. The commit-then-timeout window means a
         // NULL id does not prove the attachment is absent.
-        const found = await client.execute("ir.attachment", "search", [
-          [["res_model", "=", model], ["res_id", "=", resId], ["name", "=", name]],
+        const found = await deps.client.execute("ir.attachment", "search", [
+          [["res_model", "=", target.model], ["res_id", "=", target.resId], ["name", "=", name]],
         ], { limit: 1 });
-        attachmentId = firstId(found);
+        const adopted = firstId(found);
+        if (adopted !== null) return adopted;
       }
-      if (attachmentId === null) {
-        attachmentId = expectInt(
-          await client.execute("ir.attachment", "create", [
-            {
-              name,
-              res_model: model,
-              res_id: resId,
-              datas: toBase64Utf8(renderTranscript(slice.entries) || row.transcript),
-            },
-          ]),
-          "attachment id"
-        );
-      }
-      await persist(() => setAttachmentId(row.id, attachmentId as number));
+      return expectInt(
+        await deps.client.execute("ir.attachment", "create", [
+          { name, res_model: target.model, res_id: target.resId, datas: getDatas() },
+        ]),
+        "attachment id"
+      );
     }
 
-    // ---- Step 2: the note. ----------------------------------------------
-    if (row.message_id === null) {
-      let messageId: number | null = null;
+    async function postOrAdoptMessage(
+      target: MeetingLogTarget, attachmentId: number, attemptsBefore: number, deps: PushDeps
+    ): Promise<number> {
       if (attemptsBefore > 0) {
-        const found = await client.execute("mail.message", "search", [
+        const found = await deps.client.execute("mail.message", "search", [
           [
-            ["model", "=", model],
-            ["res_id", "=", resId],
+            ["model", "=", target.model],
+            ["res_id", "=", target.resId],
             ["attachment_ids", "in", [attachmentId]],
           ],
         ], { limit: 1 });
-        messageId = firstId(found);
+        const adopted = firstId(found);
+        if (adopted !== null) return adopted;
       }
-      if (messageId === null) {
-        messageId = expectInt(
-          await client.execute(model, "message_post", [[resId]], {
-            body: buildNoteBody(summary, slice, row.meeting_started_at ?? row.transcript_start_at),
-            attachment_ids: [attachmentId],
-            // Pinned, not left to Odoo's default. The default IS an internal
-            // note today, but nothing enforces that across Odoo versions or
-            // customer-side customisations, and the failure mode if it ever
-            // flips is that every customer is emailed their own meeting
-            // transcript.
-            subtype_xmlid: "mail.mt_note",
-          }),
-          "message id"
-        );
-      }
-      await persist(() => setMessageId(row.id, messageId as number));
+      return expectInt(
+        await deps.client.execute(target.model, "message_post", [[target.resId]], {
+          body: getBody(),
+          attachment_ids: [attachmentId],
+          // Pinned, not left to Odoo's default. The default IS an internal
+          // note today, but nothing enforces that across Odoo versions or
+          // customer-side customisations, and the failure mode if it ever
+          // flips is that every customer is emailed their own meeting
+          // transcript - now on up to five records.
+          subtype_xmlid: "mail.mt_note",
+        }),
+        "message id"
+      );
     }
 
-    await persist(() => markSent(row.id, now));
-  } catch (err) {
-    const odoo = toOdooError(err);
-    const { code, text } = queueErrorText(err);
-    try {
-      // A local DB write failed after the claim. Failing the row there could
-      // strand an attachment - or a whole posted note - live on a customer
-      // record with the row marked terminal, and selectSweepable never picks up
-      // `failed`, so nothing would recover it before slice 3. A re-push is
-      // provably safe: the attachment name is deterministic, both ids are
-      // stored the moment they return, and attemptsBefore is now > 0 so both
-      // adopt-searches run.
-      //
-      // Note what this does NOT cover, deliberately: a `message_post`
-      // ODOO_FAULT after a successful ir.attachment.create still fails the row,
-      // leaving an orphan attachment. That is the right trade - the fault is
-      // deterministic and `pending` would retry it on every launch forever -
-      // and the stored attachment_id makes slice 3's manual retry
-      // non-duplicating.
-      if (persistenceFailed || isRetryable(odoo)) {
-        await releaseRowToPending(row.id, code, text);
-      } else {
-        await failRow(row.id, code, text);
+    // ---- Sequentially, one Odoo record at a time. ------------------------
+    for (const target of targets) {
+      // `!== "pending"`, NOT `=== "sent"`. Skipping only `sent` means a
+      // deterministically failed child is re-attempted on EVERY sweep of a
+      // row that still has a pending sibling - re-firing the fault forever
+      // and making retryTarget's child reset (its entire reason for
+      // existing) dead code.
+      if (target.status !== "pending") continue;
+
+      // The persist helper and its flag are re-created HERE, inside the
+      // loop. Hoisting them above it would let a persistence failure on an
+      // EARLIER target bleed into a LATER target's classification.
+      let persistenceFailed = false;
+      const persist = async (sql: string, args: unknown[]): Promise<void> => {
+        try {
+          await db.execute(sql, args);
+        } catch (err) {
+          persistenceFailed = true;
+          throw err;
+        }
+      };
+
+      try {
+        let attachmentId = target.attachmentId;
+        if (attachmentId === null) {
+          attachmentId = await createOrAdoptAttachment(target, attemptsBefore, deps);
+          await persist(QUEUE_SQL.setTargetAttachment, [attachmentId, target.id]);
+        }
+
+        let messageId = target.messageId;
+        if (messageId === null) {
+          messageId = await postOrAdoptMessage(target, attachmentId, attemptsBefore, deps);
+          await persist(QUEUE_SQL.setTargetMessage, [messageId, target.id]);
+        }
+
+        await persist(QUEUE_SQL.targetToSent, [deps.now(), target.id]);
+
+        if (target.model === "res.partner") {
+          // Never bare `void`: this is a db.execute, a transient SQLITE_BUSY
+          // rejects, and an unhandled rejection in the webview is the exact
+          // path errors.ts exists to close. Never awaited unwrapped either -
+          // it sits inside this try but outside persist(), so an awaited
+          // rejection would be read as an Odoo fault and mark a target
+          // terminal whose note is already live.
+          stampLastMeeting(deps.instance, target.resId, deps.now()).catch((err) =>
+            console.warn("[meeting-log] last_meeting_at stamp failed", err)
+          );
+        }
+      } catch (err) {
+        // toOdooError FIRST. isRetryable switches on err.code, so an
+        // unwrapped transport rejection (a fetch TypeError, an abort) hits
+        // `default: false`, is treated as deterministic, and is marked
+        // terminally failed - which selectSweepable never picks up.
+        const odoo = toOdooError(err);
+        const { code, text } = queueErrorText(err);
+
+        // Every recovery write keeps its own guard. This branch is reached
+        // when the database itself may be what is broken, so a second
+        // unguarded write here would escape the outer NEVER-THROWS contract.
+        const record = async (sql: string): Promise<void> => {
+          try {
+            await db.execute(sql, [code, text, target.id]);
+          } catch (inner) {
+            console.warn("[meeting-log] target status write failed", inner);
+          }
+        };
+
+        if (persistenceFailed) {
+          // A local write failed AFTER a wire call. This target goes
+          // pending - never failed, whatever the code says - and the pass
+          // aborts, because continuing fires wire calls whose ids the same
+          // broken database cannot store.
+          await record(QUEUE_SQL.targetToPending);
+          break;
+        }
+        if (isRetryable(odoo)) {
+          await record(QUEUE_SQL.targetToPending);
+          break;
+        }
+        await record(QUEUE_SQL.targetToFailed);
+        // No `break` - a deterministic fault on one target must not strand
+        // the rest.
+      } finally {
+        // In a finally, so a DETERMINISTIC failure refreshes the claim too.
+        // Three consecutive slow faults (a 30s-timeout client returning an
+        // access refusal) would otherwise cross STALE_CLAIM_MS with zero
+        // re-stamps, and the other window would reclaim mid-flight - the
+        // duplicate note this exists to stop.
+        //
+        // Guarded, and a throw is treated exactly like zero rows affected.
+        // This finally is reached on the persistenceFailed path too, where
+        // the database is precisely what is broken - so an unguarded write
+        // here is the statement most likely to fail, and it would escape a
+        // function whose contract is NEVER THROWS.
+        let claimHeld = false;
+        try {
+          const stamp = await db.execute(QUEUE_SQL.restampClaim, [deps.now(), row.id]);
+          claimHeld = (stamp.rowsAffected ?? 0) > 0;
+        } catch (err) {
+          console.warn("[meeting-log] claim re-stamp failed", err);
+        }
+        if (!claimHeld) {
+          // The claim is gone or unprovable. RETURN, not break: the terminal
+          // derive below CASes on 'sending' and would match the NEW owner's
+          // row, overwriting their state mid-push. A `return` in a `finally`
+          // overrides a pending `break`, which is exactly what is wanted:
+          // deliberate override, not an accidental swallow. The only
+          // exception that can be pending here comes from the internally
+          // guarded `catch` a few lines up, so nothing escapes unnoticed.
+          // eslint-disable-next-line no-unsafe-finally -- see comment above
+          return;
+        }
       }
-    } catch {
-      // The status write itself failed. Do not attempt a second write when the
-      // database is what is broken - the stale-`sending` reclaim recovers it.
     }
+
+    try {
+      await deriveRowStatus(row.id, "sending", deps.now());
+    } catch (err) {
+      console.warn("[meeting-log] terminal derive failed", err);
+    }
+  } catch (err) {
+    // Per-target failures are already recorded on the children above, and
+    // the parent's status comes from deriveRowStatus - never written here.
+    // Reaching this catch at all means something outside the per-target loop
+    // broke (getDatabase(), the summarize wall, or the terminal derive's own
+    // try already swallowed its failure) - there is nothing more to do than
+    // log it.
+    console.warn("[meeting-log] push failed", err);
   } finally {
     if (claimedHere) claimed.delete(row.id);
   }
@@ -387,11 +519,12 @@ export async function runMeetingLogSweep(
       // pushQueuedRow never throws, but the loop is defensive anyway: a row
       // failure must never abandon the rows behind it.
       //
-      // Date.now() PER ROW, not one stamp for the run: against a slow Odoo (30s
-      // per call, client.ts:21) a shared stamp would write claimed_at/sent_at
-      // values minutes in the past for the later rows.
+      // `now` is a FRESH read on every call, not one stamp for the run:
+      // against a slow Odoo (up to 30s per call, client.ts:21, times up to
+      // five targets) a shared stamp would write claimed_at/sent_at values
+      // minutes in the past for the later rows and later targets alike.
       try {
-        await pushQueuedRow(row, { client, instance, now: Date.now(), summarize });
+        await pushQueuedRow(row, { client, instance, now: () => Date.now(), summarize });
         pushed += 1;
       } catch {
         // already recorded on the row

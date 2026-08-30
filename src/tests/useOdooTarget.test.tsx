@@ -1,4 +1,5 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const windowLabel = vi.hoisted(() => ({ value: "main" }));
@@ -57,9 +58,13 @@ const action = vi.hoisted(() => ({
   getSyncState: vi.fn(async () => null as unknown),
   setColleague: vi.fn(async () => {}),
   stampLastMeeting: vi.fn(async () => {}),
-  saveTarget: vi.fn(async () => {}),
-  loadTarget: vi.fn(async () => null as unknown),
-  clearTarget: vi.fn(async () => {}),
+  // Task 11: the shared multi-target table, which `useOdooTarget`'s single
+  // flow now persists through too - `saveTarget`/`loadTarget` queried
+  // `odoo_selected_target`, a table migration 14 drops.
+  loadTargets: vi.fn(async () => [] as unknown[]),
+  addSelectedTarget: vi.fn(async () => ({ ok: true }) as { ok: boolean; reason?: "cap" }),
+  removeSelectedTarget: vi.fn(async () => {}),
+  clearTargets: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/database/odoo-contacts.action", () => action);
 
@@ -88,7 +93,7 @@ vi.mock("@/lib/storage/odoo-config.storage", () => ({
 }));
 
 import { useOdooTarget } from "@/hooks/useOdooTarget";
-import type { OdooContact } from "@/types";
+import type { OdooContact, OdooOpportunity, SelectedTarget } from "@/types";
 
 const ada: OdooContact = {
   id: 1,
@@ -112,9 +117,11 @@ beforeEach(() => {
   listeners.clear();
   windowLabel.value = "main";
   action.listContacts.mockResolvedValue([ada, colleague]);
-  action.loadTarget.mockResolvedValue(null);
+  action.loadTargets.mockResolvedValue([]);
   action.getSyncState.mockResolvedValue({ last_sync_at: 1000, last_error_code: null });
-  action.saveTarget.mockResolvedValue(undefined);
+  action.addSelectedTarget.mockResolvedValue({ ok: true });
+  action.removeSelectedTarget.mockResolvedValue(undefined);
+  action.clearTargets.mockResolvedValue(undefined);
   action.stampLastMeeting.mockResolvedValue(undefined);
   action.setColleague.mockResolvedValue(undefined);
   odoo.fetchOpportunities.mockResolvedValue([]);
@@ -129,9 +136,18 @@ beforeEach(() => {
   });
 });
 
-function mount(meetingAssistMode = false, isPickerOpen = false, setIsPickerOpen = vi.fn()) {
+// Task 12 bridge: useOdooTarget gained a required setTargetCount param.
+// A no-op default here keeps every pre-existing call through mount()/opts
+// (below) working without touching what each of those tests actually means
+// to exercise.
+function mount(
+  meetingAssistMode = false,
+  isPickerOpen = false,
+  setIsPickerOpen = vi.fn(),
+  setTargetCount = vi.fn()
+) {
   return renderHook(() =>
-    useOdooTarget({ meetingAssistMode, isPickerOpen, setIsPickerOpen })
+    useOdooTarget({ meetingAssistMode, isPickerOpen, setIsPickerOpen, setTargetCount })
   );
 }
 
@@ -339,7 +355,7 @@ describe("the app-start sync", () => {
 describe("persisting a selection", () => {
   // instanceRef is filled by the async mount effect, and the picker is usable
   // before it resolves. Writing a null instance violates
-  // odoo_selected_target.instance TEXT NOT NULL - thrown out of a click
+  // odoo_selected_targets.instance TEXT NOT NULL - thrown out of a click
   // handler, i.e. an unhandled rejection.
   it("never writes a null instance, even mid-rehydrate", async () => {
     let releaseInstance: (v: string) => void = () => {};
@@ -355,17 +371,18 @@ describe("persisting a selection", () => {
     await act(async () => {
       releaseInstance("http://h:8069|odoo");
     });
-    await waitFor(() => expect(action.saveTarget).toHaveBeenCalled());
-    expect(action.saveTarget.mock.calls[0][0]).toMatchObject({
-      instance: "http://h:8069|odoo",
-    });
+    await waitFor(() => expect(action.addSelectedTarget).toHaveBeenCalled());
+    // instance is the FIRST positional arg of addSelectedTarget(instance, t,
+    // conversationId, at) - not an object property, unlike the old saveTarget.
+    expect(action.addSelectedTarget.mock.calls[0][0]).toBe("http://h:8069|odoo");
   });
 
-  // A rejected saveTarget with the selection already in state leaves targetRef
-  // claiming something that was never written - so the next remount loses it
-  // silently, which is exactly what the persisted singleton row exists to stop.
+  // A rejected addSelectedTarget with the selection already in state leaves
+  // targetRef claiming something that was never written - so the next
+  // remount loses it silently, which is exactly what the persisted row
+  // exists to stop.
   it("does not leave targetRef claiming an unpersisted selection", async () => {
-    action.saveTarget.mockRejectedValue(new Error("database is locked"));
+    action.addSelectedTarget.mockRejectedValue(new Error("database is locked"));
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
     await act(async () => {
@@ -389,16 +406,17 @@ describe("persisting a selection", () => {
 
   // Added during self-review: pin the exact scenario the hook's own doc
   // comment on commit()'s rejection path describes, and which no other test
-  // here exercises. Pick Ada (token 1, saveTarget hangs); pick Bea (token 2,
-  // saveTarget resolves - the row now names Bea); THEN Ada's write rejects.
-  // Without re-checking the token in the rejection path, the rollback would
-  // restore `previous` (null, captured before Ada's commit) over Bea's
-  // already-persisted selection - the picker would show nothing chosen while
-  // SQLite still holds Bea, silently reintroducing the unassigned-meeting
-  // failure through the error handling meant to prevent it.
+  // here exercises. Pick Ada (token 1, addSelectedTarget hangs); pick Bea
+  // (token 2, addSelectedTarget resolves - the row now names Bea); THEN
+  // Ada's write rejects. Without re-checking the token in the rejection
+  // path, the rollback would restore `previous` (null, captured before
+  // Ada's commit) over Bea's already-persisted selection - the picker would
+  // show nothing chosen while SQLite still holds Bea, silently
+  // reintroducing the unassigned-meeting failure through the error handling
+  // meant to prevent it.
   it("does not let a stale commit's rejection roll back a newer, already-persisted selection", async () => {
     let rejectAdaSave: (err: unknown) => void = () => {};
-    action.saveTarget.mockImplementationOnce(
+    action.addSelectedTarget.mockImplementationOnce(
       () =>
         new Promise((_resolve, reject) => {
           rejectAdaSave = reject;
@@ -408,10 +426,10 @@ describe("persisting a selection", () => {
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
 
     await act(async () => {
-      result.current.pickerProps.onSelect(ada); // token 1, saveTarget pending
+      result.current.pickerProps.onSelect(ada); // token 1, addSelectedTarget pending
     });
     await act(async () => {
-      await result.current.pickerProps.onSelect(colleague); // token 2, saveTarget resolves
+      await result.current.pickerProps.onSelect(colleague); // token 2, addSelectedTarget resolves
     });
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
 
@@ -420,6 +438,121 @@ describe("persisting a selection", () => {
     });
 
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
+  });
+
+  // Fix round 1, finding 3: the add and the compensating remove are two
+  // independent writes now, not one atomic UPSERT the way the dropped
+  // saveTarget was. Picking Bea persists Bea's row; if the compensating
+  // remove of Ada's earlier row then rejects, the OLD code just reverted to
+  // Ada in memory while the database still held BOTH rows with Bea's the
+  // more recent - resurrecting, on the very next rehydrate, the exact
+  // selection this toast just told the user had failed. The re-read must
+  // reflect what is ACTUALLY there (Bea), not the pre-commit guess (Ada).
+  it("reflects the database, not a guess, when the compensating remove rejects after a successful add", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.pickerProps.onSelect(ada); // token 1, persists Ada's row
+    });
+    expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
+
+    action.removeSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+    // What actually persisted: Bea's add succeeded (default mock), Ada's
+    // compensating remove is the one that just rejected - so BOTH rows are
+    // still there, Bea's the more recent by selected_at.
+    action.loadTargets.mockResolvedValueOnce([
+      { model: "res.partner", resId: 1, name: null },
+      { model: "res.partner", resId: 2, name: null },
+    ]);
+
+    await act(async () => {
+      await result.current.pickerProps.onSelect(colleague); // token 2, Bea
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // NOT Ada (the pre-commit guess) and NOT null - the database's own most
+    // recent row, which is what actually happened.
+    expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
+  });
+
+  // Fix round 2: the re-read above runs after TWO more awaits
+  // (resolveInstance, loadTargets) past commit's own token check on catch
+  // entry - a newer commit can supersede this one in that window. If the
+  // re-read ALSO fails, round 1's code fell through to setTarget(previous)
+  // and a toast unconditionally, even though `previous` (Ada) was already
+  // stale before this commit even began, and a NEWER selection (Carla) has
+  // since persisted cleanly - silently reverting the UI over it.
+  it("leaves no trace when a superseded commit's own re-read also fails", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    // Pick Ada - persists cleanly, nothing to compensate for yet.
+    await act(async () => {
+      await result.current.pickerProps.onSelect(ada);
+    });
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 1,
+      leadId: null,
+      leadName: null,
+    });
+
+    // Pick Bea (token 2): the add succeeds (default mock), but the
+    // compensating remove of Ada's row is held open so Carla's pick below
+    // can land while this commit is still in flight.
+    let rejectRemove: (err: unknown) => void = () => {};
+    action.removeSelectedTarget.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRemove = reject;
+        })
+    );
+    let beaSelect!: Promise<void>;
+    await act(async () => {
+      beaSelect = result.current.pickerProps.onSelect(colleague);
+    });
+    await waitFor(() => expect(action.removeSelectedTarget).toHaveBeenCalled());
+
+    // The remove is about to reject, driving commit into its catch - whose
+    // own re-read is ALSO held open, so it does not settle before Carla's
+    // pick below lands.
+    let rejectReread: (err: unknown) => void = () => {};
+    action.loadTargets.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectReread = reject;
+        })
+    );
+    await act(async () => {
+      rejectRemove(new Error("database is locked"));
+    });
+    await waitFor(() => expect(action.loadTargets).toHaveBeenCalledTimes(2));
+
+    // Carla (token 3) persists cleanly while Bea's commit is still stuck in
+    // its catch, waiting on the re-read.
+    const carla: OdooContact = { ...colleague, id: 3, name: "Carla" };
+    await act(async () => {
+      await result.current.pickerProps.onSelect(carla);
+    });
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 3,
+      leadId: null,
+      leadName: null,
+    });
+
+    // NOW Bea's re-read fails too. Token 2 is superseded by token 3 - this
+    // must leave no trace at all: no reverted selection, no toast.
+    await act(async () => {
+      rejectReread(new Error("database is unreachable"));
+      await beaSelect;
+    });
+
+    expect(result.current.targetRef.current).toEqual({
+      contactId: 3,
+      leadId: null,
+      leadName: null,
+    });
+    expect(toastError).not.toHaveBeenCalled();
   });
 });
 
@@ -479,14 +612,14 @@ describe("the opportunity panel", () => {
     await act(async () => {
       await result.current.pickerProps.onSelect(ada);
     });
-    const savesAfterSelect = action.saveTarget.mock.calls.length;
+    const savesAfterSelect = action.addSelectedTarget.mock.calls.length;
 
     odoo.fetchOpportunities.mockResolvedValue([]);
     await act(async () => {
       await result.current.pickerProps.onRetryOpportunities();
     });
     expect(odoo.fetchOpportunities).toHaveBeenCalledTimes(2);
-    expect(action.saveTarget.mock.calls).toHaveLength(savesAfterSelect);
+    expect(action.addSelectedTarget.mock.calls).toHaveLength(savesAfterSelect);
   });
 
   // Task 11's `opportunities === null` branch — the one that renders the Look
@@ -495,7 +628,7 @@ describe("the opportunity panel", () => {
   // the hook's contactRef is empty, so retry must fall back to the cache or the
   // button is dead on the one path it was added for.
   it("retries for a rehydrated target that was never selected in this session", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: "Ada Lovelace" }]);
     const { result } = mount();
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
     expect(result.current.pickerProps.opportunities).toBeNull();
@@ -581,21 +714,21 @@ describe("cross-window credential changes", () => {
   // subsequent onSelectOpportunity would then commit that stale contactId
   // under the NEW instance's fingerprint, writing a poisoned row.
   it("clears the in-memory target when the instance changes, matching the DB purge", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mount();
     await waitFor(() =>
       expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
     );
 
-    action.loadTarget.mockClear();
-    action.loadTarget.mockResolvedValue(null);
+    action.loadTargets.mockClear();
+    action.loadTargets.mockResolvedValue([]);
     await act(async () => {
       await emitInstanceChanged();
     });
 
     expect(result.current.targetRef.current).toBeNull();
     // Re-resolved for the NEW instance, not just cleared and left stale.
-    expect(action.loadTarget).toHaveBeenCalled();
+    expect(action.loadTargets).toHaveBeenCalled();
   });
 
   it("triages a still-unconfigured instance rather than rejecting", async () => {
@@ -635,8 +768,10 @@ describe("selecting", () => {
     // The user picked a person. If an unmount or a meeting-ended landed here,
     // waiting for the second click would file the meeting as unassigned.
     expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null });
-    expect(action.saveTarget).toHaveBeenCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: null, leadName: null }),
+    expect(action.addSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      { model: "res.partner", resId: 1, name: null },
+      null,
       expect.any(Number)
     );
     await act(async () => resolveLookup([]));
@@ -770,8 +905,10 @@ describe("selecting", () => {
       // which is exactly the case where there is nothing to name it from.
       leadName: null,
     });
-    expect(action.saveTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({ contactId: 1, leadId: 7, leadName: null }),
+    expect(action.addSelectedTarget).toHaveBeenLastCalledWith(
+      "http://h:8069|odoo",
+      { model: "crm.lead", resId: 7, name: null },
+      null,
       expect.any(Number)
     );
   });
@@ -780,18 +917,24 @@ describe("selecting", () => {
 describe("rehydrate", () => {
   // <Completion /> can unmount mid-call: the setup gate at
   // src/pages/app/index.tsx:84 is reactive, not latched.
-  it("restores the target from the singleton row on mount", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 4, leadId: 8, leadName: null });
+  //
+  // The row rehydrates from `odoo_selected_targets` now, coalesced to at
+  // most one row per selection (Task 11) - a lead-only row never recorded
+  // the partner it was picked under, so a rehydrated `crm.lead` target
+  // always comes back with `contactId: null`. That loss is the same one
+  // migration 14's own backfill already accepts.
+  it("restores the target from the most recent row on mount", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "crm.lead", resId: 8, name: null }]);
     const { result } = mount();
     await waitFor(() =>
-      expect(result.current.targetRef.current).toEqual({ contactId: 4, leadId: 8, leadName: null })
+      expect(result.current.targetRef.current).toEqual({ contactId: null, leadId: 8, leadName: null })
     );
   });
 
   // A mid-call remount is exactly when the user is likeliest to re-pick.
   it("does not clobber a selection committed during the rehydrate round trip", async () => {
     let resolveLoad: (v: unknown) => void = () => {};
-    action.loadTarget.mockReturnValue(
+    action.loadTargets.mockReturnValue(
       new Promise((resolve) => {
         resolveLoad = resolve;
       })
@@ -800,7 +943,7 @@ describe("rehydrate", () => {
     await act(async () => {
       result.current.pickerProps.onSelect(colleague);
     });
-    await act(async () => resolveLoad({ contactId: 4, leadId: 8, leadName: null }));
+    await act(async () => resolveLoad([{ model: "crm.lead", resId: 8, name: null }]));
     expect(result.current.targetRef.current).toEqual({ contactId: 2, leadId: null, leadName: null });
   });
 });
@@ -836,7 +979,13 @@ describe("a sync that archives the selected partner", () => {
     });
 
     await waitFor(() => expect(result.current.targetRef.current).toBeNull());
-    expect(action.clearTarget).toHaveBeenCalled();
+    // The single flow's coalesced row is removed individually, not a full
+    // clearTargets - Task 11's per-target archival rule.
+    expect(action.removeSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      "res.partner",
+      1
+    );
   });
 });
 
@@ -845,8 +994,8 @@ describe("a sync that archives the selected partner", () => {
 // (the newConversation request event, a deleted-conversation fallback, and
 // Input.tsx's keepEngaged close button) funnels through.
 describe("starting a new chat", () => {
-  it("clears both the in-memory target and the persisted row", async () => {
-    action.loadTarget.mockResolvedValue({ contactId: 1, leadId: null, leadName: null });
+  it("clears both the in-memory target and the persisted rows", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
     const { result } = mount();
     await waitFor(() =>
       expect(result.current.targetRef.current).toEqual({ contactId: 1, leadId: null, leadName: null })
@@ -859,7 +1008,48 @@ describe("starting a new chat", () => {
     });
 
     expect(result.current.targetRef.current).toBeNull();
-    expect(action.clearTarget).toHaveBeenCalled();
+    expect(result.current.targets).toEqual([]);
+    expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo");
+  });
+});
+
+/**
+ * Task 14: `useMeetingLog`'s `targetRef` param now reads `targetsRef`
+ * (`targets`, not `target`). Without `commit` mirroring its own add/remove
+ * into `targets`, a pick made through this single flow would show the
+ * contact's name in the trigger while `targetsRef.current` stayed `[]` -
+ * the meeting would then enqueue `unassigned` despite the UI naming a
+ * contact, exactly the "UI asserts what the log contradicts" failure this
+ * feature exists to remove.
+ */
+describe("Task 14: the single-select flow also feeds the flat list", () => {
+  it("mirrors a pick into targets/targetsRef, so useMeetingLog's list sees it too", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada);
+    });
+    await waitFor(() =>
+      expect(result.current.targets).toEqual([{ model: "res.partner", resId: 1, name: null }])
+    );
+    expect(result.current.targetsRef.current).toEqual([
+      { model: "res.partner", resId: 1, name: null },
+    ]);
+  });
+
+  it("removes the earlier pick from targets when a different contact is chosen", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await act(async () => {
+      result.current.pickerProps.onSelect(ada);
+    });
+    await waitFor(() => expect(result.current.targets).toHaveLength(1));
+    await act(async () => {
+      result.current.pickerProps.onSelect(colleague);
+    });
+    await waitFor(() =>
+      expect(result.current.targets).toEqual([{ model: "res.partner", resId: 2, name: null }])
+    );
   });
 });
 
@@ -872,7 +1062,13 @@ describe("the picker's open state", () => {
   it("passes the caller's isPickerOpen/setIsPickerOpen straight through to pickerProps", async () => {
     const setIsPickerOpen = vi.fn();
     const { result, rerender } = renderHook(
-      ({ open }) => useOdooTarget({ meetingAssistMode: false, isPickerOpen: open, setIsPickerOpen }),
+      ({ open }) =>
+        useOdooTarget({
+          meetingAssistMode: false,
+          isPickerOpen: open,
+          setIsPickerOpen,
+          setTargetCount: vi.fn(), // Task 12 bridge: see mount()'s comment above.
+        }),
       { initialProps: { open: false } }
     );
     await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
@@ -983,8 +1179,10 @@ describe("the lead search", () => {
       // <Completion /> remount.
       leadName: "Partnership with ECS",
     });
-    expect(action.saveTarget).toHaveBeenLastCalledWith(
-      expect.objectContaining({ contactId: null, leadId: 90, leadName: "Partnership with ECS" }),
+    expect(action.addSelectedTarget).toHaveBeenLastCalledWith(
+      "http://h:8069|odoo",
+      { model: "crm.lead", resId: 90, name: "Partnership with ECS" },
+      null,
       expect.any(Number)
     );
   });
@@ -1017,5 +1215,483 @@ describe("the lead search", () => {
     });
     expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
     expect(result.current.pickerProps.opportunities).toBeNull();
+  });
+});
+
+/**
+ * Task 11: the list of targets and the per-contact "Logging to" disclosure
+ * cache, both new hook-return fields - `targets`, `targetCount`, `addTarget`,
+ * `removeTarget`, `expandContact`, `opportunitiesFor`, `errorFor`,
+ * `retryOpportunitiesFor`. Nothing here touches `pickerProps`/`targetRef`;
+ * that suite above is untouched except for the persistence-mock retargeting.
+ */
+describe("Task 11: the multi-target list", () => {
+  const christian: OdooContact = { ...ada, id: 1, name: "Christian Carron" };
+  const bentley: OdooContact = { ...ada, id: 2, name: "Bentley AS" };
+  const colleagueContact: OdooContact = {
+    ...ada,
+    id: 99,
+    name: "Colleague",
+    isColleague: true,
+  };
+  const COLLEAGUE_ID = colleagueContact.id;
+
+  // Task 12 bridge: see mount()'s comment above.
+  const opts = {
+    meetingAssistMode: false,
+    isPickerOpen: false,
+    setIsPickerOpen: vi.fn(),
+    setTargetCount: vi.fn(),
+  };
+
+  function opp(id: number, name: string): OdooOpportunity {
+    return {
+      id,
+      name,
+      type: "opportunity",
+      stageName: null,
+      partnerId: null,
+      partnerName: null,
+      contactName: null,
+      email: null,
+    };
+  }
+
+  // Keyed by the CONTACT id fetchOpportunities was called for, so two
+  // concurrent lookups can be settled independently and out of order.
+  let pending: Map<number, { resolve: (v: OdooOpportunity[]) => void; reject: (e: unknown) => void }>;
+
+  beforeEach(() => {
+    action.listContacts.mockResolvedValue([christian, bentley, colleagueContact]);
+    pending = new Map();
+    odoo.fetchOpportunities.mockImplementation(
+      (_client: unknown, contact: OdooContact) =>
+        new Promise<OdooOpportunity[]>((resolve, reject) => {
+          pending.set(contact.id, { resolve, reject });
+        })
+    );
+  });
+
+  async function resolveOpportunities(contactId: number, rows: OdooOpportunity[]) {
+    const deferred = pending.get(contactId);
+    if (!deferred) throw new Error(`no pending fetchOpportunities call for contact ${contactId}`);
+    pending.delete(contactId);
+    await act(async () => {
+      deferred.resolve(rows);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  async function rejectOpportunities(contactId: number, err: unknown) {
+    const deferred = pending.get(contactId);
+    if (!deferred) throw new Error(`no pending fetchOpportunities call for contact ${contactId}`);
+    pending.delete(contactId);
+    await act(async () => {
+      deferred.reject(err);
+      await Promise.resolve().catch(() => {});
+      await Promise.resolve();
+    });
+  }
+
+  async function addTargets(
+    result: { current: ReturnType<typeof useOdooTarget> },
+    items: SelectedTarget[]
+  ) {
+    for (const t of items) {
+      await act(async () => {
+        await result.current.addTarget(t);
+      });
+    }
+  }
+
+  // Deviates from a literal transcription of the brief's snippet, which calls
+  // `archiveContactAndReload(1)` with no `result` argument: this helper needs
+  // a specific hook instance to drive `onRefresh` on, exactly like
+  // `addTargets` above already takes one.
+  async function archiveContactAndReload(
+    result: { current: ReturnType<typeof useOdooTarget> },
+    contactId: number
+  ) {
+    action.listContacts.mockResolvedValue(
+      [christian, bentley, colleagueContact].map((c) =>
+        c.id === contactId ? { ...c, active: false } : c
+      )
+    );
+    await act(async () => {
+      await result.current.pickerProps.onRefresh();
+    });
+  }
+
+  /**
+   * Test-only stand-in for the "Logging to" row Task 12 builds. Renders
+   * Christian's expand control UNCONDITIONALLY, decoupled from the async
+   * cache load - `expandContact` itself still needs that cache populated to
+   * find the contact, which `cache-ready` below lets the test wait for
+   * deterministically instead of racing userEvent's own internal timing.
+   *
+   * This is the render-level harness the brief's own comment calls for: a
+   * ref-only version of the disclosure cache passes every hook-level
+   * assertion above and still leaves this button stuck on nothing - only a
+   * real render catches a `useRef` write that schedules no re-render.
+   */
+  function Harness() {
+    const odoo = useOdooTarget(opts);
+    const ready = odoo.pickerProps.cache.kind === "ready";
+    const rows = odoo.opportunitiesFor(christian.id) ?? [];
+    return (
+      <div>
+        <span data-testid="cache-ready">{String(ready)}</span>
+        <button type="button" onClick={() => void odoo.expandContact(christian.id)}>
+          {`expand ${christian.name}`}
+        </button>
+        {rows.map((o) => (
+          <button key={o.id} type="button">
+            {`add ${o.name}`}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  it("hands ContactPicker a referentially stable list at zero targets", async () => {
+    const { result, rerender } = renderHook(() => useOdooTarget(opts));
+    const first = result.current.targets;
+    // Pinned to a real, empty array up front: against a hook build that
+    // dropped the `targets` field entirely, `first` would be `undefined` and
+    // the `.toBe` below would pass vacuously (undefined === undefined) even
+    // though nothing was actually being tested. `toEqual([])` fails that
+    // build outright instead of rubber-stamping it.
+    expect(first).toEqual([]);
+    // Settled BEFORE asserting, not just captured before the mount effect's
+    // async loadTargets([]) has a chance to run - a version that allocated a
+    // fresh [] on that no-op write would only fail this once the effect has
+    // actually landed.
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    rerender();
+    // Object identity, not just deep equality: a version of applyTargets that
+    // unconditionally called setTargets(next) on the mount effect's resolved
+    // (but still-empty) array would swap in a NEW [] here, still passing
+    // toEqual([]) while breaking the no-op-write guarantee this test exists
+    // for. Verified this catches that exact regression by temporarily
+    // simplifying applyTargets to `setTargets(next)` and re-running - the
+    // test failed with "expected [] to be []" (Object.is), as intended.
+    expect(result.current.targets).toBe(first);
+  });
+
+  it("re-renders the picker when a row's lookup resolves", async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getByTestId("cache-ready")).toHaveTextContent("true"));
+    await userEvent.click(screen.getByRole("button", { name: /expand Christian Carron/i }));
+    await resolveOpportunities(1, [opp(9, "Partnership with ECS")]);
+    expect(
+      await screen.findByRole("button", { name: /add Partnership with ECS/i })
+    ).toBeVisible();
+  });
+
+  it("keys the deal lookup per contact, so adding a target does not strand an open row", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    // The async form: it flushes enough microtasks (resolveInstance,
+    // getClient's loadOdooConfig) for fetchOpportunities to actually be
+    // CALLED and its promise captured in `pending` - the sync form leaves
+    // the call sitting before its first await, and resolveOpportunities
+    // below would find nothing pending yet.
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+    await act(async () => {
+      await result.current.addTarget({ model: "res.partner", resId: 2, name: "B" });
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1); // not stuck loading
+  });
+
+  it("empties the disclosure cache when the instance changes", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1);
+
+    // Driven through the existing Tauri-event helper rather than widening
+    // UseOdooTargetReturn with a `handleInstanceChanged` field the Interfaces
+    // section does not list - the brief's literal
+    // `result.current.handleInstanceChanged()` would work too, but this is
+    // the minimal surface.
+    await act(async () => {
+      await emitInstanceChanged();
+    });
+    expect(result.current.opportunitiesFor(1)).toBeNull();
+  });
+
+  // clearAllTargets deliberately does NOT bumpEpoch(), unlike handleNewChat:
+  // which deals a contact has does not change because that contact stopped
+  // being a target, and bumping would strand a lookup already in flight.
+  it("clearing every target does not discard a deal lookup in flight", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1);
+  });
+
+  it("keys the lookup error per contact", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+      void result.current.expandContact(2);
+    });
+    await rejectOpportunities(1, new Error("boom"));
+    await resolveOpportunities(2, [opp(9, "Deal")]);
+    expect(result.current.errorFor(1)).not.toBeNull();
+    expect(result.current.errorFor(2)).toBeNull();
+  });
+
+  it("skips the lookup for a colleague", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    act(() => {
+      void result.current.expandContact(COLLEAGUE_ID);
+    });
+    expect(odoo.fetchOpportunities).not.toHaveBeenCalled();
+  });
+
+  it("drops only the archived contact's target, not the selection", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [
+      { model: "res.partner", resId: 1, name: "A" },
+      { model: "res.partner", resId: 2, name: "B" },
+    ]);
+    await archiveContactAndReload(result, 1);
+    expect(result.current.targets.map((t) => t.resId)).toEqual([2]);
+  });
+
+  it("refuses a sixth target and surfaces the cap", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(
+      result,
+      [1, 2, 3, 4, 5].map((resId) => ({
+        model: "res.partner" as const,
+        resId,
+        name: `C${resId}`,
+      }))
+    );
+    action.addSelectedTarget.mockResolvedValueOnce({ ok: false, reason: "cap" });
+    await act(async () => {
+      const r = await result.current.addTarget({ model: "res.partner", resId: 6, name: "C6" });
+      expect(r).toMatchObject({ ok: false, reason: "cap" });
+    });
+    expect(result.current.targets).toHaveLength(5);
+  });
+
+  // Fix round 1, finding 1: every other write path in this file (commit,
+  // handleNewChat, reload's archival loop) reports a failure through
+  // toast.error instead of letting it escape a click handler unhandled.
+  // addTarget/removeTarget did not - a `resolveInstance` or
+  // `addSelectedTarget` rejection just vanished, and this `await` proves it
+  // would otherwise be an unhandled rejection out of the test itself.
+  it("reports and swallows a failed add instead of leaving it invisible", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    action.addSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+
+    let r: { ok: boolean; reason?: "cap" } | undefined;
+    await act(async () => {
+      r = await result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+    });
+
+    expect(r).toEqual({ ok: false });
+    expect(toastError).toHaveBeenCalled();
+    expect(result.current.targets).toHaveLength(0);
+  });
+
+  it("reports and swallows a failed remove instead of leaving it invisible", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [{ model: "res.partner", resId: 1, name: "A" }]);
+    action.removeSelectedTarget.mockRejectedValueOnce(new Error("database is locked"));
+
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // The remove never persisted, so the in-memory list must not diverge
+    // from the database by dropping it anyway.
+    expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
+  });
+
+  // Fix round 1, finding 4 (minor): no test called removeTarget at all.
+  it("filters targets and calls removeSelectedTarget with the right arguments", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await addTargets(result, [
+      { model: "res.partner", resId: 1, name: "A" },
+      { model: "crm.lead", resId: 8, name: "Deal" },
+    ]);
+
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+
+    expect(action.removeSelectedTarget).toHaveBeenCalledWith(
+      "http://h:8069|odoo",
+      "res.partner",
+      1
+    );
+    expect(result.current.targets.map((t) => ({ model: t.model, resId: t.resId }))).toEqual([
+      { model: "crm.lead", resId: 8 },
+    ]);
+  });
+
+  // Fix round 1, finding 2: both writes below settle inside the SAME
+  // microtask flush, before any render can catch `targetsRef` up to either
+  // one - the exact window in which a post-await `targetsRef.current`
+  // snapshot goes stale. A version that derives the next array from that
+  // ref instead of from `applyTargets`'s own `prev` drops whichever add's
+  // continuation ran against the OTHER call's now-stale snapshot.
+  it("keeps both targets when two adds settle out of order", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+
+    let releaseFirst: (v: { ok: boolean }) => void = () => {};
+    let releaseSecond: (v: { ok: boolean }) => void = () => {};
+    action.addSelectedTarget
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecond = resolve;
+          })
+      );
+
+    let p1!: ReturnType<typeof result.current.addTarget>;
+    let p2!: ReturnType<typeof result.current.addTarget>;
+    // The async form: it flushes enough microtasks (resolveInstance's own
+    // await) for BOTH calls to actually reach addSelectedTarget and capture
+    // their release functions - the sync form leaves both sitting before
+    // that call, and releaseFirst/releaseSecond below would still be the
+    // no-op defaults.
+    await act(async () => {
+      p1 = result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+      p2 = result.current.addTarget({ model: "res.partner", resId: 2, name: "B" });
+    });
+
+    // The SECOND call's write settles first, and both settle together,
+    // before React gets a chance to commit a render between them.
+    await act(async () => {
+      releaseSecond({ ok: true });
+      releaseFirst({ ok: true });
+      await Promise.all([p1, p2]);
+    });
+
+    expect(result.current.targets.map((t) => t.resId).sort()).toEqual([1, 2]);
+  });
+});
+
+/**
+ * Task 12: setTargetCount is a NEW required param, not exercised by any test
+ * above (they all default it to a no-op vi.fn() bridge - see mount()'s and
+ * opts's own comments). Proven here directly so deleting the effect that
+ * calls it does not survive both of Task 12's own test files - the
+ * unkillable-mutant shape this plan has hit repeatedly when a behaviour is
+ * assumed covered transitively but never actually asserted on by name.
+ */
+describe("Task 12: setTargetCount", () => {
+  it("reports the list's size to the caller on mount and after every add/remove", async () => {
+    const setTargetCount = vi.fn();
+    action.listContacts.mockResolvedValue([]);
+    const { result } = renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: false,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount,
+      })
+    );
+    await waitFor(() => expect(setTargetCount).toHaveBeenCalledWith(0));
+
+    setTargetCount.mockClear();
+    await act(async () => {
+      await result.current.addTarget({ model: "res.partner", resId: 1, name: "A" });
+    });
+    expect(setTargetCount).toHaveBeenCalledWith(1);
+
+    setTargetCount.mockClear();
+    await act(async () => {
+      await result.current.removeTarget("res.partner", 1);
+    });
+    expect(setTargetCount).toHaveBeenCalledWith(0);
+  });
+});
+
+
+/**
+ * The user-initiated clear, reached from the picker behind a confirmation.
+ *
+ * The behaviour under test is the WRITE ORDERING, which is deliberately the
+ * inverse of `handleNewChat`'s above: `odoo_selected_targets` is what the
+ * next `assignMeetingLog` reads, so a UI emptied over a failed delete would
+ * show no destinations while the next meeting still posts a note to every
+ * record the user just asked to drop.
+ */
+describe("clearing every target at once", () => {
+  it("clears the persisted rows, the flat list and the single selection", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
+    const { result } = mount();
+    await waitFor(() =>
+      expect(result.current.targetRef.current).toEqual({
+        contactId: 1,
+        leadId: null,
+        leadName: null,
+      })
+    );
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+
+    expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo");
+    expect(result.current.targets).toEqual([]);
+    // `target` as well as `targets`: clearTargets is a full-instance wipe
+    // that takes the single-select flow's own mirrored row with it, so
+    // leaving targetRef set would leave the trigger naming a contact with
+    // nothing behind it in the database.
+    expect(result.current.targetRef.current).toBeNull();
+    expect(result.current.targetsRef.current).toEqual([]);
+  });
+
+  // The load-bearing test. A version that empties the UI first and fires
+  // clearTargets best-effort - i.e. a copy of handleNewChat - passes every
+  // other assertion in this block and fails only this one.
+  it("keeps the targets on screen when the delete fails", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
+    const { result } = mount();
+    await waitFor(() => expect(result.current.targets).toHaveLength(1));
+    action.clearTargets.mockRejectedValueOnce(new Error("database is locked"));
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // Still one target, still pushable - which is the honest state, because
+    // the row is still sitting in odoo_selected_targets.
+    expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
+    expect(result.current.targetsRef.current).toHaveLength(1);
   });
 });

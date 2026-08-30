@@ -100,4 +100,19 @@ mod tests {
             "lead-only target migration must embed migrations/odoo-lead-only-target.sql"
         );
     }
+
+    #[test]
+    fn multi_target_migration_is_version_14_and_points_at_its_own_file() {
+        let all = migrations();
+        let m = all
+            .iter()
+            .find(|m| m.description == "create_multi_target_tables")
+            .expect("multi target migration must be registered");
+        assert_eq!(m.version, 14, "multi target migration must be version 14");
+        assert_eq!(
+            m.sql,
+            include_str!("migrations/odoo-multi-target.sql"),
+            "multi target migration must embed migrations/odoo-multi-target.sql"
+        );
+    }
 }
