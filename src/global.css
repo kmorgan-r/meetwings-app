@@ -133,6 +133,22 @@
   backdrop-filter: var(--backdrop-blur, none);
 }
 
+/*
+  One popover opts OUT of the transparency slider: the Odoo contact picker.
+  It is a dense, scrollable list of customer and deal names read against
+  whatever happens to be behind the overlay window, and at any --opacity
+  below 1 those rows sit on top of moving desktop content and stop being
+  legible. Two selectors against the rule above's one, so it wins on
+  specificity among equal-importance author declarations - and var(--popover)
+  tracks light/dark on its own. backdrop-filter is switched off with it:
+  blur behind a fully opaque element is an offscreen compositing pass that
+  can never show up on screen.
+*/
+[data-slot="popover-content"].popover-opaque {
+  background-color: var(--popover) !important;
+  backdrop-filter: none;
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: rgb(from var(--muted-foreground) r g b / 0.2) transparent !important;

@@ -310,7 +310,13 @@ export const ContactPicker = memo(function ContactPicker({
           {triggerLabel}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 p-3">
+      {/*
+        `popover-opaque` opts this ONE popover out of the global transparency
+        slider - see the rule in global.css. Applied here rather than in
+        components/ui/popover.tsx so every other popover in the app keeps
+        following the user's transparency setting.
+      */}
+      <PopoverContent className="w-80 p-3 popover-opaque">
         <div className="flex flex-col gap-2">
           {targets.length > 0 && (
             <div
