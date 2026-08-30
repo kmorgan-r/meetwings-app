@@ -32,7 +32,17 @@ import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
 // nullable column lets the notice, the row and the customer's chatter disagree
 // about the same meeting.
-import { meetingDateOf, type TranscriptView } from "./components/QueueRow";
+//
+// `targetNameOf` (aliased - this file has its own row-level function of the
+// same name) is imported for the identical reason: it is the one chain that
+// resolves a single target's name (`name` -> contact cache -> placeholder),
+// and this file's own row-level resolver below reuses it rather than
+// re-deriving a second copy.
+import {
+  meetingDateOf,
+  targetNameOf as targetNameOfSingle,
+  type TranscriptView,
+} from "./components/QueueRow";
 
 /**
  * The queue page. Dashboard window only - the overlay never navigates here.
@@ -251,10 +261,34 @@ function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remo
 }
 
 /**
- * `contact_id` is set for every assigned row, including those targeting a
- * `crm.lead`, so one map serves both. A miss is NORMAL, not exceptional:
- * `purgeOtherInstances` deletes other-instance contacts on every sync, so every
- * row in the other-database group resolves to `Contact #<id>` by construction.
+ * `row.targets` first, when there are any - the target rows are the source
+ * of truth as of migration 14: `insertQueueRow` (meeting-log.action.ts)
+ * writes `contact_id`/`lead_id` as `null, null` on every row it creates.
+ * Each target's own name is resolved through the imported `targetNameOfSingle`
+ * (QueueRow.tsx's exported `targetNameOf`) - the SAME chain (`name` -> the
+ * contact cache -> a generic placeholder) the per-target list under this row
+ * already renders every target through, so the heading and that list can
+ * never again disagree about what a target is called.
+ *
+ * Final whole-branch review, Critical 1: this function used to read
+ * `contact_id`/`lead_id` unconditionally and nothing else, so it printed
+ * "No contact chosen" for every post-migration-14 row no matter how many
+ * real targets it carried - those two columns are always null on such a row
+ * by construction, while the per-target list underneath rendered the real
+ * names, so the row contradicted itself.
+ *
+ * The two-column path below is reached only as the FALLBACK now: a
+ * pre-migration-14 row has no `meeting_log_targets` children at all (an
+ * empty/absent `targets`) and real ids in `contact_id`/`lead_id` instead. It
+ * also still covers the genuine zero-target case - a row that ended
+ * `unassigned` with nothing chosen has both an empty `targets` array and
+ * null legacy columns, so "No contact chosen" is reached exactly as before.
+ *
+ * `contact_id` is set for every assigned pre-14 row, including those
+ * targeting a `crm.lead`, so one map serves both. A miss is NORMAL, not
+ * exceptional: `purgeOtherInstances` deletes other-instance contacts on every
+ * sync, so every row in the other-database group resolves to `Contact #<id>`
+ * by construction.
  *
  * The marker is NEUTRAL between the two kinds of crm.lead on purpose. The
  * queue stores `lead_id` and never its type, so this row knows the meeting is
@@ -264,6 +298,11 @@ function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remo
  * would be a guess printed beside a customer's name.
  */
 function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
+  const targets = row.targets ?? [];
+  if (targets.length > 0) {
+    const names = targets.map((t) => targetNameOfSingle(t, contacts));
+    return names.length === 1 ? names[0] : `${names[0]} + ${names.length - 1} more`;
+  }
   // A row can have a crm.lead and NO contact: a lead picked out of the search
   // has no res.partner behind it. Reading that as "No contact chosen" would
   // offer to assign a meeting that is already correctly targeted, and the id

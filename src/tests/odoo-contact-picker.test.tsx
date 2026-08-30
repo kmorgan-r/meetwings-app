@@ -955,7 +955,13 @@ describe("logging to several records", () => {
     expect(screen.getByRole("button", { name: /add Archived Person/i })).toBeDisabled();
   });
 
-  it("pluralises the destination sentence and names each record's kind", async () => {
+  // Final review, Important 5: `SelectedTarget` carries `model`, not `type`
+  // ("lead" vs "opportunity") - a crm.lead target loses that distinction the
+  // moment it is flattened into `targets`, so naming one over the other here
+  // would be a guess about the record this meeting is about to be written to.
+  // Neutral wording, matching `targetRecord`'s own single-select sentence
+  // (this file's "still names the lead when the list cannot identify it").
+  it("pluralises the destination sentence without guessing a crm.lead's kind", async () => {
     setup({
       targets: [
         t("Christian Carron", "res.partner"),
@@ -966,9 +972,52 @@ describe("logging to several records", () => {
     await openPopover();
     expect(
       screen.getByText(
-        /logged on 3 records: Christian Carron, the lead Partnership with ECS, and Bentley AS\./
+        /logged on 3 records: Christian Carron, the lead or opportunity Partnership with ECS, and Bentley AS\./
       )
     ).toBeVisible();
+  });
+
+  // Final review, Important 5, the broken string it hid: `nameForTarget`'s
+  // own crm.lead fallback ("Lead or opportunity #123") used to be prefixed
+  // with "the lead ", producing "the lead Lead or opportunity #123" for an
+  // unnamed target. Not reachable through this component's own UI (every
+  // `+ add` click supplies a real name), so built directly the way a
+  // rehydrated target with no name would arrive.
+  it("does not double-name an unnamed crm.lead target in the destination sentence", async () => {
+    setup({ targets: [{ model: "crm.lead", resId: 123, name: null }] });
+    await openPopover();
+    expect(
+      screen.getByText(
+        "This meeting will be logged on 1 record: the lead or opportunity you picked earlier (#123)."
+      )
+    ).toBeVisible();
+    // The specific broken string this finding names, gone: `nameForTarget`'s
+    // own placeholder ("Lead or opportunity #123") still names the TRIGGER
+    // button for a single unnamed target - only the doubled "the lead
+    // Lead or opportunity #123" inside the sentence is the defect.
+    expect(screen.queryByText(/the lead Lead or opportunity #123/)).not.toBeInTheDocument();
+  });
+
+  // Final review, Important 4: `commit` mirrors every single-select into
+  // `targets`, and `addTarget` never clears the single-select state - so both
+  // this legacy block's own gate (contactId/leadId set) and the flat list's
+  // gate (targets.length > 0) are true at once after a single-select, and the
+  // two sentences can contradict each other (one contact vs a record count,
+  // "the lead X" vs "the opportunity X"). Reproduced directly with both sets
+  // of props supplied together, rather than by driving the picker through the
+  // click sequence useOdooTarget owns - this component alone must not render
+  // two contradicting sentences no matter how the props got that way.
+  it("renders only one destination sentence once the flat list holds anything", async () => {
+    setup({
+      contactId: 1,
+      contactName: "Christian Carron",
+      leadId: null,
+      targets: [t("Christian Carron", "res.partner")],
+    });
+    await openPopover();
+
+    expect(screen.getAllByText(/This meeting will be logged on/)).toHaveLength(1);
+    expect(screen.queryByText(/'s contact record\./)).not.toBeInTheDocument();
   });
 
   it("renders static text for a colleague's expanded row, with no dead control", async () => {

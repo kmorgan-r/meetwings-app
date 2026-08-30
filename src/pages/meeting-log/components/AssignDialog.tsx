@@ -108,8 +108,24 @@ function nameForTarget(t: SelectedTarget): string {
   return t.model === "res.partner" ? `Contact #${t.resId}` : `Lead or opportunity #${t.resId}`;
 }
 
+/**
+ * NEUTRAL wording for a crm.lead target - `SelectedTarget` carries `model`,
+ * not `type` ("lead" vs "opportunity"), so naming one over the other here
+ * would be a guess. Matches ContactPicker.tsx's own `describeTargetForSentence`
+ * (that file's comment carries the full rationale). Final whole-branch
+ * review, Important 5: this used to say "the lead X" for every crm.lead
+ * target - a regression against e9df310 ("say Opportunity on a deal, not
+ * just Lead on a lead") - and, for an unnamed target, built a broken
+ * double-name ("the lead Lead or opportunity #123") by prefixing
+ * `nameForTarget`'s own generic-placeholder fallback. Two branches here, not
+ * a prefix onto `nameForTarget`, so that placeholder is never embedded
+ * inside this one.
+ */
 function describeTargetForSentence(t: SelectedTarget): string {
-  return t.model === "crm.lead" ? `the lead ${nameForTarget(t)}` : nameForTarget(t);
+  if (t.model !== "crm.lead") return nameForTarget(t);
+  return t.name !== null
+    ? `the lead or opportunity ${t.name}`
+    : `the lead or opportunity you picked earlier (#${t.resId})`;
 }
 
 function joinWithAnd(items: string[]): string {

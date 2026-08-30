@@ -521,8 +521,24 @@ export async function insertQueueRow(row: NewQueueRow): Promise<boolean> {
   const capped = row.targets.slice(0, MAX_TARGETS);
   const overflowed = row.targets.length > MAX_TARGETS;
 
-  // Children first. The watermark reads the parent table, so a crash here
-  // leaves the meeting un-queued and the next trigger re-slices it.
+  // Children first. The watermark reads the parent table, so this is two
+  // different outcomes depending on how the loop below stops, not one.
+  //
+  // A process death here - the crash the header and this function's own doc
+  // comment describe - leaves the meeting un-queued with an orphaned set of
+  // children and no parent: the watermark never moved, so the next trigger
+  // re-slices it, and sweepOrphanTargets reclaims the stranded children.
+  //
+  // A THROW here - e.g. a SQLITE_BUSY on child insert 3 of 5 - is a
+  // different path entirely. It escapes this function (there is no try/catch
+  // around this loop) into `trigger`'s own catch (useMeetingLog.ts), which
+  // calls skipUnwritten() and advances the skip watermark. The meeting is
+  // gone, not re-sliced: the user is truthfully told it could not be queued,
+  // and there is no later pass that revisits this transcript slice. Final
+  // whole-branch review, Important 6: this is a pre-existing failure class,
+  // not something this branch introduced, and a recovery redesign for it is
+  // out of scope here - this comment exists only to stop describing the
+  // throw path as the crash path's outcome.
   for (const t of capped) {
     await db.execute(QUEUE_SQL.insertTarget, [
       crypto.randomUUID(), row.id, t.model, t.resId, t.name, row.createdAt,

@@ -58,15 +58,27 @@ function nameForTarget(target: SelectedTarget, contacts: OdooContact[]): string 
 /**
  * `SelectedTarget` carries `model`, not `type` ("lead" vs "opportunity") - a
  * crm.lead row coalesced down from an `OdooOpportunity` loses that
- * distinction, so every crm.lead target is worded "the lead X" here
- * regardless of which one it actually is in Odoo. `kindLabel` (used
- * elsewhere in this file, where an `OdooOpportunity` with a real `type` is
- * still in hand) is not reachable for this - by the time something is a flat
+ * distinction, so naming one over the other here would be a guess about the
+ * record this meeting is about to be written to. `kindLabel` (used elsewhere
+ * in this file, where an `OdooOpportunity` with a real `type` is still in
+ * hand) is not reachable for this - by the time something is a flat
  * `SelectedTarget`, the kind is already gone.
+ *
+ * NEUTRAL wording, matching this file's own single-select `targetRecord`
+ * sentence below (`the lead or opportunity X` / `... you picked earlier
+ * (#N)`). Final whole-branch review, Important 5: this function used to say
+ * "the lead X" for every crm.lead target regardless of which one it actually
+ * is - a regression against e9df310 ("say Opportunity on a deal, not just
+ * Lead on a lead"), and, for an unnamed target, a broken double-name
+ * ("the lead Lead or opportunity #123") built by prefixing `nameForTarget`'s
+ * own generic-placeholder fallback. Two branches here, not a prefix onto
+ * `nameForTarget`, so that placeholder is never embedded inside this one.
  */
 function describeTargetForSentence(target: SelectedTarget, contacts: OdooContact[]): string {
-  const name = nameForTarget(target, contacts);
-  return target.model === "crm.lead" ? `the lead ${name}` : name;
+  if (target.model !== "crm.lead") return nameForTarget(target, contacts);
+  return target.name !== null
+    ? `the lead or opportunity ${target.name}`
+    : `the lead or opportunity you picked earlier (#${target.resId})`;
 }
 
 function joinWithAnd(items: string[]): string {
@@ -662,7 +674,20 @@ export const ContactPicker = memo(function ContactPicker({
                   </button>
                 </div>
               )}
-              <p className="text-[11px]">{`This meeting will be logged on ${targetRecord}.`}</p>
+              {/*
+                Final review, Important 4: `commit` mirrors every single-select
+                into `targets` and `addTarget` never clears the single-select
+                state, so BOTH this block's own gate (contactId/leadId set) and
+                the flat multi-target sentence's gate (targets.length > 0)
+                stay true after any single-select - the two destination
+                sentences could render at once and contradict each other. This
+                one now defers to the flat list once it holds anything: that
+                sentence (and `Logging to (N)` above it) is the one honest
+                summary once multi-select is in play.
+              */}
+              {targets.length === 0 && (
+                <p className="text-[11px]">{`This meeting will be logged on ${targetRecord}.`}</p>
+              )}
             </div>
           )}
         </div>

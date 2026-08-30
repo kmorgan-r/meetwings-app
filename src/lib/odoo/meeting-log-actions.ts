@@ -218,15 +218,14 @@ async function runAction(
     const after = await getQueueRow(id);
     if (!after) return { kind: "moved-unknown" };
 
-    // attempts unchanged => the claim never happened => the push never reached
-    // Odoo. One of pushQueuedRow's four silent early exits.
-    if (after.attempts === fresh.attempts) return { kind: "no-op" };
     // Claimed, but left `sending` with no error: the terminal status write
     // itself failed and the inner catch deliberately wrote nothing. An
-    // attempts-only comparison would call this success.
+    // attempts-only comparison would call this success. Checked BEFORE the
+    // no-op test below, on `after.status` alone - unaffected by the re-read
+    // that test now runs first.
     if (after.status === "sending") return { kind: "still-sending" };
 
-    // THE PUSH CAN ALSO HAVE FAILED, and neither check above sees it.
+    // THE PUSH CAN ALSO HAVE FAILED, and no check above sees it.
     // pushQueuedRow records every per-target outcome on the children, then
     // derives the parent's status from them (deriveRowStatus, called once
     // after the per-target loop) - so a retryable failure leaves the row
@@ -251,6 +250,22 @@ async function runAction(
     // re-faults the SAME target must still report the targets that were
     // already sent from an earlier pass, not fall through to push-failed's
     // "nothing was sent" copy just because this pass changed nothing.
+    //
+    // Final whole-branch review, Important 2: this re-read runs BEFORE the
+    // no-op check below now, not after it. A row with an earlier-pass `sent`
+    // target and a `failed` sibling derives `failed` on the parent, so Retry
+    // is offered; the CAS resets the failed child to `pending` and succeeds,
+    // but `pushQueuedRow` can still take a PRE-CLAIM early exit (`listTargets`
+    // throwing, or `claimRow` losing) that touches neither `attempts` nor any
+    // child row. `after.attempts === fresh.attempts` was then true with the
+    // earlier `sent` target still live on the customer's chatter, and the
+    // no-op check below - reached first in the old order - reported "nothing
+    // reached Odoo" beside it. A pre-claim exit can only ever leave the
+    // children exactly as the CAS left them (some `sent`, the rest `pending`,
+    // never `failed`), so `sentCount > 0` here is reachable ONLY through that
+    // scenario or through a genuine partial send further down this function -
+    // never through a row that truly sent nothing, which still falls through
+    // to `no-op` unchanged below.
     const targetsAfter = await listTargets(id);
     const sentCount = targetsAfter.filter((t) => t.status === "sent").length;
     const failedCount = targetsAfter.filter((t) => t.status === "failed").length;
@@ -258,6 +273,12 @@ async function runAction(
     if (sentCount > 0 && (failedCount > 0 || pendingCount > 0)) {
       return { kind: "push-partial", sentCount, failedCount, pendingCount };
     }
+
+    // attempts unchanged => the claim never happened => the push never reached
+    // Odoo. One of pushQueuedRow's four silent early exits. Reached only when
+    // the push-partial check above did not already classify this row - i.e.
+    // `sentCount` is 0, so nothing from any earlier pass is live either.
+    if (after.attempts === fresh.attempts) return { kind: "no-op" };
 
     if (after.status !== "sent") return { kind: "push-failed" };
 
@@ -365,8 +386,19 @@ export async function removeQueueTarget(
   const target = (await listTargets(rowId)).find((t) => t.id === targetId);
   if (!target) return { kind: "gone" };
   // Global Constraint: a sent target row is immutable - it is the only record
-  // that the note exists at all.
-  if (target.status === "sent") return { kind: "refused" };
+  // that the note exists at all. `status === "sent"` alone is not the whole
+  // test: `attachmentId`/`messageId` are persisted BEFORE the terminal
+  // `targetToSent` write (meeting-log-push.ts's claim loop sets each one, then
+  // writes `sent` last), so a target whose `message_post` succeeded and whose
+  // local status write did not ends `pending` with a real note already live
+  // on the chatter - the spec designs for this case explicitly. Final review,
+  // Important 3: refusing on EITHER id being set catches that target too, on
+  // top of every genuinely `sent` one - `deleteQueueRow`'s own
+  // `NOT EXISTS (... status='sent')` gate has no way to see a target this
+  // function has already deleted.
+  if (target.status === "sent" || target.attachmentId !== null || target.messageId !== null) {
+    return { kind: "refused" };
+  }
 
   const before = (await getQueueRow(rowId))?.status;
   if (!before) return { kind: "gone" };

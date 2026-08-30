@@ -709,6 +709,29 @@ describe("queue-page per-target actions", () => {
 
       expect((await retryMeetingLog("r1", deps)).kind).toBe("push-partial");
     });
+
+    // Final review, Important 2: distinct from the case above - THIS pass
+    // never even claims the row. `mockPush` is deliberately NOT called, so
+    // `push.pushQueuedRow` keeps the outer `beforeEach`'s default
+    // `mockResolvedValue(undefined)` - a genuine no-op that writes nothing at
+    // all, standing in for pushQueuedRow's own pre-claim early exits
+    // (`listTargets` throwing, or `claimRow` losing). `attempts` is therefore
+    // unchanged after the "push", which used to be classified `no-op`
+    // ("nothing reached Odoo") - false here, because target 1's note is
+    // already live on the customer's chatter from an earlier pass.
+    it("reports a partial send, not a no-op, when the push never even claims the row", async () => {
+      seedRow({ id: "r1", status: "failed", attempts: 1 });
+      seedTargets("r1", [
+        { resId: 1, status: "sent" },
+        { resId: 2, status: "failed", lastErrorCode: "ODOO_FAULT" },
+      ]);
+
+      const res = await retryMeetingLog("r1", deps);
+
+      expect(res).toEqual({
+        kind: "push-partial", sentCount: 1, failedCount: 0, pendingCount: 1,
+      });
+    });
   });
 
   describe("retryTarget", () => {
@@ -791,6 +814,21 @@ describe("queue-page per-target actions", () => {
     it("refuses to remove a sent target", async () => {
       seedRow({ id: "r1", status: "failed" });
       seedTargets("r1", [{ resId: 1, status: "sent" }]);
+      const t = (await listTargets("r1"))[0];
+
+      await expect(removeQueueTarget("r1", t.id)).resolves.toMatchObject({ kind: "refused" });
+      expect(await listTargets("r1")).toHaveLength(1);
+    });
+
+    // Final review, Important 3: `attachmentId`/`messageId` are persisted
+    // BEFORE the terminal `targetToSent` write (meeting-log-push.ts), so a
+    // target whose `message_post` succeeded and whose local status write did
+    // not ends `pending` - not `sent` - with a real note already live on the
+    // chatter. `status === "sent"` alone missed this target entirely; this
+    // proves the guard now also keys on the ids it left behind.
+    it("refuses to remove a pending target whose note already reached the chatter", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 1, status: "pending", messageId: 501 }]);
       const t = (await listTargets("r1"))[0];
 
       await expect(removeQueueTarget("r1", t.id)).resolves.toMatchObject({ kind: "refused" });

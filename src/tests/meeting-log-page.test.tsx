@@ -1248,6 +1248,35 @@ describe("the contact map", () => {
     expect(await screen.findByText("Ada Lovelace (lead or opportunity)")).toBeInTheDocument();
     expect(screen.queryByText("Ada Lovelace (opportunity)")).toBeNull();
   });
+
+  // Final whole-branch review, Critical 1: `insertQueueRow`
+  // (meeting-log.action.ts) writes `contact_id`/`lead_id` as `null, null` for
+  // EVERY row it creates post-migration-14 - the target rows are the source
+  // of truth now. The page's own `targetNameOf` used to read only those two
+  // dead columns, so it printed "No contact chosen" for a row like this one
+  // no matter how many real targets it carried. No fixture in this suite
+  // crossed that seam before: `row()` defaults `contact_id: 7`.
+  it("resolves the heading from a post-migration row's targets, not its null legacy columns", async () => {
+    const target: MeetingLogTarget = {
+      id: "t1", rowId: "post14", model: "res.partner", resId: 7,
+      name: "Ada Lovelace", status: "failed", attachmentId: null, messageId: null,
+      lastError: "ODOO_FAULT", lastErrorCode: "ODOO_FAULT",
+      createdAt: CREATED_AT, sentAt: null,
+    };
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "post14", status: "failed", contact_id: null, lead_id: null, targets: [target] }),
+    ]);
+    await renderPage();
+
+    const post14 = await findRow("post14");
+    // TWO matches, not one: the row's own heading AND the per-target line
+    // underneath it both say the target's real name. Buggy code (reading
+    // contact_id/lead_id, both null on a post-migration row) leaves only the
+    // per-target line saying it - the heading itself would still read "No
+    // contact chosen".
+    expect(post14.getAllByText("Ada Lovelace")).toHaveLength(2);
+    expect(post14.queryByText("No contact chosen")).toBeNull();
+  });
 });
 
 describe("a queue that cannot be read", () => {
@@ -1640,9 +1669,11 @@ describe("the assign dialog's opportunity step", () => {
   });
 
   // Leads and opportunities are one Odoo table and one write, but they are not
-  // the same thing to say out loud - and this dialog's sentence is the only
-  // place the record's kind is stated before a push that cannot be taken back.
-  it("marks lead rows and names a lead as a lead in the destination sentence", async () => {
+  // the same thing to say out loud - the ROW states the kind (`kindLabel`
+  // reads the real `type`), but the destination sentence cannot: see the
+  // test right below for why, and Final whole-branch review, Important 5 for
+  // why it must not guess "the lead X" instead of saying so neutrally.
+  it("marks lead rows in the row, though the destination sentence cannot", async () => {
     opportunities.fetchOpportunities.mockResolvedValue([
       opportunity({ id: 700, name: "Website enquiry", type: "lead", stageName: "New" }),
     ]);
@@ -1662,7 +1693,9 @@ describe("the assign dialog's opportunity step", () => {
     await userEvent.click(screen.getByRole("button", { name: /add Website enquiry/i }));
 
     expect(
-      screen.getByText("This meeting will be logged on 1 record: the lead Website enquiry.")
+      screen.getByText(
+        "This meeting will be logged on 1 record: the lead or opportunity Website enquiry."
+      )
     ).toBeInTheDocument();
   });
 
@@ -1684,12 +1717,12 @@ describe("the assign dialog's opportunity step", () => {
     // The destination SENTENCE cannot: `SelectedTarget` carries only `model`
     // ("res.partner" | "crm.lead"), never `type` ("lead" | "opportunity") -
     // a crm.lead target loses that distinction the moment it is added, the
-    // same limitation ContactPicker.tsx's own `describeTargetForSentence`
-    // documents. Every crm.lead target is worded "the lead X" regardless of
-    // which one it actually is in Odoo.
+    // same limitation `describeTargetForSentence` documents. Every crm.lead
+    // target is worded neutrally ("the lead or opportunity X"), never a
+    // guess at which one it actually is in Odoo.
     expect(
       screen.getByText(
-        "This meeting will be logged on 1 record: the lead Heat pumps for the north wing."
+        "This meeting will be logged on 1 record: the lead or opportunity Heat pumps for the north wing."
       )
     ).toBeInTheDocument();
   });
@@ -1826,10 +1859,11 @@ describe("what the assign dialog hands up", () => {
     await userEvent.click(dialog().getByRole("button", { name: "add Ada Lovelace" }));
     await userEvent.click(dialog().getByRole("button", { name: "Ada Lovelace" }));
     await userEvent.click(await dialog().findByRole("button", { name: /add Heat pumps/i }));
-    // "the lead X", not "the opportunity X" - see the destination-sentence
-    // limitation documented on the opportunity-step test above.
+    // "the lead or opportunity X", never "the opportunity X" - see the
+    // destination-sentence limitation documented on the opportunity-step
+    // test above.
     expect(
-      screen.getByText(/logged on 2 records: Ada Lovelace and the lead Heat pumps/)
+      screen.getByText(/logged on 2 records: Ada Lovelace and the lead or opportunity Heat pumps/)
     ).toBeInTheDocument();
 
     await userEvent.click(dialog().getByRole("button", { name: /added Heat pumps/i }));

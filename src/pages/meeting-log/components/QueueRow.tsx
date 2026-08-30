@@ -77,13 +77,21 @@ export function meetingDateOf(row: MeetingLogListRow): string {
  * full. A target staged through the AssignDialog now carries a real name
  * (via `AddToggle`), so this fallback chain matters most for old rows.
  *
+ * EXPORTED so index.tsx's own row-level `targetNameOf` can resolve each of
+ * `row.targets` through this identical chain instead of re-deriving it.
+ * Final whole-branch review, Critical 1: the page's copy used to read a
+ * row's heading off `contact_id`/`lead_id` alone, which `insertQueueRow`
+ * writes `null, null` for on every row post-migration-14 - so it printed
+ * "No contact chosen" no matter how many real targets the row carried. The
+ * two functions had diverged where they should have shared this chain.
+ *
  * The SAME fallback shape as ContactPicker.tsx's `nameForTarget` - that
- * file's own comment names this function as its forward reference. Kept
- * separate rather than shared: the two operate on different types
- * (`SelectedTarget` there, `MeetingLogTarget` here) in different modules with
- * different owners, and ContactPicker.tsx is outside this task's files.
+ * file's own comment names this function as its forward reference. THAT one
+ * stays separate rather than shared: it operates on a different type
+ * (`SelectedTarget`, not `MeetingLogTarget`) in a different module with a
+ * different owner, and ContactPicker.tsx is outside this task's files.
  */
-function targetNameOf(target: MeetingLogTarget, contacts: Map<number, OdooContact>): string {
+export function targetNameOf(target: MeetingLogTarget, contacts: Map<number, OdooContact>): string {
   if (target.name) return target.name;
   if (target.model === "res.partner") {
     return contacts.get(target.resId)?.name ?? `Contact #${target.resId}`;
@@ -280,8 +288,13 @@ function QueueRowInner({
           */}
           {targets.map((t) => {
             const name = targetNameOf(t, contacts);
+            // The resId, appended: `name` alone is not unique - two different
+            // people can share a display name, and this row's own targets are
+            // exactly the population where a collision costs the most, since
+            // it is what tells assistive tech (and `getByRole("group", {
+            // name })`) apart which target a Retry/Remove click reaches.
             const groupProps = targetsExpanded
-              ? { role: "group" as const, "aria-label": name }
+              ? { role: "group" as const, "aria-label": `${name} (#${t.resId})` }
               : {};
             return (
               <div key={t.id} {...groupProps} className="flex flex-wrap items-center gap-2 text-xs">
