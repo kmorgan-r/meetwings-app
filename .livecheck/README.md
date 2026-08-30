@@ -33,9 +33,11 @@ Three independent guards:
    and never touches a real customer. A scratch record's only possible follower
    is the API user itself.
 
-`.livecheck/` is also outside `tsconfig.json`'s `include: ["src"]` and is skipped
-by `eslint .` (dot-directory), so it cannot break `npm run type-check` or
-`npm run lint`.
+`.livecheck/` is also outside `tsconfig.json`'s `include: ["src"]`, and it is
+listed in `eslint.config.js`'s `ignores`, so it cannot break `npm run type-check`
+or `npm run lint`. (The eslint entry is load-bearing, not decorative: `eslint .`
+does descend into dot-directories, and `queue-poke.mjs` fails `no-undef` on
+`process`/`console` without it.)
 
 ## What it actually exercises
 

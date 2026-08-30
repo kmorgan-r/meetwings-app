@@ -17,6 +17,10 @@ export default tseslint.config(
       'build/**',
       'coverage/**',
       'src/tests/**',
+      // Live-Odoo smoke harness. Node scripts and vitest files that never ship
+      // in the bundle, run only under their own configs, and are already
+      // outside tsconfig's include: ["src"].
+      '.livecheck/**',
     ],
   },
   js.configs.recommended,
