@@ -761,9 +761,10 @@ export const useCompletion = () => {
     // In the keepEngaged close-button branch (Input.tsx), startNewConversation
     // and this function are BOTH awaited in sequence, so this dispatches a
     // second time there. That is safe, not a bug to guard against: the
-    // listener's clear is commit(null, ++token), and both setTarget(null) and
-    // clearTarget() are idempotent - a second clear of an already-null target
-    // is a harmless no-op DELETE, not a stale write.
+    // listener is useOdooTarget's handleNewChat, which bumps its own
+    // selection token and calls clearTargets(instance) - the plural,
+    // full-instance wipe, not commit() - so a second dispatch is a harmless
+    // no-op against an already-empty target list, not a stale write.
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [flushUnsavedMeetingTranscript]);
 
