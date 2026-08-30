@@ -76,9 +76,13 @@ see:
    treats a non-`Markup` `str` body as plaintext and runs `plaintext2html` on it,
    and XML-RPC can only send `str`. Probed fix: `message_post` followed by
    `mail.message.write({body})` preserves the HTML.
-2. **A deterministically failed target strands a live attachment.**
-   `ir.attachment.create` against a nonexistent `res_id` succeeds; only the
-   subsequent `message_post` faults. Nothing cleans the orphan up.
+2. **A deterministically failed target strands an attachment that can never be
+   removed through the API.** `ir.attachment.create` against a nonexistent
+   `res_id` succeeds; only the subsequent `message_post` faults. The row that
+   remains is then unreclaimable — `ir.attachment.check()` gates everything on
+   reading the referenced record, so as uid 2 `search` filters it out, `read`
+   raises `AccessError`, and `unlink` raises the same. Verified on rows 3058 and
+   3063. Removing them needs SQL on the Odoo host or an `odoo shell`.
 
 `mail.mt_note` itself checked out: `subtype_id = [2, "Note"]`, and both
 `mail.mail` and `mail.notification` came back empty — no customer was emailed.
@@ -86,12 +90,23 @@ see:
 ## Cleaning up after a run
 
 The scratch records are left in place deliberately, so they can be eyeballed in
-the Odoo UI. To remove them:
+the Odoo UI. When you are done with them:
 
-- unlink every `res.partner` and `crm.lead` whose name starts `ZZ Meetwings smoke`
-  — pass `active_test: False` in the context, or the search hides the archived ones
-- unlink orphan attachments: `ir.attachment` where `res_model = 'res.partner'`
-  and `res_id = 999999999`
+```bash
+ODOO_LIVE=1 npx vitest run --config .livecheck/vitest.cleanup.config.ts
+```
+
+`odoo-cleanup.live.ts` prints everything it matched **before** it deletes
+anything. It removes leads first (a lead can reference a partner), then the
+partners — archived ones included, via `active_test: False` — matching on the
+case-sensitive prefix `ZZ Meetwings smoke%`, and finishes by asserting there are
+no survivors. Attachments and notes on those records go with them.
+
+**It cannot remove the orphan attachments** from finding 2 above; nothing over
+XML-RPC can. `odoo-orphan-probe.live.ts` (+ `vitest.probe.config.ts`) is the tool
+that establishes this: it reads a band of ids one at a time, classifies each as
+gone / hidden / present, and attempts an unlink on every hidden one so the
+refusal is on the record.
 
 This instance serves the classic `/web#` hash URLs, not `/odoo/<model>/<id>`; the
 harness prints working links at the end of a run.
