@@ -132,6 +132,12 @@ export interface ContactPickerProps {
   // removeTarget(model, resId) exactly (verified against source) rather than
   // the single-object shape onAddTarget takes.
   onRemoveTarget: (model: SelectedTarget["model"], resId: number) => Promise<void>;
+  /**
+   * Drops EVERY destination in one action. Fired only after the inline
+   * confirmation below - the hook behind it wipes the whole instance's
+   * `odoo_selected_targets`, so it is not something a stray click may do.
+   */
+  onClearTargets: () => Promise<void>;
   /** Runs (or joins) a "Logging to" row's own per-contact deal lookup. */
   onExpandContact: (contactId: number) => Promise<void>;
   opportunitiesFor: (contactId: number) => OdooOpportunity[] | null;
@@ -173,6 +179,7 @@ export const ContactPicker = memo(function ContactPicker({
   targets,
   onAddTarget,
   onRemoveTarget,
+  onClearTargets,
   onExpandContact,
   opportunitiesFor,
   errorFor,
@@ -186,6 +193,20 @@ export const ContactPicker = memo(function ContactPicker({
   // useOdooTarget (opportunitiesFor/errorFor survive a collapse/re-expand),
   // this Set only tracks which rows currently show that cache on screen.
   const [expandedContacts, setExpandedContacts] = useState<Set<number>>(new Set());
+  /**
+   * Whether the "Clear all" confirmation is armed. A two-step swap inside the
+   * "Logging to" box rather than a <Dialog>: this popover renders into a
+   * window tauri.conf.json fixes at 600x54, grown only by useCompletion's
+   * flag-driven resize effect, and a modal portalled over that has no room
+   * and fights this popover for the focus trap. The reset below matters
+   * because ContactPicker stays MOUNTED when the popover closes - without it
+   * the armed warning would be the first thing on screen on reopen.
+   */
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  useEffect(() => {
+    if (!open || targets.length === 0) setConfirmingClear(false);
+  }, [open, targets.length]);
+
   const toggleExpand = (contactId: number) => {
     const isExpanding = !expandedContacts.has(contactId);
     setExpandedContacts((prev) => {
@@ -293,13 +314,74 @@ export const ContactPicker = memo(function ContactPicker({
         <div className="flex flex-col gap-2">
           {targets.length > 0 && (
             <div
-              className="flex flex-col gap-1 max-h-24 overflow-y-auto border-b pb-2"
+              /*
+                The height cap is dropped while confirming: a warning the user
+                has to scroll to finish reading is a warning they will not
+                read. The destination list it replaces is the thing the cap
+                exists for, and it is not on screen at the same time.
+              */
+              className={`flex flex-col gap-1 border-b pb-2 ${
+                confirmingClear ? "" : "max-h-24 overflow-y-auto"
+              }`}
               data-testid="logging-to-section"
             >
-              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {`Logging to (${targets.length})${atCap ? " · limit reached" : ""}`}
-              </p>
-              <p className="text-[11px]">{destinationSentence}</p>
+              {confirmingClear ? (
+                <>
+                  <p className="text-[10px] uppercase tracking-wide text-destructive">
+                    Clear all destinations?
+                  </p>
+                  {/*
+                    Claims FUTURE behaviour only. Clearing the selection does
+                    not touch meetings already sitting in meeting_log_queue,
+                    and copy implying otherwise would send someone hunting the
+                    queue page for damage that never happened.
+                  */}
+                  <p className="text-[11px]">
+                    {`Removes all ${targets.length} destination${
+                      targets.length === 1 ? "" : "s"
+                    }. Nothing will be logged to Odoo until you pick again. Meetings already queued are unaffected.`}
+                  </p>
+                  <div className="flex gap-1 pt-1">
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      className="h-6 text-[11px]"
+                      data-testid="confirm-clear-targets"
+                      onClick={() => {
+                        setConfirmingClear(false);
+                        void onClearTargets();
+                      }}
+                    >
+                      Clear all
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 text-[11px]"
+                      onClick={() => setConfirmingClear(false)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      {`Logging to (${targets.length})${atCap ? " · limit reached" : ""}`}
+                    </p>
+                    <button
+                      type="button"
+                      data-testid="clear-targets"
+                      onClick={() => setConfirmingClear(true)}
+                      className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-destructive"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                  <p className="text-[11px]">{destinationSentence}</p>
+                </>
+              )}
             </div>
           )}
           <Input

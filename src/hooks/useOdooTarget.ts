@@ -162,6 +162,8 @@ export interface UseOdooTargetReturn {
   targetCount: number;
   addTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
   removeTarget: (model: SelectedTarget["model"], resId: number) => Promise<void>;
+  /** Drops every destination at once, database first. Confirmed in the picker. */
+  clearAllTargets: () => Promise<void>;
   /** Runs (or joins) the per-contact deal lookup a "Logging to" row expands into. */
   expandContact: (contactId: number) => Promise<void>;
   opportunitiesFor: (contactId: number) => OdooOpportunity[] | null;
@@ -1073,6 +1075,48 @@ export function useOdooTarget({
     [applyTargets, resolveInstance]
   );
 
+  /**
+   * Drop EVERY destination at once - the explicit, user-initiated counterpart
+   * to `handleNewChat`'s wipe, reached from the picker behind a confirmation.
+   *
+   * The write ordering is deliberately the OPPOSITE of `handleNewChat`'s. That
+   * one empties the UI first and fires `clearTargets` best-effort, because a
+   * new chat's reset is unconditional and there is nothing to report back to.
+   * Here `odoo_selected_targets` is what the next `assignMeetingLog` reads, so
+   * an emptied UI sitting over a FAILED delete would show no destinations
+   * while the next meeting still posts a note to every record the user just
+   * asked to drop - up to five customer chatters. Persist first, then reflect.
+   *
+   * `setTarget(null)` as well as `applyTargets([])`: `commit` mirrors the
+   * single-select flow into `targets`, and `clearTargets` is a full-instance
+   * wipe that takes that mirrored row with it. Leaving `target` set would
+   * leave the trigger naming a contact, and the single-select destination
+   * sentence (gated on `targets.length === 0`) claiming a destination, with
+   * nothing behind either in the database.
+   *
+   * No `bumpEpoch()`, unlike `handleNewChat`: the per-contact deal caches it
+   * clears are keyed by contact id and stay correct here - which deals a
+   * contact has does not change because that contact stopped being a target -
+   * and bumping would discard any lookup in flight for no gain.
+   */
+  const clearAllTargets = useCallback(async (): Promise<void> => {
+    selectionToken.current += 1;
+    const token = selectionToken.current;
+    try {
+      const instance = await resolveInstance();
+      await clearTargets(instance);
+      if (token !== selectionToken.current) return;
+      setTarget(null);
+      targetRef.current = null;
+      applyTargets([]);
+    } catch (err) {
+      // UI state left ALONE on failure: the targets still on screen are still
+      // the ones the database will push to, which is the honest thing to show.
+      const report = reportOdooError(err, "clear targets");
+      toast.error(`${report.code}: ${report.message}`);
+    }
+  }, [applyTargets, resolveInstance]);
+
   const onToggleColleague = useCallback(
     async (contact: OdooContact) => {
       const nextValue = !contact.isColleague;
@@ -1165,6 +1209,7 @@ export function useOdooTarget({
     targets,
     onAddTarget: addTarget,
     onRemoveTarget: removeTarget,
+    onClearTargets: clearAllTargets,
     onExpandContact: expandContact,
     opportunitiesFor,
     errorFor,
@@ -1179,6 +1224,7 @@ export function useOdooTarget({
     targetCount: targets.length,
     addTarget,
     removeTarget,
+    clearAllTargets,
     expandContact,
     opportunitiesFor,
     errorFor,

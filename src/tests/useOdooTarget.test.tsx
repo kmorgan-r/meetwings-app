@@ -1427,6 +1427,24 @@ describe("Task 11: the multi-target list", () => {
     expect(result.current.opportunitiesFor(1)).toBeNull();
   });
 
+  // clearAllTargets deliberately does NOT bumpEpoch(), unlike handleNewChat:
+  // which deals a contact has does not change because that contact stopped
+  // being a target, and bumping would strand a lookup already in flight.
+  it("clearing every target does not discard a deal lookup in flight", async () => {
+    const { result } = renderHook(() => useOdooTarget(opts));
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
+    await act(async () => {
+      void result.current.expandContact(1);
+    });
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+    await resolveOpportunities(1, [opp(9, "Deal")]);
+
+    expect(result.current.opportunitiesFor(1)).toHaveLength(1);
+  });
+
   it("keys the lookup error per contact", async () => {
     const { result } = renderHook(() => useOdooTarget(opts));
     await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
@@ -1618,5 +1636,62 @@ describe("Task 12: setTargetCount", () => {
       await result.current.removeTarget("res.partner", 1);
     });
     expect(setTargetCount).toHaveBeenCalledWith(0);
+  });
+});
+
+
+/**
+ * The user-initiated clear, reached from the picker behind a confirmation.
+ *
+ * The behaviour under test is the WRITE ORDERING, which is deliberately the
+ * inverse of `handleNewChat`'s above: `odoo_selected_targets` is what the
+ * next `assignMeetingLog` reads, so a UI emptied over a failed delete would
+ * show no destinations while the next meeting still posts a note to every
+ * record the user just asked to drop.
+ */
+describe("clearing every target at once", () => {
+  it("clears the persisted rows, the flat list and the single selection", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
+    const { result } = mount();
+    await waitFor(() =>
+      expect(result.current.targetRef.current).toEqual({
+        contactId: 1,
+        leadId: null,
+        leadName: null,
+      })
+    );
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+
+    expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo");
+    expect(result.current.targets).toEqual([]);
+    // `target` as well as `targets`: clearTargets is a full-instance wipe
+    // that takes the single-select flow's own mirrored row with it, so
+    // leaving targetRef set would leave the trigger naming a contact with
+    // nothing behind it in the database.
+    expect(result.current.targetRef.current).toBeNull();
+    expect(result.current.targetsRef.current).toEqual([]);
+  });
+
+  // The load-bearing test. A version that empties the UI first and fires
+  // clearTargets best-effort - i.e. a copy of handleNewChat - passes every
+  // other assertion in this block and fails only this one.
+  it("keeps the targets on screen when the delete fails", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: null }]);
+    const { result } = mount();
+    await waitFor(() => expect(result.current.targets).toHaveLength(1));
+    action.clearTargets.mockRejectedValueOnce(new Error("database is locked"));
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+
+    expect(toastError).toHaveBeenCalled();
+    // Still one target, still pushable - which is the honest state, because
+    // the row is still sitting in odoo_selected_targets.
+    expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
+    expect(result.current.targetsRef.current).toHaveLength(1);
   });
 });

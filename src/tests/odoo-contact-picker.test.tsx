@@ -91,6 +91,7 @@ function defaultProps(over: Partial<ContactPickerProps> = {}): ContactPickerProp
     targets: [],
     onAddTarget: vi.fn(async () => ({ ok: true })),
     onRemoveTarget: vi.fn(async () => {}),
+    onClearTargets: vi.fn(async () => {}),
     onExpandContact: vi.fn(async () => {}),
     opportunitiesFor: vi.fn(() => null),
     errorFor: vi.fn(() => null),
@@ -1084,5 +1085,83 @@ describe("logging to several records", () => {
       resId: 90,
       name: "Partnership with ECS",
     });
+  });
+});
+
+
+describe("clearing every destination", () => {
+  const three: SelectedTarget[] = [
+    { model: "res.partner", resId: 201, name: "Christian Carron" },
+    { model: "res.partner", resId: 202, name: "Bentley AS" },
+    { model: "crm.lead", resId: 203, name: "Partnership with ECS" },
+  ];
+
+  it("offers no clear control when nothing is selected", async () => {
+    setup({ targets: [] });
+    await openPopover();
+    expect(screen.queryByTestId("logging-to-section")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("clear-targets")).not.toBeInTheDocument();
+  });
+
+  // The whole point of the feature: one click must NOT be enough. This is the
+  // assertion that would fail if the confirmation were ever refactored away.
+  it("does not clear on the first click - it arms a warning", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    expect(props.onClearTargets).not.toHaveBeenCalled();
+    expect(screen.getByText(/Clear all destinations\?/i)).toBeVisible();
+  });
+
+  it("names the count and disclaims already-queued meetings", async () => {
+    setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    const warning = screen.getByTestId("logging-to-section");
+    expect(warning).toHaveTextContent("Removes all 3 destinations.");
+    expect(warning).toHaveTextContent(/Meetings already queued are unaffected/i);
+  });
+
+  it("swaps the destination list out rather than pushing it down", async () => {
+    setup({ targets: three });
+    await openPopover();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    // The popover lives in a 600x54 window grown only by a flag-driven resize
+    // effect, so the warning REPLACES the summary; both on screen at once
+    // would push content past the bottom edge.
+    expect(screen.getByTestId("logging-to-section")).not.toHaveTextContent(/Logging to \(3\)/);
+  });
+
+  it("clears once the warning is confirmed", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    await userEvent.click(screen.getByTestId("confirm-clear-targets"));
+    expect(props.onClearTargets).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancelling leaves both the targets and the handler alone", async () => {
+    const props = setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    expect(props.onClearTargets).not.toHaveBeenCalled();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
+  });
+
+  // ContactPicker stays MOUNTED when the popover closes, so an armed warning
+  // would otherwise be the first thing on screen the next time it opens -
+  // with no memory of having asked for it.
+  it("disarms when the popover is closed and reopened", async () => {
+    setup({ targets: three });
+    await openPopover();
+    await userEvent.click(screen.getByTestId("clear-targets"));
+    expect(screen.getByText(/Clear all destinations\?/i)).toBeVisible();
+
+    await userEvent.keyboard("{Escape}");
+    await openPopover();
+    expect(screen.queryByText(/Clear all destinations\?/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
   });
 });
