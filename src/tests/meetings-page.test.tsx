@@ -516,6 +516,239 @@ describe("renaming a conversation from the list", () => {
   });
 });
 
+/** The strip's own pencil, scoped to one queue row rather than a list card. */
+async function openStripRowEditor(rowId: string): Promise<HTMLElement> {
+  const li = stripRow(rowId)!;
+  await userEvent.hover(li);
+  await userEvent.click(within(li).getByRole("button", { name: "Rename conversation" }));
+  return li;
+}
+
+describe("renaming a conversation from the queue strip", () => {
+  // Same spy-stacking guard as the list block above.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("names the conversation on a strip row", async () => {
+    // The whole point: a row whose status line reads "No contact chosen" still
+    // has to say WHICH meeting it is.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "na", status: "unassigned", contact_id: null, conversation_id: "c1" }),
+    ]);
+    await renderPage();
+
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+    const li = stripRow("na")!;
+    expect(within(li).getByText("Quarterly review")).toBeInTheDocument();
+    // toHaveTextContent, not getByText: an unassigned row with no targets says
+    // "No contact chosen" twice - once as the heading `targetNameOf` resolves
+    // to, once as the status line.
+    expect(li).toHaveTextContent("No contact chosen");
+    expect(within(li).getByRole("button", { name: "Rename conversation" })).toBeInTheDocument();
+  });
+
+  it("renders no name and no pencil on a conversation_id IS NULL row", async () => {
+    // Nothing to name, and a rename control here could only ever be refused.
+    db.listActionableRows.mockResolvedValue([row({ id: "orphan", conversation_id: null })]);
+    await renderPage();
+
+    await waitFor(() => expect(stripRow("orphan")).not.toBeNull());
+    const li = stripRow("orphan")!;
+    expect(within(li).queryByRole("button", { name: "Rename conversation" })).toBeNull();
+    expect(within(li).queryByText("Quarterly review")).toBeNull();
+  });
+
+  it("renders no name for a conversation that no longer exists", async () => {
+    // The row outlives the conversation: `deleteConversation` leaves the queue
+    // row's `conversation_id` pointing at nothing.
+    db.listActionableRows.mockResolvedValue([row({ id: "gone", conversation_id: "deleted" })]);
+    await renderPage();
+
+    await waitFor(() => expect(stripRow("gone")).not.toBeNull());
+    expect(
+      within(stripRow("gone")!).queryByRole("button", { name: "Rename conversation" })
+    ).toBeNull();
+  });
+
+  it("commits with the CONVERSATION id and fires both channels", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await renameRowTo(li, "Renamed from the strip");
+
+    // "c1", never "na" - the row id only identifies which editor was open.
+    await waitFor(() =>
+      expect(history.renameConversationManually).toHaveBeenCalledWith(
+        "c1",
+        "Renamed from the strip"
+      )
+    );
+
+    const titleEvent = await waitFor(() => {
+      const found = dispatchSpy.mock.calls
+        .map(([event]) => event as CustomEvent)
+        .find((event) => event.type === "conversation-title-updated");
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(titleEvent.detail).toEqual({ id: "c1", title: "Renamed from the strip" });
+
+    const renamedCall = await waitFor(() => {
+      const found = setItemSpy.mock.calls.find(([key]) => key === CONVERSATION_RENAMED_KEY);
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(JSON.parse(renamedCall[1] as string).id).toBe("c1");
+  });
+
+  it("repaints the strip row AND the card below from one commit", async () => {
+    // The loop no other test covers end to end: commit -> CustomEvent ->
+    // useHistory patch -> the page's title map -> both surfaces. Either memo
+    // boundary swallowing the new title shows up here.
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await renameRowTo(li, "Renamed everywhere");
+
+    await waitFor(() =>
+      expect(within(stripRow("na")!).getByText("Renamed everywhere")).toBeInTheDocument()
+    );
+    expect(within(conversationCard("c1")!).getByText("Renamed everywhere")).toBeInTheDocument();
+  });
+
+  it("saves from the tick button, not Enter alone", async () => {
+    // Enter is not an affordance: nothing on screen said the name was saved
+    // that way, which is how this read as editable-but-unsaveable.
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    const input = within(li).getByRole("textbox");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Saved by button");
+    await userEvent.click(within(li).getByRole("button", { name: "Save the name" }));
+
+    await waitFor(() =>
+      expect(history.renameConversationManually).toHaveBeenCalledWith("c1", "Saved by button")
+    );
+    await waitFor(() => expect(within(stripRow("na")!).queryByRole("textbox")).toBeNull());
+  });
+
+  it("closes the editor from the cross button without writing", async () => {
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await userEvent.clear(within(li).getByRole("textbox"));
+    await userEvent.type(within(li).getByRole("textbox"), "Discarded");
+    await userEvent.click(within(li).getByRole("button", { name: "Cancel renaming" }));
+
+    expect(history.renameConversationManually).not.toHaveBeenCalled();
+    await waitFor(() => expect(within(stripRow("na")!).queryByRole("textbox")).toBeNull());
+  });
+
+  it("keeps the typed name on screen and says so when the write is refused", async () => {
+    // The silent-failure case: the row used to close over the user's text and
+    // show the old name back, which is indistinguishable from a save that
+    // never ran.
+    history.renameConversationManually.mockResolvedValue(false);
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await renameRowTo(li, "Refused name");
+
+    await waitFor(() =>
+      expect(within(stripRow("na")!).getByText("That name could not be saved.")).toBeInTheDocument()
+    );
+    expect(within(stripRow("na")!).getByRole("textbox")).toHaveValue("Refused name");
+  });
+
+  it("reports a database error instead of leaving an unhandled rejection", async () => {
+    // renameConversationManually RETHROWS a database error rather than
+    // returning false.
+    history.renameConversationManually.mockRejectedValue(new Error("database is locked"));
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await renameRowTo(li, "Doomed name");
+
+    await waitFor(() =>
+      expect(within(stripRow("na")!).getByText("That name could not be saved.")).toBeInTheDocument()
+    );
+  });
+
+  it("refuses an empty name without touching the database", async () => {
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    await userEvent.clear(within(li).getByRole("textbox"));
+    await userEvent.click(within(li).getByRole("button", { name: "Save the name" }));
+
+    expect(history.renameConversationManually).not.toHaveBeenCalled();
+    expect(within(stripRow("na")!).getByText("A conversation needs a name.")).toBeInTheDocument();
+  });
+
+  it("cancels on Escape without writing", async () => {
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    const li = await openStripRowEditor("na");
+    const input = within(li).getByRole("textbox");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Whatever{Escape}");
+
+    expect(history.renameConversationManually).not.toHaveBeenCalled();
+    await waitFor(() => expect(within(stripRow("na")!).queryByRole("textbox")).toBeNull());
+    expect(within(stripRow("na")!).getByText("Quarterly review")).toBeInTheDocument();
+  });
+
+  it("opens one editor when two rows share a conversation", async () => {
+    // The duplicate-mint pairs already in the database. Keyed by conversation
+    // id, one click would open an autoFocus editor on both and the second
+    // would steal the focus from the row the user clicked.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "dup1", conversation_id: "c1" }),
+      row({ id: "dup2", conversation_id: "c1" }),
+    ]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("dup2")).not.toBeNull());
+
+    await openStripRowEditor("dup1");
+
+    expect(within(stripRow("dup1")!).getByRole("textbox")).toBeInTheDocument();
+    expect(within(stripRow("dup2")!).queryByRole("textbox")).toBeNull();
+  });
+
+  it("leaves the list's own editor alone", async () => {
+    // Two surfaces, two editors: opening one must not open (or close) the
+    // other, or a rename in progress on the card below dies on a strip click.
+    db.listActionableRows.mockResolvedValue([row({ id: "na", conversation_id: "c1" })]);
+    await renderPage();
+    await waitFor(() => expect(stripRow("na")).not.toBeNull());
+
+    await openStripRowEditor("na");
+
+    expect(within(stripRow("na")!).getByRole("textbox")).toBeInTheDocument();
+    expect(within(conversationCard("c1")!).queryByRole("textbox")).toBeNull();
+  });
+});
+
 /**
  * `View.tsx` reads `conversationId` from `useParams()`, so it needs an actual
  * matching `<Route>` rather than a bare `<MemoryRouter>` - `Meetings` above

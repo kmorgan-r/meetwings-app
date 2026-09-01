@@ -72,6 +72,24 @@ export default function Meetings() {
     return resolved;
   }, [queue.badgeRows, queue.instance, queue.configState]);
 
+  /**
+   * Conversation id -> title, for the strip's rows.
+   *
+   * Read off the SAME `useHistory` state the list below renders, not a second
+   * query: `getAllConversations` is unbounded, so every conversation a queue
+   * row can point at is already here, and a rename committed on either surface
+   * repaints both through useHistory's own `conversation-title-updated`
+   * listener. A queue-side read would drift from the list the moment one of
+   * them refreshed.
+   */
+  const conversationTitles = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const conversation of conversations.conversations) {
+      titles.set(conversation.id, conversation.title);
+    }
+    return titles;
+  }, [conversations.conversations]);
+
   // Captured, so the dialog's onConfirm closes over a non-null row rather than
   // re-reading `queue.assignRow` behind a `!`.
   const assignRow = queue.assignRow;
@@ -91,6 +109,21 @@ export default function Meetings() {
   // see that component's `renamingId` doc comment.
   const [renamingId, setRenamingId] = useState<string | null>(null);
 
+  /**
+   * The QUEUE ROW - by row id, never by conversation id - whose conversation
+   * name is open for an inline rename.
+   *
+   * Its own state rather than a share of `renamingId`, because both surfaces
+   * can show the same conversation at once: one pencil click would then open
+   * an `autoFocus` editor on the strip row AND on the card below it, and the
+   * later mount would steal the focus from the one the user clicked.
+   *
+   * By ROW id for the same reason one step down: two queue rows can carry the
+   * same `conversation_id` (the duplicate-mint pairs already in the database),
+   * and keying on the conversation would open an editor on every one of them.
+   */
+  const [renamingQueueRowId, setRenamingQueueRowId] = useState<string | null>(null);
+
   // Stable identities, like `handleOpenConversation` above: ConversationList
   // and ConversationRow are `React.memo` boundaries this page must not defeat.
   const handleStartRename = useCallback((id: string) => {
@@ -101,20 +134,43 @@ export default function Meetings() {
     setRenamingId(null);
   }, []);
 
-  const handleCommitRename = useCallback(async (id: string, title: string) => {
-    // Closed BEFORE the write settles, not after: a second Enter firing
-    // mid-flight must not start a second commit, and the row should not sit
-    // open across the await regardless of how the write resolves.
-    setRenamingId(null);
+  const handleStartQueueRename = useCallback((rowId: string) => {
+    setRenamingQueueRowId(rowId);
+  }, []);
 
+  const handleCancelQueueRename = useCallback(() => {
+    setRenamingQueueRowId(null);
+  }, []);
+
+  /**
+   * The write, shared by both surfaces. Owns everything about the rename
+   * EXCEPT closing the editor, which is the one part that differs - each
+   * surface tracks its own open editor, and a single path that closed both
+   * would cancel an unrelated edit in the other one.
+   *
+   * REPORTS ITS OUTCOME rather than returning void. Every way this can fail -
+   * an empty name, a conversation deleted under the editor, a database that
+   * refuses the write - used to end in the same silent `return`, so a rename
+   * that never happened looked exactly like one that did.
+   */
+  const commitRename = useCallback(async (id: string, title: string): Promise<boolean> => {
     const trimmed = title.trim();
-    if (!trimmed) return;
+    if (!trimmed) return false;
 
     // `false` means no row matched - the conversation was deleted between
     // render and commit. Announcing a rename that did not happen would patch
-    // the overlay's cache with a title no row holds.
-    const renamed = await renameConversationManually(id, trimmed);
-    if (!renamed) return;
+    // the overlay's cache with a title no row holds. `renameConversation-
+    // Manually` RETHROWS a database error rather than returning false, so the
+    // catch is what keeps that from becoming an unhandled rejection nobody
+    // sees.
+    let renamed = false;
+    try {
+      renamed = await renameConversationManually(id, trimmed);
+    } catch (error) {
+      console.error("Failed to rename conversation:", error);
+      return false;
+    }
+    if (!renamed) return false;
 
     // BOTH channels. The in-window CustomEvent is for this webview -
     // useHistory's own listener patches `conversations` from it. The
@@ -131,7 +187,36 @@ export default function Meetings() {
       CONVERSATION_RENAMED_KEY,
       JSON.stringify({ id, title: trimmed, timestamp: Date.now() })
     );
+    return true;
   }, []);
+
+  // The editor is closed BEFORE the write settles, not after: a second Enter
+  // firing mid-flight must not start a second commit, and the row should not
+  // sit open across the await regardless of how the write resolves.
+  const handleCommitRename = useCallback(
+    (id: string, title: string) => {
+      setRenamingId(null);
+      return commitRename(id, title);
+    },
+    [commitRename]
+  );
+
+  // Takes the CONVERSATION id, like the list's: `renamingQueueRowId` is what
+  // identifies the open editor, but the write is against the conversation.
+  //
+  // Closes the editor ONLY on a write that landed. A failed rename leaves the
+  // row open with what the user typed still in it, beside the row's own error
+  // line - losing their text to a silent close is how a save failure reads as
+  // "it just does not save". Re-entrancy is handled in the row instead, which
+  // disables both commit paths while one is in flight.
+  const handleCommitQueueRename = useCallback(
+    async (id: string, title: string) => {
+      const renamed = await commitRename(id, title);
+      if (renamed) setRenamingQueueRowId(null);
+      return renamed;
+    },
+    [commitRename]
+  );
 
   return (
     <PageLayout
@@ -216,6 +301,11 @@ export default function Meetings() {
         readTranscript={queue.readTranscript}
         handleRetryTarget={queue.handleRetryTarget}
         handleRemoveTarget={queue.handleRemoveTarget}
+        conversationTitles={conversationTitles}
+        renamingRowId={renamingQueueRowId}
+        onStartRename={handleStartQueueRename}
+        onCommitRename={handleCommitQueueRename}
+        onCancelRename={handleCancelQueueRename}
       />
 
       {conversations.conversations.length === 0 ? (

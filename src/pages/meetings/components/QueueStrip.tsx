@@ -38,7 +38,24 @@ export type QueueStripProps = Pick<
   | "readTranscript"
   | "handleRetryTarget"
   | "handleRemoveTarget"
->;
+> & {
+  /**
+   * Conversation id -> title, owned by the page's `useHistory` state. A map
+   * rather than a resolved title per row because the strip is the only place
+   * that knows which rows it actually renders.
+   */
+  conversationTitles: Map<string, string>;
+  /** The ROW whose conversation name is open for an inline rename, or none. */
+  renamingRowId: string | null;
+  onStartRename: (rowId: string) => void;
+  /**
+   * Takes the CONVERSATION id - the row id only identifies the editor.
+   * Resolves to whether the write landed: the row keeps a refused rename on
+   * screen rather than closing over the user's text.
+   */
+  onCommitRename: (conversationId: string, title: string) => Promise<boolean>;
+  onCancelRename: () => void;
+};
 
 function plural(n: number): string {
   return `${n} ${n === 1 ? "meeting is" : "meetings are"}`;
@@ -89,7 +106,10 @@ function stripRowsFor(
  * page re-rendered for some OTHER reason - a search keystroke, a badge
  * recompute. `now` is the one prop that genuinely changes every
  * `STALE_TICK_MS`, and the memo correctly lets that re-render through; it
- * exists to stop everything else from doing the same.
+ * exists to stop everything else from doing the same. `conversationTitles` is
+ * the page's own `useMemo` over `useHistory`'s conversations, so it takes a new
+ * identity exactly when a title actually changed - which is precisely when this
+ * strip must repaint.
  */
 function QueueStripInner({
   rows,
@@ -107,6 +127,11 @@ function QueueStripInner({
   readTranscript,
   handleRetryTarget,
   handleRemoveTarget,
+  conversationTitles,
+  renamingRowId,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
 }: QueueStripProps) {
   // Collapsed by DEFAULT, and local to this component: the other-database group
   // is a backlog nobody on this Odoo database can act on until they point back
@@ -132,6 +157,12 @@ function QueueStripInner({
           key={row.id}
           row={row}
           targetName={targetNameOf(row, contacts)}
+          conversationTitle={
+            row.conversation_id === null
+              ? null
+              : conversationTitles.get(row.conversation_id) ?? null
+          }
+          isRenaming={renamingRowId === row.id}
           instance={instance}
           busy={busy.has(row.id)}
           stale={isClaimStale(row, now)}
@@ -145,6 +176,9 @@ function QueueStripInner({
           onReloadTranscript={readTranscript}
           onRetryTarget={handleRetryTarget}
           onRemoveTarget={handleRemoveTarget}
+          onStartRename={onStartRename}
+          onCommitRename={onCommitRename}
+          onCancelRename={onCancelRename}
         />
       ))}
     </ul>

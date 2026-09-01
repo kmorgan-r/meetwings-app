@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
-import { Button } from "@/components";
+import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
+import { Button, Input } from "@/components";
 import { ESCALATE_AFTER_ATTEMPTS } from "@/lib/odoo/meeting-log";
 import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
 
@@ -23,6 +24,16 @@ export interface QueueRowProps {
   row: MeetingLogListRow;
   /** Resolved from the page's contact map, with the opportunity marker applied. */
   targetName: string;
+  /**
+   * This row's conversation title, or `null` when there is no conversation to
+   * name: `conversation_id IS NULL` (reachable - see QueueStrip's
+   * `stripRowsFor`), or a conversation that has since been deleted. Null means
+   * NEITHER the name line NOR the pencil renders; a rename control on a row
+   * with no conversation is a button whose write can only ever be refused.
+   */
+  conversationTitle: string | null;
+  /** Whether THIS row is the one the page has open for an inline rename. */
+  isRenaming: boolean;
   /** The fingerprint the page resolved this cycle, not the one it mounted with. */
   instance: string;
   busy: boolean;
@@ -57,6 +68,15 @@ export interface QueueRowProps {
   onReloadTranscript: (row: MeetingLogListRow) => void;
   onRetryTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
   onRemoveTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
+  /** By ROW id: two rows can share one conversation. */
+  onStartRename: (rowId: string) => void;
+  /**
+   * By CONVERSATION id: that is what the write is against. Resolves to whether
+   * the rename actually landed, so a refused write can keep the editor open
+   * with the user's text instead of discarding it silently.
+   */
+  onCommitRename: (conversationId: string, title: string) => Promise<boolean>;
+  onCancelRename: () => void;
 }
 
 /**
@@ -183,6 +203,8 @@ function transcriptBody(view: TranscriptView, onRetryRead: () => void) {
 function QueueRowInner({
   row,
   targetName,
+  conversationTitle,
+  isRenaming,
   instance,
   busy,
   stale,
@@ -196,9 +218,49 @@ function QueueRowInner({
   onReloadTranscript,
   onRetryTarget,
   onRemoveTarget,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
 }: QueueRowProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [targetsExpanded, setTargetsExpanded] = useState(false);
+  // Transient, exactly like ConversationRow's: reset from `conversationTitle`
+  // every time editing starts, so it never has to survive the Enter/Escape
+  // that ends it and does not belong in the page's rename state.
+  const [draft, setDraft] = useState(conversationTitle ?? "");
+  // Guards re-entrancy: the editor stays open across the write now, so Enter
+  // and the tick button can both fire again mid-flight without this.
+  const [savingName, setSavingName] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+
+  // Captured for the narrowing: `conversationTitle` non-null implies this is
+  // non-null (QueueStrip resolves one from the other), but only the compiler
+  // needs telling.
+  const conversationId = row.conversation_id;
+
+  const saveName = async (id: string) => {
+    if (savingName) return;
+    if (!draft.trim()) {
+      setNameError("A conversation needs a name.");
+      return;
+    }
+    setSavingName(true);
+    setNameError(null);
+    try {
+      const renamed = await onCommitRename(id, draft);
+      // The page closes this editor on success, so anything reaching here
+      // failed: no row matched, or the write threw. Either way the typed name
+      // stays on screen rather than vanishing.
+      if (!renamed) setNameError("That name could not be saved.");
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const cancelName = () => {
+    setNameError(null);
+    onCancelRename();
+  };
 
   const otherDatabase = row.instance !== instance;
   const sending = row.status === "sending";
@@ -239,8 +301,92 @@ function QueueRowInner({
   return (
     <li
       data-row-id={row.id}
-      className="flex flex-col gap-2 rounded-xl border p-3"
+      className="group flex flex-col gap-2 rounded-xl border p-3"
     >
+      {/*
+        The conversation's name, above the contact - the same name, styling and
+        rename affordance the conversation card below the strip carries, so a
+        row reading "No contact chosen" still says WHICH meeting it is. The
+        commit path is the page's, shared with the list: one
+        `renameConversationManually` write, one pair of cross-window
+        notifications.
+      */}
+      {conversationId !== null && conversationTitle !== null && (
+        <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex min-w-0 items-center gap-1">
+          {isRenaming ? (
+            <>
+              <Input
+                autoFocus
+                value={draft}
+                disabled={savingName}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void saveName(conversationId);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelName();
+                  }
+                }}
+                className="h-7 text-sm"
+              />
+              {/*
+                Enter alone is not an affordance - nothing on screen said the
+                name was saved that way, which is exactly how this read as "you
+                can edit it but not save it". Same tick/cross pair, and the same
+                keyboard hints, as InlineTextEditor.tsx elsewhere in this app.
+              */}
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Save the name"
+                title="Save (Enter)"
+                disabled={savingName}
+                className="size-6 shrink-0"
+                onClick={() => void saveName(conversationId)}
+              >
+                <CheckIcon className="size-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Cancel renaming"
+                title="Cancel (Esc)"
+                disabled={savingName}
+                className="size-6 shrink-0"
+                onClick={cancelName}
+              >
+                <XIcon className="size-3" />
+              </Button>
+            </>
+          ) : (
+            <>
+              <p className="line-clamp-1 text-sm">{conversationTitle}</p>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Rename conversation"
+                title="Rename conversation"
+                // Always in the DOM, hidden by opacity - hover is a CSS-only
+                // affordance here, which is what the `group` above is for.
+                className="size-5 shrink-0 opacity-0 group-hover:opacity-100"
+                onClick={() => {
+                  setDraft(conversationTitle);
+                  setNameError(null);
+                  onStartRename(row.id);
+                }}
+              >
+                <PencilIcon className="size-3" />
+              </Button>
+            </>
+          )}
+        </div>
+        {nameError !== null && <p className="text-xs text-destructive">{nameError}</p>}
+        </div>
+      )}
+
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="text-sm font-medium">{targetName}</span>
         <span className="text-xs text-muted-foreground">{meetingDate}</span>
@@ -463,6 +609,13 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.row.meeting_started_at === b.row.meeting_started_at &&
     a.row.transcript_start_at === b.row.transcript_start_at &&
     a.targetName === b.targetName &&
+    // NOT optional. The rename's repaint arrives ONLY through this prop -
+    // commit -> CustomEvent -> useHistory patch -> the page's title map ->
+    // here - so omitting it would leave the row showing the old name until
+    // something else happened to re-render it.
+    a.conversationTitle === b.conversationTitle &&
+    a.isRenaming === b.isRenaming &&
+    a.row.conversation_id === b.row.conversation_id &&
     a.instance === b.instance &&
     a.busy === b.busy &&
     a.stale === b.stale &&
@@ -475,7 +628,10 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.onToggleTranscript === b.onToggleTranscript &&
     a.onReloadTranscript === b.onReloadTranscript &&
     a.onRetryTarget === b.onRetryTarget &&
-    a.onRemoveTarget === b.onRemoveTarget
+    a.onRemoveTarget === b.onRemoveTarget &&
+    a.onStartRename === b.onStartRename &&
+    a.onCommitRename === b.onCommitRename &&
+    a.onCancelRename === b.onCancelRename
   );
 }
 
