@@ -804,4 +804,42 @@ describe("useCompletion meeting assist mode", () => {
     const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
     expect(lastAppend?.[1]).toBe(originalTitle);
   });
+
+  it("does not throw when the renamed-elsewhere payload is the literal string \"null\"", async () => {
+    // JSON.parse("null") succeeds and returns JS null - a legitimate localStorage
+    // value, not a parse failure - so the try/catch around JSON.parse alone
+    // does not guard the destructure that follows it. Pin that the handler
+    // survives this and leaves the cached title untouched.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const originalTitle = vi.mocked(saveConversation).mock.calls.at(-1)?.[0].title;
+
+    expect(() => {
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: CONVERSATION_RENAMED_KEY,
+            newValue: "null",
+          })
+        );
+      });
+    }).not.toThrow();
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe(originalTitle);
+  });
 });

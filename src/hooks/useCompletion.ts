@@ -292,7 +292,11 @@ export const useCompletion = () => {
       } catch {
         return;
       }
-      const { id, title } = payload;
+      // JSON.parse("null") succeeds and yields JS null (a legitimate
+      // localStorage value, e.g. someone writing the literal string "null"),
+      // and destructuring null throws - so fall back to {} before destructuring
+      // rather than trusting parse success to mean "an object came back".
+      const { id, title } = payload ?? {};
       if (!id || typeof title !== "string") return;
 
       const cached = conversationMetaCacheRef.current;
