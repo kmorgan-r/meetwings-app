@@ -108,3 +108,38 @@ describe("applySummaryTitleToConversation", () => {
     expect(sqlOf(titleWrites()[0])).toContain("title_source = 'auto'");
   });
 });
+
+describe("renameConversationManually", () => {
+  it("writes both columns and leaves updated_at alone", async () => {
+    const { renameConversationManually } = await import("@/lib/database/chat-history.action");
+    await renameConversationManually("conversation-1", "Quarterly review with Acme");
+
+    const [sql, params] = mockExecute.mock.calls[0];
+    expect(String(sql).replace(/\s+/g, " ").trim()).toBe(
+      "UPDATE conversations SET title = ?, title_source = 'manual' WHERE id = ?"
+    );
+    expect(params).toEqual(["Quarterly review with Acme", "conversation-1"]);
+    expect(String(sql)).not.toContain("updated_at");
+  });
+
+  it("returns false when no row matched", async () => {
+    const { renameConversationManually } = await import("@/lib/database/chat-history.action");
+    mockExecute.mockResolvedValueOnce({ rowsAffected: 0 });
+    await expect(renameConversationManually("gone", "T")).resolves.toBe(false);
+  });
+
+  it.each([
+    ["", "T"],
+    ["conversation-1", ""],
+  ])("refuses id=%p title=%p without touching the database", async (id, title) => {
+    const { renameConversationManually } = await import("@/lib/database/chat-history.action");
+    await expect(renameConversationManually(id, title)).resolves.toBe(false);
+    expect(mockExecute).not.toHaveBeenCalled();
+  });
+
+  it("propagates a rejected write rather than reporting success", async () => {
+    const { renameConversationManually } = await import("@/lib/database/chat-history.action");
+    mockExecute.mockRejectedValueOnce(new Error("database is locked"));
+    await expect(renameConversationManually("conversation-1", "T")).rejects.toThrow("database is locked");
+  });
+});

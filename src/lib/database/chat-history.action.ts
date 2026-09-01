@@ -601,6 +601,41 @@ export async function updateConversationTitle(
 }
 
 /**
+ * Renames a conversation on the user's instruction, and records that a human
+ * chose the name so no automatic titler can take it back.
+ *
+ * Deliberately does NOT touch updated_at. The conversation list sorts on it, so
+ * bumping it would make the row jump date groups mid-edit and unmount the input
+ * under a new heading, losing the caret.
+ */
+export async function renameConversationManually(
+  id: string,
+  title: string
+): Promise<boolean> {
+  if (!id || typeof id !== "string") {
+    console.error("Invalid conversation id");
+    return false;
+  }
+  if (!title || typeof title !== "string") {
+    console.error("Invalid conversation title");
+    return false;
+  }
+
+  const db = await getDatabase();
+
+  try {
+    const result = await db.execute(
+      "UPDATE conversations SET title = ?, title_source = 'manual' WHERE id = ?",
+      [title, id]
+    );
+    return result.rowsAffected > 0;
+  } catch (error) {
+    console.error(`Failed to rename conversation ${id}:`, error);
+    throw error;
+  }
+}
+
+/**
  * Gives a conversation the name its summary was given.
  *
  * Until this runs, the same meeting carries two unrelated names. A conversation
