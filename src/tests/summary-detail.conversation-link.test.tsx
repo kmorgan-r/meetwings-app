@@ -67,6 +67,6 @@ describe("summary detail", () => {
     // the UI, leaving Context Memory and Chats as two unconnected features.
     fireEvent.click(screen.getByTitle("Open this conversation"));
 
-    expect(navigate).toHaveBeenCalledWith("/chats/view/conv-1");
+    expect(navigate).toHaveBeenCalledWith("/meetings/view/conv-1");
   });
 });

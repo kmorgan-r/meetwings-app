@@ -1,4 +1,5 @@
 export * from "./ai-response.function";
+export * from "./conversation-id.function";
 export * from "./stt.function";
 export * from "./assemblyai.function";
 export * from "./common.function";
@@ -14,3 +15,5 @@ export * from "./pitch-analysis";
 export * from "./api-test.function";
 export * from "./meeting-auto-record";
 export * from "./shortcuts.function";
+export * from "./speaker-label.function";
+export * from "./conversation-markdown.function";

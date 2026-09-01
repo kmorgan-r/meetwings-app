@@ -1,17 +1,27 @@
+/**
+ * Page-side queue READS for the meetings page.
+ *
+ * Not useMeetingLog.ts, which is the write side (enqueue and hold). The names
+ * are close; the responsibilities do not overlap.
+ *
+ * Lifted verbatim from the retired pages/meeting-log/index.tsx. Most of this file's length
+ * is defensive and each part is a fixed bug: token-ordered reads so a focus
+ * refresh cannot repaint rows an action already moved; write-only mirror refs so
+ * the focus listener does not re-register a Tauri listener every render. Do not
+ * "simplify" either.
+ */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { Button } from "@/components";
-import { PageLayout } from "@/layouts";
 import {
   countActionableQueued,
   getQueueRow,
   getQueueTranscript,
   listActionableRows,
+  listConversationBadgeRows,
 } from "@/lib/database/meeting-log.action";
 import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { reportOdooError } from "@/lib/odoo/errors";
-import { groupOf, isClaimStale, type QueueGroup } from "@/lib/odoo/meeting-log";
+import { groupOf, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
   assignMeetingLog,
   deleteMeetingLog,
@@ -26,8 +36,13 @@ import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
-import { AssignDialog, ProviderConfigReader, QueueRow, type AssignPayload } from "./components";
+import type {
+  MeetingLogListRow,
+  MeetingLogStatus,
+  MeetingLogTarget,
+  OdooContact,
+} from "@/types";
+import type { AssignPayload } from "@/pages/meetings/components/AssignDialog";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
 // nullable column lets the notice, the row and the customer's chatter disagree
@@ -42,7 +57,7 @@ import {
   meetingDateOf,
   targetNameOf as targetNameOfSingle,
   type TranscriptView,
-} from "./components/QueueRow";
+} from "@/pages/meetings/components/QueueRow";
 
 /**
  * The queue page. Dashboard window only - the overlay never navigates here.
@@ -56,8 +71,12 @@ import {
  * claim refuses every `sending` row.
  */
 
-/** LIMIT 201 in the SQL: 200 render, and the 201st proves more are hidden. */
-const PAGE_CAP = 200;
+/**
+ * LIMIT 201 in the SQL: 200 render, and the 201st proves more are hidden.
+ *
+ * Exported because the page's JSX reads it too, for the "more are hidden" line.
+ */
+export const PAGE_CAP = 200;
 
 /**
  * How often the page re-reads the clock while a claim is outstanding.
@@ -70,9 +89,12 @@ const PAGE_CAP = 200;
  */
 const STALE_TICK_MS = 30_000;
 
-const REMAINDER_LINE = "Showing 200 of the meetings waiting — more are hidden.";
-
-const GROUPS: ReadonlyArray<{ key: Exclude<QueueGroup, null>; title: string }> = [
+/**
+ * Exported: `grouped` below seeds its buckets from this, and the page's JSX
+ * iterates the same array to render one section per group in this order. One
+ * definition, so the buckets and the sections can never disagree.
+ */
+export const GROUPS: ReadonlyArray<{ key: Exclude<QueueGroup, null>; title: string }> = [
   // Needs attention first: it is the only group where a meeting is not going to
   // reach Odoo without the user.
   { key: "needs-attention", title: "Needs attention" },
@@ -217,10 +239,6 @@ function outcomeCopy(
   }
 }
 
-function plural(n: number): string {
-  return `${n} ${n === 1 ? "meeting is" : "meetings are"} waiting.`;
-}
-
 /**
  * One line per `TargetActionOutcome` kind, distinct for the same reason
  * `outcomeCopy` keeps its seven distinct: conflating any two teaches a user
@@ -297,7 +315,7 @@ function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remo
  * picker only offered opportunities; now that it offers leads too, that word
  * would be a guess printed beside a customer's name.
  */
-function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
+export function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
   const targets = row.targets ?? [];
   if (targets.length > 0) {
     const names = targets.map((t) => targetNameOfSingle(t, contacts));
@@ -319,11 +337,17 @@ function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>
 
 type ConfigState = "loading" | "absent" | "incomplete" | "complete";
 
-export default function MeetingLog() {
+export function useMeetingLogQueue() {
   const [configState, setConfigState] = useState<ConfigState>("loading");
   const [instance, setInstance] = useState("");
   const [rows, setRows] = useState<MeetingLogListRow[]>([]);
   const [contacts, setContacts] = useState<Map<number, OdooContact>>(new Map());
+  // Raw, ungrouped - one entry per queue row that names a conversation, from
+  // EVERY instance. Grouping by conversationId and resolving a badge per
+  // group (resolveBadge, @/lib/odoo/meeting-log) is the consuming page's job.
+  const [badgeRows, setBadgeRows] = useState<
+    Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
+  >([]);
   const [stranded, setStranded] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());
@@ -431,15 +455,17 @@ export default function MeetingLog() {
       // dashboard webview is hidden rather than destroyed, so a page left
       // mounted outlives every main-window runSync and a map built once at
       // mount never learns about contacts synced afterwards.
-      const [list, cached] = await Promise.all([
+      const [list, cached, badges] = await Promise.all([
         listActionableRows(fingerprint),
         listContacts(fingerprint),
+        listConversationBadgeRows(),
       ]);
       if (token !== loadToken.current) return;
       setConfigState("complete");
       setInstance(fingerprint);
       setRows(list);
       setContacts(new Map(cached.map((c) => [c.id, c])));
+      setBadgeRows(badges);
       setStranded(0);
       setLoadError(null);
     } catch (err) {
@@ -885,129 +911,48 @@ export default function MeetingLog() {
     [results, inlineIds]
   );
 
-  const isEmpty = rendered.length === 0;
-
-  return (
-    <PageLayout
-      title="Meeting log"
-      description="Meetings waiting to reach Odoo, and the ones that need you."
-    >
-      {/*
-        A LEAF. AppProvider rebuilds its value every render and calls loadData()
-        on cross-window `storage` events, so consuming the context in this shell
-        would repaint a 200-row list that does not depend on it.
-      */}
-      <ProviderConfigReader configRef={providerConfigRef} />
-
-      {loadError !== null && <p className="text-sm text-destructive">{loadError}</p>}
-
-      {/*
-        Records whose row is not on screen. Rendered ABOVE the groups so the one
-        sentence `degraded` exists to produce is not below 200 rows, and
-        persistent until dismissed - a toast here would be the same
-        disappearing-message bug on a shorter timer.
-      */}
-      {notices.length > 0 && (
-        <section aria-label="Finished meetings" className="flex flex-col gap-2">
-          <ul className="flex flex-col gap-2">
-            {notices.map((notice) => (
-              <li
-                key={notice.id}
-                data-notice-id={notice.id}
-                className="flex items-start justify-between gap-3 rounded-xl border p-3"
-              >
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs text-muted-foreground">{notice.label}</span>
-                  <span className="text-sm">{notice.text}</span>
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setResult(notice.id, null)}
-                  aria-label={`Dismiss the result for ${notice.label}`}
-                >
-                  Dismiss
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {configState !== "loading" && configState !== "complete" && (
-        <p className="text-sm">
-          {`${plural(stranded)} Finish setting Odoo up on the `}
-          <Link to="/odoo" className="underline">
-            Odoo page
-          </Link>
-          {" to see and send them."}
-        </p>
-      )}
-
-      {configState === "complete" && isEmpty && (
-        <p className="text-sm text-muted-foreground">No meetings waiting to be logged.</p>
-      )}
-
-      {configState === "complete" &&
-        GROUPS.map(({ key, title }) => {
-          const groupRows = grouped.get(key) ?? [];
-          if (groupRows.length === 0) return null;
-          return (
-            <section key={key} aria-labelledby={`meeting-log-${key}`} className="flex flex-col gap-2">
-              <h2 id={`meeting-log-${key}`} className="text-sm font-semibold">
-                {title}
-              </h2>
-              <ul className="flex flex-col gap-2">
-                {groupRows.map((row) => (
-                  <QueueRow
-                    key={row.id}
-                    row={row}
-                    targetName={targetNameOf(row, contacts)}
-                    instance={instance}
-                    busy={busy.has(row.id)}
-                    stale={isClaimStale(row, now)}
-                    outcome={results.get(row.id)?.text ?? null}
-                    transcript={transcript?.id === row.id ? transcript.view : null}
-                    contacts={contacts}
-                    onRetry={handleRetry}
-                    onAssign={handleAssign}
-                    onDelete={handleDelete}
-                    onToggleTranscript={toggleTranscript}
-                    onReloadTranscript={readTranscript}
-                    onRetryTarget={handleRetryTarget}
-                    onRemoveTarget={handleRemoveTarget}
-                  />
-                ))}
-              </ul>
-            </section>
-          );
-        })}
-
-      {/*
-        Bounded on purpose. A 201-row read proves only that AT LEAST ONE row is
-        hidden, and under group-rank ordering these are the 200 highest-priority
-        rows, not the most recent - the whole point of that ordering is that an
-        old needs-attention row outranks 200 newer unassigned ones.
-      */}
-      {configState === "complete" && rows.length > PAGE_CAP && (
-        <p className="text-xs text-muted-foreground">{REMAINDER_LINE}</p>
-      )}
-
-      {/*
-        MOUNTED ONLY WHILE OPEN, and keyed on the row. Rendered unconditionally
-        behind an `open` prop, its one-client-per-session ref would live as long
-        as this page does - and the page stays mounted, because the dashboard
-        webview is hidden rather than destroyed.
-      */}
-      {assignRow !== null && (
-        <AssignDialog
-          key={assignRow.id}
-          row={assignRow}
-          instance={instance}
-          onConfirm={(payload) => handleAssignConfirm(assignRow, payload)}
-          onCancel={handleAssignCancel}
-        />
-      )}
-    </PageLayout>
-  );
+  /**
+   * A plain object, deliberately NOT wrapped in `useMemo`.
+   *
+   * Memoising it would mean writing a ~30-entry dependency array by hand, which
+   * is the same hazard as re-deriving any handler's deps below: one wrong or
+   * missing entry is a stale closure that no test in this repo reliably catches.
+   * The consumer is a page that re-renders on these values anyway.
+   */
+  return {
+    rows,
+    rendered,
+    grouped,
+    configState,
+    stranded,
+    loadError,
+    busy,
+    contacts,
+    badgeRows,
+    results,
+    notices,
+    transcript,
+    pinned,
+    instance,
+    now,
+    hasClaim,
+    inlineIds,
+    assignRow,
+    setAssignRow,
+    providerConfigRef,
+    setResult,
+    refineResult,
+    runRowAction,
+    handleRetry,
+    handleDelete,
+    handleAssign,
+    handleAssignConfirm,
+    handleAssignCancel,
+    runTargetAction,
+    handleRetryTarget,
+    handleRemoveTarget,
+    readTranscript,
+    toggleTranscript,
+    reload,
+  };
 }

@@ -19,7 +19,7 @@ import {
   generateConversationTitle,
   shouldUseMeetwingsAPI,
   MESSAGE_ID_OFFSET,
-  generateConversationId,
+  ensureConversationId,
   generateMessageId,
   generateRequestId,
   getResponseSettings,
@@ -37,6 +37,12 @@ import {
   applyAIConversationTitle,
   type TitleProviderConfig,
 } from "@/lib/functions/conversation-title";
+import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
+// Leaf path, not the barrel above: the meeting-assist test suite replaces the
+// whole @/lib barrel with a hand-written mock factory, so a barrel import
+// here would be undefined in that suite and the listener's key comparison
+// would short-circuit on every event.
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
 import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
@@ -272,6 +278,44 @@ export const useCompletion = () => {
       );
   }, []);
 
+  // The rename UI lives in the DASHBOARD webview; this hook runs in the overlay.
+  // window CustomEvents do not cross Tauri webviews (useHistory.ts:184 uses
+  // localStorage for exactly this reason), so the in-window event above never
+  // fires here for a dashboard rename - and without this the next autosave
+  // writes the stale cached title back over the user's rename.
+  useEffect(() => {
+    const handleRenamedElsewhere = (event: StorageEvent) => {
+      if (event.key !== CONVERSATION_RENAMED_KEY || !event.newValue) return;
+      let payload: { id?: string; title?: string };
+      try {
+        payload = JSON.parse(event.newValue);
+      } catch {
+        return;
+      }
+      // JSON.parse("null") succeeds and yields JS null (a legitimate
+      // localStorage value, e.g. someone writing the literal string "null"),
+      // and destructuring null throws - so fall back to {} before destructuring
+      // rather than trusting parse success to mean "an object came back".
+      const { id, title } = payload ?? {};
+      if (!id || typeof title !== "string") return;
+
+      const cached = conversationMetaCacheRef.current;
+      // A rename for a DIFFERENT conversation is a no-op, mirroring the shipped
+      // in-window handler at :261-264. Nulling the cache here would be a bug:
+      // renaming conversation B in the dashboard while the overlay is mid-meeting
+      // on A would drop A's entry, sending the next autosave into the re-read
+      // branch - and getConversationById returns null on a FAILED read as well as
+      // a missing row (chat-history.action.ts:345-351), so a transient error
+      // invents a "Meeting transcript - <date>" title with hasStoredTitle false,
+      // the one state that hands the conversation to the AI titler.
+      if (!cached || cached.id !== id) return;
+      conversationMetaCacheRef.current = { ...cached, title };
+    };
+
+    window.addEventListener("storage", handleRenamedElsewhere);
+    return () => window.removeEventListener("storage", handleRenamedElsewhere);
+  }, []);
+
   // Chains a write onto saveQueueRef so it can't run concurrently with any
   // other queued conversation write. The queue itself never rejects (each
   // task's outcome is absorbed here) so one failed write can't jam the queue
@@ -319,9 +363,7 @@ export const useCompletion = () => {
         const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
         const persistedIdsAtSnapshot = new Set(persistedMessageIdsRef.current);
 
-        const conversationId =
-          currentConversationIdRef.current || generateConversationId("chat");
-        currentConversationIdRef.current = conversationId;
+        const conversationId = ensureConversationId(currentConversationIdRef);
 
         const cachedMeta = conversationMetaCacheRef.current;
         let title: string;
@@ -568,8 +610,7 @@ export const useCompletion = () => {
 
     // Also add to conversation history as a user message (for display)
     // Use ref for conversation ID to avoid stale closure - ref is always current
-    const conversationId = currentConversationIdRef.current || generateConversationId("chat");
-    currentConversationIdRef.current = conversationId;
+    const conversationId = ensureConversationId(currentConversationIdRef);
 
     const userMessage: ChatMessage = {
       id: generateMessageId("user", timestamp),
@@ -608,15 +649,18 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, ...validEntries]);
 
       // Also add to conversation history as user messages (for display)
-      const conversationId =
-        currentConversationIdRef.current || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
 
       const userMessages: ChatMessage[] = validEntries.map((entry) => ({
         id: generateMessageId("user", entry.timestamp),
         role: "user" as const,
         content: entry.original,
         timestamp: entry.timestamp,
+        // Matching addMeetingTranscript (:574-581) and addSystemAudioTranscript
+        // (:701-708). Without these the row persists with both columns null and
+        // the transcript export labels a guest's line "You:".
+        speaker: entry.speaker,
+        audioSource: entry.audioSource,
       }));
 
       // Update ref immediately for sync
@@ -694,9 +738,7 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, entry]);
 
       // Also add to conversation history
-      const conversationId =
-        currentConversationIdRef.current || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
 
       const userMessage: ChatMessage = {
         id: generateMessageId("user", timestamp),
@@ -879,15 +921,20 @@ export const useCompletion = () => {
 
       // Generate conversation ID upfront for new conversations
       // This ensures the ID is available when usage events are captured
-      const conversationId = state.currentConversationId || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
       console.log("[Cost Tracking] Set conversation ID ref to:", conversationId);
-      if (!state.currentConversationId) {
-        setState((prev) => ({
-          ...prev,
-          currentConversationId: conversationId,
-        }));
-      }
+      // Functional and keyed on the live value, NOT `if (!state.currentConversationId)`:
+      // after the substitution the id comes from the ref while that guard reads a
+      // possibly-stale snapshot, and the two no longer share a source. Reachable:
+      // clearMeetingTranscript does not clear state.input, so submit's memo does not
+      // re-form, the snapshot still holds the pre-reset id, the guard is falsy, the
+      // mirror never fires, and state.currentConversationId stays null — which sends
+      // every enqueue to useMeetingLog's getActiveConversationId() recovery path.
+      setState((prev) =>
+        prev.currentConversationId === conversationId
+          ? prev
+          : { ...prev, currentConversationId: conversationId }
+      );
 
       // Cancel any existing request
       if (abortControllerRef.current) {
@@ -1002,7 +1049,8 @@ export const useCompletion = () => {
           await saveCurrentConversation(
             input,
             fullResponse,
-            state.attachedFiles
+            state.attachedFiles,
+            conversationId
           );
           // Clear input and attached files after saving
           setState((prev) => ({
@@ -1042,19 +1090,10 @@ export const useCompletion = () => {
         return;
       }
 
-      // Resolve a speaker label for an entry ("You" = the user).
-      const labelFor = (entry: (typeof meetingTranscript)[number]) =>
-        entry.speaker?.speakerLabel ||
-        (entry.audioSource === "microphone"
-          ? "You"
-          : entry.audioSource === "system"
-          ? "Guest"
-          : null);
-
       // Build the meeting context prompt with speaker attribution
       const meetingContext = meetingTranscript
         .map((entry) => {
-          const speakerLabel = labelFor(entry);
+          const speakerLabel = speakerLabelFor(entry);
           // No speaker info - return text as-is (backwards compatible)
           return speakerLabel ? `${speakerLabel}: ${entry.original}` : entry.original;
         })
@@ -1064,10 +1103,10 @@ export const useCompletion = () => {
       // model answers the LATEST question instead of an earlier one. Fall back
       // to the last line if we can't tell who spoke.
       const lastParticipant =
-        [...meetingTranscript].reverse().find((e) => labelFor(e) !== "You") ??
+        [...meetingTranscript].reverse().find((e) => speakerLabelFor(e) !== "You") ??
         meetingTranscript[meetingTranscript.length - 1];
       const latestLine = lastParticipant
-        ? `${labelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
+        ? `${speakerLabelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
         : "";
 
       const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## MOST RECENT thing said to you (answer THIS):\n${latestLine}\n\n## Your Request: ${action}`;
@@ -1077,14 +1116,14 @@ export const useCompletion = () => {
       currentRequestIdRef.current = requestId;
 
       // Generate conversation ID upfront (use "chat" type for meeting assist conversations)
-      const conversationId = state.currentConversationId || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
-      if (!state.currentConversationId) {
-        setState((prev) => ({
-          ...prev,
-          currentConversationId: conversationId,
-        }));
-      }
+      const conversationId = ensureConversationId(currentConversationIdRef);
+      // See the note at the sibling site in `submit`: functional, keyed on the live
+      // value, because the guard would otherwise read a stale snapshot.
+      setState((prev) =>
+        prev.currentConversationId === conversationId
+          ? prev
+          : { ...prev, currentConversationId: conversationId }
+      );
 
       // Cancel any existing request
       if (abortControllerRef.current) {
@@ -1250,7 +1289,9 @@ export const useCompletion = () => {
     },
     [
       meetingTranscript,
-      state.currentConversationId,
+      // state.currentConversationId removed - ensureConversationId reads the ref directly,
+      // and the setState mirror below is functional, so this callback no longer closes
+      // over the state value.
       // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
       selectedAIProvider,
       allAiProviders,
@@ -1422,7 +1463,8 @@ export const useCompletion = () => {
     async (
       userMessage: string,
       assistantResponse: string,
-      _attachedFiles: AttachedFile[]
+      _attachedFiles: AttachedFile[],
+      conversationId: string
     ) => {
       // Validate inputs
       if (!userMessage || !assistantResponse) {
@@ -1430,8 +1472,6 @@ export const useCompletion = () => {
         return;
       }
 
-      const conversationId =
-        state.currentConversationId || generateConversationId("chat");
       const timestamp = Date.now();
 
       const userMsg: ChatMessage = {
@@ -1456,13 +1496,14 @@ export const useCompletion = () => {
       // transcript segments stream in while this save is in flight.
       const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
 
-      // Get existing conversation if updating
+      // Get existing conversation if updating. Reads the turn's own id, not
+      // state: state.currentConversationId is stale-null in exactly the
+      // scenario this parameter exists to fix, and a null lookup here silently
+      // renames the conversation to its first message and re-fires the titler.
       let existingConversation = null;
-      if (state.currentConversationId) {
+      if (conversationId) {
         try {
-          existingConversation = await getConversationById(
-            state.currentConversationId
-          );
+          existingConversation = await getConversationById(conversationId);
         } catch (error) {
           console.error("Failed to get existing conversation:", error);
         }
@@ -1517,7 +1558,7 @@ export const useCompletion = () => {
         }));
       }
     },
-    [state.currentConversationId, queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
+    [queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
   // On startup there is no in-progress conversation (state resets to null), so
@@ -1662,6 +1703,25 @@ export const useCompletion = () => {
           const requestId = generateRequestId();
           currentRequestIdRef.current = requestId;
 
+          // A screenshot submit is a real turn - join the current conversation
+          // if one exists, rather than letting saveCurrentConversation mint its
+          // own id from stale state.
+          const conversationId = ensureConversationId(currentConversationIdRef);
+          // Mirror into state as well, functional and keyed on the live value
+          // for the reason spelled out at submit()'s copy of this block. Only
+          // the ref was being set here, so a conversation a screenshot STARTED
+          // stayed invisible to everything reading state.currentConversationId
+          // until a text turn happened afterwards: summarizeCurrentConversation
+          // bailed at its null guard, the conversation-deleted handler below
+          // could not tell the deleted conversation was the open one, and
+          // useMeetingLog fell back to its getActiveConversationId() recovery
+          // path for every enqueue.
+          setState((prev) =>
+            prev.currentConversationId === conversationId
+              ? prev
+              : { ...prev, currentConversationId: conversationId }
+          );
+
           // Cancel any existing request
           if (abortControllerRef.current) {
             abortControllerRef.current.abort();
@@ -1747,7 +1807,7 @@ export const useCompletion = () => {
             if (fullResponse) {
               await saveCurrentConversation(prompt, fullResponse, [
                 attachedFile,
-              ]);
+              ], conversationId);
               // Clear input after saving
               setState((prev) => ({
                 ...prev,

@@ -1,6 +1,7 @@
 import type { MeetingLogListRow, SummarizationResult, TranscriptEntry } from "@/types";
 import { toOdooError } from "./errors";
 import { getRedactor, isRedactorInitialised } from "./redactor";
+import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 
 /**
  * Pure helpers for the meeting log. No I/O, no mocks in its tests.
@@ -198,24 +199,6 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * Speaker labels, mirroring labelFor (useCompletion.ts:1037-1043) EXACTLY,
- * including its three-way null.
- *
- * A two-way form defaulting to "Guest" attributes the user's own unattributed
- * lines to the customer, in a note the customer can read.
- */
-function labelFor(entry: TranscriptEntry): string | null {
-  return (
-    entry.speaker?.speakerLabel ||
-    (entry.audioSource === "microphone"
-      ? "You"
-      : entry.audioSource === "system"
-      ? "Guest"
-      : null)
-  );
-}
-
-/**
  * The attachment's contents. NOT formatConversationForSummary
  * (meeting-summarizer.ts:96), which labels lines User/Assistant from msg.role -
  * meaningless when both sides are human.
@@ -223,7 +206,7 @@ function labelFor(entry: TranscriptEntry): string | null {
 export function renderTranscript(entries: TranscriptEntry[]): string {
   return entries
     .map((e) => {
-      const label = labelFor(e);
+      const label = speakerLabelFor(e);
       return label ? `${label}: ${e.original}` : e.original;
     })
     .join("\n");
@@ -362,6 +345,53 @@ export function groupOf(
     return "waiting";
   }
   return null;
+}
+
+/**
+ * Worst-status-wins ranking for the meetings page's per-conversation badge.
+ *
+ * `cancelled` and `deleted` are absent DELIBERATELY: both are meetings the
+ * user deliberately removed, and resurfacing either as state would resurrect
+ * a decision they already made. They fall out of `resolveBadge` by
+ * construction - never matching `BADGE_RANK` - rather than by a special case.
+ */
+const BADGE_RANK = ["failed", "unassigned", "sending", "pending", "held", "sent"] as const;
+
+/**
+ * Resolves the rows for ONE conversation into a single badge, or null.
+ *
+ * Mirrors groupOf's instance-first split: a `currentInstance` row is eligible
+ * whenever its status is a badge-worthy one, but an OTHER-instance row is
+ * eligible only when `sent` - that history is worth showing, but every other
+ * other-instance status belongs to the other-database group, where
+ * pushQueuedRow's instance check would refuse the very action a badge implies
+ * is available.
+ */
+export function resolveBadge(
+  rows: ReadonlyArray<{ status: string; instance: string }>,
+  currentInstance: string
+): { status: (typeof BADGE_RANK)[number]; count: number } | null {
+  const eligible = rows.filter((r) =>
+    r.instance === currentInstance
+      ? (BADGE_RANK as readonly string[]).includes(r.status)
+      : r.status === "sent"
+  );
+  if (eligible.length === 0) return null;
+
+  const worst = BADGE_RANK.find((s) => eligible.some((r) => r.status === s));
+  if (!worst) return null;
+  // Counts the rows IN `worst`, not every eligible row. The two are rendered
+  // as one phrase - "Odoo send failed (4)" - so counting all four of a
+  // conversation's one failed, one sent, one pending and one held row claims
+  // four failures where one failed, which is the same conflation
+  // `outcomeCopy` refuses for a push-partial row.
+  //
+  // `pending` and `held` share one label ("Waiting for Odoo") and are counted
+  // separately here anyway: that copy merge lives in ConversationRow, and
+  // teaching this module about it to recover a parenthetical would put a
+  // third grouping beside `groupOf` and this rank. A mild undercount on a
+  // transient waiting state beats an overcount on a failure.
+  return { status: worst, count: eligible.filter((r) => r.status === worst).length };
 }
 
 /** Pure so retention is testable without a clock. */

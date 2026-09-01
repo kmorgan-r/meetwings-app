@@ -1,6 +1,5 @@
 export { default as Dashboard } from "./dashboard";
-export { default as Chats } from "./chats";
-export { default as ViewChat } from "./chats/components/View";
+export { default as ViewChat } from "./meetings/components/View";
 export { default as App } from "./app";
 export { default as SystemPrompts } from "./system-prompts";
 export { default as Settings } from "./settings";
@@ -14,4 +13,4 @@ export { default as ContextMemory } from "./context-memory";
 export { default as Speakers } from "./speakers";
 export { default as Language } from "./language";
 export { default as Odoo } from "./odoo";
-export { default as MeetingLog } from "./meeting-log";
+export { default as Meetings } from "./meetings";

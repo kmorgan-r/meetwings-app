@@ -6,26 +6,36 @@ import { useCompletion } from "@/hooks/useCompletion";
 import {
   appendMessagesToConversation,
   fetchAIResponse,
+  generateConversationId,
   generateConversationTitle,
   getConversationById,
   saveConversation,
   setActiveConversationId,
   shouldUseMeetwingsAPI,
 } from "@/lib";
+// Leaf path, not the barrel above: @/lib is replaced wholesale by the
+// vi.mock("@/lib", ...) factory in this suite, so a barrel import here would
+// resolve to undefined and every key comparison in the listener under test
+// would short-circuit regardless of what the hook does. This module is not
+// mocked, so both the test and the hook resolve the same real constant.
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
-vi.mock("@/contexts", () => ({
-  useApp: () => ({
-    selectedAIProvider: { provider: null },
-    allAiProviders: [],
-    systemPrompt: "",
-    screenshotConfiguration: { enabled: false, mode: "manual" },
-    setScreenshotConfiguration: vi.fn(),
-  }),
-}));
+// Hoisted to a stable module-scope object: a factory that returns a fresh
+// object per render makes selectedAIProvider change identity on every render,
+// which rebuilds `submit` every time and makes it impossible for a stale
+// closure to ever form - exactly the defect this suite needs to reproduce.
+const APP_CONTEXT = {
+  selectedAIProvider: { provider: null },
+  allAiProviders: [],
+  systemPrompt: "",
+  screenshotConfiguration: { enabled: false, mode: "manual" },
+  setScreenshotConfiguration: vi.fn(),
+};
+vi.mock("@/contexts", () => ({ useApp: () => APP_CONTEXT }));
 
 vi.mock("@/hooks", () => ({
   useGlobalShortcuts: () => ({
@@ -55,6 +65,11 @@ vi.mock("@/lib", () => {
   // a machine-speed-dependent flake, not a clear failure, so keep the counter.
   let messageIdSequence = 0;
 
+  // Hoisted so `ensureConversationId` below delegates to the SAME vi.fn as
+  // `generateConversationId`, meaning a test's `mockReturnValueOnce` on
+  // `generateConversationId` still drives what ensureConversationId mints.
+  const mockGenerateConversationId = vi.fn(() => "conversation-1");
+
   return {
     fetchAIResponse: vi.fn(),
     saveConversation: vi.fn(),
@@ -63,7 +78,11 @@ vi.mock("@/lib", () => {
     generateConversationTitle: vi.fn((message: string) => message),
     shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
     MESSAGE_ID_OFFSET: 1,
-    generateConversationId: vi.fn(() => "conversation-1"),
+    generateConversationId: mockGenerateConversationId,
+    ensureConversationId: vi.fn((ref: { current: string | null }) => {
+      ref.current ??= mockGenerateConversationId();
+      return ref.current;
+    }),
     generateMessageId: vi.fn(
       (role: string, timestamp: number) =>
         `${role}-${timestamp}-${(messageIdSequence += 1)}`
@@ -133,6 +152,13 @@ describe("useCompletion meeting assist mode", () => {
     vi.mocked(fetchAIResponse).mockImplementation(
       async function* () {} as never
     );
+    // vi.clearAllMocks() clears call records but not queued one-shot
+    // behaviours (mockReturnValueOnce). A test that deliberately leaves a
+    // second queued id unconsumed would otherwise leak it into the next
+    // test, where it gets picked up by the first mint and breaks every
+    // "conversation-1" pin. mockReset() restores the factory's default
+    // `vi.fn(() => "conversation-1")` implementation.
+    vi.mocked(generateConversationId).mockReset();
   });
 
   it("queues one transcript flush when StrictMode disables meeting assist", async () => {
@@ -558,5 +584,262 @@ describe("useCompletion meeting assist mode", () => {
       result.current.setTargetCount(2);
     });
     expect(resizeWindow).toHaveBeenCalled();
+  });
+
+  it("reuses the established conversation id when a turn is saved", async () => {
+    vi.mocked(generateConversationId)
+      .mockReturnValueOnce("chat-a")
+      .mockReturnValueOnce("chat-b");
+    enableProviderGate();
+    mockStreamedResponse("ok");
+
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    // Capture submit BEFORE the render that establishes the id. Comparing it to
+    // itself afterwards would be tautological - the point is that it survives the
+    // state change.
+    const submitBefore = result.current.submit;
+
+    // Establish an id through a ref-writing path that does not touch submit's deps.
+    await act(async () => {
+      result.current.addMeetingTranscript("Opening line", undefined, "microphone");
+    });
+    const established = result.current.currentConversationId;
+    expect(established).toBe("chat-a");
+
+    // THE PRECONDITION. The defect only reproduces if submit's useCallback
+    // identity survived the render that set the id - otherwise the closure is
+    // fresh, it reads the current state, and this degrades into a same-tick test
+    // that passes against unfixed code. With APP_CONTEXT hoisted (Step 2a) and
+    // addMeetingTranscript touching none of submit's five deps, this holds for
+    // the right reason.
+    expect(result.current.submit).toBe(submitBefore);
+
+    await act(async () => {
+      await result.current.submit("What should I say?");
+    });
+
+    // A saved turn must land on the established conversation, not mint "chat-b".
+    const savedIds = vi.mocked(saveConversation).mock.calls.map(([c]) => c.id);
+    expect(savedIds).not.toContain("chat-b");
+    expect(savedIds.at(-1)).toBe("chat-a");
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    // The ref is private, so observe it through a following ref-reading path.
+    await act(async () => {
+      result.current.addMeetingTranscript("Later line", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+  });
+
+  it("pins the meeting-context mint site to the established id", async () => {
+    // NOT a red-then-green test, and the plan should not pretend otherwise:
+    // submitWithMeetingContext lists state.currentConversationId in its own deps
+    // (:1253), so it re-forms on every id change and its closure is never stale.
+    // It also never calls saveCurrentConversation - it has its own inline save at
+    // :1218. So it cannot reproduce either defect (a) or (b). This pins the :1080
+    // substitution from Task 2 against regression; expect it green from the start.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    enableProviderGate();
+    mockStreamedResponse("ok");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.submitWithMeetingContext("summarise");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-a");
+  });
+
+  it("mints a fresh id after the conversation is reset", async () => {
+    // The guard against a ??= regression pinning the app to one conversation.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    await act(async () => {
+      await result.current.startNewConversation();
+    });
+    await act(async () => {
+      result.current.addMeetingTranscript("Second meeting", undefined, "microphone");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-b");
+  });
+
+  it("keeps state.currentConversationId populated after a chat-only turn", async () => {
+    // The setState mirror at :882/:1080. If it stops firing, every enqueue falls to
+    // useMeetingLog's getActiveConversationId() recovery and writes the
+    // conversation_id IS NULL rows the merged page then has to render.
+    //
+    // Deliberately NO mockStreamedResponse: beforeEach installs an empty generator,
+    // so fullResponse is empty, the save block at :1000 is skipped, and
+    // saveCurrentConversation never runs. That leaves the :882 mirror as the ONLY
+    // writer of state.currentConversationId - so deleting the mirror fails this
+    // test. With a streamed response, :1495 would set it and the test would pass
+    // with the mirror gone.
+    enableProviderGate();
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      await result.current.submit("hello");
+    });
+
+    expect(result.current.currentConversationId).toBe("conversation-1");
+  });
+
+  it("mints a fresh id after the delete fallback resets the conversation", async () => {
+    // The other reset path (:1570-1583): the conversationDeleted listener clears
+    // the refs and calls startNewConversation. Its detail is a BARE ID STRING,
+    // not { id } - see useHistory.ts:167-171.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("conversationDeleted", { detail: "chat-a" }));
+    });
+    await act(async () => {
+      result.current.addMeetingTranscript("After the delete", undefined, "microphone");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-b");
+  });
+
+  it("carries speaker and audioSource onto diarized batch messages", async () => {
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscriptEntries([
+        { original: "Guest line", timestamp: 1, audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } },
+        { original: "My line", timestamp: 2, audioSource: "microphone" },
+      ]);
+    });
+
+    const history = result.current.conversationHistory;
+    expect(history.at(-2)).toMatchObject({ audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } });
+    expect(history.at(-1)).toMatchObject({ audioSource: "microphone" });
+  });
+
+  it("patches the cached title when the other window renames a conversation", async () => {
+    // No enableProviderGate/mockStreamedResponse: submit is never called here, and
+    // enableProviderGate mutates a mock the beforeEach comment (:129-135) keeps clean.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    // The meta cache is only populated by a successful save, so do one first.
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const id = result.current.currentConversationId!;
+
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: CONVERSATION_RENAMED_KEY,
+          newValue: JSON.stringify({ id, title: "Renamed by hand", timestamp: Date.now() }),
+        })
+      );
+    });
+
+    // The next append must carry the new title, not the cached old one.
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    // appendMessagesToConversation(conversationId, title, updatedAt, newMessages)
+    // is positional - the title is [1], not a `.title` property.
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe("Renamed by hand");
+  });
+
+  it("ignores a rename for a different conversation", async () => {
+    // A rename of conversation B must not disturb the overlay's cache for A.
+    // Nulling it here would send the next autosave into the re-read branch, where
+    // getConversationById cannot distinguish a failed read from a missing row.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const originalTitle = vi.mocked(saveConversation).mock.calls.at(-1)?.[0].title;
+
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: CONVERSATION_RENAMED_KEY,
+          newValue: JSON.stringify({ id: "some-other-conversation", title: "Not mine", timestamp: Date.now() }),
+        })
+      );
+    });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe(originalTitle);
+  });
+
+  it("does not throw when the renamed-elsewhere payload is the literal string \"null\"", async () => {
+    // JSON.parse("null") succeeds and returns JS null - a legitimate localStorage
+    // value, not a parse failure - so the try/catch around JSON.parse alone
+    // does not guard the destructure that follows it. Pin that the handler
+    // survives this and leaves the cached title untouched.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const originalTitle = vi.mocked(saveConversation).mock.calls.at(-1)?.[0].title;
+
+    expect(() => {
+      act(() => {
+        window.dispatchEvent(
+          new StorageEvent("storage", {
+            key: CONVERSATION_RENAMED_KEY,
+            newValue: "null",
+          })
+        );
+      });
+    }).not.toThrow();
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe(originalTitle);
   });
 });

@@ -38,14 +38,13 @@ vi.mock("@/pages", () => {
     Shortcuts: stub("shortcuts"),
     Audio: stub("audio"),
     Screenshot: stub("screenshot"),
-    Chats: stub("chats"),
     Responses: stub("responses"),
     CostTracking: stub("cost-tracking"),
     ContextMemory: stub("context-memory"),
     Speakers: stub("speakers"),
     Language: stub("language"),
     Odoo: stub("odoo"),
-    MeetingLog: stub("meeting-log"),
+    Meetings: stub("meetings"),
   };
 });
 
@@ -59,11 +58,20 @@ afterEach(() => {
   window.history.pushState({}, "", "/");
 });
 
-describe("the /meeting-log route", () => {
-  it("resolves to the MeetingLog page", () => {
+describe("the meetings route", () => {
+  it("resolves /meetings to the Meetings page", () => {
+    window.history.pushState({}, "", "/meetings");
+    render(<AppRoutes />);
+    expect(screen.getByTestId("stub-meetings")).toBeInTheDocument();
+  });
+
+  it("still lands the old /meeting-log entry point on it", () => {
+    // The queue page merged into /meetings; the old path redirects rather than
+    // 404-ing, because the menu entry and the /odoo link both still point here
+    // until they are moved.
     window.history.pushState({}, "", "/meeting-log");
     render(<AppRoutes />);
-    expect(screen.getByTestId("stub-meeting-log")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-meetings")).toBeInTheDocument();
   });
 });
 
@@ -104,26 +112,38 @@ beforeEach(() => {
   setupStatus.isLoading = false;
 });
 
-describe("the Meeting log menu entry", () => {
-  it("is present, points at /meeting-log, and shares the Odoo entry's setup gate", () => {
+describe("the Meetings menu entry", () => {
+  it("is present, points at /meetings, and shares the Odoo entry's setup gate", () => {
     const { result, rerender } = renderHook(() => useMenuItems());
 
-    const meetingLogOpen = findItem(result.current.menu, "Meeting log");
+    const meetingsOpen = findItem(result.current.menu, "Meetings");
     const odooOpen = findItem(result.current.menu, "Odoo");
-    expect(meetingLogOpen.href).toBe("/meeting-log");
+    expect(meetingsOpen.href).toBe("/meetings");
     // Gate OFF: setup is complete. Both entries enabled, and agreeing.
-    expect(meetingLogOpen.disabled).toBe(false);
-    expect(meetingLogOpen.disabled).toBe(odooOpen.disabled);
+    expect(meetingsOpen.disabled).toBe(false);
+    expect(meetingsOpen.disabled).toBe(odooOpen.disabled);
 
     setupStatus.isComplete = false;
     rerender();
 
-    const meetingLogGated = findItem(result.current.menu, "Meeting log");
+    const meetingsGated = findItem(result.current.menu, "Meetings");
     const odooGated = findItem(result.current.menu, "Odoo");
     // Gate ON: setup incomplete. Both entries disabled, and STILL agreeing -
     // this is what proves it is the SHARED gate, not two independent ones
     // that happen to start out matching.
-    expect(meetingLogGated.disabled).toBe(true);
-    expect(meetingLogGated.disabled).toBe(odooGated.disabled);
+    expect(meetingsGated.disabled).toBe(true);
+    expect(meetingsGated.disabled).toBe(odooGated.disabled);
+  });
+
+  // The merge's whole point: two entry points collapse into one. A regression
+  // that brings back "Chats" or "Meeting log" as a second item would pass
+  // every assertion above (both still find "Meetings"), so this checks the
+  // menu has exactly one meetings-shaped entry, not zero-or-two.
+  it("collapses the old Meeting log and Chats entries into the one Meetings entry", () => {
+    const { result } = renderHook(() => useMenuItems());
+
+    expect(result.current.menu.filter((item) => item.href === "/meetings")).toHaveLength(1);
+    expect(result.current.menu.find((item) => item.label === "Meeting log")).toBeUndefined();
+    expect(result.current.menu.find((item) => item.label === "Chats")).toBeUndefined();
   });
 });
