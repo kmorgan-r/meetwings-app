@@ -51,6 +51,15 @@ export const CHUNK_POLL_INTERVAL_MS = 50;
 export const DOWNLOAD_SUCCESS_DISPLAY_MS = 1000;
 
 /**
+ * localStorage key carrying a rename across Tauri webviews.
+ *
+ * Both the writer (the dashboard's rename commit) and the reader (the overlay's
+ * storage listener) import THIS constant. A test that hardcodes the string
+ * would pass against a writer that never writes it.
+ */
+export const CONVERSATION_RENAMED_KEY = "meetwings-conversation-renamed";
+
+/**
  * CONVERSATION_ID_RANDOM_LENGTH
  *
  * Length of the random suffix in conversation IDs.

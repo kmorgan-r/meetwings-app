@@ -38,6 +38,11 @@ import {
   type TitleProviderConfig,
 } from "@/lib/functions/conversation-title";
 import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
+// Leaf path, not the barrel above: the meeting-assist test suite replaces the
+// whole @/lib barrel with a hand-written mock factory, so a barrel import
+// here would be undefined in that suite and the listener's key comparison
+// would short-circuit on every event.
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
 import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
@@ -271,6 +276,40 @@ export const useCompletion = () => {
         "conversation-title-updated",
         handleTitleUpdated
       );
+  }, []);
+
+  // The rename UI lives in the DASHBOARD webview; this hook runs in the overlay.
+  // window CustomEvents do not cross Tauri webviews (useHistory.ts:184 uses
+  // localStorage for exactly this reason), so the in-window event above never
+  // fires here for a dashboard rename - and without this the next autosave
+  // writes the stale cached title back over the user's rename.
+  useEffect(() => {
+    const handleRenamedElsewhere = (event: StorageEvent) => {
+      if (event.key !== CONVERSATION_RENAMED_KEY || !event.newValue) return;
+      let payload: { id?: string; title?: string };
+      try {
+        payload = JSON.parse(event.newValue);
+      } catch {
+        return;
+      }
+      const { id, title } = payload;
+      if (!id || typeof title !== "string") return;
+
+      const cached = conversationMetaCacheRef.current;
+      // A rename for a DIFFERENT conversation is a no-op, mirroring the shipped
+      // in-window handler at :261-264. Nulling the cache here would be a bug:
+      // renaming conversation B in the dashboard while the overlay is mid-meeting
+      // on A would drop A's entry, sending the next autosave into the re-read
+      // branch - and getConversationById returns null on a FAILED read as well as
+      // a missing row (chat-history.action.ts:345-351), so a transient error
+      // invents a "Meeting transcript - <date>" title with hasStoredTitle false,
+      // the one state that hands the conversation to the AI titler.
+      if (!cached || cached.id !== id) return;
+      conversationMetaCacheRef.current = { ...cached, title };
+    };
+
+    window.addEventListener("storage", handleRenamedElsewhere);
+    return () => window.removeEventListener("storage", handleRenamedElsewhere);
   }, []);
 
   // Chains a write onto saveQueueRef so it can't run concurrently with any

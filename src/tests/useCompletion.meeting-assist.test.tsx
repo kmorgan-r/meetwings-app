@@ -13,6 +13,12 @@ import {
   setActiveConversationId,
   shouldUseMeetwingsAPI,
 } from "@/lib";
+// Leaf path, not the barrel above: @/lib is replaced wholesale by the
+// vi.mock("@/lib", ...) factory in this suite, so a barrel import here would
+// resolve to undefined and every key comparison in the listener under test
+// would short-circuit regardless of what the hook does. This module is not
+// mocked, so both the test and the hook resolve the same real constant.
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -724,5 +730,78 @@ describe("useCompletion meeting assist mode", () => {
     const history = result.current.conversationHistory;
     expect(history.at(-2)).toMatchObject({ audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } });
     expect(history.at(-1)).toMatchObject({ audioSource: "microphone" });
+  });
+
+  it("patches the cached title when the other window renames a conversation", async () => {
+    // No enableProviderGate/mockStreamedResponse: submit is never called here, and
+    // enableProviderGate mutates a mock the beforeEach comment (:129-135) keeps clean.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    // The meta cache is only populated by a successful save, so do one first.
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const id = result.current.currentConversationId!;
+
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: CONVERSATION_RENAMED_KEY,
+          newValue: JSON.stringify({ id, title: "Renamed by hand", timestamp: Date.now() }),
+        })
+      );
+    });
+
+    // The next append must carry the new title, not the cached old one.
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    // appendMessagesToConversation(conversationId, title, updatedAt, newMessages)
+    // is positional - the title is [1], not a `.title` property.
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe("Renamed by hand");
+  });
+
+  it("ignores a rename for a different conversation", async () => {
+    // A rename of conversation B must not disturb the overlay's cache for A.
+    // Nulling it here would send the next autosave into the re-read branch, where
+    // getConversationById cannot distinguish a failed read from a missing row.
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+    const originalTitle = vi.mocked(saveConversation).mock.calls.at(-1)?.[0].title;
+
+    await act(async () => {
+      window.dispatchEvent(
+        new StorageEvent("storage", {
+          key: CONVERSATION_RENAMED_KEY,
+          newValue: JSON.stringify({ id: "some-other-conversation", title: "Not mine", timestamp: Date.now() }),
+        })
+      );
+    });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Another line", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.flushUnsavedMeetingTranscript();
+    });
+
+    const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+    expect(lastAppend?.[1]).toBe(originalTitle);
   });
 });
