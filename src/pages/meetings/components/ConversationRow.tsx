@@ -56,8 +56,10 @@ export interface ConversationRowProps {
  * needed a custom `propsAreEqual` for exactly that reason; this shape means this
  * row will not - the default shallow compare `memo` uses below is sufficient
  * because every prop here is either a primitive or one of `onOpen`,
- * `onStartRename`, `onCommitRename`, `onCancelRename`, which the page wraps in
- * `useCallback` with an empty dependency array.
+ * `onStartRename`, `onCommitRename`, `onCancelRename`, all of which hold their
+ * identity across the page's re-renders: three are `useCallback`s with an empty
+ * dependency array, and `onCommitRename` is deped on `commitRename`, which is
+ * itself `[]`-deped.
  */
 function ConversationRowInner({
   id,
