@@ -710,4 +710,19 @@ describe("useCompletion meeting assist mode", () => {
 
     expect(result.current.currentConversationId).toBe("chat-b");
   });
+
+  it("carries speaker and audioSource onto diarized batch messages", async () => {
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscriptEntries([
+        { original: "Guest line", timestamp: 1, audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } },
+        { original: "My line", timestamp: 2, audioSource: "microphone" },
+      ]);
+    });
+
+    const history = result.current.conversationHistory;
+    expect(history.at(-2)).toMatchObject({ audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } });
+    expect(history.at(-1)).toMatchObject({ audioSource: "microphone" });
+  });
 });

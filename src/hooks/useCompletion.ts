@@ -613,6 +613,11 @@ export const useCompletion = () => {
         role: "user" as const,
         content: entry.original,
         timestamp: entry.timestamp,
+        // Matching addMeetingTranscript (:574-581) and addSystemAudioTranscript
+        // (:701-708). Without these the row persists with both columns null and
+        // the transcript export labels a guest's line "You:".
+        speaker: entry.speaker,
+        audioSource: entry.audioSource,
       }));
 
       // Update ref immediately for sync

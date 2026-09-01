@@ -3,6 +3,7 @@ import {
   getAllConversations,
   deleteConversation,
   DOWNLOAD_SUCCESS_DISPLAY_MS,
+  conversationToMarkdown,
 } from "@/lib";
 import { ChatConversation } from "@/types/completion";
 
@@ -117,7 +118,7 @@ export function useHistory(): UseHistoryReturn {
 
     try {
       // Convert conversation to markdown format
-      const markdown = generateConversationMarkdown(conversation);
+      const markdown = conversationToMarkdown(conversation);
 
       // Create and download the file
       const blob = new Blob([markdown], { type: "text/markdown" });
@@ -206,30 +207,6 @@ export function useHistory(): UseHistoryReturn {
   };
 
   // Helper functions
-  const generateConversationMarkdown = (
-    conversation: ChatConversation
-  ): string => {
-    let markdown = `# ${conversation.title}\n\n`;
-    markdown += `**Created:** ${new Date(
-      conversation.createdAt
-    ).toLocaleString()}\n`;
-    markdown += `**Updated:** ${new Date(
-      conversation.updatedAt
-    ).toLocaleString()}\n`;
-    markdown += `**Messages:** ${conversation.messages.length}\n\n---\n\n`;
-
-    conversation.messages.forEach((message, index) => {
-      const roleLabel = message.role.toUpperCase();
-      markdown += `## ${roleLabel}: ${message.content}\n`;
-
-      if (index < conversation.messages.length - 1) {
-        markdown += "\n";
-      }
-    });
-
-    return markdown;
-  };
-
   const generateFilename = (title: string): string => {
     const sanitizedTitle = title.replace(/[^a-z0-9]/gi, "_").toLowerCase();
     return `${sanitizedTitle.substring(0, 16)}.md`;
