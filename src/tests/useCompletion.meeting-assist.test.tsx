@@ -6,6 +6,7 @@ import { useCompletion } from "@/hooks/useCompletion";
 import {
   appendMessagesToConversation,
   fetchAIResponse,
+  generateConversationId,
   generateConversationTitle,
   getConversationById,
   saveConversation,
@@ -17,15 +18,18 @@ vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
-vi.mock("@/contexts", () => ({
-  useApp: () => ({
-    selectedAIProvider: { provider: null },
-    allAiProviders: [],
-    systemPrompt: "",
-    screenshotConfiguration: { enabled: false, mode: "manual" },
-    setScreenshotConfiguration: vi.fn(),
-  }),
-}));
+// Hoisted to a stable module-scope object: a factory that returns a fresh
+// object per render makes selectedAIProvider change identity on every render,
+// which rebuilds `submit` every time and makes it impossible for a stale
+// closure to ever form - exactly the defect this suite needs to reproduce.
+const APP_CONTEXT = {
+  selectedAIProvider: { provider: null },
+  allAiProviders: [],
+  systemPrompt: "",
+  screenshotConfiguration: { enabled: false, mode: "manual" },
+  setScreenshotConfiguration: vi.fn(),
+};
+vi.mock("@/contexts", () => ({ useApp: () => APP_CONTEXT }));
 
 vi.mock("@/hooks", () => ({
   useGlobalShortcuts: () => ({
@@ -142,6 +146,13 @@ describe("useCompletion meeting assist mode", () => {
     vi.mocked(fetchAIResponse).mockImplementation(
       async function* () {} as never
     );
+    // vi.clearAllMocks() clears call records but not queued one-shot
+    // behaviours (mockReturnValueOnce). A test that deliberately leaves a
+    // second queued id unconsumed would otherwise leak it into the next
+    // test, where it gets picked up by the first mint and breaks every
+    // "conversation-1" pin. mockReset() restores the factory's default
+    // `vi.fn(() => "conversation-1")` implementation.
+    vi.mocked(generateConversationId).mockReset();
   });
 
   it("queues one transcript flush when StrictMode disables meeting assist", async () => {
