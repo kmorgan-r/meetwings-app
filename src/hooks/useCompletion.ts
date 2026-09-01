@@ -1707,6 +1707,20 @@ export const useCompletion = () => {
           // if one exists, rather than letting saveCurrentConversation mint its
           // own id from stale state.
           const conversationId = ensureConversationId(currentConversationIdRef);
+          // Mirror into state as well, functional and keyed on the live value
+          // for the reason spelled out at submit()'s copy of this block. Only
+          // the ref was being set here, so a conversation a screenshot STARTED
+          // stayed invisible to everything reading state.currentConversationId
+          // until a text turn happened afterwards: summarizeCurrentConversation
+          // bailed at its null guard, the conversation-deleted handler below
+          // could not tell the deleted conversation was the open one, and
+          // useMeetingLog fell back to its getActiveConversationId() recovery
+          // path for every enqueue.
+          setState((prev) =>
+            prev.currentConversationId === conversationId
+              ? prev
+              : { ...prev, currentConversationId: conversationId }
+          );
 
           // Cancel any existing request
           if (abortControllerRef.current) {
