@@ -68,7 +68,7 @@ Greeting Exchange", 2x "Brief Sign-off Exchange", 2x "Brief Greeting Exchange".
 
 The gaps are 10 to 120 seconds, not sub-second, so this is **not** a same-tick
 batching race. Three distinct defects produce it. Naming them matters, because
-each is fixed by a different subset of the seven mint sites.
+each is fixed by a different subset of the mint sites.
 
 **(a) A stale memoized closure.** `submit` is memoized on
 `[state.input, state.attachedFiles, selectedAIProvider, allAiProviders, systemPrompt]`
@@ -136,6 +136,9 @@ ordered conversation. It gets its own decision after the code fix lands.
 | `src/pages/meeting-log/components/*` | moved to `src/pages/meetings/components/` — `QueueRow`, `AssignDialog`, `ProviderConfigReader`, and the `meetingDateOf` / `targetNameOf` / `TranscriptView` exports that `index.tsx:41-45` imports from `./components/QueueRow` |
 | `src/pages/index.ts` | barrel: add `Meetings`, remove `Chats` and `MeetingLog`, repoint `ViewChat` |
 | `src/hooks/index.ts` | barrel: add `useMeetingLogQueue` |
+| `src/lib/functions/speaker-label.function.ts` | **new** (item 3) — `speakerLabelFor`, the one shared label helper |
+| `src/lib/functions/conversation-markdown.function.ts` | **new** (item 3) — `conversationToMarkdown`, extracted from the `useHistory` closure |
+| `src/lib/functions/conversation-id.function.ts` | **new** (item 4) — `ensureConversationId`, module scope so the `[]` deps hold |
 
 `src/hooks/useMeetingLog.ts` already exists and does something different —
 write-side enqueue and hold. `useMeetingLogQueue.ts` gets a one-line header
@@ -934,9 +937,15 @@ The recommended split, in the order this spec already states:
 3 and 4 are independent of 1 and 2 and of each other, so they can land in any
 order. 2 depends on 1 only for where the rename UI mounts.
 
-**This is the user's call, not the spec's**, because it changes the shape of the
-deliverable rather than its content — one PR or four. Nothing below assumes
-either answer.
+**Decision: one branch, four commits** — one per numbered item, in the order
+above. The user asked for these four changes together, and `/ship` opens one PR
+per pipeline; splitting into four PRs would mean four pipelines and three more
+merge gates for work that was requested as a unit. Commit boundaries give the
+independent-revert property that matters most here — migration 15 lands in its
+own commit, so it can be reverted without touching the page merge.
+
+If review of the finished branch proves it too large to review as one PR, the
+commit boundaries are already the split points.
 
 ## Decisions taken, for the record
 
