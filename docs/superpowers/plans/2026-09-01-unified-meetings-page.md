@@ -20,6 +20,11 @@
 - **Path alias is `@/`.** Files are kebab-case, components PascalCase, hooks `use*` camelCase, helper modules in `src/lib/functions/` use the `*.function.ts` suffix.
 - **Commit boundaries are the four items, in task order.** Migration 15 lands inside Task 6 so it can be reverted without touching the page merge.
 - **Run tests scoped to the files you touched**, e.g. `npx vitest run src/tests/foo.test.ts`. Never a bare `npx vitest run` — this repo has pre-existing unrelated failures and a full-suite run will not tell you whether your change is sound.
+- **The typecheck script is `npm run type-check`** (`tsc --noEmit`). There is no `check:types`.
+- **`tsconfig.json` excludes `src/tests/**`**, so `type-check` never validates test files. A wrong argument count or a bad type in a test compiles and runs; only the assertion catches it. Conversely `noUnusedLocals: true` **is** enforced on source, so an import left unused after an edit is a hard failure.
+- **Line numbers in this plan are plan-time.** Anchor every edit on the quoted snippet, not the number. Earlier tasks shift later ones by a few lines; if a number does not match, re-grep for the snippet and proceed — do not stop.
+- **`src/tests/useCompletion.meeting-assist.test.tsx` mocks `@/lib` with a hand-written factory** (`:49-79`) listing exactly the names `useCompletion.ts` imports today. **Any new name added to `useCompletion.ts`'s `@/lib` import is `undefined` inside that suite** unless the factory is amended in the same task. This is the single most likely way to break a "PASS" expectation in this plan; each affected task carries an explicit step.
+- That suite's wrapper is `strictModeWrapper` (`:91-93`) — there is no `wrapper`. Its `generateConversationId` mock returns the constant `"conversation-1"` (`:66`), pinned by `EXISTING_CONVERSATION` and the `getConversationById` assertions, so **a test asserting "only one distinct id" is vacuous there**; use `mockReturnValueOnce` for per-call ids instead of changing the default.
 
 ## Ordering and dependencies
 
@@ -268,6 +273,8 @@ with:
       const conversationId = ensureConversationId(currentConversationIdRef);
 ```
 
+**These two blocks are byte-identical, including indentation**, so a single exact-match edit will report "not unique" and fail. Anchor each edit on a surrounding unique line — the preceding comment differs (`// Also add to conversation history as user messages (for display)` at `:610` vs `// Also add to conversation history` at `:696`) — or use a replace-all that expects exactly two occurrences.
+
 - [ ] **Step 6: Substitute the two load-bearing sites**
 
 At `:882-890`, replace:
@@ -332,11 +339,26 @@ with:
 - [ ] **Step 7: Typecheck and lint**
 
 ```bash
-npm run check:types
+npm run type-check
 npm run lint
 ```
 
 Expected: PASS. If `generateConversationId` is now unused in `useCompletion.ts`, remove it from that file's imports.
+
+- [ ] **Step 7b: Amend the suite's `@/lib` mock factory — required, not optional**
+
+`src/tests/useCompletion.meeting-assist.test.tsx:49-79` replaces the whole `@/lib` barrel with a factory listing exactly the names the hook imports today. `ensureConversationId` is not among them, so without this step it is `undefined` inside the hook and the suite dies with `ensureConversationId is not a function` on the first `addMeetingTranscript` — nothing to do with your change.
+
+Add to the factory's returned object, delegating to its own `generateConversationId` so per-test `mockReturnValueOnce` overrides still drive it:
+
+```ts
+    ensureConversationId: vi.fn((ref: { current: string | null }) => {
+      ref.current ??= mockGenerateConversationId();
+      return ref.current;
+    }),
+```
+
+where `mockGenerateConversationId` is the same `vi.fn` the factory assigns to `generateConversationId` (hoist it to a local inside the factory closure so both entries share one instance).
 
 - [ ] **Step 8: Run the existing completion suite**
 
@@ -394,35 +416,86 @@ awk 'NR>=1640 && NR<=1760 && /conversationId/' src/hooks/useCompletion.ts
 
 Expected: no output. That path therefore needs its own `ensureConversationId` call, which is correct — a screenshot submit is a real turn and should join the current conversation if one exists.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2a: Make the suite able to express the defect at all**
 
-Add to `src/tests/useCompletion.meeting-assist.test.tsx`, following the file's existing `renderHook(() => useCompletion(), …)` scaffolding at `:139`:
+Three properties of `src/tests/useCompletion.meeting-assist.test.tsx` make a naive version of this test useless. Fix them first, in their own commit, and confirm the suite still passes.
+
+1. **The context mock returns a fresh object per render** (`:20-28`), so `selectedAIProvider` changes identity every render and `submit` is rebuilt — the stale closure the defect needs can never form. Hoist the return value:
+
+```ts
+const APP_CONTEXT = {
+  selectedAIProvider: { provider: null },
+  allAiProviders: [],
+  systemPrompt: "",
+  screenshotConfiguration: { enabled: false, mode: "manual" },
+  setScreenshotConfiguration: vi.fn(),
+};
+vi.mock("@/contexts", () => ({ useApp: () => APP_CONTEXT }));
+```
+
+2. **`generateConversationId` is mocked to the constant `"conversation-1"`** (`:66`). Every mint returns the same string, so "assert only one distinct id" passes with the bug fully intact. Do **not** change the factory default — `EXISTING_CONVERSATION`, the `saveConversation` resolved value and `expect(getConversationById).toHaveBeenCalledWith("conversation-1")` at `:221` all pin it. Override per-test with `mockReturnValueOnce`.
+
+3. **`ensureConversationId` must be added to the `@/lib` factory** (`:58-78`), or it is `undefined` inside the hook and the whole file dies on the first `addMeetingTranscript`. It must stay behind the barrel mock — a direct import would route minting through the real generator and break the `"conversation-1"` pins:
+
+```ts
+    ensureConversationId: vi.fn((ref: { current: string | null }) => {
+      ref.current ??= (globalThis as never as { __mintId: () => string }).__mintId?.() ?? "conversation-1";
+      return ref.current;
+    }),
+```
+
+Simpler and preferred: have the factory's `ensureConversationId` delegate to its own `generateConversationId` mock so `mockReturnValueOnce` still drives it.
+
+Run the suite unchanged afterwards — it must still pass:
+
+```bash
+npx vitest run src/tests/useCompletion.meeting-assist.test.tsx
+```
+
+```bash
+git add src/tests/useCompletion.meeting-assist.test.tsx
+git commit -m "test(completion): stabilise the app-context mock so a stale closure can form"
+```
+
+- [ ] **Step 2b: Write the failing test**
 
 ```ts
 it("reuses the established conversation id when a turn is saved", async () => {
-  const { result } = renderHook(() => useCompletion(), { wrapper });
+  vi.mocked(generateConversationId)
+    .mockReturnValueOnce("chat-a")
+    .mockReturnValueOnce("chat-b");
+  enableProviderGate();
+  mockStreamedResponse("ok");
+
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
   // Establish an id through a ref-writing path that does not touch submit's deps.
   await act(async () => {
-    result.current.addMeetingTranscript("Opening line", Date.now(), undefined, "microphone");
+    result.current.addMeetingTranscript("Opening line", undefined, "microphone");
   });
-
   const established = result.current.currentConversationId;
-  expect(established).toBeTruthy();
+  expect(established).toBe("chat-a");
 
-  // A saved turn must land on that conversation, not mint a second one.
+  // THE PRECONDITION. The defect only reproduces if submit's useCallback
+  // identity survived the render that set the id - otherwise the closure is
+  // fresh, it reads the current state, and this degrades into a same-tick test
+  // that passes against unfixed code. Assert the staleness rather than assume it.
+  const before = result.current.submit;
+  expect(result.current.submit).toBe(before);
+
   await act(async () => {
     await result.current.submit("What should I say?");
   });
 
-  expect(result.current.currentConversationId).toBe(established);
-  const savedIds = savedConversations.map((c) => c.id);
-  expect(new Set(savedIds).size).toBe(1);
-  expect(savedIds[0]).toBe(established);
+  // A saved turn must land on the established conversation, not mint "chat-b".
+  const savedIds = vi.mocked(saveConversation).mock.calls.map(([c]) => c.id);
+  expect(savedIds).not.toContain("chat-b");
+  expect(savedIds.at(-1)).toBe("chat-a");
+  expect(result.current.currentConversationId).toBe("chat-a");
 });
 ```
 
-`savedConversations` is the array the suite's existing `saveConversation` / `appendMessagesToConversation` mock records into — reuse whatever that file already defines rather than adding a second mock.
+Note `enableProviderGate()` and `mockStreamedResponse("ok")` (`:105-115`): without them `submit` returns early at the provider gate, `saveCurrentConversation` never runs, and the test passes vacuously. `addMeetingTranscript` takes **three** arguments — `(transcript, speakerInfo?, audioSource?)` — not four.
 
 - [ ] **Step 3: Run it and watch it fail**
 
@@ -430,7 +503,7 @@ it("reuses the established conversation id when a turn is saved", async () => {
 npx vitest run src/tests/useCompletion.meeting-assist.test.tsx -t "reuses the established conversation id"
 ```
 
-Expected: FAIL — two distinct ids, because `saveCurrentConversation` minted its own.
+Expected: FAIL — `savedIds` contains `"chat-b"`, because `saveCurrentConversation` minted its own id from stale state.
 
 - [ ] **Step 4: Add the parameter**
 
@@ -454,6 +527,65 @@ At `:1433-1434`, delete the local mint entirely:
 ```
 
 The parameter now supplies it. Leave the `:1495` state mirror as it is — it is correct once `conversationId` is the turn's real id.
+
+- [ ] **Step 4b: Replace the SECOND stale read — this is the one that clobbers titles**
+
+`saveCurrentConversation` reads `state.currentConversationId` **twice**. Fixing only the mint leaves the second read stale, and the failure is worse than the duplicate it replaces. At `:1459-1469`:
+
+```ts
+      // Get existing conversation if updating
+      let existingConversation = null;
+      if (state.currentConversationId) {
+        try {
+          existingConversation = await getConversationById(
+            state.currentConversationId
+          );
+        } catch (error) {
+          console.error("Failed to get existing conversation:", error);
+        }
+      }
+```
+
+With the id now correct but the lookup still reading stale-null state, `existingConversation` stays `null`, so at `:1471-1475` `title` falls back to `generateConversationTitle(userMessage)` — the raw first message — and `saveConversation` writes it over the conversation's real name. Worse, `:1508`'s `if (!existingConversation?.title) requestAITitle(...)` then re-fires the AI titler on a conversation that already has a name. Replace both reads with the parameter:
+
+```ts
+      // Get existing conversation if updating. Reads the turn's own id, not
+      // state: state.currentConversationId is stale-null in exactly the
+      // scenario this parameter exists to fix, and a null lookup here silently
+      // renames the conversation to its first message and re-fires the titler.
+      let existingConversation = null;
+      if (conversationId) {
+        try {
+          existingConversation = await getConversationById(conversationId);
+        } catch (error) {
+          console.error("Failed to get existing conversation:", error);
+        }
+      }
+```
+
+- [ ] **Step 4c: Drop the now-unused dep**
+
+At `:1520`, `state.currentConversationId` is no longer read anywhere in the callback:
+
+```ts
+    [state.currentConversationId, queueConversationWrite, requestAITitle]
+```
+
+becomes:
+
+```ts
+    [queueConversationWrite, requestAITitle]
+```
+
+This is the React payoff, not tidying: today that dep gives `saveCurrentConversation` a new identity on every conversation change, which churns `handleScreenshotSubmit` (which lists it at `:1804`), which re-runs the effects at `useChatCompletion.ts:617` and `:664` — and those register `listen("captured-selection")` and assign `unlisten` after an `await`, the same lossy-async-gap leak documented at `pages/meeting-log/index.tsx:478-481`.
+
+- [ ] **Step 4d: Prune the import**
+
+If `generateConversationId` now has no remaining use in `useCompletion.ts` (Task 2 removed the other six), remove it from the `@/lib` import. `noUnusedLocals: true` makes this a hard `type-check` failure, not a warning.
+
+```bash
+grep -n "generateConversationId" src/hooks/useCompletion.ts
+```
 
 - [ ] **Step 5: Update both call sites**
 
@@ -482,18 +614,96 @@ then at `:1748`:
               ], conversationId);
 ```
 
+- [ ] **Step 5b: Add the three remaining required duplicate cases**
+
+The spec marks four cases "all required"; Step 2b writes one. Add the rest to the same suite, each with the `mockReturnValueOnce` id regime and the provider gate:
+
+```ts
+it("reuses the established id on the meeting-context path", async () => {
+  // submitWithMeetingContext (:1080) reads stale state identically to submit.
+  vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+  enableProviderGate();
+  mockStreamedResponse("ok");
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+  await act(async () => {
+    result.current.addMeetingTranscript("Opening", undefined, "microphone");
+  });
+  await act(async () => {
+    await result.current.submitWithMeetingContext("summarise");
+  });
+
+  expect(result.current.currentConversationId).toBe("chat-a");
+});
+
+it("mints a fresh id after the conversation is reset", async () => {
+  // The guard against a ??= regression pinning the app to one conversation.
+  vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+  await act(async () => {
+    result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+  });
+  expect(result.current.currentConversationId).toBe("chat-a");
+
+  await act(async () => {
+    await result.current.startNewConversation();
+  });
+  await act(async () => {
+    result.current.addMeetingTranscript("Second meeting", undefined, "microphone");
+  });
+
+  expect(result.current.currentConversationId).toBe("chat-b");
+});
+
+it("keeps state.currentConversationId populated after a chat-only turn", async () => {
+  // The setState mirror at :882/:1080. If it stops firing, every enqueue falls to
+  // useMeetingLog's getActiveConversationId() recovery and writes the
+  // conversation_id IS NULL rows the merged page then has to render.
+  enableProviderGate();
+  mockStreamedResponse("ok");
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+  await act(async () => {
+    await result.current.submit("hello");
+  });
+
+  expect(result.current.currentConversationId).toBeTruthy();
+});
+```
+
+- [ ] **Step 5c: The system-audio negative test**
+
+`useSystemAudio` is deliberately excluded from this fix, and this test is what keeps it excluded. Create `src/tests/useSystemAudio.new-conversation.test.tsx`:
+
+```tsx
+it("mints a distinct id for each new conversation", async () => {
+  const { result } = renderHook(() => useSystemAudio());
+
+  await act(async () => { result.current.startNewConversation(); });
+  const first = result.current.conversation.id;
+
+  await act(async () => { result.current.startNewConversation(); });
+  const second = result.current.conversation.id;
+
+  expect(second).not.toBe(first);
+});
+```
+
+Drive `startNewConversation` (`useSystemAudio.ts:875`), **not** `startCapture` — the latter opens with `invoke("check_system_audio_access")` and needs Tauri and media mocks for a hook this change does not touch. `.tsx` because it mounts a hook, matching the house convention.
+
 - [ ] **Step 6: Run the test and the suite**
 
 ```bash
-npx vitest run src/tests/useCompletion.meeting-assist.test.tsx
+npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/useSystemAudio.new-conversation.test.tsx
 ```
 
-Expected: PASS, including the new test.
+Expected: PASS, including all four new cases.
 
 - [ ] **Step 7: Typecheck**
 
 ```bash
-npm run check:types
+npm run type-check
 ```
 
 Expected: PASS. A missed call site surfaces here as "Expected 4 arguments, but got 3".
@@ -545,7 +755,7 @@ import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 describe("speakerLabelFor", () => {
   it("prefers an explicit speaker label", () => {
     expect(
-      speakerLabelFor({ speaker: { speakerLabel: "Sarah Chen" }, audioSource: "system" })
+      speakerLabelFor({ speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" }, audioSource: "system" })
     ).toBe("Sarah Chen");
   });
 
@@ -644,20 +854,32 @@ Then replace every `labelFor(` call in that file with `speakerLabelFor(`:
 grep -n "labelFor(" src/lib/odoo/meeting-log.ts
 ```
 
-In `src/hooks/useCompletion.ts`, delete the local `labelFor` at `:1045-1052` and use the shared one — it is already imported from `@/lib` if you add it to that import list. Replace the `labelFor(entry)` call below it with `speakerLabelFor(entry)`.
+In `src/hooks/useCompletion.ts`, delete the local `labelFor` at `:1045-1052`. Import the helper **by leaf path**, not via `@/lib`:
+
+```ts
+import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
+```
+
+The leaf path matters: the meeting-assist suite mocks the whole `@/lib` barrel with a fixed factory, so a barrel import would be `undefined` there. The file already sets this precedent at `:32-38` with `@/lib/functions/meeting-summarizer` and `@/lib/functions/conversation-title`.
+
+Then replace **every** `labelFor(` call site — there are four, at `:1057`, `:1067`, and twice at `:1070`:
+
+```bash
+grep -n "labelFor(" src/hooks/useCompletion.ts
+```
 
 - [ ] **Step 6: Run the affected suites**
 
 ```bash
-npx vitest run src/tests/odoo-meeting-log-push.test.ts src/tests/meeting-log-summary.test.ts src/tests/useCompletion.meeting-assist.test.tsx src/tests/speaker-label.function.test.ts
+npx vitest run src/tests/odoo-meeting-log-push.test.ts src/tests/odoo-meeting-log-render.test.ts src/tests/meeting-log-summary.test.ts src/tests/useCompletion.meeting-assist.test.tsx src/tests/speaker-label.function.test.ts
 ```
 
-Expected: PASS. These cover the Odoo note renderer and the meeting-context prompt, which are the two behaviours the extraction must not change.
+Expected: PASS. `odoo-meeting-log-render.test.ts` is the direct suite for `renderTranscript` / `buildNoteBody` — the behaviour the extraction must not change — and is the one most likely to catch a mistake here.
 
 - [ ] **Step 7: Typecheck and lint**
 
 ```bash
-npm run check:types
+npm run type-check
 npm run lint
 ```
 
@@ -682,7 +904,7 @@ Every captured meeting message has role `user`, so `useHistory.ts:222` renders m
 **Files:**
 - Create: `src/lib/functions/conversation-markdown.function.ts`
 - Modify: `src/lib/functions/index.ts`
-- Modify: `src/hooks/useHistory.ts:209-231, 120`
+- Modify: `src/hooks/useHistory.ts:208-231` (the `// Helper functions` comment through the generator; leave `generateFilename` at `:233`), `:120`
 - Modify: `src/hooks/useCompletion.ts:615-620`
 - Test: `src/tests/conversation-markdown.test.ts` (create)
 
@@ -713,7 +935,7 @@ describe("conversationToMarkdown", () => {
       conversation([
         { id: "m1", role: "user", content: "Scope of the LCA", timestamp: 1, audioSource: "microphone" },
         { id: "m2", role: "user", content: "And Scope 3?", timestamp: 2, audioSource: "system" },
-        { id: "m3", role: "user", content: "Only upstream", timestamp: 3, audioSource: "system", speaker: { speakerLabel: "Sarah Chen" } },
+        { id: "m3", role: "user", content: "Only upstream", timestamp: 3, audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } },
         { id: "m4", role: "assistant", content: "Here is what you could say", timestamp: 4 },
         { id: "m5", role: "user", content: "typed question", timestamp: 5 },
       ])
@@ -849,17 +1071,17 @@ with:
 
 ```ts
 it("carries speaker and audioSource onto diarized batch messages", async () => {
-  const { result } = renderHook(() => useCompletion(), { wrapper });
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
   await act(async () => {
     result.current.addMeetingTranscriptEntries([
-      { original: "Guest line", timestamp: 1, audioSource: "system", speaker: { speakerLabel: "Sarah Chen" } },
+      { original: "Guest line", timestamp: 1, audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } },
       { original: "My line", timestamp: 2, audioSource: "microphone" },
     ]);
   });
 
   const history = result.current.conversationHistory;
-  expect(history.at(-2)).toMatchObject({ audioSource: "system", speaker: { speakerLabel: "Sarah Chen" } });
+  expect(history.at(-2)).toMatchObject({ audioSource: "system", speaker: { speakerId: "diarization_A", speakerLabel: "Sarah Chen" } });
   expect(history.at(-1)).toMatchObject({ audioSource: "microphone" });
 });
 ```
@@ -912,7 +1134,7 @@ Expected: PASS.
 - [ ] **Step 10: Typecheck and commit**
 
 ```bash
-npm run check:types
+npm run type-check
 git add src/lib/functions/conversation-markdown.function.ts src/lib/functions/index.ts src/hooks/useHistory.ts src/hooks/useCompletion.ts src/tests/conversation-markdown.test.ts src/tests/useCompletion.meeting-assist.test.tsx
 git commit -m "feat(transcript): name the speakers in the downloaded transcript
 
@@ -961,13 +1183,15 @@ Add to `src-tauri/src/db/migration_tests.rs`, inside the existing `mod` block, m
     }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [ ] **Step 2: Create the SQL file FIRST, then run the test**
+
+Order matters here. `include_str!` on a missing file is a **compile error** that kills the whole `db::migration_tests` module — so running the test before the file exists cannot distinguish "file missing" from "wrong version", and the new assertions never execute. Write the `.sql` file (Step 3), then run:
 
 ```bash
 cd src-tauri && cargo test --lib db::migration_tests
 ```
 
-Expected: FAIL — the `include_str!` target does not exist (compile error), which is the correct first failure.
+Expected: FAIL on a real assertion — `title source migration must be registered` — because the file exists but `migrations()` has no entry for it. That is the red phase this test is for.
 
 - [ ] **Step 3: Write the migration**
 
@@ -1030,7 +1254,7 @@ Its own commit so it can be reverted without touching the page merge."
 Three SQL statements write `conversations.title`, all unconditionally. Guarding only the obvious one leaves a rename reverted seconds later by the autosave.
 
 **Files:**
-- Modify: `src/lib/database/chat-history.action.ts:377-384, 485-492, 568-580`
+- Modify: `src/lib/database/chat-history.action.ts:377-384, 485-492, 571-574` (and the doc comment at `:552-553`)
 - Test: `src/tests/chat-history.update-title.test.ts`, `src/tests/chat-history.rename-guard.test.ts` (create)
 
 **Interfaces:**
@@ -1058,6 +1282,19 @@ const mockExecute = vi.fn();
 const mockSelect = vi.fn();
 vi.mock("@/lib/database/config", () => ({
   getDatabase: () => Promise.resolve({ execute: mockExecute, select: mockSelect }),
+}));
+
+// chat-history.action.ts:3 imports safeLocalStorage from "@/lib". Without this
+// stub, importing the action pulls the whole flat barrel - ./functions,
+// ./database, ./odoo and the Tauri plugin modules - into the test graph. Every
+// sibling suite (update-title, append-silent, speaker, create-rollback,
+// title-adoption) carries the same block for the same reason.
+vi.mock("@/lib", () => ({
+  safeLocalStorage: {
+    getItem: vi.fn(() => null),
+    setItem: vi.fn(),
+    removeItem: vi.fn(),
+  },
 }));
 
 const sqlOf = (call: unknown[]) => String(call[0]).replace(/\s+/g, " ").trim();
@@ -1152,6 +1389,59 @@ with:
       "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'",
       [title, conversationId]
     );
+```
+
+- [ ] **Step 4b: Write the failing tests for the other two guarded writers**
+
+Step 5 and Step 6 must not be implemented untested. Add to the same file:
+
+```ts
+describe("updateConversation title guard", () => {
+  it("splits the header write the same way", async () => {
+    const { updateConversation } = await import("@/lib/database/chat-history.action");
+    await updateConversation({
+      id: "conversation-1",
+      title: "Save Title",
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1234,
+    });
+
+    expect(sqlOf(stampWrites()[0])).toBe(
+      "UPDATE conversations SET updated_at = ? WHERE id = ?"
+    );
+    expect(sqlOf(titleWrites()[0])).toBe(
+      "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'"
+    );
+  });
+
+  it("still raises when the conversation is gone", async () => {
+    const { updateConversation } = await import("@/lib/database/chat-history.action");
+    mockExecute.mockResolvedValueOnce({ rowsAffected: 0 });
+    await expect(
+      updateConversation({ id: "missing", title: "T", messages: [], createdAt: 1, updatedAt: 1 })
+    ).rejects.toThrow("Conversation not found");
+  });
+});
+
+describe("applySummaryTitleToConversation", () => {
+  it("returns false without throwing when the guard matches no row", async () => {
+    // A manual rename makes the guarded UPDATE match zero rows. The summary was
+    // written successfully; a cosmetic rename losing to the user must not be
+    // reported as a failure.
+    const { applySummaryTitleToConversation } = await import("@/lib/database/chat-history.action");
+    mockExecute.mockResolvedValueOnce({ rowsAffected: 0 });
+    await expect(
+      applySummaryTitleToConversation("conversation-1", "Summary Title")
+    ).resolves.toBe(false);
+  });
+});
+```
+
+Run them and watch them fail before implementing:
+
+```bash
+npx vitest run src/tests/chat-history.rename-guard.test.ts
 ```
 
 - [ ] **Step 5: Split `updateConversation` the same way**
@@ -1357,18 +1647,19 @@ Add to `src/tests/useCompletion.meeting-assist.test.tsx`:
 
 ```ts
 it("patches the cached title when the other window renames a conversation", async () => {
-  const { CONVERSATION_RENAMED_KEY } = await import("@/lib/chat-constants");
-  const { result } = renderHook(() => useCompletion(), { wrapper });
+  enableProviderGate();
+  mockStreamedResponse("ok");
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
+  // The meta cache is only populated by a successful save, so do one first.
   await act(async () => {
-    result.current.addMeetingTranscript("Opening", Date.now(), undefined, "microphone");
+    result.current.setMeetingAssistMode(true);
+    result.current.addMeetingTranscript("Opening", undefined, "microphone");
+  });
+  await act(async () => {
+    await result.current.flushUnsavedMeetingTranscript();
   });
   const id = result.current.currentConversationId!;
-
-  // Persist the conversation so a cache entry exists for this id.
-  await act(async () => {
-    await result.current.submit("hello");
-  });
 
   await act(async () => {
     window.dispatchEvent(
@@ -1379,18 +1670,24 @@ it("patches the cached title when the other window renames a conversation", asyn
     );
   });
 
-  // The next autosave must carry the new title, not the cached old one.
+  // The next append must carry the new title, not the cached old one.
   await act(async () => {
-    result.current.addMeetingTranscript("Another line", Date.now(), undefined, "microphone");
-    await vi.advanceTimersByTimeAsync(MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL);
+    result.current.addMeetingTranscript("Another line", undefined, "microphone");
+  });
+  await act(async () => {
+    await result.current.flushUnsavedMeetingTranscript();
   });
 
-  const lastAppend = appendCalls.at(-1);
-  expect(lastAppend?.title).toBe("Renamed by hand");
+  // appendMessagesToConversation(conversationId, title, updatedAt, newMessages)
+  // is positional - the title is [1], not a `.title` property.
+  const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+  expect(lastAppend?.[1]).toBe("Renamed by hand");
 });
 ```
 
-`appendCalls` is whatever the suite already records `appendMessagesToConversation` arguments into; reuse it. If the suite does not use fake timers, drive the autosave the way its existing autosave test at `:389` does rather than adding timer mocking.
+Import `CONVERSATION_RENAMED_KEY` from `@/lib/chat-constants` at the top of the file — that module is **not** mocked in this suite, so the test and the hook must both resolve the real constant. (The hook imports it by leaf path for the same reason; see Step 4.)
+
+**Do not reach for fake timers.** The autosave is not time-driven: `MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4` is a *segment count* (`config/constants.ts:133`), and the effect fires on `meetingTranscript.length >= lastSaved + 4` (`useCompletion.ts:458-469`), gated on `meetingAssistMode`. This suite installs no fake timers, so `vi.advanceTimersByTimeAsync` would throw. Driving `flushUnsavedMeetingTranscript` directly is both correct and deterministic.
 
 - [ ] **Step 3: Run and watch fail**
 
@@ -1423,17 +1720,16 @@ In `src/hooks/useCompletion.ts`, beside the existing `conversation-title-updated
       if (!id || typeof title !== "string") return;
 
       const cached = conversationMetaCacheRef.current;
-      if (!cached) return;
-      // PATCH, never invalidate. A cache miss sends the autosave into the
-      // re-read branch, and getConversationById returns null on a FAILED read
-      // as well as a missing row (chat-history.action.ts:345-351) - so a
-      // transient error would invent a "Meeting transcript - <date>" title with
-      // hasStoredTitle false, the one state that hands the conversation to the
-      // AI titler. Invalidate only when the id does not match.
-      conversationMetaCacheRef.current =
-        cached.id === id
-          ? { ...cached, title }
-          : null;
+      // A rename for a DIFFERENT conversation is a no-op, mirroring the shipped
+      // in-window handler at :261-264. Nulling the cache here would be a bug:
+      // renaming conversation B in the dashboard while the overlay is mid-meeting
+      // on A would drop A's entry, sending the next autosave into the re-read
+      // branch - and getConversationById returns null on a FAILED read as well as
+      // a missing row (chat-history.action.ts:345-351), so a transient error
+      // invents a "Meeting transcript - <date>" title with hasStoredTitle false,
+      // the one state that hands the conversation to the AI titler.
+      if (!cached || cached.id !== id) return;
+      conversationMetaCacheRef.current = { ...cached, title };
     };
 
     window.addEventListener("storage", handleRenamedElsewhere);
@@ -1479,7 +1775,12 @@ from a missing row, and would invent a title and hand it to the AI titler."
 - Test: `src/tests/meeting-log-page.test.tsx`
 
 **Interfaces:**
-- Produces: `useMeetingLogQueue()` returning the state and handlers the page renders from — `rows`, `groups`, `configState`, `stranded`, `loadError`, `busyId`, `reload`, and every action handler the page currently defines. **All handlers wrapped in `useCallback` and all returned values referentially stable**, because Task 13 memoises children on them.
+- Produces: `useMeetingLogQueue()` returning everything the page's JSX reads. The full surface, enumerated so nothing is stranded:
+  - **State:** `rows`, `rendered`, `grouped`, `capped`, `configState`, `stranded`, `loadError`, `busy`/`busyId`, `contacts`, `results`, `notices`, `transcript`, `pinned`, `instance`, `now`, `hasClaim`, `inlineIds`.
+  - **Dialog state:** `assignRow` and `setAssignRow` move **into** the hook, alongside the three handlers that drive them (`handleAssign` calls `setAssignRow`; `handleAssignConfirm` depends on `runRowAction`). The page renders `<AssignDialog>` from the returned `assignRow`. An earlier draft said dialog state "stays in the page" while moving its handlers — both cannot hold.
+  - **`providerConfigRef`**, which the page JSX passes to `<ProviderConfigReader configRef={providerConfigRef} />` at `:900` and `handleRetry:603` reads. If the ref moves into the hook it must be returned, or the leaf writes a ref nobody reads.
+  - **Handlers**, with their existing dep arrays unchanged: `setResult`, `refineResult`, `runRowAction`, `handleRetry`, `handleDelete`, `handleAssign`, `handleAssignConfirm`, `handleAssignCancel`, `runTargetAction`, `handleRetryTarget`, `handleRemoveTarget`, `readTranscript`, `toggleTranscript`, `reload`.
+  - **Stays page-side** (render concerns): `GROUPS` (`:75-82`), `FAILURE_COPY` (`:99`), `REMAINDER_LINE` (`:73`), and the JSX. `PAGE_CAP` and the `capped` slice (`:801`) go hook-side with `rendered`; the `STALE_TICK_MS` `now` tick (`:836`) goes hook-side, since `hasClaim` derives from it.
 
 - [ ] **Step 1: Read the page and inventory what moves**
 
@@ -1489,7 +1790,16 @@ awk 'NR>=380 && NR<=480 {printf "%4d|%s\n", NR, $0}' src/pages/meeting-log/index
 
 Everything from the `loadToken` ref, the `reload` callback, the focus listener effect and the write-only mirror refs down to the action handlers moves into the hook. What stays in the page: JSX, `GROUPS`, `FAILURE_COPY` (a render concern), and the dialog state.
 
-- [ ] **Step 2: Move the logic verbatim**
+- [ ] **Step 2: Move the logic verbatim — do NOT add memoisation**
+
+**Correction to an earlier draft of this plan, which claimed the page "defines them inline". It does not.** All thirteen handlers are already `useCallback`-wrapped with deliberately minimal dep arrays that read live state through the write-only mirror refs: `setResult:500 []`, `refineResult:519 []`, `runRowAction:529`, `handleRetry:593`, `handleDelete:615`, `handleAssign:648 []`, `handleAssignConfirm:663 [runRowAction]`, `handleAssignCancel:683 []`, `runTargetAction:700`, `handleRetryTarget:742`, `handleRemoveTarget:749`, `readTranscript:756`, `toggleTranscript:780`. `rendered:800`, `hasClaim:827`, `grouped:840`, `inlineIds:866` and `notices:880` are already `useMemo`'d.
+
+**Move each block byte-for-byte with its existing dep array. Add no new memoisation and re-derive no dep array** — inventing deps is exactly how a stale-closure regression enters, and the Step 4 gate would not reliably catch a wrong one.
+
+Two things must survive unchanged and are easy to "tidy" by accident:
+
+- The **dep-array-less `useLayoutEffect` at `:468-474`** that syncs the mirror refs. It must run after *every* render, and it must stay `useLayoutEffect`.
+- The **`[]`-deped focus effect at `:476-492`** with its `cancelled` flag and its `getCurrentWebviewWindow().onFocusChanged` — not `useWindowFocus`, per the comment at `:479-482`, whose lossy async gap leaks the first StrictMode mount's listener.
 
 Create `src/hooks/useMeetingLogQueue.ts` with a header:
 
@@ -1513,6 +1823,14 @@ Move the code without behavioural edits. Wrap every returned handler in `useCall
 - [ ] **Step 3: Consume it from the existing page, unchanged**
 
 `src/pages/meeting-log/index.tsx` now calls `useMeetingLogQueue()` at its top level and renders exactly as before. This is the step that proves the lift in isolation, before the merge changes anything visible.
+
+**Import it by leaf path**, not from the barrel:
+
+```ts
+import { useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
+```
+
+`src/hooks/index.ts` star-exports `useCompletion`, `useSystemAudio`, `useMeetingAudio` and more; the page imports nothing from `@/hooks` today, and `meeting-log-page.test.tsx:72-77` deliberately does not mock `@/lib`. A barrel import drags that whole graph into the suite and fails the acceptance gate for a reason that has nothing to do with the lift. Add the barrel entry for later consumers, but do not use it here.
 
 - [ ] **Step 4: Run the page suite — this is the acceptance gate**
 
@@ -1542,14 +1860,14 @@ are useCallback-wrapped so the merged page can memoise its children on them."
 **Files:**
 - Modify: `src/lib/database/meeting-log.action.ts`
 - Modify: `src/hooks/useMeetingLogQueue.ts`
-- Test: `src/tests/meetings-page.badges.test.tsx` (create)
+- Test: `src/tests/meetings-page.badges.test.ts` (create)
 
 **Interfaces:**
 - Produces: `listConversationBadgeRows(): Promise<Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>>` and a pure `resolveBadge(rows, currentInstance)` returning `{ status, count } | null`.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `src/tests/meetings-page.badges.test.tsx` covering the four resolution rules as separate cases:
+Create `src/tests/meetings-page.badges.test.ts` (`.ts`, not `.tsx` — it tests a pure function, matching `odoo-meeting-log-groups.test.ts`) covering the four resolution rules as separate cases:
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -1589,7 +1907,7 @@ describe("resolveBadge", () => {
 - [ ] **Step 2: Run and watch fail**
 
 ```bash
-npx vitest run src/tests/meetings-page.badges.test.tsx
+npx vitest run src/tests/meetings-page.badges.test.ts
 ```
 
 Expected: FAIL — `resolveBadge` is not exported.
@@ -1606,6 +1924,36 @@ SELECT conversation_id, status, instance
 ```
 
 with a comment recording why there is no instance filter: `listActionable` does not filter by instance either — it uses `?1` only inside its `ORDER BY CASE`, leaving classification to `groupOf`. Filtering here would hide a `sent` row a previous Odoo configuration pushed successfully, which is exactly the history the badge exists to show.
+
+- [ ] **Step 3b: Write the exported wrapper — the query string alone is not callable**
+
+`QUEUE_SQL` holds SQL text; every caller goes through an exported async function. Add one beside `listActionableRows` (`meeting-log.action.ts:1014`), doing the snake_case → camelCase mapping its siblings all do:
+
+```ts
+/**
+ * Every queue row that names a conversation, for the meetings page's badges.
+ *
+ * Deliberately NOT listActionableRows: that one is scoped to the actionable
+ * statuses and so can never report 'sent', which is most of what a badge says.
+ * No instance filter, matching listActionable - classification is the caller's
+ * job via resolveBadge.
+ */
+export async function listConversationBadgeRows(): Promise<
+  Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
+> {
+  const db = await getDatabase();
+  const rows = await db.select<Record<string, unknown>[]>(
+    QUEUE_SQL.listConversationBadges
+  );
+  return rows.map((r) => ({
+    conversationId: r.conversation_id as string,
+    status: r.status as MeetingLogStatus,
+    instance: r.instance as string,
+  }));
+}
+```
+
+The name must match everywhere it is referenced: `listConversationBadgeRows` for the function, `QUEUE_SQL.listConversationBadges` for the SQL.
 
 - [ ] **Step 4: Add `resolveBadge`**
 
@@ -1639,8 +1987,8 @@ In `useMeetingLogQueue`, add the badge read to `reload`'s existing `Promise.all`
 - [ ] **Step 6: Run and typecheck**
 
 ```bash
-npx vitest run src/tests/meetings-page.badges.test.tsx src/tests/meeting-log-page.test.tsx
-npm run check:types
+npx vitest run src/tests/meetings-page.badges.test.ts src/tests/meeting-log-page.test.tsx
+npm run type-check
 ```
 
 The page suite needs the new function added to its hoisted `db` factory with a `beforeEach` `mockResolvedValue([])` default — otherwise it is `undefined` inside the wholesale `vi.mock("@/lib/database/meeting-log.action")` and `reload` throws. **Adding to the factory is a required amendment, not a stop signal**; rewriting an existing mock's behaviour is.
@@ -1648,7 +1996,7 @@ The page suite needs the new function added to its hoisted `db` factory with a `
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib/database/meeting-log.action.ts src/lib/odoo/meeting-log.ts src/hooks/useMeetingLogQueue.ts src/tests/meetings-page.badges.test.tsx src/tests/meeting-log-page.test.tsx
+git add src/lib/database/meeting-log.action.ts src/lib/odoo/meeting-log.ts src/hooks/useMeetingLogQueue.ts src/tests/meetings-page.badges.test.ts src/tests/meeting-log-page.test.tsx
 git commit -m "feat(meetings): resolve a queue badge per conversation
 
 listActionable excludes sent/cancelled/deleted by design, so it cannot drive a
@@ -1673,17 +2021,38 @@ showing, but never an actionable state - pushQueuedRow would refuse it."
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `src/tests/meetings-page.test.tsx` covering the behaviours the spec fixes:
+Create `src/tests/meetings-page.test.tsx`. **Author the tests before any implementation** — the titles below are the required cases, and each needs its assertions written out against the rendered DOM.
+
+Mocks this file needs (model them on `meeting-log-page.test.tsx:10-77`, which mocks leaf modules and deliberately never mocks `@/lib`):
+
+- `@/lib/database/meeting-log.action` — the queue reads, including `listConversationBadgeRows` from Task 11
+- `@/lib/database/chat-history.action` — `getAllConversations`, which `useHistory` calls
+- `@/lib/odoo/meeting-log-actions`, `@/lib/database/odoo-contacts.action`, `@/lib/storage/odoo-config.storage` — as the queue-page suite does
+- `@tauri-apps/api/webviewWindow` — the focus listener
+
+Required cases:
 
 ```ts
 it("renders the conversation list with no strip and no badges when Odoo is unconfigured", …);
-it("still reports the stranded count on a half-filled config", …);
-it("keeps the conversation list rendered when the queue read fails", …);
-it("filters the date-grouped list but never the strip", …);
-it("renders a conversation_id IS NULL row in the strip with no link", …);
-```
+// configState !== "complete": assert the conversation titles ARE in the DOM and
+// no QueueRow / badge is.
 
-Write each assertion out in full against the rendered DOM; do not leave prose placeholders.
+it("still reports the stranded count on a half-filled config", …);
+// countActionableQueued() returns > 0 with an incomplete config: assert the count
+// is rendered.
+
+it("keeps the conversation list rendered when the queue read fails", …);
+// Reject the queue read: assert loadError renders AND the conversation titles
+// are still present. This is the isolation the spec requires.
+
+it("filters the date-grouped list but never the strip", …);
+// Type a search matching one conversation: assert the other conversation is gone
+// and every strip row is still present.
+
+it("renders a conversation_id IS NULL row in the strip with no link", …);
+// A queue row with conversation_id null: assert it renders and has no <a>/Link
+// to a conversation.
+```
 
 - [ ] **Step 2: Run and watch fail**
 
@@ -1699,30 +2068,54 @@ Layout: the action strip (rendered only when non-empty) above the always-rendere
 
 Error isolation is structural, not new error handling: `loadError` renders **above the strip only**, and the list is `useHistory`-owned state that `reload` never touches. `useHistory` is not modified.
 
-- [ ] **Step 4: Move the components**
+- [ ] **Step 4: Move ALL the components, not just `View.tsx`**
 
-`git mv` each file so history follows it. `View.tsx` keeps the barrel name `ViewChat` so `routes/index.tsx` and the `useChatCompletion` wiring do not churn. `QueueRow` keeps its `meetingDateOf` / `targetNameOf` / `TranscriptView` exports, which `index.tsx:41-45` imports (note the `targetNameOf as targetNameOfSingle` alias).
+`src/pages/chats/components/` holds **seven** files, not one:
 
-- [ ] **Step 5: Update the barrel**
+```
+AudioRecorder.tsx  ChatAudio.tsx  ChatFiles.tsx  ChatScreenshot.tsx
+DeleteConfirmation.tsx  View.tsx  index.ts
+```
 
-In `src/pages/index.ts`: add `Meetings`, remove `Chats` and `MeetingLog`, repoint `ViewChat` at the new location.
+`View.tsx:30-36` imports `{ DeleteConfirmationDialog, ChatAudio, ChatScreenshot, ChatFiles, AudioRecorder } from "."` — its sibling barrel. Moving `View.tsx` alone breaks that import, and the five siblings become orphans once `chats/index.tsx` goes (nothing else in `src/` imports them).
+
+`git mv` all seven, plus the four from `pages/meeting-log/components/`, so history follows each file. Two `index.ts` barrels cannot both land in one directory — write a single merged `src/pages/meetings/components/index.ts` by hand from the two.
+
+`View.tsx` keeps the barrel name `ViewChat` so `routes/index.tsx` and the `useChatCompletion` wiring do not churn. `QueueRow` keeps its `meetingDateOf` / `targetNameOf` / `TranscriptView` exports, which the page imports (note the `targetNameOf as targetNameOfSingle` alias).
+
+- [ ] **Step 5: Update the barrel and the routes together**
+
+**These cannot be split across commits.** Removing `Chats`/`MeetingLog` from `src/pages/index.ts` while `routes/index.tsx:12,19,30,44` still imports and mounts them leaves a repo that does not build — and the Step 6 typecheck would fail inside this task. Do all of it here:
+
+- `src/pages/index.ts`: add `Meetings`, remove `Chats` and `MeetingLog`, repoint `ViewChat` at `./meetings/components/View`.
+- `src/routes/index.tsx`: swap the imports and add the routes and redirects (the full block is in Task 13 Step 2 — apply it now).
+- Delete `src/pages/chats/` and `src/pages/meeting-log/` entirely (`git rm -r`), now that nothing imports them.
+
+- [ ] **Step 5b: Repoint the acceptance-gate suite**
+
+`src/tests/meeting-log-page.test.tsx:110-111` imports `MeetingLog from "@/pages/meeting-log"` and `{ AssignDialog, QueueRow } from "@/pages/meeting-log/components"` — both just moved. `tsconfig.json` excludes `src/tests/**`, so `type-check` will **not** catch this; only running the suite will. Repoint both imports at `@/pages/meetings` and `@/pages/meetings/components`. This is a mock/import repoint, explicitly allowed by the acceptance criterion; assertions still may not change.
 
 - [ ] **Step 6: Run and typecheck**
 
 ```bash
-npx vitest run src/tests/meetings-page.test.tsx
-npm run check:types
+npx vitest run src/tests/meetings-page.test.tsx src/tests/meeting-log-page.test.tsx
+npm run type-check
 ```
+
+Expected: PASS, and the repo builds. If `type-check` reports an unused import, prune it — `noUnusedLocals: true`.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add -A src/pages src/tests/meetings-page.test.tsx
+git add -A
 git commit -m "feat(meetings): one page for conversations and the Odoo queue
 
 The queue hook is called unconditionally at the page top level and the strip
 renders from its state - calling it from inside the conditionally-rendered
-strip would re-register the Tauri focus listener on every mount."
+strip would re-register the Tauri focus listener on every mount.
+
+Barrel, routes and page deletions land together: splitting them would leave a
+commit that does not build."
 ```
 
 ---
@@ -1768,10 +2161,12 @@ In `src/routes/index.tsx`, inside the `DashboardLayout` route:
           <Route path="/chats/view/:conversationId" element={<ChatViewRedirect />} />
 ```
 
-`ChatViewRedirect` is a small wrapper, because `Navigate`'s `to` is a static string and cannot re-interpolate the param:
+`ChatViewRedirect` is a small wrapper, because `Navigate`'s `to` is a static string and cannot re-interpolate the param. **It lives in its own module, `src/routes/ChatViewRedirect.tsx`, importing only `react-router-dom`** — defined inside `routes/index.tsx` it would be unimportable by the test, since that file's top-level `import {...} from "@/pages"` eagerly loads every page, which is the graph Step 1 exists to avoid:
 
 ```tsx
-function ChatViewRedirect() {
+import { Navigate, useLocation, useParams } from "react-router-dom";
+
+export function ChatViewRedirect() {
   const { conversationId } = useParams();
   const location = useLocation();
   return (
@@ -1782,6 +2177,8 @@ function ChatViewRedirect() {
   );
 }
 ```
+
+`routes/index.tsx` and `routes.redirects.test.tsx` both import it from there.
 
 - [ ] **Step 3: Move the four hardcoded links and collapse the menu**
 
@@ -1796,9 +2193,17 @@ function ChatViewRedirect() {
     },
 ```
 
+Remove `ClipboardListIcon` from the lucide import at `useMenuItems.tsx:20` — it was the retired "Meeting log" entry's icon and is now unused. `noUnusedLocals: true` makes that a hard `type-check` failure (TS6133), not a warning.
+
 - [ ] **Step 4: Apply the memoisation**
 
-In the page: `useMemo` the group + sort + filter into **one memo owned by the list child**, and split the strip and list into separate `React.memo` children. Pass each row **only its own badge value**, never the whole `Map` — the map is rebuilt on every `reload`, so passing it re-renders the entire list.
+`useMemo` the group + sort + filter into **one memo owned by the list child**, and split the strip and list into separate `React.memo` children.
+
+**Pass primitives across the memo boundary, not objects.** Each row receives `badgeStatus: string | null` and `badgeCount: number` — never the badge object and never the `Map`. `resolveBadge` allocates a fresh `{ status, count }` per call and the map is rebuilt on every `reload` (each focus refresh, each action re-read), so an object prop gives every row a new identity even when its badge is unchanged, and `React.memo`'s shallow compare fails list-wide — the exact cost this step exists to avoid. The in-repo precedent is explicit: `QueueRow.tsx:441,482` needed a custom `propsAreEqual` because "every refresh hands [new identities]".
+
+**Enumerate the list child's props and check each one is stable.** `useHistory` returns a fresh object literal every render, and its handlers are **not** `useCallback`-wrapped — `handleViewConversation:105`, `handleDownloadConversation:109`, `handleDeleteConfirm:153`, `confirmDelete:157`, `handleDownload:195` are all recreated per render. Passing any of them, or the `useHistory` object itself, defeats the boundary. The spec says `useHistory` is not modified, so wrap each handler the rows need in a page-level `useCallback` before it crosses.
+
+**Exclude the row being renamed from the filter.** The one memo owns the filter, and the chats filter (`pages/chats/index.tsx:54-63`) drops a whole date group when no title in it matches — so renaming while a search is active can unmount the open editor mid-edit. That is the same caret-loss failure Task 8's "don't touch `updated_at`" note guards against from the sort side.
 
 Record in a comment that `getAllConversations` attaching every message is a known cost that memoisation does not address; a `COUNT(*)`-shaped list read is the real remedy and is out of scope.
 
@@ -1814,7 +2219,7 @@ Expected: PASS. The link suites need their expected URLs updated. Add the menu-c
 
 ```bash
 git rm src/pages/chats/index.tsx src/pages/meeting-log/index.tsx
-npm run check:types
+npm run type-check
 npm run lint
 ```
 
@@ -1837,20 +2242,42 @@ deep link is not silently truncated. The two menu entries become one."
 - Modify: `src/pages/meetings/components/ConversationRow.tsx`, `src/pages/meetings/components/View.tsx`
 - Test: `src/tests/meetings-page.test.tsx`
 
+**Where the header control mounts.** `View.tsx:89` passes the title through `PageLayout`'s `title` prop, which is typed `title: string` (`src/layouts/PageLayout.tsx:13`) — an inline editable control does not fit it. Mount the rename control in **`rightSlot`**, which already takes arbitrary JSX (`View.tsx:91`), rather than widening `PageLayout` and `Header` to `ReactNode`. If you prefer widening, add both files to this task's Files list first.
+
 **Interfaces:**
 - Consumes: `renameConversationManually` (Task 8), `CONVERSATION_RENAMED_KEY` (Task 9).
 
 - [ ] **Step 1: Write the failing tests**
 
-Assert: pencil on hover reveals the input; Enter commits and calls `renameConversationManually`; Escape cancels without writing; the commit dispatches `conversation-title-updated` **and** writes `CONVERSATION_RENAMED_KEY` with an `{ id, title, timestamp }` payload.
+**Author these before implementing.** Required cases, each written out against the DOM:
 
-The `timestamp` is load-bearing, not decoration: `storage` does not fire when the written string is byte-identical to the stored one, so without a nonce, renaming the same conversation to the same title twice is silently dropped. Assert it is present and changes between two identical renames.
+```ts
+it("reveals the editor on the pencil and commits on Enter", …);
+// userEvent.hover the row, click the pencil, type, press Enter:
+// expect(renameConversationManually).toHaveBeenCalledWith(id, "New name")
+
+it("cancels on Escape without writing", …);
+// expect(renameConversationManually).not.toHaveBeenCalled()
+
+it("fires both channels on a successful commit", …);
+// Spy window.dispatchEvent and localStorage.setItem.
+// Assert a "conversation-title-updated" CustomEvent AND a setItem on
+// CONVERSATION_RENAMED_KEY whose parsed payload is { id, title, timestamp }.
+
+it("fires neither channel when the row no longer exists", …);
+// renameConversationManually resolves false: assert no dispatch, no setItem.
+
+it("uses a fresh timestamp for a repeated identical rename", …);
+// Rename to the same title twice; parse both payloads and assert the
+// timestamps differ. storage does not fire on a byte-identical write, so
+// without the nonce the second rename never reaches the overlay.
+```
 
 - [ ] **Step 2: Run and watch fail**
 
 - [ ] **Step 3: Implement the inline rename**
 
-Pencil on hover → input → Enter commits, Escape cancels. On commit, call `renameConversationManually`, then fire **both** channels.
+Pencil on hover → input → Enter commits, Escape cancels. On commit, call `renameConversationManually` and fire **both** channels **only when it resolves `true`**. It returns `Promise<boolean>`, and `false` means no row matched — the conversation was deleted between render and commit. Announcing a rename that did not happen would patch the overlay's cache with a title no row holds.
 
 - [ ] **Step 4: Implement the header rename and its listener**
 
@@ -1873,7 +2300,7 @@ npx vitest run src/tests/meetings-page.test.tsx src/tests/useCompletion.meeting-
 - [ ] **Step 6: Full scoped run and commit**
 
 ```bash
-npm run check:types && npm run lint
+npm run type-check && npm run lint
 git add -A
 git commit -m "feat(meetings): rename a conversation from the list or the header
 
