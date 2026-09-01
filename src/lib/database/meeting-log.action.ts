@@ -357,6 +357,16 @@ SELECT id, session_key, conversation_id, instance, contact_id, lead_id,
           created_at DESC
  LIMIT 201`,
 
+  // No instance filter, matching listActionable above - that one uses `?1`
+  // only inside its ORDER BY CASE, leaving classification to groupOf.
+  // Filtering here would hide a `sent` row a PREVIOUS Odoo configuration
+  // pushed successfully, which is exactly the history the badge exists to
+  // show.
+  listConversationBadges: `
+SELECT conversation_id, status, instance
+  FROM meeting_log_queue
+ WHERE conversation_id IS NOT NULL`,
+
   transcriptOf: `SELECT transcript FROM meeting_log_queue WHERE id = ?`,
 
   // NOT countAll. That one is scoped to ('held','pending','sending') because
@@ -1033,6 +1043,28 @@ export async function listActionableRows(instance: string): Promise<MeetingLogLi
   return parents.map((p) => ({
     ...(p as unknown as MeetingLogListRow),
     targets: byRow.get(p.id as string) ?? [],
+  }));
+}
+
+/**
+ * Every queue row that names a conversation, for the meetings page's badges.
+ *
+ * Deliberately NOT listActionableRows: that one is scoped to the actionable
+ * statuses and so can never report 'sent', which is most of what a badge says.
+ * No instance filter, matching listActionable - classification is the caller's
+ * job via resolveBadge.
+ */
+export async function listConversationBadgeRows(): Promise<
+  Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
+> {
+  const db = await getDatabase();
+  const rows = await db.select<Record<string, unknown>[]>(
+    QUEUE_SQL.listConversationBadges
+  );
+  return rows.map((r) => ({
+    conversationId: r.conversation_id as string,
+    status: r.status as MeetingLogStatus,
+    instance: r.instance as string,
   }));
 }
 

@@ -347,6 +347,41 @@ export function groupOf(
   return null;
 }
 
+/**
+ * Worst-status-wins ranking for the meetings page's per-conversation badge.
+ *
+ * `cancelled` and `deleted` are absent DELIBERATELY: both are meetings the
+ * user deliberately removed, and resurfacing either as state would resurrect
+ * a decision they already made. They fall out of `resolveBadge` by
+ * construction - never matching `BADGE_RANK` - rather than by a special case.
+ */
+const BADGE_RANK = ["failed", "unassigned", "sending", "pending", "held", "sent"] as const;
+
+/**
+ * Resolves the rows for ONE conversation into a single badge, or null.
+ *
+ * Mirrors groupOf's instance-first split: a `currentInstance` row is eligible
+ * whenever its status is a badge-worthy one, but an OTHER-instance row is
+ * eligible only when `sent` - that history is worth showing, but every other
+ * other-instance status belongs to the other-database group, where
+ * pushQueuedRow's instance check would refuse the very action a badge implies
+ * is available.
+ */
+export function resolveBadge(
+  rows: ReadonlyArray<{ status: string; instance: string }>,
+  currentInstance: string
+): { status: (typeof BADGE_RANK)[number]; count: number } | null {
+  const eligible = rows.filter((r) =>
+    r.instance === currentInstance
+      ? (BADGE_RANK as readonly string[]).includes(r.status)
+      : r.status === "sent"
+  );
+  if (eligible.length === 0) return null;
+
+  const worst = BADGE_RANK.find((s) => eligible.some((r) => r.status === s));
+  return worst ? { status: worst, count: eligible.length } : null;
+}
+
 /** Pure so retention is testable without a clock. */
 export function pruneCutoff(now: number): number {
   return now - RETENTION_MS;

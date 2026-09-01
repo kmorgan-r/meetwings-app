@@ -15,6 +15,9 @@ const db = vi.hoisted(() => ({
   // the generic conflict. deleteMeetingLog returns ok/conflict only, so the
   // branch has to live on the page and this is the read it makes.
   getQueueRow: vi.fn(),
+  // reload's badge read (Task 11). Left undefined here would throw inside the
+  // hook's Promise.all and every test in this file would hit the single catch.
+  listConversationBadgeRows: vi.fn(),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => db);
 
@@ -296,6 +299,7 @@ beforeEach(() => {
   db.countActionableQueued.mockResolvedValue(0);
   db.getQueueTranscript.mockResolvedValue("");
   db.getQueueRow.mockResolvedValue(null);
+  db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([contact()]);
   actions.retryMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.deleteMeetingLog.mockResolvedValue({ kind: "ok" });

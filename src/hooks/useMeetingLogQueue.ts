@@ -17,6 +17,7 @@ import {
   getQueueRow,
   getQueueTranscript,
   listActionableRows,
+  listConversationBadgeRows,
 } from "@/lib/database/meeting-log.action";
 import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { reportOdooError } from "@/lib/odoo/errors";
@@ -35,7 +36,12 @@ import {
   instanceFingerprint,
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
-import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
+import type {
+  MeetingLogListRow,
+  MeetingLogStatus,
+  MeetingLogTarget,
+  OdooContact,
+} from "@/types";
 import type { AssignPayload } from "@/pages/meeting-log/components";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
@@ -336,6 +342,12 @@ export function useMeetingLogQueue() {
   const [instance, setInstance] = useState("");
   const [rows, setRows] = useState<MeetingLogListRow[]>([]);
   const [contacts, setContacts] = useState<Map<number, OdooContact>>(new Map());
+  // Raw, ungrouped - one entry per queue row that names a conversation, from
+  // EVERY instance. Grouping by conversationId and resolving a badge per
+  // group (resolveBadge, @/lib/odoo/meeting-log) is the consuming page's job.
+  const [badgeRows, setBadgeRows] = useState<
+    Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
+  >([]);
   const [stranded, setStranded] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());
@@ -443,15 +455,17 @@ export function useMeetingLogQueue() {
       // dashboard webview is hidden rather than destroyed, so a page left
       // mounted outlives every main-window runSync and a map built once at
       // mount never learns about contacts synced afterwards.
-      const [list, cached] = await Promise.all([
+      const [list, cached, badges] = await Promise.all([
         listActionableRows(fingerprint),
         listContacts(fingerprint),
+        listConversationBadgeRows(),
       ]);
       if (token !== loadToken.current) return;
       setConfigState("complete");
       setInstance(fingerprint);
       setRows(list);
       setContacts(new Map(cached.map((c) => [c.id, c])));
+      setBadgeRows(badges);
       setStranded(0);
       setLoadError(null);
     } catch (err) {
@@ -914,6 +928,7 @@ export function useMeetingLogQueue() {
     loadError,
     busy,
     contacts,
+    badgeRows,
     results,
     notices,
     transcript,
