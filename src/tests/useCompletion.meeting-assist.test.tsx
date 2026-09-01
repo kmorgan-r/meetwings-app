@@ -55,6 +55,11 @@ vi.mock("@/lib", () => {
   // a machine-speed-dependent flake, not a clear failure, so keep the counter.
   let messageIdSequence = 0;
 
+  // Hoisted so `ensureConversationId` below delegates to the SAME vi.fn as
+  // `generateConversationId`, meaning a test's `mockReturnValueOnce` on
+  // `generateConversationId` still drives what ensureConversationId mints.
+  const mockGenerateConversationId = vi.fn(() => "conversation-1");
+
   return {
     fetchAIResponse: vi.fn(),
     saveConversation: vi.fn(),
@@ -63,7 +68,11 @@ vi.mock("@/lib", () => {
     generateConversationTitle: vi.fn((message: string) => message),
     shouldUseMeetwingsAPI: vi.fn().mockResolvedValue(false),
     MESSAGE_ID_OFFSET: 1,
-    generateConversationId: vi.fn(() => "conversation-1"),
+    generateConversationId: mockGenerateConversationId,
+    ensureConversationId: vi.fn((ref: { current: string | null }) => {
+      ref.current ??= mockGenerateConversationId();
+      return ref.current;
+    }),
     generateMessageId: vi.fn(
       (role: string, timestamp: number) =>
         `${role}-${timestamp}-${(messageIdSequence += 1)}`

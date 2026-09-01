@@ -20,6 +20,7 @@ import {
   shouldUseMeetwingsAPI,
   MESSAGE_ID_OFFSET,
   generateConversationId,
+  ensureConversationId,
   generateMessageId,
   generateRequestId,
   getResponseSettings,
@@ -319,9 +320,7 @@ export const useCompletion = () => {
         const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
         const persistedIdsAtSnapshot = new Set(persistedMessageIdsRef.current);
 
-        const conversationId =
-          currentConversationIdRef.current || generateConversationId("chat");
-        currentConversationIdRef.current = conversationId;
+        const conversationId = ensureConversationId(currentConversationIdRef);
 
         const cachedMeta = conversationMetaCacheRef.current;
         let title: string;
@@ -568,8 +567,7 @@ export const useCompletion = () => {
 
     // Also add to conversation history as a user message (for display)
     // Use ref for conversation ID to avoid stale closure - ref is always current
-    const conversationId = currentConversationIdRef.current || generateConversationId("chat");
-    currentConversationIdRef.current = conversationId;
+    const conversationId = ensureConversationId(currentConversationIdRef);
 
     const userMessage: ChatMessage = {
       id: generateMessageId("user", timestamp),
@@ -608,9 +606,7 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, ...validEntries]);
 
       // Also add to conversation history as user messages (for display)
-      const conversationId =
-        currentConversationIdRef.current || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
 
       const userMessages: ChatMessage[] = validEntries.map((entry) => ({
         id: generateMessageId("user", entry.timestamp),
@@ -694,9 +690,7 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, entry]);
 
       // Also add to conversation history
-      const conversationId =
-        currentConversationIdRef.current || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
 
       const userMessage: ChatMessage = {
         id: generateMessageId("user", timestamp),
@@ -879,15 +873,20 @@ export const useCompletion = () => {
 
       // Generate conversation ID upfront for new conversations
       // This ensures the ID is available when usage events are captured
-      const conversationId = state.currentConversationId || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
+      const conversationId = ensureConversationId(currentConversationIdRef);
       console.log("[Cost Tracking] Set conversation ID ref to:", conversationId);
-      if (!state.currentConversationId) {
-        setState((prev) => ({
-          ...prev,
-          currentConversationId: conversationId,
-        }));
-      }
+      // Functional and keyed on the live value, NOT `if (!state.currentConversationId)`:
+      // after the substitution the id comes from the ref while that guard reads a
+      // possibly-stale snapshot, and the two no longer share a source. Reachable:
+      // clearMeetingTranscript does not clear state.input, so submit's memo does not
+      // re-form, the snapshot still holds the pre-reset id, the guard is falsy, the
+      // mirror never fires, and state.currentConversationId stays null — which sends
+      // every enqueue to useMeetingLog's getActiveConversationId() recovery path.
+      setState((prev) =>
+        prev.currentConversationId === conversationId
+          ? prev
+          : { ...prev, currentConversationId: conversationId }
+      );
 
       // Cancel any existing request
       if (abortControllerRef.current) {
@@ -1077,14 +1076,14 @@ export const useCompletion = () => {
       currentRequestIdRef.current = requestId;
 
       // Generate conversation ID upfront (use "chat" type for meeting assist conversations)
-      const conversationId = state.currentConversationId || generateConversationId("chat");
-      currentConversationIdRef.current = conversationId;
-      if (!state.currentConversationId) {
-        setState((prev) => ({
-          ...prev,
-          currentConversationId: conversationId,
-        }));
-      }
+      const conversationId = ensureConversationId(currentConversationIdRef);
+      // See the note at the sibling site in `submit`: functional, keyed on the live
+      // value, because the guard would otherwise read a stale snapshot.
+      setState((prev) =>
+        prev.currentConversationId === conversationId
+          ? prev
+          : { ...prev, currentConversationId: conversationId }
+      );
 
       // Cancel any existing request
       if (abortControllerRef.current) {
@@ -1250,7 +1249,9 @@ export const useCompletion = () => {
     },
     [
       meetingTranscript,
-      state.currentConversationId,
+      // state.currentConversationId removed - ensureConversationId reads the ref directly,
+      // and the setState mirror below is functional, so this callback no longer closes
+      // over the state value.
       // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
       selectedAIProvider,
       allAiProviders,
