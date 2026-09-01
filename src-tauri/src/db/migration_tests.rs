@@ -115,4 +115,19 @@ mod tests {
             "multi target migration must embed migrations/odoo-multi-target.sql"
         );
     }
+
+    #[test]
+    fn title_source_migration_is_version_15_and_points_at_its_own_file() {
+        let all = migrations();
+        let m = all
+            .iter()
+            .find(|m| m.description == "add_title_source_to_conversations")
+            .expect("title source migration must be registered");
+        assert_eq!(m.version, 15, "title source migration must be version 15");
+        assert_eq!(
+            m.sql,
+            include_str!("migrations/conversation-title-source.sql"),
+            "title source migration must embed migrations/conversation-title-source.sql"
+        );
+    }
 }

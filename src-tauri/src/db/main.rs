@@ -101,5 +101,13 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/odoo-multi-target.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 15: Record whether a conversation's title came from a
+        // human rename or an automatic titler
+        Migration {
+            version: 15,
+            description: "add_title_source_to_conversations",
+            sql: include_str!("migrations/conversation-title-source.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
