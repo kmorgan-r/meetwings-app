@@ -82,9 +82,27 @@ multi-second gap.
 `src/hooks/useCompletion.ts:1433-1434` computes
 `state.currentConversationId || generateConversationId("chat")` and **never
 assigns it to `currentConversationIdRef.current`**. Every other mint site does
-(`:324`, `:572`, `:613`, `:699`, `:883`, `:1081`, `:1361`). So this site can
-mint a second id against a conversation the ref already holds — the "small stub
-minted seconds from the real one" signature exactly.
+(`:324`, `:572`, `:613`, `:699`, `:883`, `:1081`). So this site can mint a
+second id against a conversation the ref already holds — the "small stub minted
+seconds from the real one" signature exactly. It *does* mirror the bad id into
+state at `:1495`, which is how the stub becomes the app's current conversation.
+
+`:1361` is a ref write-back but **not** a mint: it is `loadConversation`
+adopting an existing conversation (`currentConversationIdRef.current =
+conversation.id`). It is therefore absent from the Sites list below, by design.
+
+**State writers are a different set from mint sites**, and the substitution
+below makes the ref authoritative at three sites that previously read state — so
+the audit has to cover both. `setState` writes `currentConversationId` at
+`:588`, `:630`, `:717`, `:748`, `:888`, `:1085`, `:1223`, `:1372`, `:1402`,
+`:1495`. Of those, `:1223` is benign (its id descends from the `:1080` mint,
+which writes the ref at `:1081`) and `:1495` is defect (b)'s mirror. Before the
+substitution lands, **every** `setState(… currentConversationId …)` must be
+confirmed to write the ref in the same synchronous step, as the reset paths
+already do. Any adopt-an-existing-conversation path that sets state alone is
+repaired today by `:882`'s unconditional overwrite and would break under `??=`;
+it must be fixed at its own site first, and that audit is a precondition of this
+change rather than part of it.
 
 **(c) A remount.** `src/hooks/useMeetingLog.ts:323-326` documents it: a remount
 re-initialises `state.currentConversationId` to null while the persisted id
@@ -140,13 +158,37 @@ described below, placed inside the existing token guard. Everything else moves
 unchanged, and `QueueRow` / `AssignDialog` / `ProviderConfigReader` are mounted
 unchanged.
 
-**Acceptance criterion for the lift:** `src/tests/meeting-log-page.test.tsx`
-(2264 lines), repointed at the new page and otherwise unmodified, must pass. Its
-mocks bind to the page's module graph — `vi.mock("@/lib/database/meeting-log.action")`
-at `:19`, `"@/lib/odoo/meeting-log-actions"` at `:36`, the captured focus handler
-at `:88-90` — so passing *is* the proof that the lift was verbatim. Mock paths
-may be repointed; **assertions may not**. An assertion that needs an edit to
-pass is the stop-and-re-scope signal.
+**Acceptance criterion for the lift.** `src/tests/meeting-log-page.test.tsx`
+(2264 lines) is the check that the lift preserved behaviour. It cannot be frozen
+wholesale, because this design deliberately changes what the page *renders* —
+`held`/`pending`/`sending` leave the queue groups for badges, and the
+other-database group collapses to a one-liner, so two of the four `GROUPS`
+(`pages/meeting-log/index.tsx:75-82`) no longer exist. A blanket "no assertion
+may change" would fire the stop signal on the first assertion this spec exists
+to change.
+
+So the freeze is scoped to **behaviour, not placement**:
+
+- **Frozen — any edit here is the stop-and-re-scope signal.** Token ordering
+  under `loadToken`, focus-listener registration (exactly once, via the captured
+  handler at `:88-90`), every action outcome, `FAILURE_COPY` strings, and the
+  `LIMIT 201` / `PAGE_CAP = 200` / `REMAINDER_LINE` paging behaviour.
+- **Expected to change, enumerated up front.** Assertions that a `held`,
+  `pending` or `sending` row appears in a queue group; assertions about the
+  other-database group's full-row rendering. These are listed in the plan before
+  work starts, and any placement assertion *not* on that list is treated as a
+  frozen one.
+- **Mocks may be added, not rewritten.** Existing mocks bind to the Odoo module
+  graph (`vi.mock("@/lib/database/meeting-log.action")` at `:19`,
+  `"@/lib/odoo/meeting-log-actions"` at `:36`) and the suite deliberately does
+  not mock `@/lib` (`:72-77`). The merged page also mounts `useHistory`, whose
+  `getAllConversations` would otherwise run against a real `getDatabase()`, and
+  the new badge-query export would be `undefined` inside the wholesale
+  `meeting-log.action` mock — throwing inside `reload` and failing every test.
+  Adding a leaf mock for `@/lib/database/chat-history.action` and adding the
+  badge function to the hoisted factory with a `beforeEach`
+  `mockResolvedValue([])` default are **required amendments, not stop signals**.
+  Rewriting an existing mock's behaviour is a stop signal.
 
 **The hook is called unconditionally**, at the page top level, with the strip
 rendered from its returned state. It must not be called from inside a
@@ -183,6 +225,28 @@ messages attached (`pages/chats/index.tsx:12-27`). So: `useMemo` the grouping on
 `[conversations]`, and split the strip and the date-grouped list into separate
 memoised children, so neither the tick nor a search keystroke crosses into the
 other.
+
+Memoising the grouping is necessary but not sufficient, and three things defeat
+it if left alone:
+
+- `React.memo` only stops a re-render when **every** prop is referentially
+  stable. `useMeetingLogQueue()` must return `useCallback`-stable handlers and
+  state, or a fresh object per render defeats the boundary entirely.
+- Group, sort and search-filter all belong **inside one memo owned by the list
+  child** — `sortedDates` (`pages/chats/index.tsx:25-27`) and the filter
+  (`:54-63`) rebuild per render today.
+- The badge map is rebuilt on every `reload` — every focus refresh and every
+  action's re-read — so passing the `Map` itself as a prop re-renders the whole
+  list. Each row receives **only its own badge value**, so an unchanged row
+  keeps its props.
+
+Note also that `conversations` gets a new identity on every
+`conversation-title-updated` (`useHistory.ts:87-91`), not only on refresh, so
+the 30-second tick is not the only invalidator. And memoisation does not touch
+the cost this section cites — `getAllConversations` attaching every message —
+since a row renders only `doc.messages.length`. A `COUNT(*)`-shaped list read is
+the real remedy there; it is **out of scope** for this change and recorded as a
+known cost.
 
 ### Where each queue group lands
 
@@ -261,10 +325,17 @@ still reports how many rows are queued, via `countActionableQueued()`.
 
 **A queue failure must not blank the conversation list.** The lifted `reload`
 has a single `catch` that sets `loadError` for the whole page
-(`pages/meeting-log/index.tsx:445-452`). On the merged page that would let an
-Odoo-side failure blank a conversation history that is not queue data at all.
-The conversation-list read gets its own error path; a failed badge or queue read
-drops badges and shows the strip's error, and the list still renders.
+(`pages/meeting-log/index.tsx:445-452`). On the merged page that must not blank
+a conversation history that is not queue data at all.
+
+**The isolation is structural, not new error handling.** The badge query stays
+inside `reload`'s `Promise.all` under the shared catch, so a badge failure sets
+`loadError` — but `loadError` renders *above the strip only*, and the list is
+`useHistory`-owned state that `reload` never touches. `useHistory` is therefore
+**not modified**, consistent with "Default: queue read only" below;
+`refreshConversations` keeps its existing swallow-and-empty behaviour
+(`useHistory.ts:61-72`). Nothing in this change gives the list a new error path
+— it simply stops sharing the queue's.
 
 **`refreshConversations` needs the same discipline if it is wired to focus.**
 `useHistory.ts:61-72` has no token ordering and no unmount guard — two
@@ -360,11 +431,18 @@ ALTER TABLE conversations ADD COLUMN title_source TEXT NOT NULL DEFAULT 'auto';
 ```rust
 Migration {
     version: 15,
-    description: "conversation_title_source",
+    description: "add_title_source_to_conversations",
     sql: include_str!("migrations/conversation-title-source.sql"),
     kind: MigrationKind::Up,
 },
 ```
+
+The description is verb-first because every one of the fourteen registered
+descriptions is (`create_*`, `add_*`, `remove_*`, `adopt_*`, `allow_*`), and
+migration 8's `add_speaker_to_messages` is the exact structural sibling — the
+same `ALTER TABLE … ADD COLUMN` shape. It is also the lookup key in the sibling
+pinning tests (`migration_tests.rs:51,69,91,109` all `.find(|m| m.description == …)`),
+so this string and the test must agree.
 
 `every_migration_file_is_registered` would catch the omission, but discovering a
 plan step through a failing test is not a plan.
@@ -428,11 +506,36 @@ localStorage to communicate between windows", and `pages/meeting-log/index.tsx:5
 describes per-webview module state. The event works today only because
 `applyAIConversationTitle` fires it *inside* the overlay.
 
-So the rename must propagate cross-window the way the codebase already does it —
-a `localStorage` key the overlay watches via the `storage` event, mirroring
-`handleAttachToOverlay` (`useHistory.ts:183-193`). The overlay's handler
-**invalidates** the cached title by id rather than patching it, so the next
-append re-reads the row instead of trusting a value that may itself be stale.
+So a commit fires **both** channels, and dropping either one breaks a window:
+
+1. **In-window:** dispatch `conversation-title-updated`, as
+   `applyAIConversationTitle` already does (`conversation-title.ts:240-244`).
+   The dashboard's own `useHistory:97` listener and the `View.tsx` listener
+   below depend on it — `storage` does **not** fire in the window that wrote the
+   value, so the event is the only thing that updates the window the user is
+   actually looking at.
+2. **Cross-window:** write a `localStorage` key the overlay watches via the
+   `storage` event, mirroring `handleAttachToOverlay` (`useHistory.ts:183-193`).
+   The payload carries `{ id, title, timestamp }`. The `timestamp` is
+   load-bearing, not decoration: `storage` does not fire when the written string
+   is byte-identical to the stored one, so without a nonce, renaming the same
+   conversation to the same title twice is silently dropped — which is exactly
+   why `handleAttachToOverlay` carries one at `:187`.
+
+The overlay's handler **patches** `conversationMetaCacheRef` with the title from
+the payload, exactly as the shipped in-window handler does at
+`useCompletion.ts:261-264`. It does **not** invalidate the entry. An earlier
+draft of this section said "invalidate", which is wrong: a cache miss sends the
+autosave into the re-read branch at `useCompletion.ts:326-340`, and
+`getConversationById` "returns null on a failed read, which makes a transient
+error indistinguishable from 'no such row'" (`chat-history.action.ts:345-351`).
+A transient failure would then invent a `Meeting transcript - <date>` title with
+`hasStoredTitle = false` — the one state that hands the conversation to the AI
+titler. Patching cannot do that. Invalidation is used only when the cached id
+does not match the payload's.
+
+Both the writer and the listener import one exported key constant, so a test
+cannot pass against a hardcoded key the writer never writes.
 
 The SQL guard is the backstop; the cross-window channel is what keeps the
 *displayed* title correct. Neither alone is sufficient.
@@ -454,7 +557,27 @@ user knows enough to fix one.
 `messages` state, loaded by `getConversationById` at `View.tsx:63` and never
 patched. So a rename on the header would not update the header, and one made in
 the list would not reach a mounted detail view. `View.tsx` subscribes to
-`conversation-title-updated` itself and calls `setMessages`.
+`conversation-title-updated` itself.
+
+Its listener must be a `[]`-deped effect with a **functional, id-checked**
+updater, modelled on `useHistory.ts:82-103`:
+
+```ts
+setMessages((prev) => (prev && prev.id === id ? { ...prev, title } : prev));
+```
+
+Not a `[messages]`-deped listener closing over state. `setMessages` is shared
+with `useChatCompletion(conversationId, messages, setMessages)` (`View.tsx:55-59`),
+which appends during a live completion: a `[messages]` dep would re-register the
+listener on every streamed chunk — the re-registration hazard this spec guards
+against at `pages/meeting-log/index.tsx:456-470` — while a `[]`-deped listener
+writing `{ ...messages, title }` from a stale closure would clobber everything
+appended since mount.
+
+The load effect at `View.tsx:61-67` also needs an ignore flag: it has no
+cancellation and no id check, so an in-flight `getConversationById` can resolve
+*after* a title patch and overwrite it. That is the same discipline this spec
+demands of `refreshConversations`.
 
 No focus-loss loop results from dispatching on commit: the row key is `doc.id`,
 the list sorts on `updatedAt`, and neither `updateConversationTitle` nor
@@ -472,10 +595,17 @@ expect(String(sql).replace(/\s+/g, " ").trim()).toBe(
 ```
 
 Adding `AND title_source = 'auto'` breaks it outright. Update its expected SQL
-and params, and audit these in the same pass for hardcoded SQL or retired URLs:
+and params, and audit these in the same pass:
 
 - `chat-history.title-adoption.test.ts`, `meeting-summarizer.title-sync.test.ts`,
   `conversation-title.test.ts` — SQL shape and params
+- `chat-history.append-silent.test.ts`, `chat-history.speaker.test.ts`,
+  `chat-history.create-rollback.test.ts` — **call-count and index breakage, not
+  SQL-string breakage.** These drive `appendMessagesToConversation` and
+  `updateConversation`, and splitting one header `UPDATE` into two shifts every
+  positional `mockExecute.mock.calls[N]` index in the house style shown at
+  `chat-history.update-title.test.ts:32-40`. This is the audit item most likely
+  to be missed, because the failure looks unrelated to titles.
 - `summary-detail.conversation-link.test.tsx` — the `/chats/view/` link
 - `meeting-log-entry-points.test.tsx`,
   `odoo-target-new-chat-entry-points.test.tsx` — the `/meeting-log` link
@@ -545,13 +675,23 @@ export function speakerLabelFor(
 declared inside the `useHistory` hook body at `:209` and is not exported; the
 only way to reach it is `handleDownloadConversation` (`:109`), which builds a
 `Blob`, calls `URL.createObjectURL` and clicks a synthetic anchor. Extract it as
-an exported `conversationToMarkdown(conversation)` so the label behaviour can be
-asserted directly instead of through a `Blob` intercept.
+an exported `conversationToMarkdown(conversation)` in
+**`src/lib/functions/conversation-markdown.function.ts`**, so the label
+behaviour can be asserted directly instead of through a `Blob` intercept.
 
 The download needs one case the Odoo renderer does not: `speakerLabelFor`
 returns `null` for assistant messages, which have no `audioSource`. The export
 adds a role fallback — `Assistant:` for AI replies, `You:` for typed chat — so
 no line is ever unlabelled.
+
+**Accepted limitation: legacy rows.** A message written before migration 8 has
+`speaker` and `audio_source` both null, so it is indistinguishable from typed
+chat and the role fallback labels it `You:` — even when a guest spoke. That is
+the same misattribution class this section cites `lib/odoo/meeting-log.ts:203-205`
+against, and it is accepted rather than solved: the columns are empty, so the
+data to do better does not exist. Once `addMeetingTranscriptEntries` is fixed,
+no *new* rows join this class. The test fixture includes such a row and asserts
+`You:` deliberately, as the documented behaviour rather than an oversight.
 
 Resulting file:
 
@@ -576,25 +716,46 @@ not be built: "fire two completion paths within one tick, assert exactly one id
 is minted" is satisfiable by two *ref-reading* paths (`:571` + `:612`), which
 already dedupe today. Such a test passes green against unfixed code.
 
-Three cases, all required:
+Four cases, all required:
 
-1. **Stale closure.** Establish a conversation id, let `submit`'s memoized
-   closure go stale (its deps at `:1025-1032` exclude
-   `state.currentConversationId`), then fire the speech path. Assert it reuses
-   the ref's id rather than minting.
-2. **Missing write-back.** Establish the id on one path, flush awaits/timers,
-   then fire `saveCurrentConversation` (`:1433`). Assert it reuses the id *and*
-   that the ref was written.
-3. **Negative — a reset still mints fresh.** After `clearMeetingTranscript`
+1. **Stale closure.** Establish a conversation id via a ref-writing path that
+   does not touch `submit`'s deps — `addMeetingTranscript` (`:571`) — then fire
+   `submit(speechText)` and assert it reuses the ref's id.
+
+   **The test must prove the closure is actually stale, or it proves nothing.**
+   The defect only reproduces if `submit`'s `useCallback` identity survives the
+   render that set the id, which requires all five deps (`:1025-1032`) —
+   including `selectedAIProvider`, `allAiProviders` and `systemPrompt` from the
+   mocked `@/contexts` — to be referentially stable across that render. If the
+   suite's context mock returns a fresh object per render, `submit` is rebuilt,
+   the closure is fresh, and this row silently degrades into the same-tick test
+   this spec just rejected: green against unfixed code, with nothing in the
+   assertions revealing it. So capture `const before = result.current.submit`
+   before establishing the id and assert `expect(result.current.submit).toBe(before)`
+   before firing. That assertion is the test.
+2. **Stale closure, meeting-context path.** The same setup driving
+   `submitWithMeetingContext` (`:1080`). It is named as load-bearing and is the
+   cheapest of the three to drive in a suite already built for meeting assist.
+3. **Missing write-back.** Establish the id on one path, flush awaits/timers,
+   then fire `saveCurrentConversation` (`:1433`). Assert it reuses the id.
+   `currentConversationIdRef` is private, so "the ref was written" is not
+   directly observable — observe it through a following ref-reading call
+   (`:571`) reusing the same id.
+4. **Negative — a reset still mints fresh.** After `clearMeetingTranscript`
    (`:742`), `startNewConversation` (`:1396`) or the delete path (`:1581`), fire
    a completion path and assert a **different** id is minted. Without this, a
    `??=` regression that pinned the app to one conversation would ship green.
+   The delete path is driven by the `conversationDeleted` listener, whose
+   `detail` is a **bare id string**, not `{ id }` (`useHistory.ts:167-171`).
 
-`src/tests/useCompletion.meeting-assist.test.tsx` already does
-`renderHook(() => useCompletion())` at `:139` and elsewhere, so mounting is a
-solved problem — extend that suite's scaffolding. The original draft's fallback
-("if `useCompletion` proves too entangled to mount") is dead weight and is
-withdrawn.
+The plan records, before work starts, which of these entry points are on
+`useCompletion`'s returned surface (`src/types/completion.hook.ts`) and names a
+driver for each that is not. `src/tests/useCompletion.meeting-assist.test.tsx`
+already does `renderHook(() => useCompletion())` at `:139` and drives
+`addSystemAudioTranscript` directly at `:420` and `:475`, so mounting and
+transcript-driving are solved — extend that suite's scaffolding. The original
+draft's fallback ("if `useCompletion` proves too entangled to mount") is dead
+weight and is withdrawn.
 
 ### Fix
 
@@ -609,33 +770,73 @@ export function ensureConversationId(
 }
 ```
 
+It lives in **`src/lib/functions/conversation-id.function.ts`**, matching the
+`*.function.ts` convention used for `speakerLabelFor` in item 3, so both
+`useCompletion.ts` and the tests import it by the same path.
+
 Module scope, not a function in the component body. Three call sites live in
 `useCallback(…, [])` callbacks whose empty dep arrays are load-bearing and
 commented as such ("No dependencies - uses ref for conversation ID",
 `useCompletion.ts:593`). A body function would trip `react-hooks/exhaustive-deps`,
 and "fixing" that by adding it to deps would change the identity of
 `addMeetingTranscriptEntry` / `addMeetingTranscriptEntries` /
-`addSystemAudioTranscript` every render, re-running every downstream effect that
-lists them (`useSystemAudio.ts:573,868-873`). Module scope is stable by
-construction, and it is the standalone unit the tests drive directly.
+`addSystemAudioTranscript` every render, re-running every downstream consumer
+that lists them in a dep array — `pages/app/components/completion/Audio.tsx:117`
+lists `addSystemAudioTranscript` exactly so. (An earlier draft cited
+`useSystemAudio.ts:573,868-873` here; those dep arrays list
+`conversation.*` fields, not these callbacks, and that hook is not a consumer.)
+Module scope is stable by construction, and it is the standalone unit the tests
+drive directly.
 
-**Sites:** `useCompletion.ts:323, 571, 612, 698, 882, 1080, 1434`.
+**Sites:** `useCompletion.ts:323, 571, 612, 698, 882, 1080` — six. `:1434` is
+handled differently; see below.
 
-Only three change behaviour. `:323`, `:571`, `:612` and `:698` already read
-`currentConversationIdRef.current || generateConversationId("chat")` and write it
-back — semantically identical to `??=`, so those edits are refactors. The
-load-bearing edits are `:882`, `:1080` (which read stale
-`state.currentConversationId`) and `:1434` (which reads state and never writes
-the ref).
+Only two of the six change behaviour. `:323`, `:571`, `:612` and `:698` already
+read `currentConversationIdRef.current || generateConversationId("chat")` and
+write it back — semantically identical to `??=`, so those edits are refactors.
+The load-bearing edits are `:882` and `:1080`, which read stale
+`state.currentConversationId`.
 
-**The `setState` mirror is preserved verbatim** at `:882` and `:1080`. The
-helper replaces the mint *expression* only. Those sites also run
-`if (!state.currentConversationId) setState(prev => ({...prev, currentConversationId}))`,
-and `state.currentConversationId` is still consumed downstream — dropping the
-mirror would leave it null for chat-only sessions, and
-`useMeetingLog.ts:330-331` takes `conversationId ?? getActiveConversationId()`,
-so every enqueue would fall to the recovery path and write the
-`conversation_id IS NULL` rows the placement table in section 1 has to render.
+At those two, today's code assigns the ref **unconditionally** after reading
+state. That overwrite is not load-bearing — it *is* defect (a): a stale snapshot
+holding `null` destroys a live ref id and replaces it with a fresh mint. `??=`
+is the correct direction. It is safe only because of the state-writer audit
+recorded above; that audit is a precondition, not a formality.
+
+**The `setState` mirror is kept, but not verbatim.** The helper replaces the
+mint *expression*, and the mirror must still run — `state.currentConversationId`
+is consumed downstream, and `useMeetingLog.ts:330-331` takes
+`conversationId ?? getActiveConversationId()`, so losing it sends every enqueue
+to the recovery path and writes the `conversation_id IS NULL` rows the placement
+table in section 1 has to render.
+
+But the shipped mirror guards on the snapshot —
+`if (!state.currentConversationId) setState(…)` — and after the substitution the
+value comes from the ref while the guard still reads stale state. The two no
+longer share a source, and the mismatch is reachable: `clearMeetingTranscript`
+does not clear `state.input`, so `submit`'s memo does not re-form; the snapshot
+still holds the pre-reset id, the guard is falsy, the mirror never fires, and
+real `state.currentConversationId` stays null — the exact outcome the paragraph
+above exists to prevent. So the mirror becomes a functional update keyed on the
+live value:
+
+```ts
+setState((prev) =>
+  prev.currentConversationId === conversationId
+    ? prev
+    : { ...prev, currentConversationId: conversationId }
+);
+```
+
+**`:1434` takes the turn's id as an argument instead of recomputing it.**
+`saveCurrentConversation(userMessage, assistantResponse, attachedFiles)` runs at
+end-of-turn from `:1002` and `:1748`, and its closure is captured at turn start.
+If a reset lands mid-turn, `state.currentConversationId` is null and the
+finishing turn mints a fresh id — and simply making it write the ref would
+*pin the ref to that id*, seeding the user's brand-new conversation with the
+previous turn's content. Passing the id already computed at `:882` down into
+`saveCurrentConversation` makes the turn's identity correct by construction, so
+no ref write is needed there at all and no mid-turn reset can be captured.
 
 **`useSystemAudio.ts:590` and `:876` are removed from this fix.** The original
 draft said they "get the same treatment." They must not. `:590` is inside
@@ -655,34 +856,43 @@ it cannot pin the app to one conversation. Case 3 of the repro test guards this.
 
 ## Testing
 
+Every row below is a statement-shape or hook-observable assertion. The project's
+only DB harness is a mocked `execute` (`chat-history.update-title.test.ts:6-8,22`),
+so no row may be phrased as a real-table outcome — "the manual title survives"
+is not observable through a `vi.fn()`, and a row written that way either invites
+a fake SQL engine or asserts nothing.
+
 | Area | Test | File |
 |---|---|---|
-| Duplicate — stale closure | Speech path with a stale `submit` closure reuses the ref's id | `useCompletion.meeting-assist.test.tsx` |
-| Duplicate — write-back | `saveCurrentConversation` reuses the id and writes the ref | `useCompletion.meeting-assist.test.tsx` |
-| Duplicate — negative | After each reset path, a completion mints a **different** id | `useCompletion.meeting-assist.test.tsx` |
-| System audio — negative | Two consecutive `startCapture` / `startNewConversation` calls mint two distinct ids | `useSystemAudio.new-conversation.test.ts` (new) |
-| Migration 15 pinning | `title_source_migration_is_version_15_and_points_at_its_own_file` — version and `include_str!` identity, matching the four siblings at `migration_tests.rs:48,66,88,105` | `src-tauri/src/db/migration_tests.rs` |
-| Rename guard — titler | Rename, run the summary titler, manual title survives | `chat-history.rename-guard.test.ts` (new) |
-| Rename guard — autosave | Rename, then one `appendMessagesToConversation` tick carrying the **old** cached title; manual title survives | `chat-history.rename-guard.test.ts` (new) |
-| Rename guard — save | Same for `updateConversation` via `saveConversation` | `chat-history.rename-guard.test.ts` (new) |
-| Rename guard — `updated_at` | Both split statements still bump `updated_at` and still raise on a missing row | `chat-history.rename-guard.test.ts` (new) |
-| `renameConversationManually` | Exact SQL and params (both columns, no `updated_at`), false on zero rows, refusal on empty id/title, rejection propagated, event dispatched — mirroring `chat-history.update-title.test.ts:34-65` | `chat-history.rename-guard.test.ts` (new) |
-| Existing SQL assertion | `chat-history.update-title.test.ts:37-40` updated for the guard clause | `chat-history.update-title.test.ts` |
-| Cross-window rename | Overlay invalidates its cached title on the storage event; a subsequent append does not write the old title | `chat-history.rename-guard.test.ts` (new) |
-| Transcript labels | Fixture with microphone, system, assistant, typed, **and a legacy pre-migration-8 row with null `speaker` and null `audio_source`**; assert distinct labels and no unlabelled line | `conversation-markdown.test.ts` (new) |
-| Diarized batch labels | `addMeetingTranscriptEntries` rows carry `speaker`/`audioSource`, so guest lines do not export as `You:` | `conversation-markdown.test.ts` (new) |
+| Duplicate — stale closure | `submit` identity is unchanged (`expect(result.current.submit).toBe(before)`), **then** the speech path reuses the ref's id. The identity assertion is mandatory — without it the row silently degrades to a same-tick test | `useCompletion.meeting-assist.test.tsx` |
+| Duplicate — meeting context | Same setup driving `submitWithMeetingContext` (`:1080`) | `useCompletion.meeting-assist.test.tsx` |
+| Duplicate — turn id | `saveCurrentConversation` uses the id passed from the turn; a following `:571` call reuses it | `useCompletion.meeting-assist.test.tsx` |
+| Duplicate — negative | After each reset path, a completion mints a **different** id (delete driven by a `conversationDeleted` event whose `detail` is a bare id string) | `useCompletion.meeting-assist.test.tsx` |
+| Mirror survives | After a chat-only completion, the hook's exposed `currentConversationId` is populated and equals the ref-driven id — the regression that would otherwise write `conversation_id IS NULL` rows | `useCompletion.meeting-assist.test.tsx` |
+| System audio — negative | Two consecutive `startNewConversation` calls (`:875`, pure state — not `startCapture`, which needs Tauri and media mocks for a hook this fix does not touch) mint two distinct ids | `useSystemAudio.new-conversation.test.tsx` (new) |
+| Migration 15 pinning | `title_source_migration_is_version_15_and_points_at_its_own_file` — `.find(|m| m.description == "add_title_source_to_conversations")`, version 15, `include_str!` identity; matching the siblings at `migration_tests.rs:48,66,88,105` | `src-tauri/src/db/migration_tests.rs` |
+| Guarded titler SQL | `updateConversationTitle` emits `… WHERE id = ? AND title_source = 'auto'` and still never names `updated_at` | `chat-history.update-title.test.ts` |
+| Titler zero-match | `applySummaryTitleToConversation` returns `false` without throwing when the guarded update matches zero rows | `chat-history.rename-guard.test.ts` (new) |
+| Split — autosave | `appendMessagesToConversation` emits **two** statements: unconditional `updated_at`, then guarded `title` | `chat-history.rename-guard.test.ts` (new) |
+| Split — save | Same two-statement shape for `updateConversation` | `chat-history.rename-guard.test.ts` (new) |
+| Split — semantics | Both split **functions** still raise on `rowsAffected: 0` (from the first statement), and the guarded title statement never names `updated_at` | `chat-history.rename-guard.test.ts` (new) |
+| `renameConversationManually` | Exact SQL and params (both columns, no `updated_at`), false on zero rows, refusal on empty id/title, rejection propagated — mirroring `chat-history.update-title.test.ts:34-65` | `chat-history.rename-guard.test.ts` (new) |
+| Rename commit fires both | The commit handler dispatches `conversation-title-updated` **and** writes the shared localStorage key constant with an `{ id, title, timestamp }` payload | `useCompletion.meeting-assist.test.tsx` |
+| Cross-window listener | A synthesized `StorageEvent` on the shared key **patches** `conversationMetaCacheRef` with the payload title; a mismatched id invalidates instead | `useCompletion.meeting-assist.test.tsx` |
+| Transcript labels | Fixture with microphone, system, assistant, typed, **and a legacy pre-migration-8 row with null `speaker`/`audio_source` asserting the documented `You:`** | `conversation-markdown.test.ts` (new) |
+| Diarized batch carries speaker | `addMeetingTranscriptEntries` writes `speaker`/`audioSource` onto each message — a `useCompletion` behaviour, not a markdown one | `useCompletion.meeting-assist.test.tsx` |
 | Badge — other instance | An other-instance `sent` row badges; an other-instance `failed` row does **not** | `meetings-page.badges.test.tsx` (new) |
 | Badge — worst status | One conversation with several rows resolves worst-status-wins | `meetings-page.badges.test.tsx` (new) |
 | Badge — suppressed | `cancelled` and `deleted` contribute nothing | `meetings-page.badges.test.tsx` (new) |
 | Badge — count | More than one row maps to a conversation, count shown | `meetings-page.badges.test.tsx` (new) |
-| Verbatim lift | `meeting-log-page.test.tsx` passes with mocks repointed and **no assertion edited** | `meeting-log-page.test.tsx` |
+| Behaviour lift | `meeting-log-page.test.tsx` passes with mocks repointed, leaf mocks **added**, and every frozen-behaviour assertion unedited; only the enumerated placement assertions change | `meeting-log-page.test.tsx` |
 | Unconfigured Odoo | Page renders the conversation list with no strip and no badges | `meetings-page.test.tsx` (new) |
 | Half-config | `stranded` count still reported via `countActionableQueued()` | `meetings-page.test.tsx` (new) |
-| Queue failure isolation | A failing queue/badge read leaves the conversation list rendered | `meetings-page.test.tsx` (new) |
+| Queue failure isolation | A failing queue/badge read sets `loadError` above the strip and leaves the conversation list rendered | `meetings-page.test.tsx` (new) |
 | Search scope | Search filters the date-grouped list and never the strip | `meetings-page.test.tsx` (new) |
 | Null conversation row | `conversation_id IS NULL` renders in the strip as transcript-only, no link | `meetings-page.test.tsx` (new) |
-| Route redirects | `/chats`, `/meeting-log`, `/chats/view/:id` land on their `/meetings` equivalents | `routes.redirects.test.tsx` (new) |
-| Menu | Two `useMenuItems` entries collapse to one "Meetings" | `meetings-page.test.tsx` (new) |
+| Redirect wrapper | The `useParams` wrapper under `MemoryRouter` forwards `${location.search}${location.hash}` — the only redirect with real logic. The two static redirects are asserted declaratively, **not** by mounting `AppRoutes`, which hardcodes `BrowserRouter` and eagerly imports every page | `routes.redirects.test.tsx` (new) |
+| Menu | Two `useMenuItems` entries collapse to one "Meetings" — belongs where entry points are already tested, not in the page suite | `meeting-log-entry-points.test.tsx` |
 
 ## Risks
 
@@ -701,6 +911,32 @@ it cannot pin the app to one conversation. Case 3 of the repro test guards this.
   modelled on `handleAttachToOverlay` but is not the same code path. It needs
   its own test rather than an assumption that the existing mechanism
   generalises.
+- **This is large for one review unit.** See "Delivery shape" below.
+
+## Delivery shape — open decision
+
+The review flagged that this has grown past a comfortable single change: a
+schema migration, a page deletion, a 1013-line lift, a 2264-line suite
+repointed, a cross-window channel, two module extractions, and 28 test rows. It
+is *executable* as one branch, but a single review-and-rollback unit spanning a
+migration and a page merge is where the first review round's regressions came
+from.
+
+The recommended split, in the order this spec already states:
+
+1. **Page merge + routing** — items 1, plus the link and barrel moves.
+2. **Migration 15 + guard + rename UI + cross-window channel** — item 2. Its own
+   change so the migration can be reverted independently of the page merge.
+3. **Transcript labels** — item 3, including the
+   `addMeetingTranscriptEntries` fix.
+4. **Duplicate fix** — item 4, including the state-writer audit.
+
+3 and 4 are independent of 1 and 2 and of each other, so they can land in any
+order. 2 depends on 1 only for where the rename UI mounts.
+
+**This is the user's call, not the spec's**, because it changes the shape of the
+deliverable rather than its content — one PR or four. Nothing below assumes
+either answer.
 
 ## Decisions taken, for the record
 
