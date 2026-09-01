@@ -4,7 +4,7 @@
  * Not useMeetingLog.ts, which is the write side (enqueue and hold). The names
  * are close; the responsibilities do not overlap.
  *
- * Lifted verbatim from pages/meeting-log/index.tsx. Most of this file's length
+ * Lifted verbatim from the retired pages/meeting-log/index.tsx. Most of this file's length
  * is defensive and each part is a fixed bug: token-ordered reads so a focus
  * refresh cannot repaint rows an action already moved; write-only mirror refs so
  * the focus listener does not re-register a Tauri listener every render. Do not
@@ -42,7 +42,7 @@ import type {
   MeetingLogTarget,
   OdooContact,
 } from "@/types";
-import type { AssignPayload } from "@/pages/meeting-log/components";
+import type { AssignPayload } from "@/pages/meetings/components/AssignDialog";
 // The date fallback is imported, never re-derived: the shipped note body uses
 // `meeting_started_at ?? transcript_start_at` too, and a second fallback for one
 // nullable column lets the notice, the row and the customer's chatter disagree
@@ -57,7 +57,7 @@ import {
   meetingDateOf,
   targetNameOf as targetNameOfSingle,
   type TranscriptView,
-} from "@/pages/meeting-log/components/QueueRow";
+} from "@/pages/meetings/components/QueueRow";
 
 /**
  * The queue page. Dashboard window only - the overlay never navigates here.

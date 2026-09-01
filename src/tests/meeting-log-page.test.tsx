@@ -51,6 +51,17 @@ vi.mock("@/lib/storage/odoo-config.storage", () => storage);
 const contacts = vi.hoisted(() => ({ listContacts: vi.fn() }));
 vi.mock("@/lib/database/odoo-contacts.action", () => contacts);
 
+// The merged page mounts `useHistory`, which calls getAllConversations through
+// the `@/lib` barrel in a mount effect. Mocked at the LEAF for the reason the
+// meetwings.api mock below states; unmocked it reaches
+// @tauri-apps/plugin-sql under jsdom. This suite is about the queue, so the
+// list stays empty in every test here.
+const history = vi.hoisted(() => ({
+  getAllConversations: vi.fn(),
+  deleteConversation: vi.fn(),
+}));
+vi.mock("@/lib/database/chat-history.action", () => history);
+
 // AssignDialog's own two live dependencies. Mocked at the LEAF, not at
 // `@/lib/odoo`: the barrel re-exports both, so the mock is what every importer
 // sees, and mocking the barrel would have to restate a dozen unrelated exports.
@@ -110,8 +121,12 @@ vi.mock("@/layouts", () => ({
 
 import { ESCALATE_AFTER_ATTEMPTS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { setOdooRedactor } from "@/lib/odoo/redactor";
-import MeetingLog from "@/pages/meeting-log";
-import { AssignDialog, QueueRow } from "@/pages/meeting-log/components";
+import MeetingLog from "@/pages/meetings";
+// LEAF paths, not `@/pages/meetings/components`. That barrel now also carries
+// View.tsx, which imports `@/hooks` - whose barrel star-exports useCompletion
+// and useSystemAudio, none of which this file mocks.
+import { AssignDialog } from "@/pages/meetings/components/AssignDialog";
+import { QueueRow } from "@/pages/meetings/components/QueueRow";
 import type { MeetingLogListRow, MeetingLogTarget, OdooContact, OdooOpportunity } from "@/types";
 
 const INSTANCE = "http://h:8069|odoo";
@@ -262,6 +277,17 @@ async function openAssignReady(id: string, label: "Assign" | "Reassign" = "Assig
   await screen.findByPlaceholderText("Search contacts");
 }
 
+/**
+ * The other-database group is COLLAPSED on the merged page: it renders one line
+ * saying how many meetings are queued elsewhere, with its rows behind a toggle.
+ * Nothing in it can be sent while the credentials point at another database, so
+ * it must not push the rows that do need the user off the top of the page - but
+ * it must stay reachable, because hiding a backlog silently is how one is lost.
+ */
+async function expandOtherDatabase() {
+  await userEvent.click(await screen.findByRole("button", { name: "Show these meetings" }));
+}
+
 /** A promoted notice, addressed the same way and for the same reason. */
 function noticeElement(id: string): HTMLElement {
   const el = document.querySelector(`[data-notice-id="${id}"]`);
@@ -301,6 +327,7 @@ beforeEach(() => {
   db.getQueueRow.mockResolvedValue(null);
   db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([contact()]);
+  history.getAllConversations.mockResolvedValue([]);
   actions.retryMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.deleteMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.assignMeetingLog.mockResolvedValue({ kind: "ok" });
@@ -335,13 +362,29 @@ describe("groups", () => {
     expect(group("Needs attention").getAllByRole("listitem")).toHaveLength(2);
     expect(group("Not assigned to a contact").getAllByRole("listitem")).toHaveLength(1);
     expect(group("Waiting to be logged").getAllByRole("listitem")).toHaveLength(2);
-    expect(group("Queued for a different Odoo database").getAllByRole("listitem")).toHaveLength(1);
+    // COLLAPSED, so it is a count rather than a row. The membership claim is
+    // unchanged - one row landed here and not in needs attention - only where
+    // that row is drawn.
+    expect(
+      group("Queued for a different Odoo database").getByText(
+        /^1 meeting is queued for a different Odoo database\./
+      )
+    ).toBeInTheDocument();
+    expect(
+      group("Queued for a different Odoo database").queryAllByRole("listitem")
+    ).toHaveLength(0);
   });
 
-  it("renders the empty state and no groups when every group is empty", async () => {
+  it("renders no strip at all when every group is empty", async () => {
+    // The strip is rendered only when it has something in it. The queue page's
+    // "No meetings waiting to be logged." sentence retired with that page: this
+    // page always has the conversation list to show instead, so an empty queue
+    // needs no sentence of its own.
     await renderPage();
-    expect(await screen.findByText("No meetings waiting to be logged.")).toBeInTheDocument();
+    await waitFor(() => expect(db.listActionableRows).toHaveBeenCalled());
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(document.querySelector("[data-row-id]")).toBeNull();
+    expect(screen.queryByText("No meetings waiting to be logged.")).toBeNull();
   });
 });
 
@@ -414,7 +457,8 @@ describe("which actions a row offers", () => {
     ]);
     await renderPage();
 
-    const other = await findRow("od");
+    await expandOtherDatabase();
+    const other = rowOf("od");
     expect(other.getByRole("button", { name: "Retry" })).toBeDisabled();
     expect(other.getByRole("button", { name: "Reassign" })).toBeDisabled();
     expect(other.getByRole("button", { name: "Delete" })).toBeEnabled();
@@ -428,7 +472,8 @@ describe("which actions a row offers", () => {
     ]);
     await renderPage();
 
-    const other = await findRow("ods");
+    await expandOtherDatabase();
+    const other = rowOf("ods");
     expect(other.getByRole("button", { name: "Delete" })).toBeDisabled();
   });
 
@@ -472,7 +517,9 @@ describe("which actions a row offers", () => {
     ]);
     await renderPage();
 
-    const theirs = await findRow("theirs");
+    await findRow("mine");
+    await expandOtherDatabase();
+    const theirs = rowOf("theirs");
     expect(theirs.getByText(/will not be retried until Meetwings points back/)).toBeInTheDocument();
     expect(
       theirs.queryByText("Interrupted. This will be retried the next time Meetwings starts.")
@@ -994,7 +1041,8 @@ describe("outcomes whose row leaves the list", () => {
     // The row really is gone: this is a promotion, not the inline line
     // surviving because the fixture kept the row alive.
     expect(document.querySelector('[data-row-id="na"]')).toBeNull();
-    expect(screen.getByText("No meetings waiting to be logged.")).toBeInTheDocument();
+    // And the strip went with it: the last row leaving is what empties it.
+    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
 
     // Persistent until dismissed - not a toast on a timer.
     await userEvent.click(within(notice).getByRole("button", { name: /^Dismiss/ }));
@@ -1149,6 +1197,9 @@ describe("last_error", () => {
     expect(await screen.findByText("ODOO_FAULT: partner deleted")).toBeInTheDocument();
     expect(screen.getByText("ODOO_FAULT: no contact chosen")).toBeInTheDocument();
     expect(screen.getByText("ODOO_UNREACHABLE: connection refused")).toBeInTheDocument();
+    // Still rendered from the column in the other-database group too - it is
+    // collapsed, not dropped, so the error is one click away rather than gone.
+    await expandOtherDatabase();
     expect(screen.getByText("ODOO_AUTH_FAILED: key [REDACTED]")).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(SECRET);
     // The attempt count travels with the error.
@@ -1294,8 +1345,12 @@ describe("a queue that cannot be read", () => {
     // describeFailure's trailing clause is about an ACTION that stopped before
     // its CAS. This path never named a meeting, so the clause is off-key here.
     expect(document.body.textContent).not.toContain("Nothing on this meeting changed.");
-    // And a read that failed must not look like a queue that is empty.
-    expect(screen.queryByText("No meetings waiting to be logged.")).toBeNull();
+    // And a read that failed must not look like a queue that is empty. The
+    // sentence that used to carry that claim is gone with the queue page, so
+    // what stands in for it here is that the strip renders nothing at all -
+    // there is no group heading and no row claiming a state was read.
+    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+    expect(document.querySelector("[data-row-id]")).toBeNull();
     // Never the raw thrown text: the page renders the CODE's copy only.
     expect(document.body.textContent).not.toContain("database is locked");
   });

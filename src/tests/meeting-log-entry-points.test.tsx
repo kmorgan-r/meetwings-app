@@ -38,14 +38,13 @@ vi.mock("@/pages", () => {
     Shortcuts: stub("shortcuts"),
     Audio: stub("audio"),
     Screenshot: stub("screenshot"),
-    Chats: stub("chats"),
     Responses: stub("responses"),
     CostTracking: stub("cost-tracking"),
     ContextMemory: stub("context-memory"),
     Speakers: stub("speakers"),
     Language: stub("language"),
     Odoo: stub("odoo"),
-    MeetingLog: stub("meeting-log"),
+    Meetings: stub("meetings"),
   };
 });
 
@@ -59,11 +58,20 @@ afterEach(() => {
   window.history.pushState({}, "", "/");
 });
 
-describe("the /meeting-log route", () => {
-  it("resolves to the MeetingLog page", () => {
+describe("the meetings route", () => {
+  it("resolves /meetings to the Meetings page", () => {
+    window.history.pushState({}, "", "/meetings");
+    render(<AppRoutes />);
+    expect(screen.getByTestId("stub-meetings")).toBeInTheDocument();
+  });
+
+  it("still lands the old /meeting-log entry point on it", () => {
+    // The queue page merged into /meetings; the old path redirects rather than
+    // 404-ing, because the menu entry and the /odoo link both still point here
+    // until they are moved.
     window.history.pushState({}, "", "/meeting-log");
     render(<AppRoutes />);
-    expect(screen.getByTestId("stub-meeting-log")).toBeInTheDocument();
+    expect(screen.getByTestId("stub-meetings")).toBeInTheDocument();
   });
 });
 

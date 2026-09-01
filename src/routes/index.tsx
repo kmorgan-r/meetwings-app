@@ -9,16 +9,16 @@ import {
   Shortcuts,
   Audio,
   Screenshot,
-  Chats,
   Responses,
   CostTracking,
   ContextMemory,
   Speakers,
   Language,
   Odoo,
-  MeetingLog,
+  Meetings,
 } from "@/pages";
 import { DashboardLayout } from "@/layouts";
+import { ChatViewRedirect } from "./ChatViewRedirect";
 
 export default function AppRoutes() {
   return (
@@ -27,9 +27,7 @@ export default function AppRoutes() {
         <Route path="/" element={<App />} />
         <Route element={<DashboardLayout />}>
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/chats" element={<Chats />} />
           <Route path="/system-prompts" element={<SystemPrompts />} />
-          <Route path="/chats/view/:conversationId" element={<ViewChat />} />
           <Route path="/shortcuts" element={<Shortcuts />} />
           <Route path="/screenshot" element={<Screenshot />} />
           <Route path="/settings" element={<Settings />} />
@@ -41,8 +39,12 @@ export default function AppRoutes() {
           <Route path="/language" element={<Language />} />
           <Route path="/api-setup" element={<DevSpace />} />
           <Route path="/odoo" element={<Odoo />} />
-          <Route path="/meeting-log" element={<MeetingLog />} />
-          {/* Redirect old route for backward compatibility */}
+          <Route path="/meetings" element={<Meetings />} />
+          <Route path="/meetings/view/:conversationId" element={<ViewChat />} />
+          {/* Redirect old routes for backward compatibility */}
+          <Route path="/chats" element={<Navigate to="/meetings" replace />} />
+          <Route path="/meeting-log" element={<Navigate to="/meetings" replace />} />
+          <Route path="/chats/view/:conversationId" element={<ChatViewRedirect />} />
           <Route path="/dev-space" element={<Navigate to="/api-setup" replace />} />
         </Route>
       </Routes>
