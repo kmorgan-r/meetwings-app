@@ -379,7 +379,19 @@ export function resolveBadge(
   if (eligible.length === 0) return null;
 
   const worst = BADGE_RANK.find((s) => eligible.some((r) => r.status === s));
-  return worst ? { status: worst, count: eligible.length } : null;
+  if (!worst) return null;
+  // Counts the rows IN `worst`, not every eligible row. The two are rendered
+  // as one phrase - "Odoo send failed (4)" - so counting all four of a
+  // conversation's one failed, one sent, one pending and one held row claims
+  // four failures where one failed, which is the same conflation
+  // `outcomeCopy` refuses for a push-partial row.
+  //
+  // `pending` and `held` share one label ("Waiting for Odoo") and are counted
+  // separately here anyway: that copy merge lives in ConversationRow, and
+  // teaching this module about it to recover a parenthetical would put a
+  // third grouping beside `groupOf` and this rank. A mild undercount on a
+  // transient waiting state beats an overcount on a failure.
+  return { status: worst, count: eligible.filter((r) => r.status === worst).length };
 }
 
 /** Pure so retention is testable without a clock. */
