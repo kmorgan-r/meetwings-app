@@ -35,7 +35,7 @@ describe("updateConversationTitle", () => {
     // not new activity, so touching it would jump the conversation to "now".
     expect(sql).not.toMatch(/updated_at/i);
     expect(String(sql).replace(/\s+/g, " ").trim()).toBe(
-      "UPDATE conversations SET title = ? WHERE id = ?"
+      "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'"
     );
     expect(params).toEqual(["Signing Key Rotation", "conversation-1"]);
   });

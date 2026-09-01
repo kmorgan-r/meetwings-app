@@ -373,15 +373,23 @@ export async function updateConversation(
   const db = await getDatabase();
 
   try {
-    // Update conversation
+    // Update conversation. Split the same way as appendMessagesToConversation
+    // (below): the title write is guarded by title_source so a manual rename
+    // survives, while updated_at stays unconditional and keeps the
+    // rowsAffected check.
     const updateResult = await db.execute(
-      "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-      [conversation.title, conversation.updatedAt, conversation.id]
+      "UPDATE conversations SET updated_at = ? WHERE id = ?",
+      [conversation.updatedAt, conversation.id]
     );
 
     if (updateResult.rowsAffected === 0) {
       throw new Error("Conversation not found");
     }
+
+    await db.execute(
+      "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'",
+      [conversation.title, conversation.id]
+    );
 
     // Get existing messages for backup
     const existingMessages = await db.select<DbMessage[]>(
@@ -482,14 +490,25 @@ export async function appendMessagesToConversation(
   const db = await getDatabase();
 
   try {
+    // Split deliberately. The title write is guarded by title_source so a manual
+    // rename survives - this path runs on EVERY autosave tick with the title
+    // cached in conversationMetaCacheRef, so an unguarded write reverts a rename
+    // seconds after it is made. The updated_at stamp must stay unconditional,
+    // and it keeps the rowsAffected check: a guarded single statement would skip
+    // the stamp and raise a spurious "not found" on every autosave after a rename.
     const updateResult = await db.execute(
-      "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-      [title, updatedAt, conversationId]
+      "UPDATE conversations SET updated_at = ? WHERE id = ?",
+      [updatedAt, conversationId]
     );
 
     if (updateResult.rowsAffected === 0) {
       throw new Error("Conversation not found");
     }
+
+    await db.execute(
+      "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'",
+      [title, conversationId]
+    );
 
     let inserted = 0;
 
@@ -549,8 +568,9 @@ export async function appendMessagesToConversation(
  * bumping it would jump the conversation to "now" just because a background
  * title generation landed.
  *
- * Returns false when no row matched — e.g. the conversation was deleted while
- * the title was being generated.
+ * Returns false when no row matched — the conversation was deleted while the
+ * title was being generated, OR the user has renamed it by hand
+ * (title_source = 'manual'). Both mean "do not report a rename".
  */
 export async function updateConversationTitle(
   id: string,
@@ -569,7 +589,7 @@ export async function updateConversationTitle(
 
   try {
     const result = await db.execute(
-      "UPDATE conversations SET title = ? WHERE id = ?",
+      "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'",
       [title, id]
     );
 
@@ -592,9 +612,10 @@ export async function updateConversationTitle(
  * derived from the whole conversation and is simply the better name.
  *
  * It therefore wins outright rather than only filling in placeholders. That is
- * safe because every title in the system is machine-generated: the only writer
- * besides conversation creation is the AI titler. If a manual rename is ever
- * added, this needs a provenance check so it can't overwrite one.
+ * safe even though a manual rename now exists: the provenance check lives in
+ * `updateConversationTitle`'s `AND title_source = 'auto'` clause, which this
+ * function inherits by delegating to it, so a summary title can still replace
+ * an auto-generated one but can never overwrite a rename the user made by hand.
  *
  * Returns whether a row was renamed. Never throws — a summary that was written
  * successfully must not be reported as failed because its cosmetic rename was.
