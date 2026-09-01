@@ -117,27 +117,56 @@ const View = () => {
 
   const [isRenamingTitle, setIsRenamingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
+  // Guards re-entrancy: the editor stays open across the write, so Enter and
+  // the tick button could otherwise both fire again mid-flight.
+  const [savingTitle, setSavingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
 
   const startRenamingTitle = () => {
     setTitleDraft(messages?.title ?? "");
+    setTitleError(null);
     setIsRenamingTitle(true);
   };
 
-  const handleCommitTitleRename = async () => {
-    const id = conversationId;
-    // Closed before the write settles - same reasoning as the list row's
-    // commit handler (pages/meetings/index.tsx): a second Enter mid-flight
-    // must not fire a second commit.
+  const cancelRenamingTitle = () => {
+    setTitleError(null);
     setIsRenamingTitle(false);
+  };
+
+  const handleCommitTitleRename = async () => {
+    if (savingTitle) return;
+    const id = conversationId;
     if (!id) return;
 
     const trimmed = titleDraft.trim();
-    if (!trimmed) return;
+    if (!trimmed) {
+      setTitleError("A conversation needs a name.");
+      return;
+    }
 
     // `false` means no row matched (deleted meanwhile) - do not announce a
-    // rename that did not happen.
-    const renamed = await renameConversationManually(id, trimmed);
-    if (!renamed) return;
+    // rename that did not happen. `renameConversationManually` RETHROWS a
+    // database error rather than returning false, and this runs from a
+    // keydown/click handler, so without the catch a refused write is an
+    // unhandled rejection nobody sees.
+    setSavingTitle(true);
+    setTitleError(null);
+    let renamed = false;
+    try {
+      renamed = await renameConversationManually(id, trimmed);
+    } catch (error) {
+      console.error("Failed to rename conversation:", error);
+    } finally {
+      setSavingTitle(false);
+    }
+    if (!renamed) {
+      // The editor stays open with the typed name still in it - the same
+      // contract the meetings page's rows have. Closing over the text is how a
+      // save failure reads as "it just does not save".
+      setTitleError("That name could not be saved.");
+      return;
+    }
+    setIsRenamingTitle(false);
 
     // BOTH channels, same pair the list row fires: the in-window event this
     // component's own listener above also consumes, and the localStorage key
@@ -161,42 +190,50 @@ const View = () => {
       rightSlot={
         <div className="flex flex-row items-center gap-2">
           {isRenamingTitle ? (
-            <div className="flex items-center gap-1">
-              <Input
-                autoFocus
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleCommitTitleRename();
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    setIsRenamingTitle(false);
-                  }
-                }}
-                className="h-6 lg:h-8 text-[10px] lg:text-sm w-36 lg:w-56"
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label="Save conversation name"
-                title="Save conversation name"
-                className="size-6 lg:size-8"
-                onClick={handleCommitTitleRename}
-              >
-                <Check className="size-3 lg:size-4" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label="Cancel rename"
-                title="Cancel rename"
-                className="size-6 lg:size-8"
-                onClick={() => setIsRenamingTitle(false)}
-              >
-                <XIcon className="size-3 lg:size-4" />
-              </Button>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1">
+                <Input
+                  autoFocus
+                  value={titleDraft}
+                  disabled={savingTitle}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void handleCommitTitleRename();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      cancelRenamingTitle();
+                    }
+                  }}
+                  className="h-6 lg:h-8 text-[10px] lg:text-sm w-36 lg:w-56"
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label="Save conversation name"
+                  title="Save conversation name"
+                  disabled={savingTitle}
+                  className="size-6 lg:size-8"
+                  onClick={() => void handleCommitTitleRename()}
+                >
+                  <Check className="size-3 lg:size-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label="Cancel rename"
+                  title="Cancel rename"
+                  disabled={savingTitle}
+                  className="size-6 lg:size-8"
+                  onClick={cancelRenamingTitle}
+                >
+                  <XIcon className="size-3 lg:size-4" />
+                </Button>
+              </div>
+              {titleError !== null && (
+                <p className="text-[10px] lg:text-xs text-destructive">{titleError}</p>
+              )}
             </div>
           ) : (
             <Button

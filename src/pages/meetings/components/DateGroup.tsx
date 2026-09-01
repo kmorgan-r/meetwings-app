@@ -11,7 +11,8 @@ export interface DateGroupProps {
   /** The conversation open for an inline rename, or `null`. See `ConversationList`'s doc comment. */
   renamingId: string | null;
   onStartRename: (id: string) => void;
-  onCommitRename: (id: string, title: string) => void;
+  /** Resolves to whether the write landed - see ConversationRow. */
+  onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
 }
 

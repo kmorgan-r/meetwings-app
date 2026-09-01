@@ -514,6 +514,54 @@ describe("renaming a conversation from the list", () => {
       .map(([, value]) => JSON.parse(value as string));
     expect(payloads[0].timestamp).not.toBe(payloads[1].timestamp);
   });
+
+  it("saves from the tick button, not Enter alone", async () => {
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    const input = within(card).getByRole("textbox");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Clicked name");
+    await userEvent.click(within(card).getByRole("button", { name: "Save the name" }));
+
+    await waitFor(() =>
+      expect(history.renameConversationManually).toHaveBeenCalledWith("c1", "Clicked name")
+    );
+  });
+
+  it("keeps the typed name on screen and says so when the write is refused", async () => {
+    // The same silent-failure case the strip row covers: the card used to
+    // close over the user's text and show the old title back, which is
+    // indistinguishable from a save that never ran.
+    history.renameConversationManually.mockResolvedValue(false);
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    await renameRowTo(card, "Refused name");
+
+    await waitFor(() =>
+      expect(
+        within(conversationCard("c1")!).getByText("That name could not be saved.")
+      ).toBeInTheDocument()
+    );
+    expect(within(conversationCard("c1")!).getByRole("textbox")).toHaveValue("Refused name");
+  });
+
+  it("reports a database error instead of leaving an unhandled rejection", async () => {
+    // renameConversationManually RETHROWS a database error rather than
+    // returning false, so a bare call here would reject into nothing.
+    history.renameConversationManually.mockRejectedValue(new Error("database is locked"));
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    await renameRowTo(card, "Doomed name");
+
+    await waitFor(() =>
+      expect(
+        within(conversationCard("c1")!).getByText("That name could not be saved.")
+      ).toBeInTheDocument()
+    );
+  });
 });
 
 /** The strip's own pencil, scoped to one queue row rather than a list card. */
@@ -878,6 +926,42 @@ describe("renaming a conversation from the header", () => {
       .find((event) => event.type === "conversation-title-updated");
     expect(titleEvent).toBeUndefined();
     expect(setItemSpy.mock.calls.some(([key]) => key === CONVERSATION_RENAMED_KEY)).toBe(false);
+  });
+
+  it("keeps the typed name on screen and says so when the write is refused", async () => {
+    // Firing neither channel is not enough: the header used to close its
+    // editor first and discard the typed name, which reads as a save that
+    // silently did nothing.
+    history.renameConversationManually.mockResolvedValue(false);
+    await renderView();
+    await openHeaderEditor();
+
+    await renameHeaderTo("Refused title");
+
+    await waitFor(() =>
+      expect(
+        within(headerRightSlot()).getByText("That name could not be saved.")
+      ).toBeInTheDocument()
+    );
+    expect(within(headerRightSlot()).getByRole("textbox")).toHaveValue("Refused title");
+  });
+
+  it("reports a database error instead of leaving an unhandled rejection", async () => {
+    // renameConversationManually RETHROWS a database error rather than
+    // returning false, and this commit runs from a keydown handler - without
+    // the catch the rejection reaches nobody.
+    history.renameConversationManually.mockRejectedValue(new Error("database is locked"));
+    await renderView();
+    await openHeaderEditor();
+
+    await renameHeaderTo("Doomed title");
+
+    await waitFor(() =>
+      expect(
+        within(headerRightSlot()).getByText("That name could not be saved.")
+      ).toBeInTheDocument()
+    );
+    expect(within(headerRightSlot()).getByRole("textbox")).toHaveValue("Doomed title");
   });
 
   it("updates the header when the conversation-title-updated listener fires for this conversation", async () => {

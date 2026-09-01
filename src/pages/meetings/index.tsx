@@ -190,13 +190,17 @@ export default function Meetings() {
     return true;
   }, []);
 
-  // The editor is closed BEFORE the write settles, not after: a second Enter
-  // firing mid-flight must not start a second commit, and the row should not
-  // sit open across the await regardless of how the write resolves.
+  // Closes the editor ONLY on a write that landed - the same contract as the
+  // strip's commit below, for the same reason: a rename refused because the
+  // conversation was deleted under the editor, or because the database threw,
+  // used to close the row and take the typed name with it, saying nothing.
+  // Re-entrancy (a second Enter fired while the first write is in flight) is
+  // handled in the row, which disables both commit paths while one is open.
   const handleCommitRename = useCallback(
-    (id: string, title: string) => {
-      setRenamingId(null);
-      return commitRename(id, title);
+    async (id: string, title: string) => {
+      const renamed = await commitRename(id, title);
+      if (renamed) setRenamingId(null);
+      return renamed;
     },
     [commitRename]
   );
