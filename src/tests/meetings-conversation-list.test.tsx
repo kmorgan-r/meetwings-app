@@ -34,6 +34,9 @@ describe("ConversationList", () => {
         search="quarterly"
         badges={new Map()}
         onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
         renamingId={null}
       />
     );
@@ -55,12 +58,19 @@ describe("ConversationList", () => {
         search="zzz-no-match"
         badges={new Map()}
         onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
         renamingId="c2"
       />
     );
 
     expect(screen.queryByText("Quarterly review")).toBeNull();
-    expect(screen.getByText("Supplier onboarding")).toBeInTheDocument();
+    // c2's row survives - and ConversationRow renders it as the open editor
+    // (an input, not the read-only title text) because `renamingId` matches
+    // its id, so the title shows up as the input's value, not as text.
+    expect(document.querySelector('[data-conversation-id="c2"]')).not.toBeNull();
+    expect(screen.getByRole("textbox")).toHaveValue("Supplier onboarding");
   });
 
   it("drops that same group once renamingId is null again", () => {
@@ -74,6 +84,9 @@ describe("ConversationList", () => {
         search="zzz-no-match"
         badges={new Map()}
         onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
         renamingId={null}
       />
     );

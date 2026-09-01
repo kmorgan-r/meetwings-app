@@ -11,19 +11,21 @@ export interface ConversationListProps {
   /**
    * The conversation currently open for an inline rename, or `null`.
    *
-   * Always `null` today - no caller sets it, because the rename UI has not
-   * landed yet. Threaded through now because the filter below drops a whole
-   * date group when no title in it matches the search box, and the stored
-   * title can change out from under an open editor with no user action:
-   * `useHistory`'s `conversation-title-updated` listener patches
-   * `conversations` whenever a background AI titler finishes. If that patch
-   * makes the group's only match disappear, the group - and the row holding
-   * the open editor - unmounts mid-edit. That is the same caret-loss failure
+   * Owned by the page (`pages/meetings/index.tsx`), not this component:
+   * threaded through because the filter below drops a whole date group when
+   * no title in it matches the search box, and the stored title can change
+   * out from under an open editor with no user action: `useHistory`'s
+   * `conversation-title-updated` listener patches `conversations` whenever a
+   * background AI titler finishes. If that patch makes the group's only
+   * match disappear, the group - and the row holding the open editor -
+   * unmounts mid-edit. That is the same caret-loss failure
    * `renameConversationManually` guards against from the sort side by never
-   * touching `updated_at`. Whichever component ends up owning the rename
-   * UI's open/closed state must pass that id here.
+   * touching `updated_at`.
    */
   renamingId: string | null;
+  onStartRename: (id: string) => void;
+  onCommitRename: (id: string, title: string) => void;
+  onCancelRename: () => void;
 }
 
 interface DateBucket {
@@ -43,7 +45,9 @@ interface DateBucket {
  * clock only the queue strip needs. `React.memo`'s default shallow compare is
  * enough: `conversations`, `search` and `renamingId` are primitives or the
  * page's own state, `badges` is the page's queue-derived map (rebuilt on
- * `reload`, not on the tick), and `onOpen` is a page-level `useCallback`.
+ * `reload`, not on the tick), and `onOpen`, `onStartRename`, `onCommitRename`
+ * and `onCancelRename` are page-level `useCallback`s with an empty
+ * dependency array.
  *
  * Known cost this does NOT address: `getAllConversations` attaches every
  * message to every conversation, and this component still receives that full
@@ -57,6 +61,9 @@ function ConversationListInner({
   badges,
   onOpen,
   renamingId,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
 }: ConversationListProps) {
   const dateGroups = useMemo<DateBucket[]>(() => {
     const byDate = new Map<string, ChatConversation[]>();
@@ -90,6 +97,10 @@ function ConversationListInner({
           conversations={docs}
           badges={badges}
           onOpen={onOpen}
+          renamingId={renamingId}
+          onStartRename={onStartRename}
+          onCommitRename={onCommitRename}
+          onCancelRename={onCancelRename}
         />
       ))}
     </>

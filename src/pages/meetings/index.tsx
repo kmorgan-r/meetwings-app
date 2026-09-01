@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button, Empty, Input } from "@/components";
 import { MessageCircleIcon, Search } from "lucide-react";
@@ -12,6 +12,9 @@ import { useHistory } from "@/hooks/useHistory";
 import { useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
 import { PageLayout } from "@/layouts";
 import { resolveBadge } from "@/lib/odoo/meeting-log";
+import { renameConversationManually } from "@/lib/database/chat-history.action";
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
+import { safeLocalStorage } from "@/lib/storage/helper";
 import { AssignDialog } from "./components/AssignDialog";
 import { ConversationList } from "./components/ConversationList";
 import { ProviderConfigReader } from "./components/ProviderConfigReader";
@@ -81,6 +84,54 @@ export default function Meetings() {
     (id: string) => navigate(`/meetings/view/${id}`),
     [navigate]
   );
+
+  // The one conversation currently open for an inline rename, or none. Lives
+  // here rather than in ConversationList/ConversationRow because a rename in
+  // progress must survive ConversationList's own search-filter re-render -
+  // see that component's `renamingId` doc comment.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+
+  // Stable identities, like `handleOpenConversation` above: ConversationList
+  // and ConversationRow are `React.memo` boundaries this page must not defeat.
+  const handleStartRename = useCallback((id: string) => {
+    setRenamingId(id);
+  }, []);
+
+  const handleCancelRename = useCallback(() => {
+    setRenamingId(null);
+  }, []);
+
+  const handleCommitRename = useCallback(async (id: string, title: string) => {
+    // Closed BEFORE the write settles, not after: a second Enter firing
+    // mid-flight must not start a second commit, and the row should not sit
+    // open across the await regardless of how the write resolves.
+    setRenamingId(null);
+
+    const trimmed = title.trim();
+    if (!trimmed) return;
+
+    // `false` means no row matched - the conversation was deleted between
+    // render and commit. Announcing a rename that did not happen would patch
+    // the overlay's cache with a title no row holds.
+    const renamed = await renameConversationManually(id, trimmed);
+    if (!renamed) return;
+
+    // BOTH channels. The in-window CustomEvent is for this webview -
+    // useHistory's own listener patches `conversations` from it. The
+    // localStorage key is for the overlay webview, which a window event
+    // cannot reach at all. The timestamp is a nonce: the `storage` event does
+    // not fire on a byte-identical write, so renaming to the same title twice
+    // would otherwise never reach the overlay the second time.
+    window.dispatchEvent(
+      new CustomEvent("conversation-title-updated", {
+        detail: { id, title: trimmed },
+      })
+    );
+    safeLocalStorage.setItem(
+      CONVERSATION_RENAMED_KEY,
+      JSON.stringify({ id, title: trimmed, timestamp: Date.now() })
+    );
+  }, []);
 
   return (
     <PageLayout
@@ -202,9 +253,10 @@ export default function Meetings() {
             search={search}
             badges={badges}
             onOpen={handleOpenConversation}
-            // No rename UI exists yet - see ConversationList's `renamingId`
-            // doc comment for what will eventually set this.
-            renamingId={null}
+            renamingId={renamingId}
+            onStartRename={handleStartRename}
+            onCommitRename={handleCommitRename}
+            onCancelRename={handleCancelRename}
           />
         </div>
       )}

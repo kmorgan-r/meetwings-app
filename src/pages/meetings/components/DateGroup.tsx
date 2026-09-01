@@ -8,6 +8,11 @@ export interface DateGroupProps {
   conversations: ChatConversation[];
   badges: ReadonlyMap<string, { status: string; count: number }>;
   onOpen: (id: string) => void;
+  /** The conversation open for an inline rename, or `null`. See `ConversationList`'s doc comment. */
+  renamingId: string | null;
+  onStartRename: (id: string) => void;
+  onCommitRename: (id: string, title: string) => void;
+  onCancelRename: () => void;
 }
 
 /**
@@ -16,7 +21,16 @@ export interface DateGroupProps {
  * The date heading is a <p>, not an <h2>: the queue strip owns the only <h2>s
  * on this page, and its own suite addresses its sections by heading level.
  */
-export function DateGroup({ dateKey, conversations, badges, onOpen }: DateGroupProps) {
+export function DateGroup({
+  dateKey,
+  conversations,
+  badges,
+  onOpen,
+  renamingId,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+}: DateGroupProps) {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground select-none font-medium">
@@ -37,6 +51,10 @@ export function DateGroup({ dateKey, conversations, badges, onOpen }: DateGroupP
               badgeStatus={badge?.status ?? null}
               badgeCount={badge?.count ?? 0}
               onOpen={onOpen}
+              isRenaming={doc.id === renamingId}
+              onStartRename={onStartRename}
+              onCommitRename={onCommitRename}
+              onCancelRename={onCancelRename}
             />
           );
         })}

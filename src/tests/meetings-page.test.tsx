@@ -22,6 +22,7 @@ vi.mock("@/lib/database/meeting-log.action", () => db);
 const history = vi.hoisted(() => ({
   getAllConversations: vi.fn(),
   deleteConversation: vi.fn(),
+  renameConversationManually: vi.fn(),
 }));
 vi.mock("@/lib/database/chat-history.action", () => history);
 
@@ -75,6 +76,7 @@ vi.mock("@/layouts", () => ({
 
 import Meetings from "@/pages/meetings";
 import type { ChatConversation, MeetingLogListRow } from "@/types";
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 
 const INSTANCE = "http://h:8069|odoo";
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "bob", apiKey: "sk-live-key" };
@@ -166,7 +168,27 @@ beforeEach(() => {
   db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([]);
   history.getAllConversations.mockResolvedValue(CONVERSATIONS);
+  history.renameConversationManually.mockResolvedValue(true);
 });
+
+/** Finds the pencil on a rendered conversation card and clicks it. */
+async function openRowEditor(id: string): Promise<HTMLElement> {
+  const card = conversationCard(id)!;
+  await userEvent.hover(card);
+  await userEvent.click(within(card).getByRole("button", { name: "Rename conversation" }));
+  return card;
+}
+
+/**
+ * The editor opens pre-filled with the current title (so Enter with no edits
+ * is a no-op rename), so every caller must clear it first - `userEvent.type`
+ * appends to existing content rather than replacing it.
+ */
+async function renameRowTo(card: HTMLElement, text: string): Promise<void> {
+  const input = within(card).getByRole("textbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, `${text}{Enter}`);
+}
 
 describe("the meetings page", () => {
   it("renders the conversation list with no strip and no badges when Odoo is unconfigured", async () => {
@@ -321,5 +343,116 @@ describe("the meetings page", () => {
     expect(badge.textContent).toContain("Sent to Odoo");
     expect(badge.textContent).toContain("2");
     expect(conversationCard("c2")!.querySelector("[data-badge-status]")).toBeNull();
+  });
+});
+
+describe("renaming a conversation from the list", () => {
+  // vi.spyOn(window, "dispatchEvent" | Date, "now" | localStorage, "setItem")
+  // below stack across tests otherwise - the outer file's beforeEach only
+  // clears call history, it does not restore a spy to the real implementation.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reveals the editor on the pencil and commits on Enter", async () => {
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    await renameRowTo(card, "New name");
+
+    await waitFor(() =>
+      expect(history.renameConversationManually).toHaveBeenCalledWith("c1", "New name")
+    );
+  });
+
+  it("cancels on Escape without writing", async () => {
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    const input = within(card).getByRole("textbox");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Whatever{Escape}");
+
+    expect(history.renameConversationManually).not.toHaveBeenCalled();
+    // Back to the read-only title - no editor left open on the row.
+    await waitFor(() => expect(within(card).queryByRole("textbox")).toBeNull());
+    expect(within(card).getByText("Quarterly review")).toBeInTheDocument();
+  });
+
+  it("fires both channels on a successful commit", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    await renameRowTo(card, "New name");
+    await waitFor(() => expect(history.renameConversationManually).toHaveBeenCalled());
+
+    const titleEvent = await waitFor(() => {
+      const found = dispatchSpy.mock.calls
+        .map(([event]) => event as CustomEvent)
+        .find((event) => event.type === "conversation-title-updated");
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(titleEvent.detail).toEqual({ id: "c1", title: "New name" });
+
+    const renamedCall = await waitFor(() => {
+      const found = setItemSpy.mock.calls.find(([key]) => key === CONVERSATION_RENAMED_KEY);
+      expect(found).toBeDefined();
+      return found!;
+    });
+    const payload = JSON.parse(renamedCall[1] as string);
+    expect(payload.id).toBe("c1");
+    expect(payload.title).toBe("New name");
+    expect(typeof payload.timestamp).toBe("number");
+  });
+
+  it("fires neither channel when the row no longer exists", async () => {
+    // The conversation was deleted between render and commit.
+    history.renameConversationManually.mockResolvedValue(false);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    await renderPage();
+    const card = await openRowEditor("c1");
+
+    await renameRowTo(card, "New name");
+    await waitFor(() => expect(history.renameConversationManually).toHaveBeenCalled());
+    // Let the resolved (but falsy) write settle before asserting silence.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const titleEvent = dispatchSpy.mock.calls
+      .map(([event]) => event as CustomEvent)
+      .find((event) => event.type === "conversation-title-updated");
+    expect(titleEvent).toBeUndefined();
+    expect(setItemSpy.mock.calls.some(([key]) => key === CONVERSATION_RENAMED_KEY)).toBe(false);
+  });
+
+  it("uses a fresh timestamp for a repeated identical rename", async () => {
+    // storage does not fire on a byte-identical write - without a nonce the
+    // second identical rename would never reach the overlay.
+    let now = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now++);
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    await renderPage();
+
+    for (let i = 0; i < 2; i++) {
+      const card = await openRowEditor("c1");
+      await renameRowTo(card, "Same name");
+      await waitFor(() => expect(within(card).queryByRole("textbox")).toBeNull());
+    }
+
+    await waitFor(() => {
+      const payloads = setItemSpy.mock.calls.filter(([key]) => key === CONVERSATION_RENAMED_KEY);
+      expect(payloads).toHaveLength(2);
+    });
+
+    const payloads = setItemSpy.mock.calls
+      .filter(([key]) => key === CONVERSATION_RENAMED_KEY)
+      .map(([, value]) => JSON.parse(value as string));
+    expect(payloads[0].timestamp).not.toBe(payloads[1].timestamp);
   });
 });

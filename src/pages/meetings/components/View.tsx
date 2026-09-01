@@ -3,11 +3,15 @@ import {
   Card,
   Empty,
   Button,
+  Input,
   Markdown,
   Textarea,
   GetLicense,
 } from "@/components";
 import { getConversationById } from "@/lib";
+import { renameConversationManually } from "@/lib/database/chat-history.action";
+import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
+import { safeLocalStorage } from "@/lib/storage/helper";
 import { ChatConversation } from "@/types";
 import {
   Download,
@@ -19,6 +23,8 @@ import {
   UsersIcon,
   SendIcon,
   Check,
+  XIcon,
+  PencilIcon,
   Loader2,
 } from "lucide-react";
 import { useState, useEffect } from "react";
@@ -59,12 +65,39 @@ const View = () => {
   );
 
   useEffect(() => {
+    // `ignore` because this read has no cancellation of its own: switching
+    // conversations fast, or renaming right after navigating in, can let this
+    // resolve AFTER a title patch from the listener below and overwrite it
+    // with the stale row this effect started reading.
+    let ignore = false;
     const getMessages = async () => {
       const conversation = await getConversationById(conversationId as string);
-      setMessages(conversation || null);
+      if (!ignore) setMessages(conversation || null);
     };
     getMessages();
+    return () => {
+      ignore = true;
+    };
   }, [conversationId]);
+
+  // `[]`-deped with a functional, id-checked updater - NOT `[messages]`.
+  // `setMessages` is shared with `useChatCompletion` above, which appends to
+  // it during a live completion, so a `[messages]` dependency would re-register
+  // this listener on every streamed chunk; and a `[]`-deped listener that wrote
+  // `{ ...messages, title }` from a closure over the mount-time `messages`
+  // would clobber everything appended since mount. Reading `prev` inside the
+  // updater sidesteps both.
+  useEffect(() => {
+    const handleTitleUpdated = (event: Event) => {
+      const { id, title } = (event as CustomEvent).detail || {};
+      if (!id || typeof title !== "string") return;
+      setMessages((prev) => (prev && prev.id === id ? { ...prev, title } : prev));
+    };
+
+    window.addEventListener("conversation-title-updated", handleTitleUpdated);
+    return () =>
+      window.removeEventListener("conversation-title-updated", handleTitleUpdated);
+  }, []);
 
   useEffect(() => {
     // Scroll to bottom when messages load
@@ -82,6 +115,43 @@ const View = () => {
     navigate(-1);
   };
 
+  const [isRenamingTitle, setIsRenamingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+
+  const startRenamingTitle = () => {
+    setTitleDraft(messages?.title ?? "");
+    setIsRenamingTitle(true);
+  };
+
+  const handleCommitTitleRename = async () => {
+    const id = conversationId;
+    // Closed before the write settles - same reasoning as the list row's
+    // commit handler (pages/meetings/index.tsx): a second Enter mid-flight
+    // must not fire a second commit.
+    setIsRenamingTitle(false);
+    if (!id) return;
+
+    const trimmed = titleDraft.trim();
+    if (!trimmed) return;
+
+    // `false` means no row matched (deleted meanwhile) - do not announce a
+    // rename that did not happen.
+    const renamed = await renameConversationManually(id, trimmed);
+    if (!renamed) return;
+
+    // BOTH channels, same pair the list row fires: the in-window event this
+    // component's own listener above also consumes, and the localStorage key
+    // the overlay webview reads. The timestamp is a nonce so a repeat rename
+    // to the same title still produces a `storage` event on the overlay side.
+    window.dispatchEvent(
+      new CustomEvent("conversation-title-updated", { detail: { id, title: trimmed } })
+    );
+    safeLocalStorage.setItem(
+      CONVERSATION_RENAMED_KEY,
+      JSON.stringify({ id, title: trimmed, timestamp: Date.now() })
+    );
+  };
+
   return (
     <PageLayout
       isMainTitle={false}
@@ -90,6 +160,55 @@ const View = () => {
       description={`${messages?.messages.length} messages in this conversation`}
       rightSlot={
         <div className="flex flex-row items-center gap-2">
+          {isRenamingTitle ? (
+            <div className="flex items-center gap-1">
+              <Input
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleCommitTitleRename();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setIsRenamingTitle(false);
+                  }
+                }}
+                className="h-6 lg:h-8 text-[10px] lg:text-sm w-36 lg:w-56"
+              />
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="Save conversation name"
+                title="Save conversation name"
+                className="size-6 lg:size-8"
+                onClick={handleCommitTitleRename}
+              >
+                <Check className="size-3 lg:size-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="Cancel rename"
+                title="Cancel rename"
+                className="size-6 lg:size-8"
+                onClick={() => setIsRenamingTitle(false)}
+              >
+                <XIcon className="size-3 lg:size-4" />
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="outline"
+              title="Rename conversation"
+              aria-label="Rename conversation"
+              className="text-[10px] lg:text-sm h-6 lg:h-8"
+              onClick={startRenamingTitle}
+            >
+              Rename <PencilIcon className="size-3 lg:size-4" />
+            </Button>
+          )}
           <Button
             variant="outline"
             title="Open this conversation in overlay"

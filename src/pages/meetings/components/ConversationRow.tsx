@@ -1,6 +1,7 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import moment from "moment";
-import { Badge, Card } from "@/components";
+import { Badge, Card, Button, Input } from "@/components";
+import { PencilIcon } from "lucide-react";
 
 /**
  * The badge's copy, keyed by the status `resolveBadge` picked.
@@ -29,6 +30,11 @@ export interface ConversationRowProps {
   badgeStatus: string | null;
   badgeCount: number;
   onOpen: (id: string) => void;
+  /** Whether THIS row is the one the page has open for an inline rename. */
+  isRenaming: boolean;
+  onStartRename: (id: string) => void;
+  onCommitRename: (id: string, title: string) => void;
+  onCancelRename: () => void;
 }
 
 /**
@@ -40,8 +46,9 @@ export interface ConversationRowProps {
  * hand every row a new identity even when its badge is unchanged. QueueRow
  * needed a custom `propsAreEqual` for exactly that reason; this shape means this
  * row will not - the default shallow compare `memo` uses below is sufficient
- * because every prop here is either a primitive or `onOpen`, which the page
- * wraps in `useCallback`.
+ * because every prop here is either a primitive or one of `onOpen`,
+ * `onStartRename`, `onCommitRename`, `onCancelRename`, which the page wraps in
+ * `useCallback` with an empty dependency array.
  */
 function ConversationRowInner({
   id,
@@ -51,15 +58,68 @@ function ConversationRowInner({
   badgeStatus,
   badgeCount,
   onOpen,
+  isRenaming,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
 }: ConversationRowProps) {
+  // Transient - reset from the `title` prop every time editing starts, so it
+  // never needs to survive past the Enter/Escape that ends it, and does not
+  // belong in the page's `renamingId` state.
+  const [draft, setDraft] = useState(title);
+
   return (
     <Card
       data-conversation-id={id}
       className="shadow-none select-none p-4 gap-0 group relative transition-all !bg-black/5 dark:!bg-white/5 hover:!border-primary/50 cursor-pointer"
-      onClick={() => onOpen(id)}
+      onClick={() => {
+        if (!isRenaming) onOpen(id);
+      }}
     >
       <div className="flex items-center justify-between">
-        <p className="line-clamp-1 text-sm mr-8">{title}</p>
+        <div className="flex items-center gap-1 min-w-0 flex-1 mr-8">
+          {isRenaming ? (
+            <Input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  onCommitRename(id, draft);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  onCancelRename();
+                }
+              }}
+              className="h-7 text-sm"
+            />
+          ) : (
+            <>
+              <p className="line-clamp-1 text-sm">{title}</p>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Rename conversation"
+                title="Rename conversation"
+                // Always in the DOM, hidden by opacity rather than a
+                // conditional render: hover is a CSS-only affordance here.
+                className="size-5 shrink-0 opacity-0 group-hover:opacity-100"
+                onClick={(e) => {
+                  // Stops the click from also bubbling to the Card's onClick,
+                  // which would otherwise read `isRenaming` from this render
+                  // (still false) and navigate away the instant editing starts.
+                  e.stopPropagation();
+                  setDraft(title);
+                  onStartRename(id);
+                }}
+              >
+                <PencilIcon className="size-3" />
+              </Button>
+            </>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           {badgeStatus !== null && (
             <Badge data-badge-status={badgeStatus} variant="outline" className="text-xs">
