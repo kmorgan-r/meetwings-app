@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // `vi.hoisted`, not a bare `const`: vitest hoists every `vi.mock` above the
@@ -23,8 +23,46 @@ const history = vi.hoisted(() => ({
   getAllConversations: vi.fn(),
   deleteConversation: vi.fn(),
   renameConversationManually: vi.fn(),
+  getConversationById: vi.fn(),
 }));
 vi.mock("@/lib/database/chat-history.action", () => history);
+
+// `View.tsx` (the header-rename suite below) calls this hook for its own
+// message-loading and completion plumbing, none of which that suite exercises
+// - only the rename control in `rightSlot` and the `[]`-deped title listener
+// are under test. Mocked at the leaf, same reasoning as `chat-history.action`
+// above: the real hook needs `useApp()` fields (selectedAIProvider,
+// selectedSttProvider, screenshotConfiguration, ...), a Tauri `invoke`/`listen`
+// pair, and AI/STT fetch plumbing this file has no reason to stand up.
+// `setMessages` (View's own state setter) is passed straight through and never
+// touched by the mock, so View's real title-update path is unaffected.
+const chatCompletion = vi.hoisted(() => ({
+  input: "",
+  setInput: vi.fn(),
+  isLoading: false,
+  error: null as string | null,
+  attachedFiles: [] as unknown[],
+  handleFileSelect: vi.fn(),
+  removeFile: vi.fn(),
+  onRemoveAllFiles: vi.fn(),
+  isFilesPopoverOpen: false,
+  setIsFilesPopoverOpen: vi.fn(),
+  micOpen: false,
+  setMicOpen: vi.fn(),
+  isRecording: false,
+  setIsRecording: vi.fn(),
+  screenshotConfiguration: {},
+  captureScreenshot: vi.fn(),
+  isScreenshotLoading: false,
+  handleKeyPress: vi.fn(),
+  handlePaste: vi.fn(),
+  submit: vi.fn(),
+  inputRef: { current: null },
+  messagesEndRef: { current: null },
+}));
+vi.mock("@/hooks/useChatCompletion", () => ({
+  useChatCompletion: () => chatCompletion,
+}));
 
 const actions = vi.hoisted(() => ({
   retryMeetingLog: vi.fn(),
@@ -70,11 +108,32 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 
 // PageLayout renders <Header />, which calls useNavigate(), and <Promote />,
 // which calls useApp(). Same stub as meeting-log-page.test.tsx:105-108.
+// `title` is surfaced as a plain div (never a heading - several tests below
+// assert `queryByRole("heading", { level: 2 })` is null) so the header-rename
+// suite can observe the `[]`-deped title listener actually repainting it;
+// `rightSlot` is rendered for the same reason - View.tsx's rename control
+// lives there, not in `children`. The list page never passes `rightSlot` and
+// its `title` ("Meetings") is never asserted on, so this is a no-op for it.
 vi.mock("@/layouts", () => ({
-  PageLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  PageLayout: ({
+    children,
+    title,
+    rightSlot,
+  }: {
+    children: React.ReactNode;
+    title?: React.ReactNode;
+    rightSlot?: React.ReactNode;
+  }) => (
+    <div>
+      <div data-testid="page-title">{title}</div>
+      <div data-testid="page-right-slot">{rightSlot}</div>
+      {children}
+    </div>
+  ),
 }));
 
 import Meetings from "@/pages/meetings";
+import View from "@/pages/meetings/components/View";
 import type { ChatConversation, MeetingLogListRow } from "@/types";
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 
@@ -454,5 +513,158 @@ describe("renaming a conversation from the list", () => {
       .filter(([key]) => key === CONVERSATION_RENAMED_KEY)
       .map(([, value]) => JSON.parse(value as string));
     expect(payloads[0].timestamp).not.toBe(payloads[1].timestamp);
+  });
+});
+
+/**
+ * `View.tsx` reads `conversationId` from `useParams()`, so it needs an actual
+ * matching `<Route>` rather than a bare `<MemoryRouter>` - `Meetings` above
+ * never reads route params and gets away with rendering unrouted.
+ */
+async function renderView(conversationId = "c1") {
+  const view = render(
+    <MemoryRouter initialEntries={[`/meetings/view/${conversationId}`]}>
+      <Routes>
+        <Route path="/meetings/view/:conversationId" element={<View />} />
+      </Routes>
+    </MemoryRouter>
+  );
+  await waitFor(() => expect(history.getConversationById).toHaveBeenCalledWith(conversationId));
+  // Wait for the fetched conversation to land in state before a test acts on
+  // the header - the title starts empty until this resolves.
+  await screen.findByText("Quarterly review");
+  return view;
+}
+
+/** The header's `rightSlot`, scoped past the footer's own `role="textbox"` -
+ *  the message composer below it is a `<textarea>`, which shares that role. */
+function headerRightSlot(): HTMLElement {
+  return screen.getByTestId("page-right-slot");
+}
+
+/** Finds the pencil in the page header (View's `rightSlot`) and clicks it. */
+async function openHeaderEditor(): Promise<void> {
+  await userEvent.click(within(headerRightSlot()).getByRole("button", { name: "Rename conversation" }));
+}
+
+/** Same pre-filled-input caveat as `renameRowTo` above. */
+async function renameHeaderTo(text: string): Promise<void> {
+  const input = within(headerRightSlot()).getByRole("textbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, `${text}{Enter}`);
+}
+
+describe("renaming a conversation from the header", () => {
+  // Same leak this file's row-rename block guards against: vi.spyOn on
+  // window.dispatchEvent/localStorage.setItem stacks across tests otherwise.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    // ChatAudio (rendered unconditionally in View's footer) reads
+    // selectedSttProvider.provider straight off useApp() with no guard, and
+    // View itself gates the whole footer behind hasActiveLicense - neither is
+    // read by the list-page tests above, so they are added here rather than
+    // in the shared fixture.
+    appState.current = {
+      ...appState.current,
+      hasActiveLicense: true,
+      selectedSttProvider: { provider: "" },
+    };
+    history.getConversationById.mockResolvedValue(
+      conversation({ id: "c1", title: "Quarterly review" })
+    );
+  });
+
+  it("reveals the editor on the header pencil and commits on Enter", async () => {
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    await renderView();
+
+    await openHeaderEditor();
+    await renameHeaderTo("New header title");
+
+    await waitFor(() =>
+      expect(history.renameConversationManually).toHaveBeenCalledWith("c1", "New header title")
+    );
+    // Mirrors the row's "fires both channels" test: the header's commit path
+    // is the same pair, not just the same writer call.
+    const titleEvent = await waitFor(() => {
+      const found = dispatchSpy.mock.calls
+        .map(([event]) => event as CustomEvent)
+        .find((event) => event.type === "conversation-title-updated");
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(titleEvent.detail).toEqual({ id: "c1", title: "New header title" });
+
+    const renamedCall = await waitFor(() => {
+      const found = setItemSpy.mock.calls.find(([key]) => key === CONVERSATION_RENAMED_KEY);
+      expect(found).toBeDefined();
+      return found!;
+    });
+    const payload = JSON.parse(renamedCall[1] as string);
+    expect(payload.id).toBe("c1");
+    expect(payload.title).toBe("New header title");
+    expect(typeof payload.timestamp).toBe("number");
+  });
+
+  it("cancels on Escape without writing", async () => {
+    await renderView();
+    await openHeaderEditor();
+
+    const input = within(headerRightSlot()).getByRole("textbox");
+    await userEvent.clear(input);
+    await userEvent.type(input, "Whatever{Escape}");
+
+    expect(history.renameConversationManually).not.toHaveBeenCalled();
+    // Back to the read-only header - no editor left open.
+    await waitFor(() => expect(within(headerRightSlot()).queryByRole("textbox")).toBeNull());
+    expect(screen.getByTestId("page-title")).toHaveTextContent("Quarterly review");
+  });
+
+  it("fires neither channel when the row no longer exists", async () => {
+    // The conversation was deleted between render and commit.
+    history.renameConversationManually.mockResolvedValue(false);
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    await renderView();
+    await openHeaderEditor();
+
+    await renameHeaderTo("New header title");
+    await waitFor(() => expect(history.renameConversationManually).toHaveBeenCalled());
+    // Let the resolved (but falsy) write settle before asserting silence.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const titleEvent = dispatchSpy.mock.calls
+      .map(([event]) => event as CustomEvent)
+      .find((event) => event.type === "conversation-title-updated");
+    expect(titleEvent).toBeUndefined();
+    expect(setItemSpy.mock.calls.some(([key]) => key === CONVERSATION_RENAMED_KEY)).toBe(false);
+  });
+
+  it("updates the header when the conversation-title-updated listener fires for this conversation", async () => {
+    // The one path the row tests cannot cover: View's `[]`-deped listener
+    // (View.tsx:90-100) patching `messages` through a functional updater.
+    // `setMessages` is the same setter useChatCompletion appends to during a
+    // live completion, which is exactly why that listener is `[]`-deped with
+    // an id-checked `prev` read instead of a `[messages]` effect - see the
+    // doc comment above it.
+    await renderView();
+    expect(screen.getByTestId("page-title")).toHaveTextContent("Quarterly review");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("conversation-title-updated", {
+          detail: { id: "c1", title: "Retitled elsewhere" },
+        })
+      );
+    });
+
+    expect(screen.getByTestId("page-title")).toHaveTextContent("Retitled elsewhere");
   });
 });

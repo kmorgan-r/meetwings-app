@@ -12,7 +12,6 @@ export * from "./ChatScreenshot";
 export * from "./ChatFiles";
 export * from "./AudioRecorder";
 export * from "./DeleteConfirmation";
-export * from "./View";
 export { QueueRow } from "./QueueRow";
 export { ProviderConfigReader } from "./ProviderConfigReader";
 export { AssignDialog, type AssignPayload } from "./AssignDialog";
