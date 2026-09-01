@@ -534,8 +534,14 @@ autosave into the re-read branch at `useCompletion.ts:326-340`, and
 error indistinguishable from 'no such row'" (`chat-history.action.ts:345-351`).
 A transient failure would then invent a `Meeting transcript - <date>` title with
 `hasStoredTitle = false` — the one state that hands the conversation to the AI
-titler. Patching cannot do that. Invalidation is used only when the cached id
-does not match the payload's.
+titler. Patching cannot do that.
+
+**A rename for a different conversation is a no-op**, not an invalidation. The
+handler returns early when the cached id does not match, mirroring the shipped
+in-window handler at `:261-264`. Invalidating there would be the same bug by
+another route: renaming conversation B in the dashboard while the overlay is
+mid-meeting on A would drop A's cache entry and send A's next autosave into
+exactly the re-read branch described above.
 
 Both the writer and the listener import one exported key constant, so a test
 cannot pass against a hardcoded key the writer never writes.
@@ -881,7 +887,7 @@ a fake SQL engine or asserts nothing.
 | Split — semantics | Both split **functions** still raise on `rowsAffected: 0` (from the first statement), and the guarded title statement never names `updated_at` | `chat-history.rename-guard.test.ts` (new) |
 | `renameConversationManually` | Exact SQL and params (both columns, no `updated_at`), false on zero rows, refusal on empty id/title, rejection propagated — mirroring `chat-history.update-title.test.ts:34-65` | `chat-history.rename-guard.test.ts` (new) |
 | Rename commit fires both | The commit handler dispatches `conversation-title-updated` **and** writes the shared localStorage key constant with an `{ id, title, timestamp }` payload | `useCompletion.meeting-assist.test.tsx` |
-| Cross-window listener | A synthesized `StorageEvent` on the shared key **patches** `conversationMetaCacheRef` with the payload title; a mismatched id invalidates instead | `useCompletion.meeting-assist.test.tsx` |
+| Cross-window listener | A synthesized `StorageEvent` on the shared key **patches** `conversationMetaCacheRef` with the payload title; **a mismatched id is a no-op** | `useCompletion.meeting-assist.test.tsx` |
 | Transcript labels | Fixture with microphone, system, assistant, typed, **and a legacy pre-migration-8 row with null `speaker`/`audio_source` asserting the documented `You:`** | `conversation-markdown.test.ts` (new) |
 | Diarized batch carries speaker | `addMeetingTranscriptEntries` writes `speaker`/`audioSource` onto each message — a `useCompletion` behaviour, not a markdown one | `useCompletion.meeting-assist.test.tsx` |
 | Badge — other instance | An other-instance `sent` row badges; an other-instance `failed` row does **not** | `meetings-page.badges.test.tsx` (new) |

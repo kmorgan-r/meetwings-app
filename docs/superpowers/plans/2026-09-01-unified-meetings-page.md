@@ -435,6 +435,16 @@ vi.mock("@/contexts", () => ({ useApp: () => APP_CONTEXT }));
 
 2. **`generateConversationId` is mocked to the constant `"conversation-1"`** (`:66`). Every mint returns the same string, so "assert only one distinct id" passes with the bug fully intact. Do **not** change the factory default — `EXISTING_CONVERSATION`, the `saveConversation` resolved value and `expect(getConversationById).toHaveBeenCalledWith("conversation-1")` at `:221` all pin it. Override per-test with `mockReturnValueOnce`.
 
+   **And reset it in `beforeEach`, or the one-shots leak.** The suite's own comment at `:393-397` records the hazard: `vi.clearAllMocks()` clears call records but **not** queued one-shot behaviours. In the fixed (green) state the second queued id is deliberately never consumed — that is the whole point — so it survives into the next test, where the first mint picks it up and every `"conversation-1"` pin breaks. Add to the suite's `beforeEach`, matching the `mockReset()` precedent at `:398`/`:405`:
+
+```ts
+    vi.mocked(generateConversationId).mockReset();
+```
+
+   Vitest restores the factory's `vi.fn(() => "conversation-1")` implementation on reset, so the pinned default survives.
+
+4. **Add `generateConversationId` to the suite's import list** at `:6-14`. The new tests call `vi.mocked(generateConversationId)`, and it is not currently imported. `tsconfig.json` excludes `src/tests/**`, so this surfaces as a runtime `ReferenceError`, not a type error.
+
 3. **Verify `ensureConversationId` is present in the `@/lib` factory** — it was added in **Task 2 Step 7b**, which owns that amendment because its own Step 8 gate depends on it. If it is missing (a task ran out of order, or a worktree was reset), add it there rather than here, so the two tasks do not write competing versions of the same factory key.
 
 Run the suite unchanged afterwards — it must still pass:
@@ -488,6 +498,12 @@ it("reuses the established conversation id when a turn is saved", async () => {
   const savedIds = vi.mocked(saveConversation).mock.calls.map(([c]) => c.id);
   expect(savedIds).not.toContain("chat-b");
   expect(savedIds.at(-1)).toBe("chat-a");
+  expect(result.current.currentConversationId).toBe("chat-a");
+
+  // The ref is private, so observe it through a following ref-reading path.
+  await act(async () => {
+    result.current.addMeetingTranscript("Later line", undefined, "microphone");
+  });
   expect(result.current.currentConversationId).toBe("chat-a");
 });
 ```
@@ -618,8 +634,13 @@ then at `:1748`:
 The spec marks four cases "all required"; Step 2b writes one. Add the rest to the same suite, each with the `mockReturnValueOnce` id regime and the provider gate:
 
 ```ts
-it("reuses the established id on the meeting-context path", async () => {
-  // submitWithMeetingContext (:1080) reads stale state identically to submit.
+it("pins the meeting-context mint site to the established id", async () => {
+  // NOT a red-then-green test, and the plan should not pretend otherwise:
+  // submitWithMeetingContext lists state.currentConversationId in its own deps
+  // (:1253), so it re-forms on every id change and its closure is never stale.
+  // It also never calls saveCurrentConversation - it has its own inline save at
+  // :1218. So it cannot reproduce either defect (a) or (b). This pins the :1080
+  // substitution from Task 2 against regression; expect it green from the start.
   vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
   enableProviderGate();
   mockStreamedResponse("ok");
@@ -659,21 +680,73 @@ it("keeps state.currentConversationId populated after a chat-only turn", async (
   // The setState mirror at :882/:1080. If it stops firing, every enqueue falls to
   // useMeetingLog's getActiveConversationId() recovery and writes the
   // conversation_id IS NULL rows the merged page then has to render.
+  //
+  // Deliberately NO mockStreamedResponse: beforeEach installs an empty generator,
+  // so fullResponse is empty, the save block at :1000 is skipped, and
+  // saveCurrentConversation never runs. That leaves the :882 mirror as the ONLY
+  // writer of state.currentConversationId - so deleting the mirror fails this
+  // test. With a streamed response, :1495 would set it and the test would pass
+  // with the mirror gone.
   enableProviderGate();
-  mockStreamedResponse("ok");
   const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
   await act(async () => {
     await result.current.submit("hello");
   });
 
-  expect(result.current.currentConversationId).toBeTruthy();
+  expect(result.current.currentConversationId).toBe("conversation-1");
+});
+
+it("mints a fresh id after the delete fallback resets the conversation", async () => {
+  // The other reset path (:1570-1583): the conversationDeleted listener clears
+  // the refs and calls startNewConversation. Its detail is a BARE ID STRING,
+  // not { id } - see useHistory.ts:167-171.
+  vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+  await act(async () => {
+    result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+  });
+  expect(result.current.currentConversationId).toBe("chat-a");
+
+  await act(async () => {
+    window.dispatchEvent(new CustomEvent("conversationDeleted", { detail: "chat-a" }));
+  });
+  await act(async () => {
+    result.current.addMeetingTranscript("After the delete", undefined, "microphone");
+  });
+
+  expect(result.current.currentConversationId).toBe("chat-b");
 });
 ```
 
 - [ ] **Step 5c: The system-audio negative test**
 
-`useSystemAudio` is deliberately excluded from this fix, and this test is what keeps it excluded. Create `src/tests/useSystemAudio.new-conversation.test.tsx`:
+`useSystemAudio` is deliberately excluded from this fix, and this test is what keeps it excluded. Create `src/tests/useSystemAudio.new-conversation.test.tsx`.
+
+**It needs a mock header — the hook does not mount bare.** `useSystemAudio()` calls `useApp()` at `:106`, which throws `"useApp must be used within a AppProvider"` (`app.context.tsx:806-808`), plus `useWindowResize`/`useGlobalShortcuts` from `@/hooks` and a Tauri `listen(...)` in a mount effect at `:207`:
+
+```tsx
+vi.mock("@/contexts", () => ({
+  useApp: () => ({
+    selectedSttProvider: null,
+    allSttProviders: [],
+    selectedAIProvider: { provider: null },
+    allAiProviders: [],
+    systemPrompt: "",
+    selectedAudioDevices: {},
+    sttLanguage: "en",
+  }),
+}));
+vi.mock("@/hooks", () => ({
+  useWindowResize: () => ({ resizeWindow: vi.fn() }),
+  useGlobalShortcuts: () => ({}),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(true) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
+```
+
+**Leave `@/lib` unmocked**, as `meeting-log-page.test.tsx:72-77` deliberately does. This test asserts two ids *differ*, and the meeting-assist suite's constant-`"conversation-1"` mock would make that impossible; the real `generateConversationId` supplies distinct ids, which is exactly what is under test.
 
 ```tsx
 it("mints a distinct id for each new conversation", async () => {
@@ -1412,6 +1485,7 @@ describe("updateConversation title guard", () => {
     expect(sqlOf(titleWrites()[0])).toBe(
       "UPDATE conversations SET title = ? WHERE id = ? AND title_source = 'auto'"
     );
+    expect(sqlOf(titleWrites()[0])).not.toContain("updated_at");
   });
 
   it("still raises when the conversation is gone", async () => {
@@ -1425,14 +1499,16 @@ describe("updateConversation title guard", () => {
 
 describe("applySummaryTitleToConversation", () => {
   it("returns false without throwing when the guard matches no row", async () => {
-    // A manual rename makes the guarded UPDATE match zero rows. The summary was
-    // written successfully; a cosmetic rename losing to the user must not be
-    // reported as a failure.
+    // CHARACTERISATION, not red-then-green: it already delegates to
+    // updateConversationTitle (:602-623) and already returns false on zero rows.
+    // Expect it green from the start. The load-bearing half is the SQL
+    // assertion below - that the delegation now carries the guard clause.
     const { applySummaryTitleToConversation } = await import("@/lib/database/chat-history.action");
     mockExecute.mockResolvedValueOnce({ rowsAffected: 0 });
     await expect(
       applySummaryTitleToConversation("conversation-1", "Summary Title")
     ).resolves.toBe(false);
+    expect(sqlOf(titleWrites()[0])).toContain("title_source = 'auto'");
   });
 });
 ```
@@ -1458,13 +1534,21 @@ At `:571-574`, change the statement to:
     );
 ```
 
-Update the doc comment at `:552-553`, which is now incomplete:
+Update **two** doc comments. First `:552-553`, which is now incomplete:
 
 ```ts
  * Returns false when no row matched — the conversation was deleted while the
  * title was being generated, OR the user has renamed it by hand
  * (title_source = 'manual'). Both mean "do not report a rename".
 ```
+
+Then `applySummaryTitleToConversation`'s comment at `:595-597`, which now asserts the opposite of what is true:
+
+> That is safe because every title in the system is machine-generated: the only
+> writer besides conversation creation is the AI titler. If a manual rename is
+> ever added, this needs a provenance check so it can't overwrite one.
+
+The manual rename now exists, and the provenance check is the `AND title_source = 'auto'` clause this function inherits by delegating to `updateConversationTitle`. Rewrite it to record that the change landed, rather than leaving it predicting a change that already happened.
 
 - [ ] **Step 7: Run every affected suite**
 
@@ -1646,8 +1730,8 @@ Add to `src/tests/useCompletion.meeting-assist.test.tsx`:
 
 ```ts
 it("patches the cached title when the other window renames a conversation", async () => {
-  enableProviderGate();
-  mockStreamedResponse("ok");
+  // No enableProviderGate/mockStreamedResponse: submit is never called here, and
+  // enableProviderGate mutates a mock the beforeEach comment (:129-135) keeps clean.
   const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
   // The meta cache is only populated by a successful save, so do one first.
@@ -1682,7 +1766,44 @@ it("patches the cached title when the other window renames a conversation", asyn
   const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
   expect(lastAppend?.[1]).toBe("Renamed by hand");
 });
+
+it("ignores a rename for a different conversation", async () => {
+  // A rename of conversation B must not disturb the overlay's cache for A.
+  // Nulling it here would send the next autosave into the re-read branch, where
+  // getConversationById cannot distinguish a failed read from a missing row.
+  const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+  await act(async () => {
+    result.current.setMeetingAssistMode(true);
+    result.current.addMeetingTranscript("Opening", undefined, "microphone");
+  });
+  await act(async () => {
+    await result.current.flushUnsavedMeetingTranscript();
+  });
+  const originalTitle = vi.mocked(saveConversation).mock.calls.at(-1)?.[0].title;
+
+  await act(async () => {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: CONVERSATION_RENAMED_KEY,
+        newValue: JSON.stringify({ id: "some-other-conversation", title: "Not mine", timestamp: Date.now() }),
+      })
+    );
+  });
+
+  await act(async () => {
+    result.current.addMeetingTranscript("Another line", undefined, "microphone");
+  });
+  await act(async () => {
+    await result.current.flushUnsavedMeetingTranscript();
+  });
+
+  const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
+  expect(lastAppend?.[1]).toBe(originalTitle);
+});
 ```
+
+**Spec reconciliation.** The spec's testing table says "a mismatched id invalidates instead". That was wrong and this plan deliberately departs from it: invalidation on a mismatch is the bug described in the handler comment above. The behaviour here — mismatch is a no-op, mirroring the shipped in-window handler at `:261-264` — is correct, and the test above pins it. Update the spec's row when this lands so the two agree.
 
 Import `CONVERSATION_RENAMED_KEY` from `@/lib/chat-constants` at the top of the file — that module is **not** mocked in this suite, so the test and the hook must both resolve the real constant. (The hook imports it by leaf path for the same reason; see Step 4.)
 
