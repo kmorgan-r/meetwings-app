@@ -16,7 +16,7 @@
 - **Migration 15 is the next free version.** `src-tauri/src/db/main.rs` registers 1–14.
 - **Migration descriptions are verb-first snake_case.** All fourteen are (`create_*`, `add_*`, `remove_*`, `adopt_*`, `allow_*`). The description string is also the lookup key in `migration_tests.rs`, so the registration and the test must agree exactly.
 - **The DB test harness is a mocked `execute`.** See `src/tests/chat-history.update-title.test.ts:6-8,22`. No test may assert a real-table outcome ("the row now holds X"); assert statement shape and params instead.
-- **`src/lib/index.ts` star-exports `./functions`, `./database` and `./odoo` into one flat namespace.** Every new exported name must be unique across all of `src/lib`. Verified free at plan time: `speakerLabelFor`, `conversationToMarkdown`, `ensureConversationId`, `renameConversationManually`.
+- **`src/lib/index.ts` star-exports `./functions`, `./database` and `./odoo` into one flat namespace.** Every new exported name must be unique across all of `src/lib`. Verified free at plan time: `speakerLabelFor`, `conversationToMarkdown`, `ensureConversationId`, `renameConversationManually`, `resolveBadge`, `listConversationBadgeRows`, `CONVERSATION_RENAMED_KEY`.
 - **Path alias is `@/`.** Files are kebab-case, components PascalCase, hooks `use*` camelCase, helper modules in `src/lib/functions/` use the `*.function.ts` suffix.
 - **Commit boundaries are the four items, in task order.** Migration 15 lands inside Task 6 so it can be reverted without touching the page merge.
 - **Run tests scoped to the files you touched**, e.g. `npx vitest run src/tests/foo.test.ts`. Never a bare `npx vitest run` — this repo has pre-existing unrelated failures and a full-suite run will not tell you whether your change is sound.
@@ -371,7 +371,7 @@ Expected: PASS. This suite mounts the hook and drives the transcript paths, so i
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/lib/functions/conversation-id.function.ts src/lib/functions/index.ts src/hooks/useCompletion.ts src/tests/conversation-id.function.test.ts
+git add src/lib/functions/conversation-id.function.ts src/lib/functions/index.ts src/hooks/useCompletion.ts src/tests/conversation-id.function.test.ts src/tests/useCompletion.meeting-assist.test.tsx
 git commit -m "fix(completion): mint a conversation id in one place
 
 Six inline mint sites collapse onto ensureConversationId. Four already read
@@ -435,16 +435,7 @@ vi.mock("@/contexts", () => ({ useApp: () => APP_CONTEXT }));
 
 2. **`generateConversationId` is mocked to the constant `"conversation-1"`** (`:66`). Every mint returns the same string, so "assert only one distinct id" passes with the bug fully intact. Do **not** change the factory default — `EXISTING_CONVERSATION`, the `saveConversation` resolved value and `expect(getConversationById).toHaveBeenCalledWith("conversation-1")` at `:221` all pin it. Override per-test with `mockReturnValueOnce`.
 
-3. **`ensureConversationId` must be added to the `@/lib` factory** (`:58-78`), or it is `undefined` inside the hook and the whole file dies on the first `addMeetingTranscript`. It must stay behind the barrel mock — a direct import would route minting through the real generator and break the `"conversation-1"` pins:
-
-```ts
-    ensureConversationId: vi.fn((ref: { current: string | null }) => {
-      ref.current ??= (globalThis as never as { __mintId: () => string }).__mintId?.() ?? "conversation-1";
-      return ref.current;
-    }),
-```
-
-Simpler and preferred: have the factory's `ensureConversationId` delegate to its own `generateConversationId` mock so `mockReturnValueOnce` still drives it.
+3. **Verify `ensureConversationId` is present in the `@/lib` factory** — it was added in **Task 2 Step 7b**, which owns that amendment because its own Step 8 gate depends on it. If it is missing (a task ran out of order, or a worktree was reset), add it there rather than here, so the two tasks do not write competing versions of the same factory key.
 
 Run the suite unchanged afterwards — it must still pass:
 
@@ -469,6 +460,11 @@ it("reuses the established conversation id when a turn is saved", async () => {
 
   const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
+  // Capture submit BEFORE the render that establishes the id. Comparing it to
+  // itself afterwards would be tautological - the point is that it survives the
+  // state change.
+  const submitBefore = result.current.submit;
+
   // Establish an id through a ref-writing path that does not touch submit's deps.
   await act(async () => {
     result.current.addMeetingTranscript("Opening line", undefined, "microphone");
@@ -479,9 +475,10 @@ it("reuses the established conversation id when a turn is saved", async () => {
   // THE PRECONDITION. The defect only reproduces if submit's useCallback
   // identity survived the render that set the id - otherwise the closure is
   // fresh, it reads the current state, and this degrades into a same-tick test
-  // that passes against unfixed code. Assert the staleness rather than assume it.
-  const before = result.current.submit;
-  expect(result.current.submit).toBe(before);
+  // that passes against unfixed code. With APP_CONTEXT hoisted (Step 2a) and
+  // addMeetingTranscript touching none of submit's five deps, this holds for
+  // the right reason.
+  expect(result.current.submit).toBe(submitBefore);
 
   await act(async () => {
     await result.current.submit("What should I say?");
@@ -568,8 +565,10 @@ With the id now correct but the lookup still reading stale-null state, `existing
 At `:1520`, `state.currentConversationId` is no longer read anywhere in the callback:
 
 ```ts
-    [state.currentConversationId, queueConversationWrite, requestAITitle]
+    [state.currentConversationId, queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
 ```
+
+(The real line carries that trailing comment; keep it.)
 
 becomes:
 
@@ -600,7 +599,7 @@ At `:1002-1006`, pass the id `submit` already computed:
           );
 ```
 
-In `handleScreenshotSubmit`, mint once near the top of the callback (immediately after `currentRequestIdRef.current = requestId;`, matching the shape of the other turn-starting paths):
+In `handleScreenshotSubmit` (`:1640`), mint once near the top of the callback, matching the shape of the other turn-starting paths. Anchor the edit inside that callback's body — `currentRequestIdRef.current = requestId;` alone appears at `:878`, `:1077` and `:1663`, so an exact-match edit on it reports "not unique":
 
 ```ts
       const conversationId = ensureConversationId(currentConversationIdRef);
@@ -1737,7 +1736,7 @@ In `src/hooks/useCompletion.ts`, beside the existing `conversation-title-updated
   }, []);
 ```
 
-Import `CONVERSATION_RENAMED_KEY` from `@/lib`.
+Import it by leaf path — `import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";` — **not** from `@/lib`. The meeting-assist suite replaces the whole barrel with a fixed factory, so a barrel import is `undefined` there and the listener's key comparison short-circuits on every event. The test imports the same real constant from the same leaf path, so neither side restates the string.
 
 - [ ] **Step 5: Run and watch pass**
 
@@ -1780,7 +1779,9 @@ from a missing row, and would invent a title and hand it to the AI titler."
   - **Dialog state:** `assignRow` and `setAssignRow` move **into** the hook, alongside the three handlers that drive them (`handleAssign` calls `setAssignRow`; `handleAssignConfirm` depends on `runRowAction`). The page renders `<AssignDialog>` from the returned `assignRow`. An earlier draft said dialog state "stays in the page" while moving its handlers — both cannot hold.
   - **`providerConfigRef`**, which the page JSX passes to `<ProviderConfigReader configRef={providerConfigRef} />` at `:900` and `handleRetry:603` reads. If the ref moves into the hook it must be returned, or the leaf writes a ref nobody reads.
   - **Handlers**, with their existing dep arrays unchanged: `setResult`, `refineResult`, `runRowAction`, `handleRetry`, `handleDelete`, `handleAssign`, `handleAssignConfirm`, `handleAssignCancel`, `runTargetAction`, `handleRetryTarget`, `handleRemoveTarget`, `readTranscript`, `toggleTranscript`, `reload`.
-  - **Stays page-side** (render concerns): `GROUPS` (`:75-82`), `FAILURE_COPY` (`:99`), `REMAINDER_LINE` (`:73`), and the JSX. `PAGE_CAP` and the `capped` slice (`:801`) go hook-side with `rendered`; the `STALE_TICK_MS` `now` tick (`:836`) goes hook-side, since `hasClaim` derives from it.
+  - **State:** correction — the page has `busy: Set<string>` (`:329`), not a `busyId`; return that. `isEmpty` (`:888`) is `rendered.length === 0` and may be re-derived page-side rather than returned. `capped` (`:801`) is a local inside `rendered`'s memo that the page never reads — do not return it.
+  - **Moves hook-side with its callers** (not render-only, despite living near the copy maps): `FAILURE_COPY` (`:99`), `describeFailure` (`:111`) and `outcomeCopy` (`:164`). `runRowAction:567` and `runTargetAction:722` call `describeFailure` directly and `setResult:559` calls `outcomeCopy`, so leaving them in the page module makes the hook reference undefined identifiers.
+  - **Stays page-side** (genuinely render-only): `GROUPS` (`:75-82`), `REMAINDER_LINE` (`:73`), `plural` (`:221`, used by the JSX at `:949`), and the JSX itself. `PAGE_CAP` (`:60`) is read by the page JSX at `:992` *and* by `rendered`'s memo at `:801` — export it from the hook module, or return `hasMore: rows.length > PAGE_CAP` and keep the constant hook-side. The `STALE_TICK_MS` `now` tick (`:836`) goes hook-side, since `hasClaim` derives from it.
 
 - [ ] **Step 1: Read the page and inventory what moves**
 
@@ -1818,7 +1819,7 @@ Create `src/hooks/useMeetingLogQueue.ts` with a header:
  */
 ```
 
-Move the code without behavioural edits. Wrap every returned handler in `useCallback` and the returned object in `useMemo` — the page currently defines them inline, which was fine for one consumer but defeats the memoised children in Task 13.
+Move the code without behavioural edits. Do **not** wrap the returned object in a `useMemo` either — that would mean inventing a ~30-entry dep array, which is the same hazard as re-deriving a handler's deps.
 
 - [ ] **Step 3: Consume it from the existing page, unchanged**
 
@@ -1840,6 +1841,16 @@ npx vitest run src/tests/meeting-log-page.test.tsx
 
 Expected: **PASS with no edit to any assertion and no edit to any mock.** At this point the page renders identically, so a failure means the lift was not verbatim. Fix the lift, not the test.
 
+This is the **only** point in the plan where that absolute framing is true. Task 12 retargets the same suite at a genuinely different component, where mock additions and some assertion changes are expected — see Task 12 Step 5b.
+
+- [ ] **Step 4b: Typecheck**
+
+```bash
+npm run type-check && npm run lint
+```
+
+Vitest transforms with esbuild and does no type checking, so a stranded identifier (a copy helper left page-side while its caller moved) would otherwise surface at Step 4 as a runtime `ReferenceError` — which the instruction above would send you to debug as a bad lift. Typecheck first; it names the real cause.
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -1847,8 +1858,9 @@ git add src/hooks/useMeetingLogQueue.ts src/hooks/index.ts src/pages/meeting-log
 git commit -m "refactor(meeting-log): lift the queue logic into useMeetingLogQueue
 
 No behaviour change - the page renders identically and its suite passes with no
-assertion or mock edited, which is what proves the lift was verbatim. Handlers
-are useCallback-wrapped so the merged page can memoise its children on them."
+assertion or mock edited, which is what proves the lift was verbatim. Every
+handler keeps the useCallback and dep array it already had; none were
+re-derived."
 ```
 
 ---
@@ -2085,15 +2097,52 @@ DeleteConfirmation.tsx  View.tsx  index.ts
 
 - [ ] **Step 5: Update the barrel and the routes together**
 
-**These cannot be split across commits.** Removing `Chats`/`MeetingLog` from `src/pages/index.ts` while `routes/index.tsx:12,19,30,44` still imports and mounts them leaves a repo that does not build — and the Step 6 typecheck would fail inside this task. Do all of it here:
+**These cannot be split across commits.** Removing `Chats`/`MeetingLog` from `src/pages/index.ts` while `routes/index.tsx:12,19,30,44` still imports and mounts them leaves a repo that does not build — and the Step 6 typecheck would fail inside this task. **Task 12 owns all of it**; Task 13 owns links, menu and memoisation only.
+
+First create `src/routes/ChatViewRedirect.tsx`. It needs its own module because `Navigate`'s `to` is a static string and cannot re-interpolate the param — and because defined inside `routes/index.tsx` it would be unimportable by its test, since that file's top-level `import {...} from "@/pages"` eagerly loads every page:
+
+```tsx
+import { Navigate, useLocation, useParams } from "react-router-dom";
+
+export function ChatViewRedirect() {
+  const { conversationId } = useParams();
+  const location = useLocation();
+  return (
+    <Navigate
+      to={`/meetings/view/${conversationId}${location.search}${location.hash}`}
+      replace
+    />
+  );
+}
+```
+
+Then, in `src/routes/index.tsx`, swap `Chats` and `MeetingLog` for `Meetings` in the `@/pages` import, add `import { ChatViewRedirect } from "./ChatViewRedirect";`, and replace the two old routes with:
+
+```tsx
+          <Route path="/meetings" element={<Meetings />} />
+          <Route path="/meetings/view/:conversationId" element={<ViewChat />} />
+          {/* Redirect old routes for backward compatibility */}
+          <Route path="/chats" element={<Navigate to="/meetings" replace />} />
+          <Route path="/meeting-log" element={<Navigate to="/meetings" replace />} />
+          <Route path="/chats/view/:conversationId" element={<ChatViewRedirect />} />
+```
+
+`/dev-space` at `:46` is the house pattern the two static redirects copy.
+
+Then:
 
 - `src/pages/index.ts`: add `Meetings`, remove `Chats` and `MeetingLog`, repoint `ViewChat` at `./meetings/components/View`.
-- `src/routes/index.tsx`: swap the imports and add the routes and redirects (the full block is in Task 13 Step 2 — apply it now).
 - Delete `src/pages/chats/` and `src/pages/meeting-log/` entirely (`git rm -r`), now that nothing imports them.
 
-- [ ] **Step 5b: Repoint the acceptance-gate suite**
+- [ ] **Step 5b: Retarget the queue-page suite — assertions WILL change here**
 
-`src/tests/meeting-log-page.test.tsx:110-111` imports `MeetingLog from "@/pages/meeting-log"` and `{ AssignDialog, QueueRow } from "@/pages/meeting-log/components"` — both just moved. `tsconfig.json` excludes `src/tests/**`, so `type-check` will **not** catch this; only running the suite will. Repoint both imports at `@/pages/meetings` and `@/pages/meetings/components`. This is a mock/import repoint, explicitly allowed by the acceptance criterion; assertions still may not change.
+`src/tests/meeting-log-page.test.tsx:110-111` imports `MeetingLog from "@/pages/meeting-log"` and `{ AssignDialog, QueueRow } from "@/pages/meeting-log/components"` — both just moved. `tsconfig.json` excludes `src/tests/**`, so `type-check` will **not** catch this; only running the suite will.
+
+**This is not the Task 10 gate, and the "no assertion, no mock edited" rule does not apply here.** Task 10 pointed the suite at the same component at a new path; this points it at a *different* component. Expected and allowed:
+
+- **A new mock is required.** The unified page mounts `useHistory`, which calls `getAllConversations` from `@/lib` in an effect. This suite deliberately mocks neither `@/lib` nor `@/lib/database/chat-history.action` (`:72-77`), so add a leaf mock for `@/lib/database/chat-history.action` with `getAllConversations` → `mockResolvedValue([])`. Without it the call reaches `@tauri-apps/plugin-sql` under jsdom.
+- **The placement assertions change**, exactly as enumerated in Task 10's acceptance criterion: assertions that a `held`/`pending`/`sending` row appears in a queue group, and the other-database group's full-row rendering. Known concrete sites: `:339`, `:993`, `:1294` (`"No meetings waiting to be logged."`) and `:1198` (`"Finish setting Odoo up on the"`), all gated on `configState === "complete"`, which is where the merged page's behaviour differs — the list is always rendered, the strip only when non-empty.
+- **Still frozen:** token ordering, focus-listener registration, action outcomes, `FAILURE_COPY` strings, and the `LIMIT 201` / `PAGE_CAP` / `REMAINDER_LINE` paging. An edit to any of those is still the stop-and-re-scope signal.
 
 - [ ] **Step 6: Run and typecheck**
 
@@ -2120,17 +2169,20 @@ commit that does not build."
 
 ---
 
-### Task 13: Routing, links, menu, and the memoisation
+### Task 13: Links, menu, and the memoisation
+
+Routes, the `ChatViewRedirect` module, the pages barrel and the page deletions all landed in **Task 12** — they could not be split from the moves without leaving a non-building commit. This task covers what is left.
 
 **Files:**
-- Modify: `src/routes/index.tsx`, `src/hooks/useMenuItems.tsx:64-75`, `src/pages/context-memory/components/SummaryDetail.tsx:259`, `src/pages/odoo/index.tsx:559`
-- Delete: `src/pages/chats/index.tsx`, `src/pages/meeting-log/index.tsx`
+- Modify: `src/hooks/useMenuItems.tsx:64-75`, `src/pages/context-memory/components/SummaryDetail.tsx:259`, `src/pages/odoo/index.tsx:559`, `src/pages/meetings/index.tsx` (memoisation)
 - Test: `src/tests/routes.redirects.test.tsx` (create), `src/tests/meeting-log-entry-points.test.tsx`
 
 **Interfaces:**
-- Consumes: the `Meetings` page from Task 12.
+- Consumes: the `Meetings` page and `ChatViewRedirect` from Task 12.
 
-- [ ] **Step 1: Write the failing redirect test**
+- [ ] **Step 1: Cover the redirect wrapper with a regression test**
+
+`ChatViewRedirect` already exists (Task 12 Step 5), so this is a regression test, not a red-then-green cycle — it should pass on the first run. If it fails, the wrapper is wrong and that is the finding.
 
 Create `src/tests/routes.redirects.test.tsx`. Test the piece with real logic — the `useParams` wrapper — as a component under `MemoryRouter`, and assert the two static redirects declaratively. **Do not mount `AppRoutes`**: it hardcodes `BrowserRouter` and eagerly imports every page, dragging in the whole odoo/chat-history module graph.
 
@@ -2148,39 +2200,7 @@ it("forwards search and hash when redirecting a conversation view", () => {
 });
 ```
 
-- [ ] **Step 2: Add the routes**
-
-In `src/routes/index.tsx`, inside the `DashboardLayout` route:
-
-```tsx
-          <Route path="/meetings" element={<Meetings />} />
-          <Route path="/meetings/view/:conversationId" element={<ViewChat />} />
-          {/* Redirect old routes for backward compatibility */}
-          <Route path="/chats" element={<Navigate to="/meetings" replace />} />
-          <Route path="/meeting-log" element={<Navigate to="/meetings" replace />} />
-          <Route path="/chats/view/:conversationId" element={<ChatViewRedirect />} />
-```
-
-`ChatViewRedirect` is a small wrapper, because `Navigate`'s `to` is a static string and cannot re-interpolate the param. **It lives in its own module, `src/routes/ChatViewRedirect.tsx`, importing only `react-router-dom`** — defined inside `routes/index.tsx` it would be unimportable by the test, since that file's top-level `import {...} from "@/pages"` eagerly loads every page, which is the graph Step 1 exists to avoid:
-
-```tsx
-import { Navigate, useLocation, useParams } from "react-router-dom";
-
-export function ChatViewRedirect() {
-  const { conversationId } = useParams();
-  const location = useLocation();
-  return (
-    <Navigate
-      to={`/meetings/view/${conversationId}${location.search}${location.hash}`}
-      replace
-    />
-  );
-}
-```
-
-`routes/index.tsx` and `routes.redirects.test.tsx` both import it from there.
-
-- [ ] **Step 3: Move the four hardcoded links and collapse the menu**
+- [ ] **Step 2: Move the four hardcoded links and collapse the menu**
 
 `SummaryDetail.tsx:259` and `pages/odoo/index.tsx:559` point at `/meetings`. In `useMenuItems.tsx:64-75`, the "Meeting log" and "Chats" entries collapse into one:
 
@@ -2195,7 +2215,7 @@ export function ChatViewRedirect() {
 
 Remove `ClipboardListIcon` from the lucide import at `useMenuItems.tsx:20` — it was the retired "Meeting log" entry's icon and is now unused. `noUnusedLocals: true` makes that a hard `type-check` failure (TS6133), not a warning.
 
-- [ ] **Step 4: Apply the memoisation**
+- [ ] **Step 3: Apply the memoisation**
 
 `useMemo` the group + sort + filter into **one memo owned by the list child**, and split the strip and list into separate `React.memo` children.
 
@@ -2207,7 +2227,7 @@ Remove `ClipboardListIcon` from the lucide import at `useMenuItems.tsx:20` — i
 
 Record in a comment that `getAllConversations` attaching every message is a known cost that memoisation does not address; a `COUNT(*)`-shaped list read is the real remedy and is out of scope.
 
-- [ ] **Step 5: Run the affected suites**
+- [ ] **Step 4: Run the affected suites**
 
 ```bash
 npx vitest run src/tests/routes.redirects.test.tsx src/tests/meetings-page.test.tsx src/tests/summary-detail.conversation-link.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/odoo-target-new-chat-entry-points.test.tsx
@@ -2215,15 +2235,18 @@ npx vitest run src/tests/routes.redirects.test.tsx src/tests/meetings-page.test.
 
 Expected: PASS. The link suites need their expected URLs updated. Add the menu-collapse assertion to `meeting-log-entry-points.test.tsx`, where entry points are already tested.
 
-- [ ] **Step 6: Delete the retired pages and typecheck**
+- [ ] **Step 5: Typecheck and lint**
+
+The retired pages were already deleted in Task 12 Step 5; nothing to remove here.
 
 ```bash
-git rm src/pages/chats/index.tsx src/pages/meeting-log/index.tsx
 npm run type-check
 npm run lint
 ```
 
-- [ ] **Step 7: Commit**
+Expected: PASS. If `ClipboardListIcon` was left in the lucide import, this is where TS6133 surfaces.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add -A
