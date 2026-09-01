@@ -37,6 +37,7 @@ import {
   applyAIConversationTitle,
   type TitleProviderConfig,
 } from "@/lib/functions/conversation-title";
+import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
 import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
@@ -1041,19 +1042,10 @@ export const useCompletion = () => {
         return;
       }
 
-      // Resolve a speaker label for an entry ("You" = the user).
-      const labelFor = (entry: (typeof meetingTranscript)[number]) =>
-        entry.speaker?.speakerLabel ||
-        (entry.audioSource === "microphone"
-          ? "You"
-          : entry.audioSource === "system"
-          ? "Guest"
-          : null);
-
       // Build the meeting context prompt with speaker attribution
       const meetingContext = meetingTranscript
         .map((entry) => {
-          const speakerLabel = labelFor(entry);
+          const speakerLabel = speakerLabelFor(entry);
           // No speaker info - return text as-is (backwards compatible)
           return speakerLabel ? `${speakerLabel}: ${entry.original}` : entry.original;
         })
@@ -1063,10 +1055,10 @@ export const useCompletion = () => {
       // model answers the LATEST question instead of an earlier one. Fall back
       // to the last line if we can't tell who spoke.
       const lastParticipant =
-        [...meetingTranscript].reverse().find((e) => labelFor(e) !== "You") ??
+        [...meetingTranscript].reverse().find((e) => speakerLabelFor(e) !== "You") ??
         meetingTranscript[meetingTranscript.length - 1];
       const latestLine = lastParticipant
-        ? `${labelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
+        ? `${speakerLabelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
         : "";
 
       const contextualPrompt = `## Meeting Transcript:\n${meetingContext}\n\n## MOST RECENT thing said to you (answer THIS):\n${latestLine}\n\n## Your Request: ${action}`;

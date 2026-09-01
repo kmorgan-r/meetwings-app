@@ -15,3 +15,4 @@ export * from "./pitch-analysis";
 export * from "./api-test.function";
 export * from "./meeting-auto-record";
 export * from "./shortcuts.function";
+export * from "./speaker-label.function";

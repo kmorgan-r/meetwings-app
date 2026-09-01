@@ -1,6 +1,7 @@
 import type { MeetingLogListRow, SummarizationResult, TranscriptEntry } from "@/types";
 import { toOdooError } from "./errors";
 import { getRedactor, isRedactorInitialised } from "./redactor";
+import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 
 /**
  * Pure helpers for the meeting log. No I/O, no mocks in its tests.
@@ -198,24 +199,6 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * Speaker labels, mirroring labelFor (useCompletion.ts:1037-1043) EXACTLY,
- * including its three-way null.
- *
- * A two-way form defaulting to "Guest" attributes the user's own unattributed
- * lines to the customer, in a note the customer can read.
- */
-function labelFor(entry: TranscriptEntry): string | null {
-  return (
-    entry.speaker?.speakerLabel ||
-    (entry.audioSource === "microphone"
-      ? "You"
-      : entry.audioSource === "system"
-      ? "Guest"
-      : null)
-  );
-}
-
-/**
  * The attachment's contents. NOT formatConversationForSummary
  * (meeting-summarizer.ts:96), which labels lines User/Assistant from msg.role -
  * meaningless when both sides are human.
@@ -223,7 +206,7 @@ function labelFor(entry: TranscriptEntry): string | null {
 export function renderTranscript(entries: TranscriptEntry[]): string {
   return entries
     .map((e) => {
-      const label = labelFor(e);
+      const label = speakerLabelFor(e);
       return label ? `${label}: ${e.original}` : e.original;
     })
     .join("\n");
