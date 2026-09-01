@@ -1,6 +1,5 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import moment from "moment";
 import { Button, Empty, Input } from "@/components";
 import { MessageCircleIcon, Search } from "lucide-react";
 // LEAF paths, never "@/hooks" and never "./components".
@@ -12,10 +11,9 @@ import { MessageCircleIcon, Search } from "lucide-react";
 import { useHistory } from "@/hooks/useHistory";
 import { useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
 import { PageLayout } from "@/layouts";
-import type { ChatConversation } from "@/types";
 import { resolveBadge } from "@/lib/odoo/meeting-log";
 import { AssignDialog } from "./components/AssignDialog";
-import { DateGroup } from "./components/DateGroup";
+import { ConversationList } from "./components/ConversationList";
 import { ProviderConfigReader } from "./components/ProviderConfigReader";
 import { QueueStrip } from "./components/QueueStrip";
 
@@ -71,33 +69,17 @@ export default function Meetings() {
     return resolved;
   }, [queue.badgeRows, queue.instance, queue.configState]);
 
-  const grouped = useMemo(() => {
-    const byDate = new Map<string, ChatConversation[]>();
-    for (const doc of conversations.conversations) {
-      const dateKey = moment(doc.updatedAt).format("YYYY-MM-DD");
-      const bucket = byDate.get(dateKey);
-      if (bucket) bucket.push(doc);
-      else byDate.set(dateKey, [doc]);
-    }
-    return byDate;
-  }, [conversations.conversations]);
-
   // Captured, so the dialog's onConfirm closes over a non-null row rather than
   // re-reading `queue.assignRow` behind a `!`.
   const assignRow = queue.assignRow;
   const search = conversations.search ?? "";
-  const sortedDates = useMemo(
-    () =>
-      [...grouped.keys()]
-        .sort((a, b) => moment(b).diff(moment(a)))
-        .filter((dateKey) =>
-          search.length === 0
-            ? true
-            : (grouped.get(dateKey) ?? []).some((doc) =>
-                doc.title.toLowerCase().includes(search.toLowerCase())
-              )
-        ),
-    [grouped, search]
+
+  // Stable across renders so `ConversationList`'s `React.memo` boundary holds:
+  // an inline arrow here would give every render a fresh `onOpen` identity
+  // and defeat the memo on every keystroke and every 30-second queue tick.
+  const handleOpenConversation = useCallback(
+    (id: string) => navigate(`/meetings/view/${id}`),
+    [navigate]
   );
 
   return (
@@ -208,16 +190,22 @@ export default function Meetings() {
             The search filters THIS list and nothing above it. The strip is a
             worklist, not a view of the history: filtering it would hide the one
             thing on the page that will not resolve itself.
+
+            Group, sort and filter are ONE memo owned by ConversationList
+            itself, and that component is a React.memo boundary - see its own
+            doc comment for why: the queue's 30-second stale-claim tick lives
+            on this page (`queue.now`, consumed above by QueueStrip) and must
+            not re-run this list's grouping just to redraw a clock.
           */}
-          {sortedDates.map((dateKey) => (
-            <DateGroup
-              key={dateKey}
-              dateKey={dateKey}
-              conversations={grouped.get(dateKey) ?? []}
-              badges={badges}
-              onOpen={(id) => navigate(`/meetings/view/${id}`)}
-            />
-          ))}
+          <ConversationList
+            conversations={conversations.conversations}
+            search={search}
+            badges={badges}
+            onOpen={handleOpenConversation}
+            // No rename UI exists yet - see ConversationList's `renamingId`
+            // doc comment for what will eventually set this.
+            renamingId={null}
+          />
         </div>
       )}
 

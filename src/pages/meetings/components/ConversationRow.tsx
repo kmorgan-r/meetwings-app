@@ -1,3 +1,4 @@
+import { memo } from "react";
 import moment from "moment";
 import { Badge, Card } from "@/components";
 
@@ -38,9 +39,11 @@ export interface ConversationRowProps {
  * `reload` - each focus refresh, each action's re-read - so an object prop would
  * hand every row a new identity even when its badge is unchanged. QueueRow
  * needed a custom `propsAreEqual` for exactly that reason; this shape means this
- * row will not.
+ * row will not - the default shallow compare `memo` uses below is sufficient
+ * because every prop here is either a primitive or `onOpen`, which the page
+ * wraps in `useCallback`.
  */
-export function ConversationRow({
+function ConversationRowInner({
   id,
   title,
   messageCount,
@@ -75,3 +78,5 @@ export function ConversationRow({
     </Card>
   );
 }
+
+export const ConversationRow = memo(ConversationRowInner);

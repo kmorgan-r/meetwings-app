@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Button } from "@/components";
 // The LEAF path, never "@/hooks". That barrel star-exports useCompletion,
 // useSystemAudio and a dozen more, so importing it here would drag their whole
@@ -80,8 +80,18 @@ function stripRowsFor(
  *
  * Returning null IS the "rendered only when non-empty" rule - a page-side
  * emptiness check would have to restate `stripRowsFor` to get the same answer.
+ *
+ * Wrapped in `React.memo` below with the default shallow compare, not a
+ * custom comparator: every prop here is either `useMeetingLogQueue` state
+ * (`rows`, `contacts`, `busy`, `results`, `transcript` are plain `useState`
+ * values, and `grouped` is its own `useMemo`) or one of its `useCallback`
+ * handlers, so nothing about this component changes identity just because the
+ * page re-rendered for some OTHER reason - a search keystroke, a badge
+ * recompute. `now` is the one prop that genuinely changes every
+ * `STALE_TICK_MS`, and the memo correctly lets that re-render through; it
+ * exists to stop everything else from doing the same.
  */
-export function QueueStrip({
+function QueueStripInner({
   rows,
   grouped,
   contacts,
@@ -185,3 +195,5 @@ export function QueueStrip({
     </>
   );
 }
+
+export const QueueStrip = memo(QueueStripInner);

@@ -542,7 +542,7 @@ describe("the queue status block", () => {
     expect(block).toHaveTextContent("4 meetings queued for a different Odoo database");
     expect(
       within(block).getByRole("link", { name: "Open the meeting log" })
-    ).toHaveAttribute("href", "/meeting-log");
+    ).toHaveAttribute("href", "/meetings");
   });
 
   it("surfaces the most recent redacted error beside the attention group", async () => {

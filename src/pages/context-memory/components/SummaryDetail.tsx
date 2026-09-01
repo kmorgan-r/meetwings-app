@@ -256,7 +256,7 @@ export const SummaryDetail = ({
                   size="icon"
                   className="h-8 w-8"
                   onClick={() =>
-                    navigate(`/chats/view/${summary.conversationId}`)
+                    navigate(`/meetings/view/${summary.conversationId}`)
                   }
                   title="Open this conversation"
                   disabled={!summary.conversationId}

@@ -556,7 +556,7 @@ export default function OdooSettings() {
             {queue.otherInstance > 0 && (
               <p>{plural(queue.otherInstance)} queued for a different Odoo database</p>
             )}
-            <Link to="/meeting-log" className="underline">
+            <Link to="/meetings" className="underline">
               Open the meeting log
             </Link>
           </div>
