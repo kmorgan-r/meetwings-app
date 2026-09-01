@@ -248,6 +248,56 @@ describe("the meetings page", () => {
     expect(stripRow("orphan")!.querySelector("a")).toBeNull();
   });
 
+  it("badges a waiting row's conversation instead of keeping it in the strip", async () => {
+    // THE MUTANT THIS KILLS: drop the `waiting` narrowing in QueueStrip's
+    // stripRowsFor and this row renders a full QueueRow beside the badge that
+    // already says the same thing. Every fixture in meeting-log-page.test.tsx
+    // has a null conversation_id, so nothing over there can catch it.
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "wa", status: "pending", attempts: 0, conversation_id: "c1" }),
+    ]);
+    db.listConversationBadgeRows.mockResolvedValue([
+      { conversationId: "c1", status: "pending", instance: INSTANCE },
+    ]);
+    await renderPage();
+
+    const badge = await waitFor(() => {
+      const el = conversationCard("c1")!.querySelector("[data-badge-status]");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(badge.getAttribute("data-badge-status")).toBe("pending");
+    expect(badge.textContent).toContain("Waiting for Odoo");
+    // In flight, and nothing here needs the user - so it is not on the worklist.
+    expect(stripRow("wa")).toBeNull();
+    expect(screen.queryByRole("heading", { level: 2 })).toBeNull();
+  });
+
+  it("keeps a waiting row on screen while it still has an outcome to show", async () => {
+    // A no-op retry leaves a `failed` row `pending` with a conversation, i.e.
+    // narrowed out of the strip - but the hook's `inlineIds` is derived from the
+    // GROUPED buckets, so it counts that row as rendered and never promotes its
+    // record into the notice region. Drop the `results` clause from
+    // stripRowsFor and this sentence is written and then shown nowhere.
+    actions.retryMeetingLog.mockResolvedValue({ kind: "no-op" });
+    db.listActionableRows.mockResolvedValueOnce([
+      row({ id: "wa", status: "failed", attempts: 1, conversation_id: "c1" }),
+    ]);
+    db.listActionableRows.mockResolvedValue([
+      row({ id: "wa", status: "pending", attempts: 0, conversation_id: "c1" }),
+    ]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Retry" }));
+
+    expect(
+      await screen.findByText(
+        "This meeting was put back in the queue, but nothing reached Odoo. It will be retried the next time Meetwings starts."
+      )
+    ).toBeInTheDocument();
+    expect(stripRow("wa")).not.toBeNull();
+  });
+
   it("badges a conversation from its queue rows and counts them", async () => {
     db.listConversationBadgeRows.mockResolvedValue([
       { conversationId: "c1", status: "sent", instance: INSTANCE },
