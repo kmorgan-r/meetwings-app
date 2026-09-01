@@ -579,4 +579,135 @@ describe("useCompletion meeting assist mode", () => {
     });
     expect(resizeWindow).toHaveBeenCalled();
   });
+
+  it("reuses the established conversation id when a turn is saved", async () => {
+    vi.mocked(generateConversationId)
+      .mockReturnValueOnce("chat-a")
+      .mockReturnValueOnce("chat-b");
+    enableProviderGate();
+    mockStreamedResponse("ok");
+
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    // Capture submit BEFORE the render that establishes the id. Comparing it to
+    // itself afterwards would be tautological - the point is that it survives the
+    // state change.
+    const submitBefore = result.current.submit;
+
+    // Establish an id through a ref-writing path that does not touch submit's deps.
+    await act(async () => {
+      result.current.addMeetingTranscript("Opening line", undefined, "microphone");
+    });
+    const established = result.current.currentConversationId;
+    expect(established).toBe("chat-a");
+
+    // THE PRECONDITION. The defect only reproduces if submit's useCallback
+    // identity survived the render that set the id - otherwise the closure is
+    // fresh, it reads the current state, and this degrades into a same-tick test
+    // that passes against unfixed code. With APP_CONTEXT hoisted (Step 2a) and
+    // addMeetingTranscript touching none of submit's five deps, this holds for
+    // the right reason.
+    expect(result.current.submit).toBe(submitBefore);
+
+    await act(async () => {
+      await result.current.submit("What should I say?");
+    });
+
+    // A saved turn must land on the established conversation, not mint "chat-b".
+    const savedIds = vi.mocked(saveConversation).mock.calls.map(([c]) => c.id);
+    expect(savedIds).not.toContain("chat-b");
+    expect(savedIds.at(-1)).toBe("chat-a");
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    // The ref is private, so observe it through a following ref-reading path.
+    await act(async () => {
+      result.current.addMeetingTranscript("Later line", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+  });
+
+  it("pins the meeting-context mint site to the established id", async () => {
+    // NOT a red-then-green test, and the plan should not pretend otherwise:
+    // submitWithMeetingContext lists state.currentConversationId in its own deps
+    // (:1253), so it re-forms on every id change and its closure is never stale.
+    // It also never calls saveCurrentConversation - it has its own inline save at
+    // :1218. So it cannot reproduce either defect (a) or (b). This pins the :1080
+    // substitution from Task 2 against regression; expect it green from the start.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    enableProviderGate();
+    mockStreamedResponse("ok");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("Opening", undefined, "microphone");
+    });
+    await act(async () => {
+      await result.current.submitWithMeetingContext("summarise");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-a");
+  });
+
+  it("mints a fresh id after the conversation is reset", async () => {
+    // The guard against a ??= regression pinning the app to one conversation.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    await act(async () => {
+      await result.current.startNewConversation();
+    });
+    await act(async () => {
+      result.current.addMeetingTranscript("Second meeting", undefined, "microphone");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-b");
+  });
+
+  it("keeps state.currentConversationId populated after a chat-only turn", async () => {
+    // The setState mirror at :882/:1080. If it stops firing, every enqueue falls to
+    // useMeetingLog's getActiveConversationId() recovery and writes the
+    // conversation_id IS NULL rows the merged page then has to render.
+    //
+    // Deliberately NO mockStreamedResponse: beforeEach installs an empty generator,
+    // so fullResponse is empty, the save block at :1000 is skipped, and
+    // saveCurrentConversation never runs. That leaves the :882 mirror as the ONLY
+    // writer of state.currentConversationId - so deleting the mirror fails this
+    // test. With a streamed response, :1495 would set it and the test would pass
+    // with the mirror gone.
+    enableProviderGate();
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      await result.current.submit("hello");
+    });
+
+    expect(result.current.currentConversationId).toBe("conversation-1");
+  });
+
+  it("mints a fresh id after the delete fallback resets the conversation", async () => {
+    // The other reset path (:1570-1583): the conversationDeleted listener clears
+    // the refs and calls startNewConversation. Its detail is a BARE ID STRING,
+    // not { id } - see useHistory.ts:167-171.
+    vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+    });
+    expect(result.current.currentConversationId).toBe("chat-a");
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("conversationDeleted", { detail: "chat-a" }));
+    });
+    await act(async () => {
+      result.current.addMeetingTranscript("After the delete", undefined, "microphone");
+    });
+
+    expect(result.current.currentConversationId).toBe("chat-b");
+  });
 });

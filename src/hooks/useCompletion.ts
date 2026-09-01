@@ -19,7 +19,6 @@ import {
   generateConversationTitle,
   shouldUseMeetwingsAPI,
   MESSAGE_ID_OFFSET,
-  generateConversationId,
   ensureConversationId,
   generateMessageId,
   generateRequestId,
@@ -1001,7 +1000,8 @@ export const useCompletion = () => {
           await saveCurrentConversation(
             input,
             fullResponse,
-            state.attachedFiles
+            state.attachedFiles,
+            conversationId
           );
           // Clear input and attached files after saving
           setState((prev) => ({
@@ -1423,7 +1423,8 @@ export const useCompletion = () => {
     async (
       userMessage: string,
       assistantResponse: string,
-      _attachedFiles: AttachedFile[]
+      _attachedFiles: AttachedFile[],
+      conversationId: string
     ) => {
       // Validate inputs
       if (!userMessage || !assistantResponse) {
@@ -1431,8 +1432,6 @@ export const useCompletion = () => {
         return;
       }
 
-      const conversationId =
-        state.currentConversationId || generateConversationId("chat");
       const timestamp = Date.now();
 
       const userMsg: ChatMessage = {
@@ -1457,13 +1456,14 @@ export const useCompletion = () => {
       // transcript segments stream in while this save is in flight.
       const transcriptLengthAtSnapshot = meetingTranscriptLengthRef.current;
 
-      // Get existing conversation if updating
+      // Get existing conversation if updating. Reads the turn's own id, not
+      // state: state.currentConversationId is stale-null in exactly the
+      // scenario this parameter exists to fix, and a null lookup here silently
+      // renames the conversation to its first message and re-fires the titler.
       let existingConversation = null;
-      if (state.currentConversationId) {
+      if (conversationId) {
         try {
-          existingConversation = await getConversationById(
-            state.currentConversationId
-          );
+          existingConversation = await getConversationById(conversationId);
         } catch (error) {
           console.error("Failed to get existing conversation:", error);
         }
@@ -1518,7 +1518,7 @@ export const useCompletion = () => {
         }));
       }
     },
-    [state.currentConversationId, queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
+    [queueConversationWrite, requestAITitle] // Note: conversationHistory removed - using conversationHistoryRef
   );
 
   // On startup there is no in-progress conversation (state resets to null), so
@@ -1663,6 +1663,11 @@ export const useCompletion = () => {
           const requestId = generateRequestId();
           currentRequestIdRef.current = requestId;
 
+          // A screenshot submit is a real turn - join the current conversation
+          // if one exists, rather than letting saveCurrentConversation mint its
+          // own id from stale state.
+          const conversationId = ensureConversationId(currentConversationIdRef);
+
           // Cancel any existing request
           if (abortControllerRef.current) {
             abortControllerRef.current.abort();
@@ -1748,7 +1753,7 @@ export const useCompletion = () => {
             if (fullResponse) {
               await saveCurrentConversation(prompt, fullResponse, [
                 attachedFile,
-              ]);
+              ], conversationId);
               // Clear input after saving
               setState((prev) => ({
                 ...prev,
