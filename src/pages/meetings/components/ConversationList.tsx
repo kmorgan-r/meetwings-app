@@ -12,15 +12,14 @@ export interface ConversationListProps {
    * The conversation currently open for an inline rename, or `null`.
    *
    * Owned by the page (`pages/meetings/index.tsx`), not this component:
-   * threaded through because the filter below drops a whole date group when
-   * no title in it matches the search box, and the stored title can change
-   * out from under an open editor with no user action: `useHistory`'s
+   * threaded through because the filter below drops any row whose title does
+   * not match the search box, and the stored title can change out from under
+   * an open editor with no user action: `useHistory`'s
    * `conversation-title-updated` listener patches `conversations` whenever a
-   * background AI titler finishes. If that patch makes the group's only
-   * match disappear, the group - and the row holding the open editor -
-   * unmounts mid-edit. That is the same caret-loss failure
-   * `renameConversationManually` guards against from the sort side by never
-   * touching `updated_at`.
+   * background AI titler finishes. If that patch renames the row away from the
+   * search term, the row holding the open editor unmounts mid-edit. That is
+   * the same caret-loss failure `renameConversationManually` guards against
+   * from the sort side by never touching `updated_at`.
    */
   renamingId: string | null;
   onStartRename: (id: string) => void;
@@ -67,25 +66,31 @@ function ConversationListInner({
   onCancelRename,
 }: ConversationListProps) {
   const dateGroups = useMemo<DateBucket[]>(() => {
+    const term = search.toLowerCase();
     const byDate = new Map<string, ChatConversation[]>();
+    // Filters per ROW, then buckets what survives. Bucketing first and dropping
+    // whole buckets - which this did, carried over verbatim from the old
+    // `pages/chats/index.tsx` - kept every OTHER conversation from a day that
+    // held one match, so searching for a single meeting returned that whole
+    // day's list. A bucket is only created once a row lands in it, so no empty
+    // group can reach the render below.
     for (const doc of conversations) {
+      const kept =
+        term.length === 0 ||
+        doc.title.toLowerCase().includes(term) ||
+        // The row mid-rename survives the filter with no title match at all -
+        // see the `renamingId` doc comment above.
+        doc.id === renamingId;
+      if (!kept) continue;
+
       const dateKey = moment(doc.updatedAt).format("YYYY-MM-DD");
       const bucket = byDate.get(dateKey);
       if (bucket) bucket.push(doc);
       else byDate.set(dateKey, [doc]);
     }
 
-    const term = search.toLowerCase();
     return [...byDate.entries()]
       .sort(([a], [b]) => moment(b).diff(moment(a)))
-      .filter(
-        ([, docs]) =>
-          term.length === 0 ||
-          docs.some((doc) => doc.title.toLowerCase().includes(term)) ||
-          // The row mid-rename survives the filter even with zero title
-          // matches - see the `renamingId` doc comment above.
-          (renamingId !== null && docs.some((doc) => doc.id === renamingId))
-      )
       .map(([dateKey, docs]) => ({ dateKey, conversations: docs }));
   }, [conversations, search, renamingId]);
 
