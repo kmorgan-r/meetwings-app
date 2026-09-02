@@ -146,6 +146,13 @@ the UTC offset — selecting the wrong meeting, or none. Normalizing at the
 boundary keeps `current-meeting.ts` taking plain numbers, which is what makes
 its window arithmetic testable without a timezone harness.
 
+**The request sends `Prefer: outlook.timezone="UTC"`**, so `timeZone` is always
+`UTC` and normalization is a plain parse. Without that header Graph answers in
+the mailbox's own zone, named in Windows style ("Pacific Standard Time"), and
+resolving those requires a timezone database — `src-tauri/Cargo.toml` carries no
+`chrono`, `time`, or `chrono-tz`, and this feature is not the right reason to
+add one.
+
 ### Where the proposal mounts
 
 `ContactPicker` is wrapped in `React.memo` and is fully controlled: it owns no
@@ -390,11 +397,16 @@ Excluded from the **proposal** (not from what the user may select by hand):
 
 - the signed-in user's own address. **Its source is the `preferred_username`
   (falling back to `upn`) claim of the ID token**, which the explicit `openid
-  profile` scopes above guarantee. It is specified here because the obvious
-  alternative — adding `User.Read` or calling `/me` — widens the grant for a
-  value the flow already hands over.
+  profile` scopes above guarantee.
 
-  **This exclusion is best-effort, and the spec says so rather than pretending
+  This is a **deliberate trade, not a free win**. `User.Read` / `/me` would
+  return the primary SMTP address — the exact string that appears in
+  `attendees[]` — and would therefore be *more* accurate than the claim. The
+  spec declines it anyway: widening a mailbox-adjacent grant to improve a
+  cosmetic exclusion is a bad exchange when the failure mode of getting it wrong
+  is one extra visible row.
+
+  **So the exclusion is best-effort, and the spec says so rather than pretending
   otherwise.** Both claims are UPN-shaped and in many tenants differ from the
   primary SMTP address that appears in `attendees[]`
   (`k.morgan@corp.contoso.com` vs `kevin.morgan@contoso.com`). When the claim
@@ -439,10 +451,24 @@ arrives *after* the popover opens, because the Graph call is async. Content that
 appears later has nothing to grow the window around it.
 
 Therefore the proposal renders inside a **fixed max-height, internally
-scrollable region**, sized so the popover's total footprint is identical whether
-the block is absent, loading, showing two rows or showing twelve. A block that
-changed the popover's height would need the resize effect to re-run on data
-arrival, which it has no mechanism to do.
+scrollable region**. But "absent" has to be split in two, or the rule would
+reserve blank space in a 54px window for the default v1 user, who ships no
+client ID and has no calendar connected:
+
+- **Statically absent** — not connected, Odoo unconfigured, or the contact cache
+  is empty. All three are known *before* the popover opens, so they route into
+  `useCompletion`'s existing flag list like any other content decision. Nothing
+  is reserved and the picker is exactly what it is today. This is the common
+  case and it must cost nothing.
+- **Dynamically absent** — connected, the Graph call ran, and there is no
+  current meeting. This resolves *after* open, so it is bound by the
+  identical-footprint rule and occupies the reserved region with its one-line
+  "no meeting found right now".
+
+Within the dynamic case the footprint is identical whether the block is empty,
+loading, showing two rows or showing twelve. A block that changed the popover's
+height after open would need the resize effect to re-run on data arrival, which
+it has no mechanism to do.
 
 jsdom has no window bounds, so no test can prove this is visible — the same
 acknowledgement `MeetingLogStrip.tsx` already makes. It is a required manual
@@ -543,6 +569,8 @@ So, explicitly:
 | `GRAPH_CONSENT_REQUIRED` | Tenant requires admin consent | Its own sentence; admin-consent instruction (see below) |
 | `GRAPH_AUTH_CANCELLED` | `access_denied`, listener timeout, or an abandoned flow | Connect returns to its idle state, no error styling |
 | `GRAPH_AUTH_EXPIRED` | `invalid_grant` from the token endpoint — and only that | Prompt to reconnect; stored refresh token cleared |
+| `GRAPH_AUTH_REJECTED` | A 401 on a data call that survives one refresh-and-retry | Prompt to reconnect; refresh token **retained** |
+| `GRAPH_BAD_RESPONSE` | A 200 whose payload is missing a property the rules require | Proposal block shows an error; never an empty result |
 | `GRAPH_THROTTLED` | 429 | Respect `Retry-After`; do not retry in a loop |
 | `GRAPH_NETWORK` | Transport failure, including a refresh that failed to transmit | Retry affordance; refresh token **retained** |
 | `GRAPH_NO_KEYCHAIN` | No keychain service (Linux) | Session-only connection, stated plainly |
@@ -553,9 +581,18 @@ the single-use listener times out. It is not a failure and must not be dressed
 as one. The cargo tests already parse this response form; the table previously
 had nowhere to put it.
 
-The `GRAPH_AUTH_EXPIRED` / `GRAPH_NETWORK` split is load-bearing, not
-bookkeeping — see "Lifecycle rules". A refresh that fails to transmit must not
-discard a working ~90-day credential.
+The `GRAPH_AUTH_EXPIRED` / `GRAPH_AUTH_REJECTED` / `GRAPH_NETWORK` three-way
+split is load-bearing, not bookkeeping — see "Lifecycle rules". Only
+`invalid_grant` proves the refresh token is dead, so only it clears the token. A
+refresh that fails to transmit must not discard a working ~90-day credential,
+and neither must a 401 that survives a refresh: that usually means scopes or
+tenant policy changed, not that the token expired, and clearing it would force a
+reconnect that fails the same way.
+
+`GRAPH_BAD_RESPONSE` exists because "fail loudly on an absent filter property"
+(see the probes) needs somewhere to land. A `calendarView` response missing
+`isCancelled` or `responseStatus` is unusable, not empty — treating it as "no
+meetings" would silently propose a meeting the user declined.
 
 `GRAPH_CONSENT_REQUIRED` is treated as an expected outcome, not an edge case.
 In a tenant that blocks third-party consent it is the *normal* first result.
@@ -584,6 +621,17 @@ message or details in the first place**. Errors carry the code, the operation,
 and non-identifying counts. The redactor still applies to credentials, exactly as
 it does for Odoo.
 
+**One deliberate divergence from the mirrored shape.** `reportOdooError` emits
+the underlying error's message once the redactor is initialised, returning
+code-only just when it is not (`src/lib/odoo/errors.ts`). The Graph analogue must
+**not** propagate a thrown error's message text at all — a subject or address
+lifted from a raw `reqwest` or serde failure would otherwise survive into the
+report, and no fixed needle list can catch it. `toGraphError` therefore maps to a
+code and drops the original text rather than redacting it. Mirroring the Odoo
+file faithfully on this one point would make the redaction test above
+unsatisfiable, so the divergence is stated here rather than discovered at
+implementation.
+
 ## Testing
 
 Vitest, in the flat `src/tests/` layout with its `<subject>.<aspect>.test.ts[x]`
@@ -611,11 +659,15 @@ naming (hook tests follow `useOdooTarget.test.tsx`):
   transition; state cleared on the `open` → false transition; state cleared on
   an instance change; and a superseded in-flight response discarded rather than
   overwriting a newer one.
-- Error mapping — each Graph failure to its `GRAPH_*` code, including the split
-  that matters: `invalid_grant` → `GRAPH_AUTH_EXPIRED` **and the stored refresh
-  token cleared**, versus a transport failure during refresh → `GRAPH_NETWORK`
-  **with the refresh token retained**. A test that only asserts "auth failure
-  clears the token" would lock in the defect this spec corrected.
+- Error mapping — each Graph failure to its `GRAPH_*` code, including the
+  three-way split that matters: `invalid_grant` → `GRAPH_AUTH_EXPIRED` **and the
+  stored refresh token cleared**; a transport failure during refresh →
+  `GRAPH_NETWORK` **with the token retained**; a 401 surviving one
+  refresh-and-retry → `GRAPH_AUTH_REJECTED` **with the token retained**. A test
+  that only asserts "auth failure clears the token" would lock in the defect this
+  spec corrected.
+- A 200 whose payload lacks `isCancelled`, `isAllDay` or `responseStatus` maps to
+  `GRAPH_BAD_RESPONSE` — never to an empty meeting list.
 - Throttling — a 429 carrying `Retry-After` does not trigger an immediate or
   looping retry.
 - Redaction — a token, a meeting subject, and an attendee address embedded in a
@@ -653,7 +705,10 @@ Cargo tests:
   spec's central security invariant — a future edit that widens the struct
   should fail a test rather than ship.
 - Absent filter properties (`isCancelled`, `isAllDay`, `responseStatus`) produce
-  an error rather than an event that defaults to included.
+  a `GRAPH_BAD_RESPONSE` rather than an event that defaults to included.
+- `Prefer: outlook.timezone="UTC"` is sent on the `calendarView` request, and a
+  response whose `timeZone` is not `UTC` is rejected rather than parsed — the
+  normalization to epoch milliseconds assumes that header held.
 
 Manual acceptance, because a loopback browser round-trip cannot be proven in
 jsdom — the same acknowledgement `MeetingLogStrip.tsx` already makes about
