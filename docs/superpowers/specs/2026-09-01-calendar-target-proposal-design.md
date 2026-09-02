@@ -79,7 +79,9 @@ matches as a confirmable block inside the existing ContactPicker.
   pushed at the user mid-call. Confirmation is mandatory either way, so
   pushing saves no interaction while interrupting a live meeting.
 - **Google Calendar or any non-Outlook provider.**
-- **Creating Odoo contacts for unmatched attendees.**
+- **Creating Odoo contacts for unmatched attendees.** Deferred to
+  [#50](https://github.com/kmorgan-r/meetwings-app/issues/50) — see
+  "Follow-up work".
 - **Migrating the Odoo API key to the keychain.** Correct to do, but it is
   its own issue — see "Follow-up work".
 
@@ -397,5 +399,12 @@ window bounds:
 - Migrate the Odoo API key from plaintext `plugin-store` to the same keychain
   path. Shipping a hardened Graph credential story next to a plaintext Odoo
   key invites a justified audit finding. Its own issue.
+- Resolving unmatched attendees into Odoo —
+  [#50](https://github.com/kmorgan-r/meetwings-app/issues/50). Its own issue
+  because "create a contact" is the wrong action for an attendee who exists
+  only as an unlinked `crm.lead`, because the watermarked contact cache cannot
+  be trusted for a dedupe check (the search must hit the server), and because
+  it is this app's first master-data write to Odoo. The greyed unmatched row
+  specified above is its hook point, so deferring costs no rework.
 - Meetwings-owned multi-tenant registration, once there is a user base for it.
 - Name-similarity proposals, if the unmatched list proves insufficient.
