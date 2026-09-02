@@ -215,7 +215,10 @@ assumptions, because each can move a module boundary:
    so this is purely data minimization: ReadBasic additionally withholds the
    meeting body, text this feature never needs and would rather not hold. One
    Graph Explorer call with a ReadBasic-consented token settles it. If
-   `attendees` is absent, the scope is `Calendars.Read`.
+   `attendees` is absent, the scope is `Calendars.Read`. The same call also
+   confirms whether the organizer is repeated inside `attendees` — the
+   union-and-dedupe rule below is correct either way, so this is confirmation
+   rather than a branch point.
 2. **Does `tauri-plugin-keychain` (already in `src-tauri/Cargo.toml`, unused)
    expose a Rust-side API?** If it is JS-facing only, it cannot hold the
    refresh token without putting that token back in the webview, which the
@@ -225,19 +228,36 @@ assumptions, because each can move a module boundary:
 ## Selecting the meeting
 
 `GET /me/calendarView` over `[now − 15 min, now + 15 min]`. Everything after
-the response is `current-meeting.ts`, pure and unit-tested.
+the response is `current-meeting.ts`, pure and unit-tested. The query window
+is deliberately wider than the acceptance window below, so the pure function
+sees the events either side of the boundary rather than having them filtered
+away by the query.
+
+**The organizer is a participant.** Graph carries the organizer in a separate
+`organizer` property and generally does *not* repeat them in `attendees`.
+Every rule below, and the matcher in the next section, operates on the union
+of `organizer.emailAddress` and `attendees[].emailAddress`, deduped by
+normalized address. Getting this wrong breaks the issue's opening scenario
+outright: on a 1:1 client call the *client* organized, `attendees` is just the
+user, and a naive rule discards the meeting as a focus block.
 
 Rejected candidates:
 
 - cancelled events,
 - all-day events,
 - events the signed-in user has declined,
-- events whose only attendee is the user — focus blocks and reminders. This
-  filter alone collapses most apparent overlaps.
+- events whose only participant — organizer included, per above — is the user.
+  Focus blocks and reminders. This filter alone collapses most apparent
+  overlaps.
 
-Accepted late: an event that ended up to 10 minutes ago still counts when
-nothing else is live. Meetings run over, and users start logging after the
-fact.
+Acceptance window, on the union'd candidate set:
+
+- `start <= now + 5 min` — an event further out than that is not the meeting
+  you are in, even when the 15-minute query returns it. Five minutes covers
+  the normal early join.
+- `end >= now - 10 min` — an event that ended within ten minutes still counts
+  when nothing else is live. Meetings run over, and users start logging after
+  the fact.
 
 Joining late needs no special handling: the window is anchored on *now*, not
 on when recording started.
@@ -268,9 +288,18 @@ migration 11 serves this directly; the sync needs no change. The instance
 scope is not optional: matching across instances would resolve an address to
 an id that names a different partner in the database currently configured.
 
+The matcher's input is the same organizer-plus-attendees union described
+above, so a client who organized the meeting is matched like any other
+participant.
+
 Excluded from the **proposal** (not from what the user may select by hand):
 
-- the signed-in user's own address,
+- the signed-in user's own address. **Its source is the `preferred_username`
+  (falling back to `upn`) claim of the ID token** returned by the auth flow —
+  `openid` is implicit in the code+PKCE exchange, so this costs no extra
+  scope. It is specified here because the obvious alternatives, adding
+  `User.Read` or calling `/me`, both widen the grant for a value the flow
+  already hands over.
 - contacts flagged `is_colleague`. Logging a meeting onto a coworker's partner
   record is noise. Under multi-target `is_colleague` no longer gates
   selection, only the deal lookup — this is a proposal-time filter layered on
@@ -336,11 +365,14 @@ extends the redaction discipline already in `src/lib/odoo/redact.ts`.
 Vitest, following the existing `src/tests/*.test.ts` layout:
 
 - `current-meeting.ts` — overlapping entries, declined, cancelled, all-day,
-  solo/focus blocks, ended-within-grace, ended-outside-grace, joined-late,
-  empty calendar, several survivors.
+  solo/focus blocks, ended-within-grace, ended-outside-grace, starts-inside-
+  and outside-the-early-join window, joined-late, empty calendar, several
+  survivors, and **a client-organized 1:1 where the only `attendees` entry is
+  the user** — that one must survive as a candidate and propose the organizer.
 - `match-attendees.ts` — case and whitespace normalization, own address
   excluded, colleague excluded, unmatched retained and labelled, more than
-  five matches, zero matches, duplicate addresses on one event.
+  `MAX_TARGETS` matches, zero matches, duplicate addresses on one event, and
+  an organizer who also appears in `attendees` counted once.
 - Error mapping — each Graph failure to its `GRAPH_*` code.
 - `CalendarProposal.tsx` — pre-check rule at 5 and at 6 matches, ordering,
   `addSelectedTarget` called once per checked row, cap rejection surfaced.
