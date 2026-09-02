@@ -194,12 +194,28 @@ import { describe, expect, it } from "vitest";
 import { GraphError, graphError, reportGraphError, toGraphError } from "@/lib/calendar/errors";
 
 describe("graphError", () => {
-  it("carries the code and nothing else", () => {
-    const err = graphError("GRAPH_THROTTLED", { retryAfterSeconds: 30 });
+  it("carries the code and non-identifying details only", () => {
+    const err = graphError("GRAPH_BAD_RESPONSE", { eventCount: 3 });
     expect(err).toBeInstanceOf(GraphError);
-    expect(err.code).toBe("GRAPH_THROTTLED");
-    expect(err.message).toBe("GRAPH_THROTTLED");
-    expect(err.details).toEqual({ retryAfterSeconds: 30 });
+    expect(err.code).toBe("GRAPH_BAD_RESPONSE");
+    // `message` IS the code. There is no free-text message parameter to pass a
+    // subject or an address through.
+    expect(err.message).toBe("GRAPH_BAD_RESPONSE");
+    expect(err.details).toEqual({ eventCount: 3 });
+  });
+
+  /**
+   * "Respect Retry-After; do not retry in a loop" holds BY CONSTRUCTION here,
+   * so no seconds value is carried and none is needed.
+   *
+   * This feature has exactly one automatic retry anywhere - the single
+   * refresh-and-retry on a 401 (Task 11) - and a 429 is not it: calendar.rs
+   * returns GRAPH_THROTTLED straight to the caller, useCalendarProposal puts
+   * it in an error state, and the only thing that issues another request is a
+   * user clicking Try again. A stored Retry-After would have nothing to gate.
+   */
+  it("carries no retry hint on GRAPH_THROTTLED, because nothing auto-retries", () => {
+    expect(graphError("GRAPH_THROTTLED").details).toEqual({});
   });
 });
 
@@ -2358,7 +2374,11 @@ pub async fn fetch_calendar_view(
         200 => response.text().await.map_err(|_| NETWORK.to_string()),
         // Surfaced so the caller can run its ONE refresh-and-retry.
         401 => Err(AUTH_REJECTED.to_string()),
-        // Respect Retry-After; the caller does NOT retry in a loop.
+        // "Respect Retry-After; do not retry in a loop" holds BY CONSTRUCTION:
+        // this returns straight to the caller, useCalendarProposal renders an
+        // error state, and the ONLY thing that issues another request is the
+        // user clicking Try again. The header's seconds value is therefore not
+        // read - there is no automatic retry for it to gate.
         429 => Err(THROTTLED.to_string()),
         status if status >= 500 => Err(NETWORK.to_string()),
         _ => Err(BAD_RESPONSE.to_string()),
@@ -2407,12 +2427,16 @@ Append to `mod.rs`'s `mod tests`:
         {
             let mut session = state.session.lock().unwrap();
             session.access_token = Some("live".into());
+            session.refresh_token = Some("also-live".into());
             session.expires_at_ms = i64::MAX;
             session.generation = 3;
         }
         state.clear_session();
         let session = state.session.lock().unwrap();
         assert!(session.access_token.is_none());
+        // The session-only path's ONLY copy of the refresh token lives here,
+        // so a disconnect that left it behind would not disconnect at all.
+        assert!(session.refresh_token.is_none());
         assert_eq!(session.expires_at_ms, 0);
         // A bumped generation is what makes an in-flight call abandon its
         // result instead of writing it back after the disconnect.
@@ -2420,13 +2444,48 @@ Append to `mod.rs`'s `mod tests`:
     }
 
     #[test]
-    fn session_only_is_reported_when_no_keychain_is_available() {
+    fn session_only_reports_disconnected_with_nothing_in_memory() {
         let state = GraphState::default();
         *state.session_only.lock().unwrap() = true;
         assert_eq!(
             state.status(),
             GraphStatus { connected: false, session_only: true }
         );
+    }
+
+    /// A session-only connection lasts until app QUIT, not until access-token
+    /// expiry. Reading the access token in `status()` would report a
+    /// disconnection roughly every 55 minutes, and `stored_refresh_token`
+    /// reading only the keychain would make the next call fail outright - on
+    /// the one platform where the refuse-to-persist rule applies.
+    #[test]
+    fn session_only_survives_access_token_expiry() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        {
+            let mut session = state.session.lock().unwrap();
+            session.refresh_token = Some("in-memory-only".into());
+            session.access_token = Some("stale".into());
+            session.expires_at_ms = 0; // long expired
+        }
+        assert_eq!(
+            state.status(),
+            GraphStatus { connected: true, session_only: true }
+        );
+        assert_eq!(
+            stored_refresh_token(&state),
+            Ok("in-memory-only".to_string())
+        );
+    }
+
+    /// Nothing was written to disk, so there is nothing to fall back to. This
+    /// is the re-authenticate-each-launch state, and it must be NOT_CONNECTED
+    /// rather than a keychain error.
+    #[test]
+    fn session_only_with_no_memory_token_is_not_connected() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        assert_eq!(stored_refresh_token(&state), Err(NOT_CONNECTED.to_string()));
     }
 ```
 
@@ -2450,6 +2509,18 @@ use tauri_plugin_opener::OpenerExt;
 pub struct Session {
     pub access_token: Option<String>,
     pub expires_at_ms: i64,
+    /**
+     * The refresh token IN MEMORY - the session-only path's only copy.
+     *
+     * On Linux with no keychain service nothing is written to disk, so without
+     * this field the connection would die at ACCESS-token expiry (~55 minutes)
+     * rather than at app quit. The spec says re-authenticate each LAUNCH.
+     *
+     * On the normal path this mirrors the keychain entry, and the refresh path
+     * reads memory first so a keychain hiccup mid-session does not force a
+     * reconnect.
+     */
+    pub refresh_token: Option<String>,
     pub own_address: Option<String>,
     /// Bumped by disconnect. An in-flight call captures it before awaiting and
     /// discards its result if the value moved - which is how "aborts in-flight
@@ -2469,6 +2540,7 @@ impl GraphState {
     pub fn clear_session(&self) {
         let mut session = self.session.lock().unwrap();
         session.access_token = None;
+        session.refresh_token = None;
         session.expires_at_ms = 0;
         session.own_address = None;
         session.generation = session.generation.wrapping_add(1);
@@ -2476,8 +2548,12 @@ impl GraphState {
 
     pub fn status(&self) -> GraphStatus {
         let session_only = *self.session_only.lock().unwrap();
+        // The REFRESH token, not the access token: a session-only connection
+        // whose access token has expired is still connected - the next call
+        // silently refreshes from memory. Testing the access token here would
+        // report a disconnection roughly every 55 minutes.
         let connected = if session_only {
-            self.session.lock().unwrap().access_token.is_some()
+            self.session.lock().unwrap().refresh_token.is_some()
         } else {
             matches!(keychain::load_refresh_token(), Ok(Some(_)))
         };
@@ -2496,11 +2572,34 @@ fn adopt(state: &GraphState, tokens: &auth::Tokens) {
     let mut session = state.session.lock().unwrap();
     session.access_token = Some(tokens.access_token.clone());
     session.expires_at_ms = tokens.expires_at_ms;
+    // Entra ROTATES on every redemption; `None` means this response carried no
+    // new one, so the existing value stands rather than being cleared.
+    if tokens.refresh_token.is_some() {
+        session.refresh_token = tokens.refresh_token.clone();
+    }
     if let Some(id_token) = &tokens.id_token {
         if let Some(address) = auth::own_address_from_id_token(id_token) {
             session.own_address = Some(address);
         }
     }
+}
+
+/// MEMORY FIRST, then the keychain.
+///
+/// The session-only path (Linux with no keychain service) has no keychain
+/// entry at all, so a keychain-only read would strand it at access-token
+/// expiry. On the normal path memory and keychain hold the same value, and
+/// preferring memory also survives a transient keychain failure mid-session.
+fn stored_refresh_token(state: &GraphState) -> Result<String, String> {
+    if let Some(token) = state.session.lock().unwrap().refresh_token.clone() {
+        return Ok(token);
+    }
+    if *state.session_only.lock().unwrap() {
+        // Nothing was ever written to disk, so there is nothing to fall back
+        // to - this is the re-authenticate-each-launch state.
+        return Err(NOT_CONNECTED.to_string());
+    }
+    keychain::load_refresh_token()?.ok_or_else(|| NOT_CONNECTED.to_string())
 }
 
 #[tauri::command]
@@ -2559,7 +2658,10 @@ pub async fn graph_connect(
         auth::persist_rotated(&tokens)?;
     } else {
         // REFUSE TO PERSIST. The connection works for this launch only, and
-        // the UI says so plainly rather than silently writing plaintext.
+        // the UI says so plainly rather than silently writing plaintext. The
+        // refresh token still lands in `Session` via `adopt` below - that is
+        // what makes "session" mean until quit rather than until the access
+        // token expires.
         *state.session_only.lock().unwrap() = true;
     }
     adopt(&state, &tokens);
@@ -2602,7 +2704,7 @@ pub async fn graph_current_meetings(
     };
 
     if token.is_none() {
-        let stored = keychain::load_refresh_token()?.ok_or_else(|| NOT_CONNECTED.to_string())?;
+        let stored = stored_refresh_token(&state)?;
         let tokens = match auth::refresh(&authority, &client_id, &stored, now_ms()).await {
             Ok(tokens) => tokens,
             // ONLY invalid_grant clears the stored token.
@@ -2625,7 +2727,7 @@ pub async fn graph_current_meetings(
         // fresh token is a real authorization failure - scopes or tenant
         // policy changed - and the refresh token is RETAINED.
         Err(code) if code == AUTH_REJECTED => {
-            let stored = keychain::load_refresh_token()?.ok_or_else(|| NOT_CONNECTED.to_string())?;
+            let stored = stored_refresh_token(&state)?;
             let tokens = auth::refresh(&authority, &client_id, &stored, now_ms()).await?;
             auth::persist_rotated(&tokens)?;
             adopt(&state, &tokens);
@@ -2657,7 +2759,7 @@ cargo test --manifest-path src-tauri/Cargo.toml graph::
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo build --manifest-path src-tauri/Cargo.toml
 ```
-Expected: PASS (30 tests), no warnings, builds.
+Expected: PASS (33 tests), no warnings, builds.
 
 If `app.opener().open_url(...)` does not resolve against the pinned `tauri-plugin-opener` version, substitute the plugin's current URL-opening entry point (`lib.rs:116` already registers the plugin) — do not shell out to a per-platform `Command`, which would reintroduce a quoting surface for the authorize URL.
 
