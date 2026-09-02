@@ -203,7 +203,10 @@ No dependency on either probe. Every function here is pure and runs in Vitest wi
 - Test: `src/tests/graph-errors.test.ts`, `src/tests/graph-redact.test.ts`
 
 **Interfaces:**
-- Produces: `GraphErrorCode`, `CalendarEvent`, `CalendarParticipant`, `GraphStatus`, `CurrentMeetings`, `GraphError`, `graphError(code)`, `toGraphError(thrown)`, `reportGraphError(thrown, where)`. Tasks 4, 5, 11, 13, 14 all consume these.
+- Produces, from `src/types/calendar.ts`: `GraphErrorCode`, `AttendeeType`, `CalendarParticipant`, `CalendarEvent`, `GraphStatus`, `CurrentMeetings` — plus, because they are shared across `src/lib/`, `src/hooks/` and `src/pages/`, `AttendeeMatch`, `UnmatchedAttendee`, `ExcludedAttendee`, `MatchResult`, `CurrentMeeting`, `CandidateSummary` and `CalendarProposalState`.
+- Produces, from `src/lib/calendar/errors.ts`: `GraphError`, `graphError(code)`, `toGraphError(thrown)`, `reportGraphError(thrown, where)`.
+
+  Tasks 4, 5, 11, 13, 14 and 15 consume these. Tasks 4 and 5 declare **no** result types of their own — they import them from here, which is what keeps `src/hooks/` and `src/pages/` from importing each other's types.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -389,15 +392,13 @@ export interface CurrentMeetings {
  *
  * That placement is load-bearing, not tidiness. The obvious alternative -
  * declaring `MatchResult` in match-attendees.ts and `CalendarProposalState` in
- * useCalendarProposal.ts - closes a three-file cycle: the hook would import
- * `PickerCacheState` from ContactPicker.tsx (pages), CalendarProposal.tsx
- * (pages) would import the state union back out of the hook, and
- * ContactPicker.tsx would need that same union for its new prop while also
- * importing the component it renders. Those edges are all `import type`, so
- * they erase at build and today's runtime graph would stay acyclic - but
- * widening any ONE of them to a value import later turns it into a real cycle,
- * and nothing in this repo has a page importing a type back out of a hook that
- * depends on that page.
+ * useCalendarProposal.ts - has `src/pages/` and `src/hooks/` importing types out
+ * of each other: CalendarProposal.tsx and ContactPicker.tsx would both pull the
+ * state union out of the hook, while the hook depends on nothing but @/types and
+ * @/lib. Those edges are all `import type`, so they erase at build and the
+ * runtime graph stays acyclic - but widening any one of them to a value import
+ * later makes it real, and nothing in this repo has a page importing a type back
+ * out of a hook.
  * ------------------------------------------------------------------------- */
 
 export interface AttendeeMatch {
@@ -568,9 +569,10 @@ Expected: PASS, no type errors, no lint errors.
 Barrel collision check — `src/lib/index.ts` is flat, so a duplicate export name across `./odoo` and `./calendar` is a build error. Confirm none of `GraphError`, `graphError`, `toGraphError`, `reportGraphError`, `GraphErrorDetails`, `GraphErrorReport` already exists:
 
 ```bash
-grep -rn "GraphError\|graphError" src/lib src/types --include=*.ts | grep -v "src/lib/calendar"
+grep -rn "GraphError\|graphError\|AttendeeType\|CalendarParticipant\|CalendarEvent\|GraphStatus\|CurrentMeetings\|AttendeeMatch\|UnmatchedAttendee\|ExcludedAttendee\|MatchResult\|CurrentMeeting\|CandidateSummary\|CalendarProposalState" \
+  src/lib src/types --include=*.ts | grep -v "src/lib/calendar\|src/types/calendar"
 ```
-Expected: no output.
+Expected: no output. The filter excludes `src/types/calendar` as well as `src/lib/calendar` — this task's own declarations are not collisions, and without the second term every new type would report as one.
 
 - [ ] **Step 6: Commit**
 
@@ -1634,7 +1636,7 @@ Add `mod auth;` to `src-tauri/src/graph/mod.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (12 tests).
+Expected: PASS (11 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1941,7 +1943,7 @@ Add `NETWORK` to the `use super::{...}` list at the top of the file.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (21 tests).
+Expected: PASS (20 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2358,7 +2360,7 @@ Extend `auth.rs`'s `use super::{...}` to cover `AUTH_EXPIRED`, `BAD_RESPONSE`, `
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph:: && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`
-Expected: PASS (25 tests), no clippy warnings.
+Expected: PASS (24 tests), no clippy warnings.
 
 - [ ] **Step 6: Commit**
 
@@ -2720,7 +2722,7 @@ Add `mod calendar;` to `src-tauri/src/graph/mod.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (33 tests).
+Expected: PASS (32 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -3263,7 +3265,7 @@ cargo test --manifest-path src-tauri/Cargo.toml graph::
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo build --manifest-path src-tauri/Cargo.toml
 ```
-Expected: PASS (41 tests), no warnings, builds.
+Expected: PASS (39 tests), no warnings, builds.
 
 If `app.opener().open_url(...)` does not resolve against the pinned `tauri-plugin-opener` version, substitute the plugin's current URL-opening entry point (`lib.rs:116` already registers the plugin) — do not shell out to a per-platform `Command`, which would reintroduce a quoting surface for the authorize URL.
 
@@ -3291,13 +3293,19 @@ git commit -m "feat(graph): expose connect, disconnect, status and current-meeti
   - `SECURE_GRAPH_CONFIG_KEY`
   - `DEFAULT_AUTHORITY = "https://login.microsoftonline.com/organizations"`
   - `GraphConfig = { clientId: string; authority: string }`
-  - `GraphConfigState = { state: "absent" | "unreadable" | "complete"; config: GraphConfig | null }`
+  - A **discriminated union**, not a single object — `config` is only non-null on the `complete` arm, and that is what makes `config.config.clientId` type-check at the call sites:
+    ```typescript
+    export type GraphConfigState =
+      | { state: "absent"; config: null }
+      | { state: "unreadable"; config: null }
+      | { state: "complete"; config: GraphConfig };
+    ```
   - `loadGraphConfigState(): Promise<GraphConfigState>` — the one that distinguishes "never set up" from "corrupt"
-  - `loadGraphConfig(): Promise<GraphConfig | null>` — thin wrapper for callers that treat both the same
+  - `loadGraphConfig(): Promise<GraphConfig | null>` — thin wrapper collapsing both non-complete arms to `null`. **It has no caller in this plan**: Task 13 and the `/odoo` section both need the distinction, so both use `loadGraphConfigState`. Kept because it is the shape a future caller that genuinely does not care will want, and its own test pins the collapse.
   - `isHttpsUrl(value: string): boolean`
   - `saveGraphConfig(config: GraphConfig): Promise<void>`
 
-  Task 13 consumes `loadGraphConfigState` (it must tell a silent absence from an error state); Task 15 consumes the config.
+  Task 13 consumes `loadGraphConfigState`; so does this task's own `/odoo` section.
 
 **Why plugin-store and not the keychain:** a public client ID is **not a secret** — it travels in every authorize URL and is trivially extracted from any native binary. It is stored the same way the Odoo config is, and passed to Rust as a command argument on every call, which keeps Rust's persistent state to exactly one thing: the refresh token.
 
@@ -3832,6 +3840,42 @@ describe("presence", () => {
     expect(result.current.present).toBe(true);
   });
 
+  /**
+   * What the hook RETURNS and what it PUBLISHES to useCompletion must be the
+   * same value. `calendarBlockPresent` exists solely to sit in the resize
+   * effect's dependency array, so a returned `true` alongside a published
+   * `false` renders the 112px region with nothing re-running the resize.
+   */
+  it("publishes the same presence it returns, including on a status error", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const { result, setCalendarBlockPresent } = setup();
+    await waitFor(() => expect(result.current.present).toBe(true));
+    expect(setCalendarBlockPresent).toHaveBeenLastCalledWith(true);
+  });
+
+  /**
+   * `idle` renders nothing and the fetch is triggered from a PASSIVE effect, so
+   * without deriving the loading state during render the region would be absent
+   * for the commit the popover opens on and appear on the next one — the
+   * footprint growing after open, in miniature.
+   */
+  it("reports loading on the very first render after the picker opens", async () => {
+    // Never resolves: the state under test is the one before any response.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: true, sessionOnly: false };
+      return new Promise(() => {});
+    });
+    const { result, rerender } = setup();
+    await waitFor(() => expect(result.current.present).toBe(true));
+
+    rerender({ isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() });
+    // Synchronously on the opening render - no await, no flush.
+    expect(result.current.state).toEqual({ kind: "loading" });
+  });
+
   // "Never set up" is the routine v1 state and must stay silent.
   it("stays silently absent when no client ID is configured", async () => {
     config.loadGraphConfigState.mockResolvedValue({ state: "absent", config: null });
@@ -4057,7 +4101,7 @@ Expected: FAIL — module not found.
 `src/hooks/useCalendarProposal.ts`:
 
 ```typescript
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // `GraphErrorCode` is a type-only import alongside the others below.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -4082,6 +4126,13 @@ import type {
  * pure function sees the events either side of the boundary rather than having
  * them filtered away by the query. */
 const QUERY_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * Module scope, so the derived loading state below is referentially stable. A
+ * fresh `{ kind: "loading" }` per render would change `calendarProps`'s
+ * identity and defeat `ContactPicker`'s memo.
+ */
+const LOADING_STATE: CalendarProposalState = { kind: "loading" };
 
 // `CalendarProposalState` and `CandidateSummary` are imported from @/types, not
 // declared here - see the placement note in src/types/calendar.ts.
@@ -4135,9 +4186,25 @@ export function useCalendarProposal({
   // this the STATIC absence the resize effect can route on.
   const present = connected && rows.length > 0;
 
+  /**
+   * ONE value, published to `useCompletion` AND returned to the caller.
+   *
+   * They must not diverge. Publishing the computed `present` while returning a
+   * forced `true` for the error case would render the 112px region while
+   * `calendarBlockPresent` stayed false — and that flag's ONLY job is to sit in
+   * the resize effect's dependency array, so nothing would re-run the resize.
+   * A status read failing or recovering while the picker is open would then
+   * change the footprint with no resize behind it, which is precisely the case
+   * the static/dynamic split exists to cover.
+   *
+   * A failed status read forces the block present because it is the one failure
+   * worth the reserved space: the alternative is the feature silently vanishing.
+   */
+  const blockPresent = statusError !== null || present;
+
   useEffect(() => {
-    setCalendarBlockPresent(present);
-  }, [present, setCalendarBlockPresent]);
+    setCalendarBlockPresent(blockPresent);
+  }, [blockPresent, setCalendarBlockPresent]);
 
   /**
    * Read the connection state. Runs on mount AND whenever the /odoo page
@@ -4160,7 +4227,14 @@ export function useCalendarProposal({
     }
     if (config.state === "unreadable") {
       setConnected(false);
-      setStatusError("GRAPH_NOT_CONNECTED");
+      // GRAPH_AUTH_REJECTED, not GRAPH_NOT_CONNECTED. Task 12 drew the
+      // absent/unreadable distinction precisely so a bad stored config is
+      // distinguishable from a disconnected account, and collapsing it back to
+      // the disconnected code here would throw that away at the last step: the
+      // user reads "not connected" for a config that IS there but invalid, and
+      // Try again re-reads the same bad value forever. AUTH_REJECTED matches
+      // what Rust's own `validate_authority` returns for the same input.
+      setStatusError("GRAPH_AUTH_REJECTED");
       return;
     }
     try {
@@ -4239,12 +4313,14 @@ export function useCalendarProposal({
   const fetchNow = useCallback(async () => {
     // BEFORE any await, all three of them:
     //
-    // - `setState({ kind: "loading" })` — the region must be on screen in the
-    //   same commit the popover opens. Setting it after `loadGraphConfig()` (a
-    //   plugin-store round trip) left `idle` rendering `null` for one or more
-    //   commits, so the block appeared AFTER open and grew the popover's
-    //   footprint — the one thing the Global Constraints forbid, and the reason
-    //   the whole static/dynamic split exists.
+    // - `setState({ kind: "loading" })` — setting it AFTER the config round
+    //   trip left `idle` rendering `null` for however long plugin-store took,
+    //   so the block appeared well after open and grew the popover's footprint.
+    //   This effect is PASSIVE, so this alone still cannot cover the commit the
+    //   popover opens on; `visibleState` below derives `loading` during render
+    //   for exactly that commit. Between the two, the region is on screen from
+    //   the first render and its footprint never changes — which is what the
+    //   Global Constraints require and why the static/dynamic split exists.
     // - the generation bump, so ordering is decided by call order rather than
     //   by which config load happens to resolve first.
     generation.current += 1;
@@ -4254,7 +4330,13 @@ export function useCalendarProposal({
     const config = await loadGraphConfigState();
     if (config.state !== "complete") {
       if (mine === generation.current) {
-        setState(config.state === "absent" ? { kind: "idle" } : { kind: "error", code: "GRAPH_NOT_CONNECTED" });
+        // Same code `readStatus` uses for the same condition: an invalid stored
+        // config is a rejected authority, not a disconnected account.
+        setState(
+          config.state === "absent"
+            ? { kind: "idle" }
+            : { kind: "error", code: "GRAPH_AUTH_REJECTED" }
+        );
       }
       return;
     }
@@ -4322,23 +4404,47 @@ export function useCalendarProposal({
 
   /**
    * A status read that FAILED outranks whatever the proposal state happens to
-   * be. Without this the hook reports `present: false` for an unreadable
-   * keychain exactly as it does for "never configured", and the feature
-   * vanishes silently instead of saying what went wrong.
+   * be. Without this the hook reports the same absence for an unreadable
+   * keychain as for "never configured", and the feature vanishes silently
+   * instead of saying what went wrong.
    *
-   * `present` is forced true in that case so the block renders at all — this is
-   * the one place a failure is worth the reserved space.
+   * Both of these are memoized, and that is not tidiness. `<Completion />`
+   * feeds `state` and `onRetry` into the `calendarProps` useMemo that keeps
+   * `ContactPicker`'s `React.memo` intact; a fresh object literal and a fresh
+   * arrow here would change identity every render, so the memo would recompute
+   * every render and the picker would re-render on every streamed AI token —
+   * reintroducing the exact defect the memo was added to fix, and doing it for
+   * the whole session because `blockPresent` is forced true in this branch.
    */
+  const retryStatus = useCallback(() => void readStatus(), [readStatus]);
+  const errorState = useMemo<CalendarProposalState>(
+    () => ({ kind: "error", code: statusError ?? "GRAPH_NETWORK" }),
+    [statusError]
+  );
+
+  /**
+   * `idle` renders nothing, and `fetchNow` sets `loading` from a PASSIVE
+   * effect — so on the commit where `isPickerOpen` flips true the state is
+   * still `idle` and the region is absent for exactly one commit, after which
+   * it appears. That is the footprint growing after open, in miniature.
+   *
+   * Deriving the loading state during render closes that commit. It is not the
+   * same as setting it in the effect: this is what is on screen for the render
+   * the popover opens on.
+   */
+  const visibleState =
+    isPickerOpen && blockPresent && state.kind === "idle" ? LOADING_STATE : state;
+
   if (statusError !== null) {
     return {
-      present: true,
-      state: { kind: "error", code: statusError },
+      present: blockPresent,
+      state: errorState,
       onPickCandidate,
-      onRetry: () => void readStatus(),
+      onRetry: retryStatus,
     };
   }
 
-  return { present, state, onPickCandidate, onRetry };
+  return { present: blockPresent, state: visibleState, onPickCandidate, onRetry };
 }
 ```
 
@@ -4352,9 +4458,10 @@ Expected: PASS.
 Barrel collision check — `src/hooks/index.ts` is a flat `export *`:
 
 ```bash
-grep -rn "useCalendarProposal\|UseCalendarProposalReturn" src/hooks --include=*.ts* | grep -v "useCalendarProposal.ts"
+grep -rn "useCalendarProposal\|UseCalendarProposalReturn" src/hooks --include=*.ts* \
+  | grep -v "^src/hooks/useCalendarProposal.ts\|^src/hooks/index.ts"
 ```
-Expected: no output.
+Expected: no output. Both exclusions are needed: Step 3 adds `export * from "./useCalendarProposal";` to `src/hooks/index.ts`, and that line contains the name — filtering only on `useCalendarProposal.ts` would never match it, so the check would report a false collision every time and be quietly ignored thereafter.
 
 - [ ] **Step 5: Commit**
 
@@ -4370,7 +4477,7 @@ git commit -m "feat(calendar): orchestrate the proposal with useCalendarProposal
 - Test: `src/tests/CalendarProposal.slots.test.tsx`, `src/tests/CalendarProposal.states.test.tsx`
 
 **Interfaces:**
-- Consumes: `CalendarProposalState` (Task 13), `MAX_TARGETS` (`src/lib/odoo/meeting-log.ts:66`), `compareContacts`-style ordering, `SelectedTargets` / `SelectedTarget`.
+- Consumes: `CalendarProposalState` (Task 3, via `@/types` — **not** from the hook; see the placement note in `src/types/calendar.ts`), `MAX_TARGETS` (`src/lib/odoo/meeting-log.ts:66`), `compareContacts`-style ordering, `SelectedTargets` / `SelectedTarget`.
 - Produces: `CalendarProposalProps`, `CalendarProposal` (a props-only component — it fetches nothing). Task 15 renders it.
 
 - [ ] **Step 1: Write the failing tests**
@@ -5477,4 +5584,14 @@ Seven CRITICALs, all in planned *code* rather than prose, and five of them in Ta
 Two test-quality findings were about tests that *could not fail against the defect they named* — the "not on a calendar-data change" test reused one `cache` reference, and the cap-rejection test only checked that each name appeared somewhere in the message. Both are now written so the regression they target actually breaks them.
 
 Seven Sonnet MINORs were reported but withheld by the review's auto-apply guard, and are worth a look before execution: a `GRAPH_UNKNOWN` code so programming errors stop rendering a "Try again" that cannot help; suppressing that same retry affordance for `GRAPH_AUTH_EXPIRED`/`GRAPH_NOT_CONNECTED`; and renaming `graph-*.test.ts` to `calendar-*` to match the folder, per the uniform `odoo-` precedent.
+
+## Review pass 2 — the `--diff` verification
+
+One Opus reviewer, re-reading the applied edits against the whole plan rather than re-reviewing the design. **Zero criticals**, which is the convergence signal, and all three importants were *self-inflicted by pass 1* rather than pre-existing — the same shape as the spec review's second pass:
+
+- **The `statusError` early return reintroduced the memo defect pass 1 had just fixed.** It returned a fresh state literal and a fresh `onRetry` arrow every render, both of which feed Task 15's `calendarProps` memo — so the memo recomputed every render and `ContactPicker`'s `React.memo` failed every render, for the whole session, popover closed included. Now memoized.
+- **The hook published one presence value and returned another.** `setCalendarBlockPresent` got the computed `present` while the return forced `true` on a status error. That flag exists only to sit in the resize effect's dependency array, so the block would have rendered with nothing re-running the resize. One `blockPresent` now serves both.
+- **The "loading before any await" comment overclaimed.** Moving `setState` before the await shrank the gap but could not close it: `fetchNow` runs from a passive effect, so the opening commit was still `idle`, which renders nothing. `visibleState` now derives `loading` during render for exactly that commit.
+
+Also corrected: the cargo test counts were off by one from Task 7 onward; Task 13's new barrel grep could never pass (its filter did not match the `index.ts` line the same step adds); Task 3's grep did not cover the types it introduced; and an unreadable stored config was reported as `GRAPH_NOT_CONNECTED`, which discarded the absent/unreadable distinction Task 12 exists to draw and offered a retry that re-reads the same bad value forever.
 
