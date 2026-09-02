@@ -46,7 +46,7 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 
 | Path | Responsibility |
 |---|---|
-| `src/types/calendar.ts` | `GraphErrorCode`, `CalendarEvent`, `CalendarParticipant`, `GraphStatus`, `CurrentMeetings` — the IPC contract, shared by Rust (via serde) and TS |
+| `src/types/calendar.ts` | `GraphErrorCode`, `CalendarEvent`, `CalendarParticipant`, `GraphStatus`, `CurrentMeetings` — the IPC contract, shared by Rust (via serde) and TS — **plus** `MatchResult` and `CalendarProposalState`, which live here rather than in the modules that produce them so `src/hooks/` and `src/pages/` never import each other's types |
 | `src/lib/calendar/errors.ts` | `GraphError`, `graphError`, `toGraphError`, `reportGraphError` |
 | `src/lib/calendar/match-attendees.ts` | `normalizeAddress`, `participantsOf`, `matchAttendees` — attendee identity and the matched/unmatched/excluded split |
 | `src/lib/calendar/current-meeting.ts` | `pickCurrentMeeting` — one / several / none |
@@ -73,7 +73,11 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 | `src/pages/app/components/completion/index.tsx:48-60, :158` | mount `useCalendarProposal`; pass `calendar` to `<ContactPicker />` |
 | `src/pages/odoo/index.tsx` | calendar connect section |
 
-**Test files created:** `src/tests/current-meeting.test.ts`, `src/tests/match-attendees.test.ts`, `src/tests/graph-errors.test.ts`, `src/tests/graph-redact.test.ts`, `src/tests/useCalendarProposal.test.tsx`, `src/tests/CalendarProposal.slots.test.tsx`, `src/tests/CalendarProposal.states.test.tsx`.
+**Test files created (8):** `src/tests/current-meeting.test.ts`, `src/tests/match-attendees.test.ts`, `src/tests/graph-errors.test.ts`, `src/tests/graph-redact.test.ts`, `src/tests/graph-config.storage.test.ts`, `src/tests/useCalendarProposal.test.tsx`, `src/tests/CalendarProposal.slots.test.tsx`, `src/tests/CalendarProposal.states.test.tsx`.
+
+Also modified: `src/tests/odoo-contact-picker.test.tsx` (Task 15 extends it).
+
+**Cargo dependencies added** (Task 6): `sha2`, `rand`, `url`, and — unless Probe 2 finds a Rust-side API on `tauri-plugin-keychain` — `keyring`. Deliberately NOT added: `oauth2` (the flow is four HTTP calls and two hashes; a framework would put the token lifecycle inside someone else's state machine) and `chrono`/`time`/`chrono-tz` (the query window arrives from TypeScript as ISO strings, and the response parse is fixed-layout integer math).
 
 ---
 
@@ -113,7 +117,23 @@ Write `docs/superpowers/plans/probe-results/2026-09-02-keychain-rust-api.md` wit
 - Decision for Task 9: (which of the two below)
   - RUST-API-AVAILABLE -> keychain.rs wraps the plugin's extension trait; do NOT add the `keyring` crate in Task 6.
   - JS-ONLY -> keychain.rs wraps the `keyring` crate exactly as Task 9 specifies; `keyring` stays in Task 6's Cargo additions.
+
+## Second question, same probe: which error variant means "no keychain service"?
+
+Task 9's `available()` decides the ENTIRE refuse-to-persist fallback by matching
+one error variant. Guessing wrong is not a small miss: `available()` returns true,
+`persist_rotated` then fails, and `graph_connect` errors AFTER `exchange_code` has
+already burnt the authorization code — so a credential that was successfully
+obtained is thrown away and the user must redo the whole browser flow.
+
+- Variant returned by `Entry::new` / `get_password` when no Secret Service is
+  running (read `keyring`'s own `Error` enum for the platform in use; on Linux the
+  candidates are `PlatformFailure`, `NoStorageAccess`, and `Invalid`):
+- Variant(s) `available()` must therefore treat as "unavailable":
 ```
+
+**Whatever this probe finds, Task 9's `available()` is still a heuristic and Task 11
+must not depend on it being right** — see Task 11's degrade-to-session-only rule.
 
 - [ ] **Step 3: Commit**
 
@@ -191,7 +211,10 @@ No dependency on either probe. Every function here is pure and runs in Vitest wi
 
 ```typescript
 import { describe, expect, it } from "vitest";
-import { GraphError, graphError, reportGraphError, toGraphError } from "@/lib/calendar/errors";
+// `reportGraphError` is deliberately NOT imported here - it is exercised in
+// graph-redact.test.ts. An unused import fails the `npm run lint` this task's
+// own verification step expects to be clean.
+import { GraphError, graphError, toGraphError } from "@/lib/calendar/errors";
 
 describe("graphError", () => {
   it("carries the code and non-identifying details only", () => {
@@ -358,6 +381,87 @@ export interface CurrentMeetings {
   ownAddress: string | null;
   events: CalendarEvent[];
 }
+
+/* ----------------------------------------------------------------------------
+ * Everything below is shared between `src/lib/calendar/`, `src/hooks/` and
+ * `src/pages/`, so it lives HERE rather than in whichever module happens to
+ * produce it.
+ *
+ * That placement is load-bearing, not tidiness. The obvious alternative -
+ * declaring `MatchResult` in match-attendees.ts and `CalendarProposalState` in
+ * useCalendarProposal.ts - closes a three-file cycle: the hook would import
+ * `PickerCacheState` from ContactPicker.tsx (pages), CalendarProposal.tsx
+ * (pages) would import the state union back out of the hook, and
+ * ContactPicker.tsx would need that same union for its new prop while also
+ * importing the component it renders. Those edges are all `import type`, so
+ * they erase at build and today's runtime graph would stay acyclic - but
+ * widening any ONE of them to a value import later turns it into a real cycle,
+ * and nothing in this repo has a page importing a type back out of a hook that
+ * depends on that page.
+ * ------------------------------------------------------------------------- */
+
+export interface AttendeeMatch {
+  participant: CalendarParticipant;
+  contact: OdooContact;
+}
+
+export interface UnmatchedAttendee {
+  participant: CalendarParticipant;
+  /**
+   * `archived` is NOT a softer `no-contact`: the record exists, it is just not
+   * somewhere new notes should land. The two render differently.
+   */
+  reason: "no-contact" | "archived";
+}
+
+export interface ExcludedAttendee {
+  participant: CalendarParticipant;
+  /** Excluded from the PROPOSAL, not from what the user may select by hand. */
+  reason: "self" | "colleague";
+}
+
+export interface MatchResult {
+  matched: AttendeeMatch[];
+  unmatched: UnmatchedAttendee[];
+  excluded: ExcludedAttendee[];
+}
+
+export type CurrentMeeting =
+  | { kind: "one"; event: CalendarEvent }
+  | { kind: "several"; candidates: CalendarEvent[] }
+  | { kind: "none" };
+
+export interface CandidateSummary {
+  id: string;
+  subject: string | null;
+  startMs: number;
+  endMs: number;
+}
+
+export type CalendarProposalState =
+  /** Popover closed, or reset. The region is not reserved. */
+  | { kind: "idle" }
+  | { kind: "loading" }
+  /**
+   * DYNAMICALLY absent: connected, the call ran, no current meeting. Occupies
+   * the reserved region, because it resolves after open.
+   */
+  | { kind: "no-meeting" }
+  | { kind: "several"; candidates: CandidateSummary[] }
+  | {
+      kind: "proposal";
+      eventId: string;
+      subject: string | null;
+      matched: AttendeeMatch[];
+      unmatched: UnmatchedAttendee[];
+    }
+  | { kind: "error"; code: GraphErrorCode };
+```
+
+The file's one import, at the top:
+
+```typescript
+import type { OdooContact } from "./odoo";
 ```
 
 Add to `src/types/index.ts`: `export * from "./calendar";`
@@ -483,15 +587,11 @@ git commit -m "feat(calendar): add Graph IPC types and GRAPH_* error codes"
 - Test: `src/tests/match-attendees.test.ts`
 
 **Interfaces:**
-- Consumes: `CalendarEvent`, `CalendarParticipant` (Task 3), `OdooContact` (`src/types/odoo.ts:26`).
-- Produces:
+- Consumes: `CalendarEvent`, `CalendarParticipant`, `MatchResult`, `AttendeeMatch`, `UnmatchedAttendee`, `ExcludedAttendee` (all from `@/types`, Task 3), `OdooContact` (`src/types/odoo.ts:26`).
+- Produces — **functions only.** The result types are declared in `src/types/calendar.ts`, not here; see the placement note in Task 3.
   - `normalizeAddress(address: string): string`
   - `participantsOf(event: CalendarEvent): CalendarParticipant[]`
   - `matchAttendees(args: { participants: CalendarParticipant[]; contacts: OdooContact[]; ownAddress: string | null }): MatchResult`
-  - `MatchResult = { matched: AttendeeMatch[]; unmatched: UnmatchedAttendee[]; excluded: ExcludedAttendee[] }`
-  - `AttendeeMatch = { participant: CalendarParticipant; contact: OdooContact }`
-  - `UnmatchedAttendee = { participant: CalendarParticipant; reason: "no-contact" | "archived" }`
-  - `ExcludedAttendee = { participant: CalendarParticipant; reason: "self" | "colleague" }`
 
   Task 5 imports `participantsOf` (this module owns attendee identity; `current-meeting.ts` owns which meeting it is). Tasks 13 and 14 import the rest.
 
@@ -656,6 +756,51 @@ describe("matchAttendees", () => {
     });
     expect(result.matched).toHaveLength(0);
   });
+
+  /**
+   * Two cached contacts sharing an email is ROUTINE in Odoo - a person and
+   * their company, or the same person under two parents. `listContacts` runs a
+   * bare `SELECT * FROM odoo_contacts WHERE instance = ?` with no ORDER BY
+   * (odoo-contacts.action.ts:122), so "whichever row came back first" is not a
+   * rule, it is whatever SQLite happened to return.
+   *
+   * The user sees only a NAME on the proposal row, so if the wrong record wins
+   * the substitution is invisible at confirm time - and the confirm button is
+   * the whole safety gate. Deterministic beats arbitrary even when both are
+   * imperfect.
+   */
+  it("breaks a duplicate-email tie deterministically, whatever the cache order", () => {
+    const person = contact(20, "shared@acme.example", { name: "Zoe Person" });
+    const company = contact(21, "shared@acme.example", {
+      name: "Acme Ltd",
+      isCompany: true,
+    });
+    const forwards = matchAttendees({
+      participants: [participant("shared@acme.example")],
+      contacts: [company, person],
+      ownAddress: own,
+    });
+    const backwards = matchAttendees({
+      participants: [participant("shared@acme.example")],
+      contacts: [person, company],
+      ownAddress: own,
+    });
+    // Same winner both ways round, and it is the PERSON, not the company.
+    expect(forwards.matched[0].contact.id).toBe(20);
+    expect(backwards.matched[0].contact.id).toBe(20);
+  });
+
+  it("breaks a person-vs-person duplicate by lowest id", () => {
+    const result = matchAttendees({
+      participants: [participant("shared@acme.example")],
+      contacts: [
+        contact(31, "shared@acme.example", { name: "Bee" }),
+        contact(30, "shared@acme.example", { name: "Ay" }),
+      ],
+      ownAddress: own,
+    });
+    expect(result.matched[0].contact.id).toBe(30);
+  });
 });
 ```
 
@@ -669,7 +814,15 @@ Expected: FAIL — `Failed to resolve import "@/lib/calendar/match-attendees"`.
 `src/lib/calendar/match-attendees.ts`:
 
 ```typescript
-import type { CalendarEvent, CalendarParticipant, OdooContact } from "@/types";
+import type {
+  AttendeeMatch,
+  CalendarEvent,
+  CalendarParticipant,
+  ExcludedAttendee,
+  MatchResult,
+  OdooContact,
+  UnmatchedAttendee,
+} from "@/types";
 
 /** Exact match on normalized email: trim and lowercase BOTH sides. */
 export function normalizeAddress(address: string): string {
@@ -708,30 +861,21 @@ export function participantsOf(event: CalendarEvent): CalendarParticipant[] {
   return [...byAddress.values()];
 }
 
-export interface AttendeeMatch {
-  participant: CalendarParticipant;
-  contact: OdooContact;
-}
-
-export interface UnmatchedAttendee {
-  participant: CalendarParticipant;
-  /**
-   * `archived` is NOT a softer "no-contact": the record exists, it is just not
-   * somewhere new notes should land. Both render greyed and labelled.
-   */
-  reason: "no-contact" | "archived";
-}
-
-export interface ExcludedAttendee {
-  participant: CalendarParticipant;
-  /** Excluded from the PROPOSAL, not from what the user may select by hand. */
-  reason: "self" | "colleague";
-}
-
-export interface MatchResult {
-  matched: AttendeeMatch[];
-  unmatched: UnmatchedAttendee[];
-  excluded: ExcludedAttendee[];
+/**
+ * Which of two contacts sharing one email wins.
+ *
+ * `listContacts` has no ORDER BY (odoo-contacts.action.ts:122), so without an
+ * explicit rule the winner is whatever SQLite returned first - and the proposal
+ * row shows only a name, so picking the wrong partner record is invisible at
+ * the confirm gate. Deterministic beats arbitrary even when both are imperfect.
+ *
+ * A PERSON beats a company: an email shared between the two is almost always
+ * the individual's, and a meeting note belongs on the person. Then lowest id,
+ * which is stable across syncs in a way `name` is not.
+ */
+function preferForDuplicateEmail(a: OdooContact, b: OdooContact): OdooContact {
+  if (a.isCompany !== b.isCompany) return a.isCompany ? b : a;
+  return a.id <= b.id ? a : b;
 }
 
 export function matchAttendees({
@@ -748,7 +892,8 @@ export function matchAttendees({
     if (contact.email === null) continue;
     const key = normalizeAddress(contact.email);
     if (key === "") continue;
-    if (!byEmail.has(key)) byEmail.set(key, contact);
+    const existing = byEmail.get(key);
+    byEmail.set(key, existing === undefined ? contact : preferForDuplicateEmail(existing, contact));
   }
 
   // null when neither claim was present. Normalizing null to "" would make the
@@ -790,6 +935,13 @@ Add `export * from "./match-attendees";` to `src/lib/calendar/index.ts`.
 Run: `npx vitest run src/tests/match-attendees.test.ts && npm run type-check && npm run lint`
 Expected: PASS.
 
+Barrel collision check, same as Task 3 — `src/lib/index.ts` is a flat `export *`, so a duplicate name across `./calendar` and `./odoo` is a build error:
+
+```bash
+grep -rn "normalizeAddress\|participantsOf\|matchAttendees" src/lib src/types --include=*.ts | grep -v "src/lib/calendar"
+```
+Expected: no output.
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -805,8 +957,8 @@ git commit -m "feat(calendar): match attendees to cached Odoo contacts by email"
 - Test: `src/tests/current-meeting.test.ts`
 
 **Interfaces:**
-- Consumes: `CalendarEvent` (Task 3), `participantsOf` (Task 4).
-- Produces: `EARLY_JOIN_MS`, `ENDED_GRACE_MS`, `CurrentMeeting`, `pickCurrentMeeting(events: CalendarEvent[], nowMs: number): CurrentMeeting`. Task 13 consumes it.
+- Consumes: `CalendarEvent`, `CurrentMeeting` (both from `@/types`, Task 3), `participantsOf` (Task 4).
+- Produces: `EARLY_JOIN_MS`, `ENDED_GRACE_MS`, `pickCurrentMeeting(events: CalendarEvent[], nowMs: number): CurrentMeeting`. The `CurrentMeeting` union itself is declared in `src/types/calendar.ts`, not here. Task 13 consumes it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -957,7 +1109,7 @@ Expected: FAIL — `Failed to resolve import "@/lib/calendar/current-meeting"`.
 `src/lib/calendar/current-meeting.ts`:
 
 ```typescript
-import type { CalendarEvent } from "@/types";
+import type { CalendarEvent, CurrentMeeting } from "@/types";
 import { participantsOf } from "./match-attendees";
 
 /**
@@ -973,12 +1125,9 @@ export const EARLY_JOIN_MS = 5 * 60 * 1000;
  */
 export const ENDED_GRACE_MS = 10 * 60 * 1000;
 
-export type CurrentMeeting =
-  | { kind: "one"; event: CalendarEvent }
-  // Do not guess. The block renders one row per candidate; picking one
-  // replaces the block with that meeting's attendee proposal.
-  | { kind: "several"; candidates: CalendarEvent[] }
-  | { kind: "none" };
+// `CurrentMeeting` is imported from @/types (see Task 3's placement note). The
+// "several" case is deliberate: do NOT guess. The block renders one row per
+// candidate, and picking one replaces it with that meeting's proposal.
 
 /**
  * `declined` is the ONLY response that rejects. `notResponded`, `none` and
@@ -1024,6 +1173,13 @@ Add `export * from "./current-meeting";` to `src/lib/calendar/index.ts`.
 Run: `npx vitest run src/tests/current-meeting.test.ts src/tests/match-attendees.test.ts && npm run type-check && npm run lint`
 Expected: PASS.
 
+Barrel collision check:
+
+```bash
+grep -rn "pickCurrentMeeting\|EARLY_JOIN_MS\|ENDED_GRACE_MS" src/lib src/types --include=*.ts | grep -v "src/lib/calendar"
+```
+Expected: no output.
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -1035,7 +1191,7 @@ git commit -m "feat(calendar): pick the meeting happening now from a calendar vi
 
 ## Slice 2 — Rust: credentials and IO
 
-Everything here is gated on **Task 1** (Probe 2). Task 10 is additionally gated on **Task 2** (Probe 1), which fixes the value of `GRAPH_SCOPES`.
+Everything here is gated on **Task 1** (Probe 2). **Task 9** is additionally gated on **Task 2** (Probe 1), because Task 9 is where `GRAPH_SCOPES` is written — Task 10 consumes the constant but never sets it. Getting this gate wrong is not bookkeeping: an executor following the stated gates would hardcode `Calendars.ReadBasic` before the probe has run, which is exactly the outcome Probe 1 exists to prevent (a meeting the user *declined* proposing its attendees, because `responseStatus` was silently absent).
 
 Every command returns `Result<T, String>` where the `Err` value is a **bare `GRAPH_*` code** and nothing else — `toGraphError` (Task 3) maps it back, and dropping the text is what keeps subjects and addresses out of the report.
 
@@ -1250,6 +1406,7 @@ git commit -m "feat(graph): add the graph module skeleton and IPC shape guard"
   - `pub fn random_token(bytes: usize) -> String` (used for `state` and `nonce`)
   - `pub fn validate_state(expected: &str, received: Option<&str>) -> Result<(), String>`
   - `pub fn nonce_from_id_token(id_token: &str) -> Option<String>`
+  - `pub fn validate_nonce(expected: &str, id_token: Option<&str>) -> Result<(), String>` — an absent ID token is a rejection, not a skip
   - `pub fn own_address_from_id_token(id_token: &str) -> Option<String>`
 
   Tasks 8, 9 and 11 consume all of these.
@@ -1310,6 +1467,38 @@ mod tests {
     fn nonce_is_read_from_the_id_token() {
         let token = fake_id_token(r#"{"nonce":"n-123","preferred_username":"a@b.test"}"#);
         assert_eq!(nonce_from_id_token(&token), Some("n-123".to_string()));
+    }
+
+    /// The spec asks for "nonce validation in the returned ID token" — a
+    /// REJECTION behaviour, not extraction. Extraction passing tells you
+    /// nothing about whether a wrong nonce is refused.
+    #[test]
+    fn nonce_mismatch_is_rejected() {
+        let good = fake_id_token(r#"{"nonce":"n-123"}"#);
+        let wrong = fake_id_token(r#"{"nonce":"n-999"}"#);
+        assert!(validate_nonce("n-123", Some(&good)).is_ok());
+        assert_eq!(
+            validate_nonce("n-123", Some(&wrong)),
+            Err(AUTH_REJECTED.to_string())
+        );
+    }
+
+    /// An ABSENT id_token, or one carrying no nonce claim, is a rejection - not
+    /// a skip. The scopes ask for `openid profile` explicitly, so a response
+    /// without an ID token is not what we requested, and an `if let Some(...)`
+    /// guard around the comparison would accept it while binding nothing.
+    #[test]
+    fn a_missing_id_token_or_nonce_claim_is_rejected_not_skipped() {
+        assert_eq!(validate_nonce("n-123", None), Err(AUTH_REJECTED.to_string()));
+        let no_claim = fake_id_token(r#"{"sub":"x"}"#);
+        assert_eq!(
+            validate_nonce("n-123", Some(&no_claim)),
+            Err(AUTH_REJECTED.to_string())
+        );
+        assert_eq!(
+            validate_nonce("n-123", Some("not-a-jwt")),
+            Err(AUTH_REJECTED.to_string())
+        );
     }
 
     #[test]
@@ -1405,6 +1594,22 @@ pub fn nonce_from_id_token(id_token: &str) -> Option<String> {
     Some(id_token_claims(id_token)?.get("nonce")?.as_str()?.to_string())
 }
 
+/// The nonce check, as its OWN function for the same reason `validate_state` is
+/// one: a comparison inlined in an async `#[tauri::command]` body cannot be unit
+/// tested, and this is a security check.
+///
+/// **An ABSENT `id_token` is a rejection, not a skip.** The scopes request
+/// `openid profile` explicitly, so a token response without an ID token means
+/// something other than what we asked for came back - and the earlier inline
+/// form, guarded by `if let Some(id_token)`, would have silently accepted it and
+/// bound nothing.
+pub fn validate_nonce(expected: &str, id_token: Option<&str>) -> Result<(), String> {
+    match id_token.and_then(nonce_from_id_token) {
+        Some(actual) if actual == expected => Ok(()),
+        _ => Err(AUTH_REJECTED.to_string()),
+    }
+}
+
 /// `preferred_username`, falling back to `upn`.
 ///
 /// Best-effort BY DESIGN. `/me` would return the primary SMTP address - the
@@ -1429,7 +1634,7 @@ Add `mod auth;` to `src-tauri/src/graph/mod.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (9 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1533,6 +1738,40 @@ Append to `auth.rs`'s `mod tests`:
         let (_port, rx) = listen_once(Duration::from_millis(150)).unwrap();
         let outcome = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(outcome, Err(AUTH_CANCELLED.to_string()));
+    }
+
+    /// The spec's third listener case: "a second callback to a consumed OR
+    /// STALE listener is rejected, not redeemed."
+    ///
+    /// This is the one that fails against a watchdog which only messages the
+    /// channel. Sending `Err(AUTH_CANCELLED)` does not unblock `accept`, so
+    /// without the self-connect the thread stays parked, the port stays bound,
+    /// and a late callback is still accepted and parsed - the listener has
+    /// "timed out" only from the receiver's point of view.
+    #[test]
+    fn a_callback_arriving_after_the_timeout_is_not_redeemed() {
+        use std::io::Write;
+        use std::net::TcpStream;
+
+        let (port, rx) = listen_once(Duration::from_millis(150)).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(AUTH_CANCELLED.to_string())
+        );
+
+        // Give the watchdog's self-connect time to wake `accept` and drop the
+        // listener, then try to deliver a code to the dead port.
+        std::thread::sleep(Duration::from_millis(200));
+        if let Ok(mut late) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = late.write_all(b"GET /?code=late&state=s HTTP/1.1\r\n\r\n");
+        }
+        // Nothing carrying a code may ever arrive.
+        while let Ok(outcome) = rx.recv_timeout(Duration::from_millis(300)) {
+            assert!(
+                !matches!(&outcome, Ok(cb) if cb.code.is_some()),
+                "a callback arriving after the timeout was redeemed"
+            );
+        }
     }
 ```
 
@@ -1649,9 +1888,19 @@ pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, 
         // A watchdog rather than a socket read timeout: `accept` has no
         // per-call timeout on a blocking listener, and an abandoned flow must
         // not hold the thread for the life of the process.
+        //
+        // The self-connect on the last line is the whole point. Sending the
+        // timeout into the channel does NOT unblock `accept`, so a watchdog
+        // that only sent would leave this thread parked and the loopback port
+        // bound until the process exits - one leaked thread and one leaked
+        // port per abandoned connect attempt. Dialling our own port wakes
+        // `accept`, which lets the thread finish and DROP the listener, which
+        // is also what makes the port genuinely stop listening after a timeout
+        // rather than merely stop being read.
         std::thread::spawn(move || {
             std::thread::sleep(timeout);
             let _ = timeout_tx.send(Err(AUTH_CANCELLED.to_string()));
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
         });
 
         match listener.accept() {
@@ -1692,7 +1941,7 @@ Add `NETWORK` to the `use super::{...}` list at the top of the file.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (17 tests).
+Expected: PASS (21 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1707,17 +1956,18 @@ git commit -m "feat(graph): add the single-use loopback callback listener"
 - Create: `src-tauri/src/graph/keychain.rs`
 - Modify: `src-tauri/src/graph/auth.rs`, `src-tauri/src/graph/mod.rs`
 
-**Gated on Task 1.** Probe 2's verdict decides only what the three functions in `keychain.rs` call. The rest of this task is identical either way.
+**Gated on Task 1 AND Task 2.** Probe 2's verdict decides only what the three functions in `keychain.rs` call; the rest of the task is identical either way. Probe 1 fixes the value of `GRAPH_SCOPES`, which is written *here* — so this task cannot start before Task 2 has recorded its verdict.
 
 **Interfaces:**
 - Consumes: Tasks 6, 7, 8.
 - Produces:
-  - `keychain::{store_refresh_token, load_refresh_token, delete_refresh_token} -> Result<_, String>`, and `keychain::available() -> bool`
+  - `keychain::{store_refresh_token, load_refresh_token, delete_refresh_token} -> Result<_, String>`, and `keychain::available() -> bool` (a heuristic — Task 11 degrades on a persist failure rather than trusting it)
   - `pub struct Tokens { pub access_token: String, pub expires_at_ms: i64, pub refresh_token: Option<String>, pub id_token: Option<String> }`
   - `pub fn classify_token_error(status: u16, body: &str) -> &'static str`
   - `pub async fn exchange_code(...) -> Result<Tokens, String>`
   - `pub async fn refresh(...) -> Result<Tokens, String>`
-  - `pub fn authorize_url(...) -> String`
+  - `pub fn validate_authority(authority: &str) -> Result<url::Url, String>` — https-only, host required
+  - `pub fn authorize_url(...) -> Result<String, String>` — a Result, never an `expect`: the authority is user-typed free text
 
   Tasks 10 and 11 consume them.
 
@@ -1749,6 +1999,33 @@ Append to `auth.rs`'s `mod tests`:
         assert_eq!(classify_token_error(400, "<html>"), AUTH_REJECTED);
     }
 
+    /// The authority is the host this module POSTs the auth code, the PKCE
+    /// verifier and later the refresh token to. An unvalidated one is an
+    /// arbitrary exfiltration target, and a plain-http one puts those values on
+    /// the wire in clear - so anything that is not an absolute https URL with a
+    /// host is rejected BEFORE a browser is ever opened.
+    #[test]
+    fn a_non_https_or_malformed_authority_is_rejected_not_panicked_on() {
+        for bad in [
+            "login.microsoftonline.com/organizations", // no scheme - the typo case
+            "http://login.microsoftonline.com/organizations", // clear text
+            "ftp://example.test",
+            "https://",  // no host
+            "",
+            "not a url",
+        ] {
+            assert_eq!(
+                validate_authority(bad),
+                Err(AUTH_REJECTED.to_string()),
+                "authority {bad:?} must be rejected"
+            );
+            assert!(
+                authorize_url(bad, "client-1", 8123, "c", "s", "n").is_err(),
+                "authorize_url must return Err, never panic, for {bad:?}"
+            );
+        }
+    }
+
     #[test]
     fn authorize_url_carries_pkce_state_nonce_and_the_loopback_redirect() {
         let url = authorize_url(
@@ -1758,7 +2035,8 @@ Append to `auth.rs`'s `mod tests`:
             "challenge-x",
             "state-y",
             "nonce-z",
-        );
+        )
+        .expect("a well-formed https authority");
         assert!(url.starts_with(
             "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"
         ));
@@ -1812,7 +2090,7 @@ Expected: FAIL to compile — `cannot find function classify_token_error`.
 //! plaintext JSON on disk and says so in its own doc comment - that is the one
 //! existing pattern this feature must not copy.
 
-use super::{NETWORK, NO_KEYCHAIN};
+use super::NO_KEYCHAIN;
 
 const SERVICE: &str = "com.meetwings.graph";
 const ACCOUNT: &str = "refresh-token";
@@ -1824,9 +2102,25 @@ fn entry() -> Result<keyring::Entry, String> {
 /// Whether a keychain service is reachable at all. Probed by opening an entry
 /// and reading it: on Linux with no Secret Service this fails at the D-Bus
 /// connection, which is exactly the condition the refuse-to-persist rule tests.
+///
+/// **This is a HEURISTIC and Task 11 must not trust it.** It decides by matching
+/// error variants, and which variant a keychain-less platform actually produces
+/// is a question Probe 2 records rather than one this code can know. Guessing
+/// wrong here is expensive in the worst place: `available()` returns true, the
+/// write then fails, and `graph_connect` errors AFTER `exchange_code` has already
+/// burnt the authorization code - so a credential that was successfully obtained
+/// is discarded and the user redoes the whole browser flow. Task 11 therefore
+/// degrades to session-only on a persist FAILURE as well, and this function is
+/// only the fast path.
+///
+/// `NoEntry` is success: it means the keychain answered, and answered "nothing
+/// stored yet" - the normal state before a first connect.
 pub fn available() -> bool {
     match entry() {
-        Ok(e) => !matches!(e.get_password(), Err(keyring::Error::PlatformFailure(_))),
+        Ok(e) => !matches!(
+            e.get_password(),
+            Err(keyring::Error::PlatformFailure(_)) | Err(keyring::Error::NoStorageAccess(_))
+        ),
         Err(_) => false,
     }
 }
@@ -1851,7 +2145,10 @@ pub fn delete_refresh_token() -> Result<(), String> {
     match entry()?.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
-        Err(_) => Err(NETWORK.to_string()),
+        // NO_KEYCHAIN, matching store/load above. This is a keychain-access
+        // failure and calling it NETWORK would send the user chasing their
+        // connection over a problem that has nothing to do with the network.
+        Err(_) => Err(NO_KEYCHAIN.to_string()),
     }
 }
 ```
@@ -1879,6 +2176,32 @@ pub struct Tokens {
     pub id_token: Option<String>,
 }
 
+/// The authority is FREE TEXT the user typed on the `/odoo` page, and it is the
+/// host this module sends credentials to: `post_token` POSTs the authorization
+/// code, the PKCE verifier and later the refresh token to
+/// `{authority}/oauth2/v2.0/token`. An unvalidated authority is therefore not a
+/// cosmetic problem — it is an arbitrary exfiltration target, and a plain `http`
+/// one puts those values on the wire in clear.
+///
+/// So: parse it, require `https`, and reject anything else. The previous draft
+/// used `.expect("authority is validated before this point")` when nothing
+/// validated it anywhere — a typo would have PANICKED the Rust side mid-connect,
+/// bypassing the whole GRAPH_*/redaction path this feature is built on.
+///
+/// Returning `Result` rather than validating only in the TypeScript layer is
+/// deliberate: this is the last point before credentials move, and a check that
+/// lives only on the caller's side is one refactor away from being skipped.
+pub fn validate_authority(authority: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(authority.trim_end_matches('/')).map_err(|_| AUTH_REJECTED.to_string())?;
+    if parsed.scheme() != "https" {
+        return Err(AUTH_REJECTED.to_string());
+    }
+    if !parsed.has_host() {
+        return Err(AUTH_REJECTED.to_string());
+    }
+    Ok(parsed)
+}
+
 pub fn authorize_url(
     authority: &str,
     client_id: &str,
@@ -1886,10 +2209,11 @@ pub fn authorize_url(
     challenge: &str,
     state: &str,
     nonce: &str,
-) -> String {
+) -> Result<String, String> {
     let redirect = format!("http://127.0.0.1:{port}");
-    let mut url = url::Url::parse(&format!("{}/oauth2/v2.0/authorize", authority.trim_end_matches('/')))
-        .expect("authority is validated before this point");
+    let base = validate_authority(authority)?;
+    let mut url = url::Url::parse(&format!("{}/oauth2/v2.0/authorize", base.as_str().trim_end_matches('/')))
+        .map_err(|_| AUTH_REJECTED.to_string())?;
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
@@ -1900,7 +2224,7 @@ pub fn authorize_url(
         .append_pair("code_challenge_method", "S256")
         .append_pair("state", state)
         .append_pair("nonce", nonce);
-    url.to_string()
+    Ok(url.to_string())
 }
 
 /// ONLY `invalid_grant` proves the refresh token is dead (revoked, expired,
@@ -1930,7 +2254,12 @@ async fn post_token(
     form: &[(&str, &str)],
     now_ms: i64,
 ) -> Result<Tokens, String> {
-    let endpoint = format!("{}/oauth2/v2.0/token", authority.trim_end_matches('/'));
+    // Validated HERE too, not only in authorize_url. This is the call that
+    // actually carries the authorization code, the PKCE verifier and the
+    // refresh token, so it does its own check rather than trusting that some
+    // earlier caller did one.
+    let base = validate_authority(authority)?;
+    let endpoint = format!("{}/oauth2/v2.0/token", base.as_str().trim_end_matches('/'));
     // A transport failure is NETWORK, never AUTH_EXPIRED. This mapping is the
     // one that decides whether a working credential survives a flaky café
     // wifi.
@@ -2029,7 +2358,7 @@ Extend `auth.rs`'s `use super::{...}` to cover `AUTH_EXPIRED`, `BAD_RESPONSE`, `
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph:: && cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings`
-Expected: PASS (20 tests), no clippy warnings.
+Expected: PASS (25 tests), no clippy warnings.
 
 - [ ] **Step 6: Commit**
 
@@ -2044,7 +2373,7 @@ git commit -m "feat(graph): add keychain storage, token exchange and refresh"
 - Create: `src-tauri/src/graph/calendar.rs`
 - Modify: `src-tauri/src/graph/mod.rs`
 
-**Gated on Task 2** (which fixes `GRAPH_SCOPES`) and Task 9.
+**Gated on Task 9** (which is itself gated on both probes). This task consumes `GRAPH_SCOPES` but never sets it.
 
 **Interfaces:**
 - Consumes: `CalendarEvent`, `CalendarParticipant`, the `GRAPH_*` constants (Task 6).
@@ -2391,7 +2720,7 @@ Add `mod calendar;` to `src-tauri/src/graph/mod.rs`.
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml graph::`
-Expected: PASS (28 tests).
+Expected: PASS (33 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2448,7 +2777,7 @@ Append to `mod.rs`'s `mod tests`:
         let state = GraphState::default();
         *state.session_only.lock().unwrap() = true;
         assert_eq!(
-            state.status(),
+            state.status().unwrap(),
             GraphStatus { connected: false, session_only: true }
         );
     }
@@ -2469,13 +2798,76 @@ Append to `mod.rs`'s `mod tests`:
             session.expires_at_ms = 0; // long expired
         }
         assert_eq!(
-            state.status(),
+            state.status().unwrap(),
             GraphStatus { connected: true, session_only: true }
         );
         assert_eq!(
             stored_refresh_token(&state),
             Ok("in-memory-only".to_string())
         );
+    }
+
+    /// A disconnect landing while a refresh is in the air must not be undone by
+    /// that refresh completing. `adopt` compares the generation UNDER the
+    /// session lock and writes nothing on a mismatch; `adopt_and_persist` then
+    /// refuses to touch the keychain at all, so the entry the user just deleted
+    /// is not rewritten behind them.
+    #[test]
+    fn a_disconnect_mid_flight_beats_a_refresh_that_was_already_running() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        // The disconnect lands first, bumping the generation.
+        state.clear_session();
+
+        assert!(!adopt(&state, &tokens, generation), "stale generation must not adopt");
+        assert_eq!(
+            adopt_and_persist(&state, &tokens, generation),
+            Err(NOT_CONNECTED.to_string())
+        );
+        let session = state.session.lock().unwrap();
+        assert!(session.access_token.is_none(), "a disconnected session stayed disconnected");
+        assert!(session.refresh_token.is_none());
+    }
+
+    /// On the session-only path `available()` was false at connect, so any
+    /// keychain call errors. Deleting BEFORE clearing memory therefore made
+    /// Disconnect impossible on exactly the platform where memory holds the only
+    /// copy of the credential. Memory is cleared unconditionally and first.
+    #[test]
+    fn forgetting_on_the_session_only_path_touches_no_keychain_and_clears_memory() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        state.session.lock().unwrap().refresh_token = Some("in-memory-only".into());
+
+        assert_eq!(forget_refresh_token(&state), Ok(()));
+        assert!(state.session.lock().unwrap().refresh_token.is_none());
+    }
+
+    /// Session-only must never write to disk, and a skipped write is not a
+    /// failure: the tokens still reach memory and the call proceeds.
+    #[test]
+    fn session_only_adopts_without_persisting() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        assert_eq!(adopt_and_persist(&state, &tokens, generation), Ok(()));
+        let session = state.session.lock().unwrap();
+        assert_eq!(session.access_token.as_deref(), Some("fresh"));
+        assert_eq!(session.refresh_token.as_deref(), Some("rotated"));
     }
 
     /// Nothing was written to disk, so there is nothing to fall back to. This
@@ -2546,18 +2938,29 @@ impl GraphState {
         session.generation = session.generation.wrapping_add(1);
     }
 
-    pub fn status(&self) -> GraphStatus {
+    /// Returns `Err` when the keychain cannot be READ.
+    ///
+    /// It must not collapse that into `connected: false`. `matches!(load(),
+    /// Ok(Some(_)))` treats a real read failure as "disconnected", so a
+    /// genuinely connected user hits a transient keychain problem, gets
+    /// `connected: false` with no error anywhere, and the calendar block simply
+    /// VANISHES (`present` goes false in Task 13) instead of saying anything.
+    /// A feature that disappears silently is indistinguishable from one that
+    /// was never set up.
+    pub fn status(&self) -> Result<GraphStatus, String> {
         let session_only = *self.session_only.lock().unwrap();
-        // The REFRESH token, not the access token: a session-only connection
-        // whose access token has expired is still connected - the next call
-        // silently refreshes from memory. Testing the access token here would
-        // report a disconnection roughly every 55 minutes.
-        let connected = if session_only {
-            self.session.lock().unwrap().refresh_token.is_some()
+        // The REFRESH token, not the access token: a connection whose access
+        // token has expired is still connected - the next call refreshes.
+        // Testing the access token would report a disconnection roughly every
+        // 55 minutes.
+        let in_memory = self.session.lock().unwrap().refresh_token.is_some();
+        // Memory first, and on the session-only path memory is all there is.
+        let connected = if session_only || in_memory {
+            in_memory
         } else {
-            matches!(keychain::load_refresh_token(), Ok(Some(_)))
+            keychain::load_refresh_token()?.is_some()
         };
-        GraphStatus { connected, session_only }
+        Ok(GraphStatus { connected, session_only })
     }
 }
 
@@ -2568,8 +2971,20 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn adopt(state: &GraphState, tokens: &auth::Tokens) {
+/// Adopt a freshly obtained token set into the session.
+///
+/// Returns `false` when a disconnect landed while the caller was awaiting -
+/// the generation moved, so these tokens belong to a connection the user has
+/// since destroyed. The caller must then write NOTHING, keychain included.
+///
+/// Checking the generation INSIDE the lock is what makes this sound: a caller
+/// that checked first and adopted second would race the very disconnect it is
+/// trying to observe.
+fn adopt(state: &GraphState, tokens: &auth::Tokens, generation: u64) -> bool {
     let mut session = state.session.lock().unwrap();
+    if session.generation != generation {
+        return false;
+    }
     session.access_token = Some(tokens.access_token.clone());
     session.expires_at_ms = tokens.expires_at_ms;
     // Entra ROTATES on every redemption; `None` means this response carried no
@@ -2582,6 +2997,92 @@ fn adopt(state: &GraphState, tokens: &auth::Tokens) {
             session.own_address = Some(address);
         }
     }
+    true
+}
+
+/// Adopt into MEMORY first, persist SECOND, and never let a persist failure
+/// throw away a credential we already hold.
+///
+/// Three separate rules live here, each of which was a defect when this was an
+/// inline `persist_rotated(&tokens)?; adopt(&state, &tokens);` pair:
+///
+/// 1. **A disconnect that landed mid-flight wins.** `adopt` returning false
+///    means the user disconnected while we were awaiting; persisting anyway
+///    would REWRITE the keychain entry they just destroyed and leave `status()`
+///    reporting connected again after a disconnect that appeared to succeed.
+/// 2. **Session-only never touches disk.** The write is skipped, not attempted
+///    and ignored - `persist_rotated` would fail and its `?` would abort the
+///    whole call, so every request after access-token expiry died on the one
+///    platform where the refuse-to-persist rule applies.
+/// 3. **A persist failure degrades; it does not discard.** `available()` is a
+///    heuristic over error variants (see keychain.rs), so it can be wrong, and
+///    the keychain can also go away mid-session. We already hold working tokens
+///    in memory at this point - falling back to session-only keeps the user
+///    working until quit, where propagating the error would throw away a
+///    credential that is fine.
+fn adopt_and_persist(
+    state: &GraphState,
+    tokens: &auth::Tokens,
+    generation: u64,
+) -> Result<(), String> {
+    if !adopt(state, tokens, generation) {
+        return Err(NOT_CONNECTED.to_string());
+    }
+    if *state.session_only.lock().unwrap() {
+        return Ok(());
+    }
+    if auth::persist_rotated(tokens).is_err() {
+        *state.session_only.lock().unwrap() = true;
+    }
+    Ok(())
+}
+
+/// Called ONLY on an explicit `invalid_grant` - the one response that proves
+/// the refresh token is genuinely dead.
+///
+/// Memory is cleared first and unconditionally: whatever the keychain does, a
+/// token known to be dead must not survive in this process. The keychain delete
+/// is then propagated rather than discarded with `let _ =`. A silently failed
+/// delete leaves the dead token on disk while memory says disconnected, so the
+/// next launch reads it straight back and fails identically, with nothing
+/// anywhere telling the user why.
+fn forget_refresh_token(state: &GraphState) -> Result<(), String> {
+    let was_session_only = *state.session_only.lock().unwrap();
+    state.clear_session();
+    if was_session_only {
+        return Ok(());
+    }
+    keychain::delete_refresh_token()
+}
+
+/// The ONE refresh path. Both call sites in `graph_current_meetings` go through
+/// it, which is what keeps the `invalid_grant` handling identical between them.
+///
+/// The earlier draft special-cased AUTH_EXPIRED at the first call site and used
+/// a bare `?` at the second, so a refresh token revoked at the same moment as
+/// the access token - a password change, the single commonest cause - left the
+/// dead credential sitting in the keychain forever.
+async fn refresh_and_adopt(
+    state: &GraphState,
+    authority: &str,
+    client_id: &str,
+    generation: u64,
+) -> Result<String, String> {
+    let stored = stored_refresh_token(state)?;
+    let tokens = match auth::refresh(authority, client_id, &stored, now_ms()).await {
+        Ok(tokens) => tokens,
+        Err(code) if code == AUTH_EXPIRED => {
+            // A keychain failure while forgetting is surfaced, not swallowed:
+            // "your credential is dead AND it is stuck on disk" is a different
+            // problem from "reconnect", and the user can act on it.
+            forget_refresh_token(state)?;
+            return Err(AUTH_EXPIRED.to_string());
+        }
+        Err(code) => return Err(code),
+    };
+    let access = tokens.access_token.clone();
+    adopt_and_persist(state, &tokens, generation)?;
+    Ok(access)
 }
 
 /// MEMORY FIRST, then the keychain.
@@ -2618,6 +3119,9 @@ pub async fn graph_connect(
     let expected_state = auth::random_token(24);
     let expected_nonce = auth::random_token(24);
 
+    // Returns Err on a malformed or non-https authority - the user typed it,
+    // and it is the host that will receive the code, the verifier and the
+    // refresh token. Nothing is opened until it is validated.
     let url = auth::authorize_url(
         &authority,
         &client_id,
@@ -2625,7 +3129,7 @@ pub async fn graph_connect(
         &pkce.challenge,
         &expected_state,
         &expected_nonce,
-    );
+    )?;
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|_| NETWORK.to_string())?;
@@ -2646,42 +3150,51 @@ pub async fn graph_connect(
     let tokens = auth::exchange_code(&authority, &client_id, &code, &pkce.verifier, port, now_ms())
         .await?;
 
-    // The nonce binds this ID token to this authorize request.
-    if let Some(id_token) = &tokens.id_token {
-        if auth::nonce_from_id_token(id_token).as_deref() != Some(expected_nonce.as_str()) {
-            return Err(AUTH_REJECTED.to_string());
-        }
-    }
+    // The nonce binds this ID token to this authorize request. An ABSENT id
+    // token is a rejection, not a skip - see auth::validate_nonce.
+    auth::validate_nonce(&expected_nonce, tokens.id_token.as_deref())?;
 
-    if keychain::available() {
-        *state.session_only.lock().unwrap() = false;
-        auth::persist_rotated(&tokens)?;
-    } else {
-        // REFUSE TO PERSIST. The connection works for this launch only, and
-        // the UI says so plainly rather than silently writing plaintext. The
-        // refresh token still lands in `Session` via `adopt` below - that is
-        // what makes "session" mean until quit rather than until the access
-        // token expires.
-        *state.session_only.lock().unwrap() = true;
-    }
-    adopt(&state, &tokens);
-    Ok(state.status())
+    // `available()` is only the fast path. adopt_and_persist degrades to
+    // session-only if the write fails anyway, so a wrong guess here costs
+    // nothing - where propagating a persist failure would discard a credential
+    // we have already paid for the browser round trip to obtain, forcing the
+    // user through the whole flow again.
+    *state.session_only.lock().unwrap() = !keychain::available();
+    let generation = state.session.lock().unwrap().generation;
+    adopt_and_persist(&state, &tokens, generation)?;
+    state.status()
 }
 
 #[tauri::command]
 pub async fn graph_disconnect(app: AppHandle) -> Result<(), String> {
     let state = app.state::<GraphState>();
-    // Keychain first, memory second: if the delete fails the caller learns the
-    // credential is still on disk rather than believing a half-disconnect.
-    keychain::delete_refresh_token()?;
+    let was_session_only = *state.session_only.lock().unwrap();
+
+    // MEMORY FIRST, unconditionally, before anything that can fail.
+    //
+    // Deleting the keychain entry first with `?` meant ANY keychain error
+    // returned early and left both the access token and the in-memory refresh
+    // token live - a disconnect that does not disconnect. On the session-only
+    // path that was not an edge case but the guaranteed outcome: `available()`
+    // was false at connect, so the delete always errors, and Disconnect could
+    // never succeed on the one platform where memory holds the ONLY copy of
+    // the credential.
     state.clear_session();
     *state.session_only.lock().unwrap() = false;
-    Ok(())
+
+    // Nothing was ever written to disk on that path, so there is nothing to
+    // delete and no failure to report.
+    if was_session_only {
+        return Ok(());
+    }
+    // Surfaced, not swallowed: the user needs to know the entry survived.
+    // Memory is already clear either way.
+    keychain::delete_refresh_token()
 }
 
 #[tauri::command]
 pub fn graph_status(app: AppHandle) -> Result<GraphStatus, String> {
-    Ok(app.state::<GraphState>().status())
+    app.state::<GraphState>().status()
 }
 
 #[tauri::command]
@@ -2703,21 +3216,10 @@ pub async fn graph_current_meetings(
         }
     };
 
+    // BOTH refresh sites go through refresh_and_adopt, which is what makes the
+    // invalid_grant handling identical between them.
     if token.is_none() {
-        let stored = stored_refresh_token(&state)?;
-        let tokens = match auth::refresh(&authority, &client_id, &stored, now_ms()).await {
-            Ok(tokens) => tokens,
-            // ONLY invalid_grant clears the stored token.
-            Err(code) if code == AUTH_EXPIRED => {
-                let _ = keychain::delete_refresh_token();
-                state.clear_session();
-                return Err(AUTH_EXPIRED.to_string());
-            }
-            Err(code) => return Err(code),
-        };
-        auth::persist_rotated(&tokens)?;
-        adopt(&state, &tokens);
-        token = Some(tokens.access_token.clone());
+        token = Some(refresh_and_adopt(&state, &authority, &client_id, generation).await?);
     }
 
     let access = token.ok_or_else(|| NOT_CONNECTED.to_string())?;
@@ -2727,17 +3229,19 @@ pub async fn graph_current_meetings(
         // fresh token is a real authorization failure - scopes or tenant
         // policy changed - and the refresh token is RETAINED.
         Err(code) if code == AUTH_REJECTED => {
-            let stored = stored_refresh_token(&state)?;
-            let tokens = auth::refresh(&authority, &client_id, &stored, now_ms()).await?;
-            auth::persist_rotated(&tokens)?;
-            adopt(&state, &tokens);
-            calendar::fetch_calendar_view(&tokens.access_token, &start_iso, &end_iso).await?
+            let refreshed = refresh_and_adopt(&state, &authority, &client_id, generation).await?;
+            calendar::fetch_calendar_view(&refreshed, &start_iso, &end_iso).await?
         }
         Err(code) => return Err(code),
     };
 
     // A disconnect that landed while this was in flight invalidates the
     // result: returning it would answer a question the user has withdrawn.
+    //
+    // This check is now a BACKSTOP rather than the only guard. `adopt` makes
+    // the same comparison under the session lock before writing anything, so a
+    // disconnect can no longer be undone by a refresh that was already in the
+    // air - which is what this check alone, sitting after the fetch, allowed.
     if state.session.lock().unwrap().generation != generation {
         return Err(NOT_CONNECTED.to_string());
     }
@@ -2759,7 +3263,7 @@ cargo test --manifest-path src-tauri/Cargo.toml graph::
 cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 cargo build --manifest-path src-tauri/Cargo.toml
 ```
-Expected: PASS (33 tests), no warnings, builds.
+Expected: PASS (41 tests), no warnings, builds.
 
 If `app.opener().open_url(...)` does not resolve against the pinned `tauri-plugin-opener` version, substitute the plugin's current URL-opening entry point (`lib.rs:116` already registers the plugin) — do not shell out to a per-platform `Command`, which would reintroduce a quoting surface for the authorize URL.
 
@@ -2787,10 +3291,13 @@ git commit -m "feat(graph): expose connect, disconnect, status and current-meeti
   - `SECURE_GRAPH_CONFIG_KEY`
   - `DEFAULT_AUTHORITY = "https://login.microsoftonline.com/organizations"`
   - `GraphConfig = { clientId: string; authority: string }`
-  - `loadGraphConfig(): Promise<GraphConfig | null>` — `null` when the client ID is blank
+  - `GraphConfigState = { state: "absent" | "unreadable" | "complete"; config: GraphConfig | null }`
+  - `loadGraphConfigState(): Promise<GraphConfigState>` — the one that distinguishes "never set up" from "corrupt"
+  - `loadGraphConfig(): Promise<GraphConfig | null>` — thin wrapper for callers that treat both the same
+  - `isHttpsUrl(value: string): boolean`
   - `saveGraphConfig(config: GraphConfig): Promise<void>`
 
-  Tasks 13 and 15 consume `loadGraphConfig`.
+  Task 13 consumes `loadGraphConfigState` (it must tell a silent absence from an error state); Task 15 consumes the config.
 
 **Why plugin-store and not the keychain:** a public client ID is **not a secret** — it travels in every authorize URL and is trivially extracted from any native binary. It is stored the same way the Odoo config is, and passed to Rust as a command argument on every call, which keeps Rust's persistent state to exactly one thing: the refresh token.
 
@@ -2811,6 +3318,7 @@ vi.mock("@/lib/secure-storage", () => store);
 import {
   DEFAULT_AUTHORITY,
   loadGraphConfig,
+  loadGraphConfigState,
   saveGraphConfig,
 } from "@/lib/storage/graph-config.storage";
 
@@ -2846,10 +3354,41 @@ describe("loadGraphConfig", () => {
     expect(DEFAULT_AUTHORITY).not.toContain("/common");
   });
 
-  it("returns null rather than throwing on an unreadable blob", async () => {
+  // "Never set up" and "corrupt" must not be the same state. Collapsing them
+  // takes the feature away from a previously-connected user with nothing on
+  // screen to say why - the exact distinction loadOdooConfigState draws.
+  it("reports an unreadable blob as unreadable, not absent", async () => {
     store.secureGet.mockResolvedValue("{not json");
-    await expect(loadGraphConfig()).resolves.toBeNull();
+    await expect(loadGraphConfigState()).resolves.toEqual({
+      state: "unreadable",
+      config: null,
+    });
   });
+
+  it("reports nothing stored as absent, not unreadable", async () => {
+    store.secureGet.mockResolvedValue(null);
+    await expect(loadGraphConfigState()).resolves.toEqual({
+      state: "absent",
+      config: null,
+    });
+  });
+
+  // A blank client ID is a half-finished setup, not corruption.
+  it("reports a blank client ID as absent", async () => {
+    store.secureGet.mockResolvedValue(JSON.stringify({ clientId: "  " }));
+    await expect(loadGraphConfigState()).resolves.toMatchObject({ state: "absent" });
+  });
+
+  // The authority is the host that receives the auth code, the PKCE verifier
+  // and later the refresh token. Rust rejects a non-https one outright; this
+  // check exists so /odoo can say something useful first.
+  it.each(["http://login.microsoftonline.com/x", "login.microsoftonline.com/x", "ftp://x.test"])(
+    "reports %s as unreadable rather than handing it to Rust",
+    async (authority) => {
+      store.secureGet.mockResolvedValue(JSON.stringify({ clientId: "abc", authority }));
+      await expect(loadGraphConfigState()).resolves.toMatchObject({ state: "unreadable" });
+    }
+  );
 });
 
 describe("saveGraphConfig", () => {
@@ -2897,28 +3436,70 @@ export interface GraphConfig {
 }
 
 /**
- * `null` means "no calendar configured", which in v1 is the DEFAULT state -
- * the app ships no client ID. It is a routine outcome, never an error: the
- * proposal block is statically absent and the picker is exactly what it is
- * today.
+ * "Absent" and "unreadable" are DIFFERENT states, and this function must not
+ * collapse them - the same distinction `loadOdooConfigState` already draws
+ * ("Throws ODOO_INTERNAL on an unreadable blob; never throws for 'not set up'").
+ *
+ * `absent` is the routine v1 state: the app ships no client ID, so almost every
+ * user is here, and the correct response is a statically-absent proposal block
+ * and a picker identical to today's. `unreadable` is a real failure - a config
+ * that once worked and whose store is now corrupt - and returning `absent` for
+ * it would take the whole feature away from a previously-connected user with
+ * nothing on screen to say why.
  */
-export async function loadGraphConfig(): Promise<GraphConfig | null> {
+export type GraphConfigState =
+  | { state: "absent"; config: null }
+  | { state: "unreadable"; config: null }
+  | { state: "complete"; config: GraphConfig };
+
+export async function loadGraphConfigState(): Promise<GraphConfigState> {
   let raw: string | null;
   try {
     raw = await secureGet(SECURE_GRAPH_CONFIG_KEY);
   } catch {
-    return null;
+    return { state: "unreadable", config: null };
   }
-  if (!raw) return null;
+  if (!raw) return { state: "absent", config: null };
+
+  let parsed: Partial<GraphConfig>;
   try {
-    const parsed = JSON.parse(raw) as Partial<GraphConfig>;
-    const clientId = (parsed.clientId ?? "").trim();
-    if (clientId === "") return null;
-    const authority = (parsed.authority ?? "").trim();
-    return { clientId, authority: authority === "" ? DEFAULT_AUTHORITY : authority };
+    parsed = JSON.parse(raw) as Partial<GraphConfig>;
   } catch {
-    return null;
+    return { state: "unreadable", config: null };
   }
+
+  const clientId = (parsed.clientId ?? "").trim();
+  // A blank client ID is "not set up yet", not corruption: the fields exist
+  // and are empty, which is exactly what a half-finished setup looks like.
+  if (clientId === "") return { state: "absent", config: null };
+
+  const authority = (parsed.authority ?? "").trim();
+  const resolved = authority === "" ? DEFAULT_AUTHORITY : authority;
+  // Validated here as well as in Rust. Rust's check is the one that actually
+  // protects the credentials (see auth::validate_authority); this one exists so
+  // the /odoo page can say something useful instead of surfacing a bare
+  // GRAPH_AUTH_REJECTED from deep in the connect flow.
+  if (!isHttpsUrl(resolved)) return { state: "unreadable", config: null };
+
+  return { state: "complete", config: { clientId, authority: resolved } };
+}
+
+export function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Thin wrapper for the callers that only need the config and treat every
+ * non-complete state the same way. `useCalendarProposal` does NOT use this -
+ * it needs to tell "absent" from "unreadable" apart to decide between a silent
+ * absence and an error state.
+ */
+export async function loadGraphConfig(): Promise<GraphConfig | null> {
+  return (await loadGraphConfigState()).config;
 }
 
 export async function saveGraphConfig(config: GraphConfig): Promise<void> {
@@ -2944,21 +3525,70 @@ const [graph, setGraph] = useState<GraphConfig>({ clientId: "", authority: "" })
 const [graphStatus, setGraphStatus] = useState<GraphStatus | null>(null);
 const [graphMessage, setGraphMessage] = useState<Status | null>(null);
 
+// Seeded on MOUNT, not only by handleConnect. Without this a user who
+// connected in a previous session opens /odoo and sees no Disconnect button
+// (it is gated on graphStatus?.connected) and no session-only banner - the page
+// would claim they had never connected.
+useEffect(() => {
+  let cancelled = false;
+  void (async () => {
+    try {
+      const status = await invoke<GraphStatus>("graph_status");
+      if (!cancelled) setGraphStatus(status);
+    } catch (err) {
+      // A keychain that cannot be READ is a real failure, not "disconnected".
+      if (!cancelled) setGraphMessage(errorStatus(reportGraphError(err, "calendar status").code));
+    }
+  })();
+  return () => {
+    cancelled = true;
+  };
+}, []);
+
+/**
+ * Tauri events broadcast to every window. The overlay's own
+ * `useCalendarProposal` listens for this, because /odoo runs in the `dashboard`
+ * webview and <Completion /> runs in `main` — without it, connecting here would
+ * not make the proposal block appear over there until the app restarted, and
+ * disconnecting here would leave the overlay believing it is still connected
+ * and erroring on every open. Same shape as the existing
+ * `odoo-instance-changed` broadcast this page already emits.
+ */
+const notifyCalendarConnectionChanged = () => emit("graph-connection-changed");
+
 const handleConnect = async () => {
-  await saveGraphConfig(graph);
-  const config = await loadGraphConfig();
-  if (config === null) {
+  const config = await (async () => {
+    try {
+      // INSIDE the try. Sitting outside it, a genuine secureSet write failure
+      // was an unhandled rejection that set no message at all, unlike every
+      // other failure path in this handler.
+      await saveGraphConfig(graph);
+      return await loadGraphConfigState();
+    } catch (err) {
+      setGraphMessage(errorStatus(reportGraphError(err, "save calendar config").code));
+      return null;
+    }
+  })();
+  if (config === null) return;
+  if (config.state === "absent") {
     setGraphMessage(errorStatus("Enter the application (client) ID from your app registration."));
+    return;
+  }
+  if (config.state === "unreadable") {
+    setGraphMessage(
+      errorStatus("The authority must be an https URL, e.g. " + DEFAULT_AUTHORITY)
+    );
     return;
   }
   try {
     setGraphStatus(
       await invoke<GraphStatus>("graph_connect", {
-        clientId: config.clientId,
-        authority: config.authority,
+        clientId: config.config.clientId,
+        authority: config.config.authority,
       })
     );
     setGraphMessage(okStatus("Calendar connected."));
+    void notifyCalendarConnectionChanged();
   } catch (err) {
     const report = reportGraphError(err, "connect calendar");
     // GRAPH_AUTH_CANCELLED is the commonest outcome of a loopback flow - the
@@ -2971,7 +3601,7 @@ const handleConnect = async () => {
     setGraphMessage(
       report.code === "GRAPH_CONSENT_REQUIRED"
         ? infoStatus(
-            `Your tenant requires administrator consent. Send an administrator this URL: ${config.authority}/adminconsent?client_id=${config.clientId}`
+            `Your tenant requires administrator consent. Send an administrator this URL: ${config.config.authority}/adminconsent?client_id=${config.config.clientId}`
           )
         : report.code === "GRAPH_NO_KEYCHAIN"
           ? infoStatus(
@@ -2981,9 +3611,53 @@ const handleConnect = async () => {
     );
   }
 };
+
+/**
+ * `graph_disconnect` is exposed by Task 11 and this is its ONLY caller. Without
+ * it the command ships with nothing invoking it, and a user has no way to
+ * revoke a stored credential from inside the app.
+ *
+ * The catch matters as much as the call: `graph_disconnect` clears memory
+ * unconditionally and THEN propagates a keychain delete failure, so an error
+ * here means "you are disconnected in this session, but the stored credential
+ * survived on disk" — which the user needs told, not swallowed.
+ */
+const handleDisconnect = async () => {
+  try {
+    await invoke("graph_disconnect");
+    setGraphStatus({ connected: false, sessionOnly: false });
+    setGraphMessage(okStatus("Calendar disconnected."));
+  } catch (err) {
+    setGraphStatus({ connected: false, sessionOnly: false });
+    const report = reportGraphError(err, "disconnect calendar");
+    setGraphMessage(
+      report.code === "GRAPH_NO_KEYCHAIN"
+        ? errorStatus(
+            "Disconnected in this session, but the stored credential could not be removed from the keychain. Remove it manually."
+          )
+        : errorStatus(report.code)
+    );
+  }
+  void notifyCalendarConnectionChanged();
+};
 ```
 
-Render: the two inputs, a **Connect calendar** button, a **Disconnect** button shown only when `graphStatus?.connected`, the status line, and — when `graphStatus?.sessionOnly` — the plain sentence that this connection is session-only.
+Imports this section needs, none of which the page already has:
+
+```typescript
+import { emit } from "@tauri-apps/api/event"; // already imported by this page
+import { invoke } from "@tauri-apps/api/core";
+import { reportGraphError } from "@/lib/calendar";
+import {
+  DEFAULT_AUTHORITY,
+  loadGraphConfigState,
+  saveGraphConfig,
+  type GraphConfig,
+} from "@/lib/storage/graph-config.storage";
+import type { GraphStatus } from "@/types";
+```
+
+Render: the two inputs, a **Connect calendar** button, a **Disconnect** button (wired to `handleDisconnect`) shown only when `graphStatus?.connected`, the status line, and — when `graphStatus?.sessionOnly` — the plain sentence that this connection is session-only.
 
 The `GRAPH_CONSENT_REQUIRED` remedy is **the admin-consent URL for the user's own client ID**, not a pointer at the client-ID fields: v1 ships no client ID, so they had already filled those in to reach this error at all.
 
@@ -2991,6 +3665,13 @@ The `GRAPH_CONSENT_REQUIRED` remedy is **the admin-consent URL for the user's ow
 
 Run: `npx vitest run src/tests/graph-config.storage.test.ts && npm run type-check && npm run lint`
 Expected: PASS.
+
+Barrel collision check — `src/lib/storage/index.ts` is a flat `export *`:
+
+```bash
+grep -rn "loadGraphConfig\|saveGraphConfig\|DEFAULT_AUTHORITY\|isHttpsUrl\|GraphConfig" src/lib src/types --include=*.ts | grep -v "graph-config.storage"
+```
+Expected: no output.
 
 - [ ] **Step 6: Commit**
 
@@ -3007,11 +3688,12 @@ git commit -m "feat(calendar): add Graph registration config and the connect sec
 - Test: `src/tests/useCalendarProposal.test.tsx`
 
 **Interfaces:**
-- Consumes: `pickCurrentMeeting`, `participantsOf`, `matchAttendees` (Tasks 4–5), `toGraphError` (Task 3), `loadGraphConfig` (Task 12), `graph_status` / `graph_current_meetings` (Task 11), `PickerCacheState` (`ContactPicker.tsx:35`).
+- Consumes: `pickCurrentMeeting`, `participantsOf`, `matchAttendees` (Tasks 4–5), `toGraphError`, `CalendarProposalState`, `CandidateSummary` (Task 3), `loadGraphConfigState` (Task 12), `graph_status` / `graph_current_meetings` (Task 11).
+
+  **It does NOT import `PickerCacheState` from `ContactPicker.tsx`.** It takes `contacts: OdooContact[] | null` instead — `null` meaning "cache not ready". That is not a style preference: importing a page's type into a hook, while the page imports this hook's state union back, is the closed cycle Task 3's placement note describes. The hook never needed the cache *variant*, only the contacts, so `<Completion />` narrows at the call site.
 - Produces:
-  - `CalendarProposalState` (the discriminated union `CalendarProposal.tsx` renders)
   - `UseCalendarProposalReturn = { present: boolean; state: CalendarProposalState; onPickCandidate: (eventId: string) => void; onRetry: () => void }`
-  - `useCalendarProposal({ isPickerOpen, cache, setCalendarBlockPresent })`
+  - `useCalendarProposal({ isPickerOpen, contacts, setCalendarBlockPresent })`
 
   Tasks 14 and 15 consume them.
 
@@ -3040,12 +3722,14 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 const config = vi.hoisted(() => ({
-  loadGraphConfig: vi.fn(async () => ({ clientId: "c", authority: "a" })),
+  loadGraphConfigState: vi.fn(async () => ({
+    state: "complete" as const,
+    config: { clientId: "c", authority: "https://login.microsoftonline.com/organizations" },
+  })),
 }));
 vi.mock("@/lib/storage/graph-config.storage", () => config);
 
 import { useCalendarProposal } from "@/hooks/useCalendarProposal";
-import type { PickerCacheState } from "@/pages/app/components/completion/ContactPicker";
 import type { OdooContact } from "@/types";
 
 const NOW = Date.UTC(2026, 8, 2, 14, 0, 0);
@@ -3059,11 +3743,7 @@ function contact(id: number, email: string): OdooContact {
   };
 }
 
-const READY: PickerCacheState = {
-  kind: "ready",
-  contacts: [contact(7, "cfo@acme.example")],
-  lastError: null,
-};
+const CONTACTS: OdooContact[] = [contact(7, "cfo@acme.example")];
 
 function meeting(id: string, subject: string) {
   return {
@@ -3086,7 +3766,7 @@ function mockGraph(events: unknown[]) {
 
 function setup(over: Partial<Parameters<typeof useCalendarProposal>[0]> = {}) {
   const setCalendarBlockPresent = vi.fn();
-  const props = { isPickerOpen: false, cache: READY, setCalendarBlockPresent, ...over };
+  const props = { isPickerOpen: false, contacts: CONTACTS, setCalendarBlockPresent, ...over };
   const view = renderHook((p: typeof props) => useCalendarProposal(p), {
     initialProps: props,
   });
@@ -3097,7 +3777,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   listeners.clear();
   vi.setSystemTime(NOW);
-  config.loadGraphConfig.mockResolvedValue({ clientId: "c", authority: "a" });
+  config.loadGraphConfigState.mockResolvedValue({
+    state: "complete",
+    config: { clientId: "c", authority: "https://login.microsoftonline.com/organizations" },
+  });
 });
 
 describe("presence", () => {
@@ -3111,17 +3794,15 @@ describe("presence", () => {
     expect(setCalendarBlockPresent).toHaveBeenLastCalledWith(false);
   });
 
-  it("is statically absent when Odoo is not configured", async () => {
+  it("is statically absent while the contact cache is not ready", async () => {
     mockGraph([meeting("e1", "Sync")]);
-    const { result } = setup({ cache: { kind: "not-configured" } });
+    const { result } = setup({ contacts: null });
     await waitFor(() => expect(result.current.present).toBe(false));
   });
 
   it("is statically absent when the contact cache is empty", async () => {
     mockGraph([meeting("e1", "Sync")]);
-    const { result } = setup({
-      cache: { kind: "ready", contacts: [], lastError: null },
-    });
+    const { result } = setup({ contacts: [] });
     await waitFor(() => expect(result.current.present).toBe(false));
   });
 
@@ -3131,16 +3812,96 @@ describe("presence", () => {
     await waitFor(() => expect(result.current.present).toBe(true));
     expect(setCalendarBlockPresent).toHaveBeenLastCalledWith(true);
   });
+
+  /**
+   * A status read that FAILED is not "not connected". Collapsing the two makes
+   * the feature vanish with nothing on screen, which looks exactly like never
+   * having set it up - so a user with a momentarily unreadable keychain has no
+   * way to tell the difference.
+   */
+  it("surfaces an unreadable connection state as an error, not a silent absence", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const { result } = setup();
+    await waitFor(() =>
+      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
+    );
+    // Forced present: this is the one failure worth the reserved space.
+    expect(result.current.present).toBe(true);
+  });
+
+  // "Never set up" is the routine v1 state and must stay silent.
+  it("stays silently absent when no client ID is configured", async () => {
+    config.loadGraphConfigState.mockResolvedValue({ state: "absent", config: null });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.present).toBe(false));
+    expect(result.current.state).toEqual({ kind: "idle" });
+  });
+
+  /**
+   * `/odoo` lives in the `dashboard` webview and this hook runs in `main`.
+   * Without the cross-window listener, connecting there would not reach here
+   * until an app restart, and disconnecting there would leave this window
+   * erroring on every open.
+   */
+  it("re-reads the connection state when /odoo broadcasts a change", async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.present).toBe(false));
+
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: true, sessionOnly: false };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    await act(async () => {
+      for (const handler of listeners.get("graph-connection-changed") ?? []) {
+        handler({ payload: null });
+      }
+    });
+    await waitFor(() => expect(result.current.present).toBe(true));
+  });
 });
 
 describe("fetching", () => {
+  /**
+   * The race the frozen-`present` gate produced: open the picker before
+   * `connected` and the contact cache have resolved, and the effect saw
+   * `present === false`, returned, and — with `present` out of its dependency
+   * array — never ran again. No block at all for the whole open session, not
+   * even "Checking your calendar…", until the user closed and reopened.
+   */
+  it("still fetches when present resolves true AFTER the picker is already open", async () => {
+    mockGraph([meeting("e1", "Sync")]);
+    const props = { isPickerOpen: true, contacts: null as OdooContact[] | null, setCalendarBlockPresent: vi.fn() };
+    const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
+      initialProps: props,
+    });
+    // Cache not ready yet: nothing to fetch against.
+    expect(invoke).not.toHaveBeenCalledWith("graph_current_meetings", expect.anything());
+
+    rerender({ ...props, contacts: CONTACTS });
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
+    );
+    // Exactly once, not once per render - the fetch-guard ref is what keeps
+    // adding `present` to the deps from becoming a refetch loop.
+    expect(
+      invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings")
+    ).toHaveLength(1);
+  });
+
   it("does not call Graph until the picker opens", async () => {
     mockGraph([meeting("e1", "Sync")]);
     const { result, rerender } = setup();
     await waitFor(() => expect(result.current.present).toBe(true));
     expect(invoke).not.toHaveBeenCalledWith("graph_current_meetings", expect.anything());
 
-    rerender({ isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() });
+    rerender({ isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() });
     await waitFor(() =>
       expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
     );
@@ -3150,7 +3911,7 @@ describe("fetching", () => {
   // (the calendar entry changing mid-meeting) without a watcher.
   it("recomputes on each open and not on a calendar-data change", async () => {
     mockGraph([meeting("e1", "Sync")]);
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3161,7 +3922,18 @@ describe("fetching", () => {
       ([cmd]) => cmd === "graph_current_meetings"
     ).length;
 
-    rerender({ ...props });
+    // A NEW array reference with identical contents, while the picker stays
+    // open. Rerendering with the SAME `contacts` reference could not fail this
+    // test: `project`/`fetchNow` would keep their identity whatever the
+    // dependency array said, so a future edit that put `contacts` back into the
+    // fetch effect's deps would still pass. Changing the reference is what
+    // actually exercises the rule.
+    rerender({ ...props, contacts: [...CONTACTS] });
+    expect(
+      invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings")
+    ).toHaveLength(afterFirstOpen);
+
+    rerender({ ...props, contacts: [...CONTACTS, contact(8, "new@acme.example")] });
     expect(
       invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings")
     ).toHaveLength(afterFirstOpen);
@@ -3177,7 +3949,7 @@ describe("fetching", () => {
 
   it("moves from several survivors to a single proposal when one is picked", async () => {
     mockGraph([meeting("a", "Client sync"), meeting("b", "Standup")]);
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3189,7 +3961,7 @@ describe("fetching", () => {
 
   it("reports no-meeting rather than an error when nothing is live", async () => {
     mockGraph([]);
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3201,7 +3973,7 @@ describe("fetching", () => {
       if (cmd === "graph_status") return { connected: true, sessionOnly: false };
       throw new Error("GRAPH_BAD_RESPONSE");
     });
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3218,7 +3990,7 @@ describe("lifecycle", () => {
   // attendees recurring week to week.
   it("clears state on the open -> false transition", async () => {
     mockGraph([meeting("e1", "Sync")]);
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3232,7 +4004,7 @@ describe("lifecycle", () => {
   // reason the matcher is instance-scoped.
   it("clears state on an Odoo instance change", async () => {
     mockGraph([meeting("e1", "Sync")]);
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3255,7 +4027,7 @@ describe("lifecycle", () => {
       if (cmd === "graph_status") return { connected: true, sessionOnly: false };
       return new Promise((resolve) => resolvers.push(resolve));
     });
-    const props = { isPickerOpen: true, cache: READY, setCalendarBlockPresent: vi.fn() };
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
@@ -3286,6 +4058,7 @@ Expected: FAIL — module not found.
 
 ```typescript
 import { useCallback, useEffect, useRef, useState } from "react";
+// `GraphErrorCode` is a type-only import alongside the others below.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -3293,40 +4066,25 @@ import {
   participantsOf,
   pickCurrentMeeting,
   toGraphError,
-  type MatchResult,
 } from "@/lib/calendar";
-import { loadGraphConfig } from "@/lib/storage/graph-config.storage";
-import type { CalendarEvent, CurrentMeetings, GraphErrorCode, GraphStatus } from "@/types";
-import type { PickerCacheState } from "@/pages/app/components/completion/ContactPicker";
+import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
+import type {
+  CalendarEvent,
+  CalendarProposalState,
+  CandidateSummary,
+  CurrentMeetings,
+  GraphErrorCode,
+  GraphStatus,
+  OdooContact,
+} from "@/types";
 
 /** Deliberately WIDER than the acceptance window in current-meeting.ts, so the
  * pure function sees the events either side of the boundary rather than having
  * them filtered away by the query. */
 const QUERY_WINDOW_MS = 15 * 60 * 1000;
 
-export interface CandidateSummary {
-  id: string;
-  subject: string | null;
-  startMs: number;
-  endMs: number;
-}
-
-export type CalendarProposalState =
-  /** Popover closed, or reset. Renders nothing; the region is not reserved. */
-  | { kind: "idle" }
-  | { kind: "loading" }
-  /** DYNAMICALLY absent: connected, the call ran, no current meeting. Occupies
-   * the reserved region with one line, because it resolves after open. */
-  | { kind: "no-meeting" }
-  | { kind: "several"; candidates: CandidateSummary[] }
-  | {
-      kind: "proposal";
-      eventId: string;
-      subject: string | null;
-      matched: MatchResult["matched"];
-      unmatched: MatchResult["unmatched"];
-    }
-  | { kind: "error"; code: GraphErrorCode };
+// `CalendarProposalState` and `CandidateSummary` are imported from @/types, not
+// declared here - see the placement note in src/types/calendar.ts.
 
 export interface UseCalendarProposalReturn {
   present: boolean;
@@ -3341,11 +4099,17 @@ function summarize(event: CalendarEvent): CandidateSummary {
 
 export function useCalendarProposal({
   isPickerOpen,
-  cache,
+  contacts,
   setCalendarBlockPresent,
 }: {
   isPickerOpen: boolean;
-  cache: PickerCacheState;
+  /**
+   * The synced contact cache, or `null` while it is not ready. Deliberately NOT
+   * `PickerCacheState`: this hook never needed the cache variant, only the
+   * rows, and importing a page's type here (while that page imports this hook's
+   * state union back) closes the dependency cycle Task 3's note describes.
+   */
+  contacts: OdooContact[] | null;
   /**
    * useCompletion owns the slot; this hook writes into it. Mirrors
    * setTargetCount exactly (useCompletion.ts:143), and for the same reason:
@@ -3355,6 +4119,8 @@ export function useCalendarProposal({
   setCalendarBlockPresent: (present: boolean) => void;
 }): UseCalendarProposalReturn {
   const [connected, setConnected] = useState(false);
+  /** Non-null when the connection state itself could not be read. */
+  const [statusError, setStatusError] = useState<GraphErrorCode | null>(null);
   const [state, setState] = useState<CalendarProposalState>({ kind: "idle" });
   /** Every resolved fetch checks this before writing. A close/reopen or an
    * instance change bumps it, so a superseded response is discarded rather
@@ -3364,34 +4130,68 @@ export function useCalendarProposal({
   const eventsRef = useRef<CalendarEvent[]>([]);
   const ownAddressRef = useRef<string | null>(null);
 
-  const contacts = cache.kind === "ready" ? cache.contacts : [];
+  const rows = contacts ?? [];
   // All three inputs are known BEFORE the popover opens. That is what makes
   // this the STATIC absence the resize effect can route on.
-  const present = connected && contacts.length > 0;
+  const present = connected && rows.length > 0;
 
   useEffect(() => {
     setCalendarBlockPresent(present);
   }, [present, setCalendarBlockPresent]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const config = await loadGraphConfig();
-      if (config === null) {
-        if (!cancelled) setConnected(false);
-        return;
-      }
-      try {
-        const status = await invoke<GraphStatus>("graph_status");
-        if (!cancelled) setConnected(status.connected);
-      } catch {
-        if (!cancelled) setConnected(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  /**
+   * Read the connection state. Runs on mount AND whenever the /odoo page
+   * broadcasts a change.
+   *
+   * The two failure branches are deliberately DIFFERENT. A config that is
+   * absent means "never set up", which is the routine v1 state and must stay
+   * silent — the block is statically absent and the picker is exactly what it
+   * is today. A config that is UNREADABLE, or a `graph_status` that throws,
+   * means something is genuinely broken; swallowing that into `connected =
+   * false` makes the whole feature disappear with nothing on screen to explain
+   * it, which is indistinguishable from never having set it up.
+   */
+  const readStatus = useCallback(async () => {
+    const config = await loadGraphConfigState();
+    if (config.state === "absent") {
+      setConnected(false);
+      setStatusError(null);
+      return;
+    }
+    if (config.state === "unreadable") {
+      setConnected(false);
+      setStatusError("GRAPH_NOT_CONNECTED");
+      return;
+    }
+    try {
+      const status = await invoke<GraphStatus>("graph_status");
+      setConnected(status.connected);
+      setStatusError(null);
+    } catch (err) {
+      setConnected(false);
+      setStatusError(toGraphError(err).code);
+    }
   }, []);
+
+  useEffect(() => {
+    void readStatus();
+  }, [readStatus]);
+
+  /**
+   * `/odoo` runs in the `dashboard` webview; `<Completion />` runs in `main`.
+   * Without this listener, connecting on that page would not make the block
+   * appear here until the app restarted, and disconnecting there would leave
+   * this window believing it is connected — so every open would produce a
+   * GRAPH_NOT_CONNECTED error state. Same cross-window pattern the picker
+   * already uses for `odoo-instance-changed`.
+   */
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen("graph-connection-changed", () => void readStatus()).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [readStatus]);
 
   const reset = useCallback(() => {
     generation.current += 1;
@@ -3422,7 +4222,7 @@ export function useCalendarProposal({
       }
       const result = matchAttendees({
         participants: participantsOf(picked.event),
-        contacts,
+        contacts: rows,
         ownAddress,
       });
       return {
@@ -3433,20 +4233,36 @@ export function useCalendarProposal({
         unmatched: result.unmatched,
       } as const;
     },
-    [contacts]
+    [rows]
   );
 
   const fetchNow = useCallback(async () => {
-    const config = await loadGraphConfig();
-    if (config === null) return;
+    // BEFORE any await, all three of them:
+    //
+    // - `setState({ kind: "loading" })` — the region must be on screen in the
+    //   same commit the popover opens. Setting it after `loadGraphConfig()` (a
+    //   plugin-store round trip) left `idle` rendering `null` for one or more
+    //   commits, so the block appeared AFTER open and grew the popover's
+    //   footprint — the one thing the Global Constraints forbid, and the reason
+    //   the whole static/dynamic split exists.
+    // - the generation bump, so ordering is decided by call order rather than
+    //   by which config load happens to resolve first.
     generation.current += 1;
     const mine = generation.current;
     setState({ kind: "loading" });
+
+    const config = await loadGraphConfigState();
+    if (config.state !== "complete") {
+      if (mine === generation.current) {
+        setState(config.state === "absent" ? { kind: "idle" } : { kind: "error", code: "GRAPH_NOT_CONNECTED" });
+      }
+      return;
+    }
     const now = Date.now();
     try {
       const response = await invoke<CurrentMeetings>("graph_current_meetings", {
-        clientId: config.clientId,
-        authority: config.authority,
+        clientId: config.config.clientId,
+        authority: config.config.authority,
         startIso: new Date(now - QUERY_WINDOW_MS).toISOString(),
         endIso: new Date(now + QUERY_WINDOW_MS).toISOString(),
       });
@@ -3460,20 +4276,38 @@ export function useCalendarProposal({
     }
   }, [project]);
 
-  // Recomputed each time the picker OPENS - not on a calendar-data change,
-  // which would need a watcher for a case that reopening already covers.
+  /**
+   * Recomputed each time the picker OPENS — not on a calendar-data change,
+   * which would need a watcher for a case that reopening already covers.
+   *
+   * `present` IS in the dependency array, and that is load-bearing rather than
+   * lint appeasement. It is composed of two values that resolve asynchronously
+   * after mount (`connected`, and the contact cache). With `[isPickerOpen]`
+   * alone, opening the picker shortly after launch evaluated `present` as false,
+   * returned, and — because nothing re-ran the effect when `present` later
+   * flipped true — never fetched at all for that whole open session. The user
+   * saw no block, not even "Checking your calendar…", until they closed and
+   * reopened.
+   *
+   * `hasFetched` is what keeps that from becoming a refetch loop: `present` can
+   * only transition false -> true once per open, and the ref makes the second
+   * pass a no-op, so this still fetches exactly once per open. `fetchNow` stays
+   * out of the deps deliberately — it changes identity with `project`, which
+   * changes with `contacts`, and re-running on that IS the calendar-data
+   * refetch the spec rules out.
+   */
+  const hasFetched = useRef(false);
   useEffect(() => {
     if (!isPickerOpen) {
+      hasFetched.current = false;
       reset();
       return;
     }
-    if (!present) return;
+    if (!present || hasFetched.current) return;
+    hasFetched.current = true;
     void fetchNow();
-    // `present` and `fetchNow` are intentionally excluded: re-running on either
-    // would refetch inside an already-open popover, which is the "not on a
-    // calendar-data change" rule.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPickerOpen]);
+  }, [isPickerOpen, present]);
 
   const onPickCandidate = useCallback(
     (eventId: string) => {
@@ -3486,6 +4320,24 @@ export function useCalendarProposal({
     void fetchNow();
   }, [fetchNow]);
 
+  /**
+   * A status read that FAILED outranks whatever the proposal state happens to
+   * be. Without this the hook reports `present: false` for an unreadable
+   * keychain exactly as it does for "never configured", and the feature
+   * vanishes silently instead of saying what went wrong.
+   *
+   * `present` is forced true in that case so the block renders at all — this is
+   * the one place a failure is worth the reserved space.
+   */
+  if (statusError !== null) {
+    return {
+      present: true,
+      state: { kind: "error", code: statusError },
+      onPickCandidate,
+      onRetry: () => void readStatus(),
+    };
+  }
+
   return { present, state, onPickCandidate, onRetry };
 }
 ```
@@ -3496,6 +4348,13 @@ Add `export * from "./useCalendarProposal";` to `src/hooks/index.ts`.
 
 Run: `npx vitest run src/tests/useCalendarProposal.test.tsx && npm run type-check && npm run lint`
 Expected: PASS.
+
+Barrel collision check — `src/hooks/index.ts` is a flat `export *`:
+
+```bash
+grep -rn "useCalendarProposal\|UseCalendarProposalReturn" src/hooks --include=*.ts* | grep -v "useCalendarProposal.ts"
+```
+Expected: no output.
 
 - [ ] **Step 5: Commit**
 
@@ -3519,6 +4378,7 @@ git commit -m "feat(calendar): orchestrate the proposal with useCalendarProposal
 `src/tests/CalendarProposal.slots.test.tsx` — the slot rule, **not a bare match count**. Every case pre-populates `targets`, because stubbing a blanket cap rejection would pass against exactly the match-count rule the review corrected:
 
 ```tsx
+import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -3679,6 +4539,57 @@ describe("the write", () => {
     expect(maxInFlight).toBe(1);
   });
 
+  /**
+   * The regression the static-`targets` tests above cannot see.
+   *
+   * In production every successful `onAddTarget` updates the parent's `targets`,
+   * so this test re-renders with the grown list exactly as `<Completion />`
+   * would. Without the `writingRef` guard on the pre-check effect, the row the
+   * user UNCHECKED gets re-checked mid-write and written anyway - a write to
+   * odoo_selected_targets they never authorised, which is the one thing the
+   * confirm gate exists to prevent.
+   */
+  it("never writes a row the user unchecked, even as targets grow mid-write", async () => {
+    const contacts = [contact(1), contact(2), contact(3)];
+    const added: number[] = [];
+    let live: SelectedTargets = [];
+
+    function Harness() {
+      const [targets, setTargets] = React.useState<SelectedTargets>([]);
+      live = targets;
+      return (
+        <CalendarProposal
+          state={{
+            kind: "proposal",
+            eventId: "e1",
+            subject: "Client sync",
+            matched: matched(contacts),
+            unmatched: [],
+          }}
+          targets={targets}
+          onAddTarget={async (t) => {
+            added.push(t.resId);
+            // Exactly what useOdooTarget.addTarget does on success.
+            setTargets((prev) => [...prev, t]);
+            return { ok: true };
+          }}
+          onPickCandidate={vi.fn()}
+          onRetry={vi.fn()}
+        />
+      );
+    }
+
+    render(<Harness />);
+    // The user deliberately excludes Person 2.
+    await userEvent.click(screen.getByTestId("calendar-proposal-row-2"));
+    expect(screen.getByTestId("calendar-proposal-confirm")).toHaveTextContent("Add 2 to log");
+
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await waitFor(() => expect(added).toHaveLength(2));
+    expect(added).toEqual([1, 3]);
+    expect(live.map((t) => t.resId)).toEqual([1, 3]);
+  });
+
   // The action-layer cap remains the backstop; a rejection is SURFACED, never
   // swallowed.
   it("stops at the first cap rejection and names what was and was not written", async () => {
@@ -3689,9 +4600,85 @@ describe("the write", () => {
     await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
     await waitFor(() => expect(onAddTarget).toHaveBeenCalledTimes(2));
     const message = await screen.findByTestId("calendar-proposal-write-result");
-    expect(message).toHaveTextContent("Person 1");
-    expect(message).toHaveTextContent("Person 2");
-    expect(message).toHaveTextContent("Person 3");
+    // Assert the SPLIT, not just that each name appears somewhere: checking
+    // only for presence would pass even if Person 1 were reported as not
+    // written.
+    expect(message).toHaveTextContent("Added Person 1");
+    expect(message).toHaveTextContent(/The log is full, so Person 2, Person 3 were not added/);
+  });
+
+  /**
+   * `useOdooTarget.addTarget` returns a bare `{ ok: false }` from its catch for
+   * ANY thrown error - a busy database, ODOO_NOT_CONFIGURED - and has already
+   * toasted the real cause. Reporting that as "the log is full" contradicts the
+   * toast and sends the user to remove destinations that were never the problem.
+   */
+  it("does not blame the cap for a failure that carries no cap reason", async () => {
+    const onAddTarget = vi.fn(async (t: { resId: number }) =>
+      t.resId === 2 ? { ok: false } : { ok: true }
+    );
+    renderProposal({ contacts: [contact(1), contact(2), contact(3)], onAddTarget });
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    const message = await screen.findByTestId("calendar-proposal-write-result");
+    expect(message).toHaveTextContent(/Something went wrong/);
+    expect(message).not.toHaveTextContent(/log is full/i);
+  });
+
+  /**
+   * `<Completion />` force-closes the picker when a meeting-log hold begins,
+   * and this component stays MOUNTED across that. With no reset path, `writing`
+   * stayed true forever and the confirm button was dead on every later open.
+   */
+  it("clears in-flight state when the popover closes", async () => {
+    const { rerender } = render(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e1",
+          subject: "Client sync",
+          matched: matched([contact(1)]),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: false, reason: "cap" as const }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await screen.findByTestId("calendar-proposal-write-result");
+
+    const closed = (
+      <CalendarProposal
+        state={{ kind: "idle" }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    rerender(closed);
+    expect(screen.queryByTestId("calendar-proposal-region")).toBeNull();
+
+    // Reopened for a later meeting: the confirm control is live again, and no
+    // stale failure message survives.
+    rerender(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e2",
+          subject: "Another meeting",
+          matched: matched([contact(4)]),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeEnabled();
+    expect(screen.queryByTestId("calendar-proposal-write-result")).toBeNull();
   });
 });
 ```
@@ -3703,7 +4690,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CalendarProposal } from "@/pages/app/components/completion/CalendarProposal";
-import type { CalendarProposalState } from "@/hooks/useCalendarProposal";
+import type { CalendarProposalState } from "@/types";
 
 function renderState(state: CalendarProposalState, over = {}) {
   const handlers = {
@@ -3765,9 +4752,16 @@ describe("unmatched attendees", () => {
         },
       ],
     });
-    const rows = screen.getAllByTestId(/^calendar-unmatched-/);
-    expect(rows).toHaveLength(2);
-    for (const row of rows) expect(row).toHaveTextContent(/no odoo contact/i);
+    expect(screen.getAllByTestId(/^calendar-unmatched-/)).toHaveLength(2);
+    // The two reasons render DIFFERENTLY. Telling the user there is "no Odoo
+    // contact" for a partner who is merely archived would send them off to
+    // create a duplicate of a record they already have.
+    expect(screen.getByTestId("calendar-unmatched-new@acme.example")).toHaveTextContent(
+      /no odoo contact/i
+    );
+    expect(screen.getByTestId("calendar-unmatched-old@acme.example")).toHaveTextContent(
+      /archived in odoo/i
+    );
     // Greyed, and there is no create-contact action anywhere in this block.
     expect(screen.queryByRole("button", { name: /create/i })).toBeNull();
     expect(screen.queryByTestId("calendar-proposal-row-0")).toBeNull();
@@ -3811,11 +4805,18 @@ Expected: FAIL — module not found.
 `src/pages/app/components/completion/CalendarProposal.tsx`:
 
 ```tsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components";
 import { MAX_TARGETS } from "@/lib/odoo";
-import type { CalendarProposalState } from "@/hooks/useCalendarProposal";
-import type { OdooContact, SelectedTarget, SelectedTargets } from "@/types";
+// From @/types, NOT from the hook - see the placement note in
+// src/types/calendar.ts. A page importing a type back out of a hook that
+// depends on that page is the cycle this avoids.
+import type {
+  CalendarProposalState,
+  OdooContact,
+  SelectedTarget,
+  SelectedTargets,
+} from "@/types";
 
 /**
  * FIXED height, not max-height.
@@ -3877,6 +4878,16 @@ export function CalendarProposal({
   const [checked, setChecked] = useState<ReadonlySet<number>>(new Set());
   const [writeResult, setWriteResult] = useState<string | null>(null);
   const [writing, setWriting] = useState(false);
+  /**
+   * The same fact as `writing`, in a ref, because two different consumers need
+   * it at two different times:
+   *
+   * - the reset effect below reads it DURING the write, and a state read there
+   *   is a render-time snapshot that can lag the loop;
+   * - `confirm` reads it to refuse re-entry, and the button's `disabled` alone
+   *   only covers repeat clicks on that one control.
+   */
+  const writingRef = useRef(false);
 
   const proposal = state.kind === "proposal" ? state : null;
 
@@ -3897,6 +4908,26 @@ export function CalendarProposal({
 
   const writableKey = writable.map((m) => m.contact.id).join(",");
   useEffect(() => {
+    /**
+     * NOT WHILE A WRITE IS RUNNING. This guard is the whole finding.
+     *
+     * `confirm` writes sequentially, and each successful `onAddTarget` updates
+     * the parent's `targets` (useOdooTarget.addTarget -> applyTargets). Since
+     * `targets` is a prop and a dependency of the memo above, every successful
+     * write re-renders, recomputes `writable` without the row just added,
+     * changes `writableKey`, and re-fires this effect - which then rebuilt the
+     * pre-checked set from scratch, SILENTLY RE-CHECKING rows the user had
+     * deliberately unchecked before clicking Add. The user watches boxes tick
+     * themselves back on mid-write, clicks Add again trusting what is on
+     * screen, and writes the attendee they excluded.
+     *
+     * That is a write to odoo_selected_targets the user did not authorise,
+     * which is precisely what the confirm gate exists to make impossible.
+     *
+     * It also erased `writeResult`, so a partial-write failure could lose its
+     * only surface to a `targets` update flushing after the loop.
+     */
+    if (writingRef.current) return;
     // Pre-check only when EVERY writable match fits. Auto-selecting an
     // arbitrary subset is the wrong-record risk this feature exists to avoid.
     setChecked(
@@ -3906,6 +4937,25 @@ export function CalendarProposal({
     );
     setWriteResult(null);
   }, [writableKey, freeSlots]);
+
+  /**
+   * The popover closed. `ContactPicker` — and therefore this component — stays
+   * MOUNTED when it does (see its `confirmingClear` reset keyed on `open`), so
+   * without this every local flag survives into the next open.
+   *
+   * `writing` is the one that matters most: it had no reset path at all, and a
+   * real force-close exists — `<Completion />`'s layout effect closes the picker
+   * when `meetingLog.holding` flips true. Closed mid-write, `writing` stayed
+   * true forever and the confirm button was dead on every subsequent open, for
+   * an unrelated later meeting, with nothing saying why.
+   */
+  useEffect(() => {
+    if (state.kind !== "idle") return;
+    writingRef.current = false;
+    setWriting(false);
+    setChecked(new Set());
+    setWriteResult(null);
+  }, [state.kind]);
 
   if (state.kind === "idle") return null;
 
@@ -3966,14 +5016,24 @@ export function CalendarProposal({
   const overflowing = writable.length > freeSlots && !atCap;
 
   const confirm = async () => {
+    if (writingRef.current) return;
+    writingRef.current = true;
     setWriting(true);
+
+    // SNAPSHOT the user's choice before the first await. `targets` mutates
+    // under us as the loop lands rows, so re-reading `checkedWritable` mid-loop
+    // would write whatever the recomputed set says rather than what the user
+    // actually confirmed.
+    const batch = [...checkedWritable];
     const written: string[] = [];
     const notWritten: string[] = [];
+    let failure: "cap" | "other" | null = null;
+
     // SEQUENTIAL. addSelectedTarget is a non-atomic check-then-act; issued
     // concurrently every call reads the same pre-write count, all pass, and
     // more than MAX_TARGETS rows land.
-    for (const match of checkedWritable) {
-      if (notWritten.length > 0) {
+    for (const match of batch) {
+      if (failure !== null) {
         notWritten.push(match.contact.name);
         continue;
       }
@@ -3982,16 +5042,30 @@ export function CalendarProposal({
         resId: match.contact.id,
         name: match.contact.name,
       });
-      if (result.ok) written.push(match.contact.name);
-      else notWritten.push(match.contact.name);
+      if (result.ok) {
+        written.push(match.contact.name);
+        continue;
+      }
+      // `reason` MATTERS. useOdooTarget.addTarget returns a bare `{ ok: false }`
+      // from its catch for any thrown error - a busy database,
+      // ODOO_NOT_CONFIGURED - and it has already shown the user a toast naming
+      // the real cause. Reporting every failure as "the log is full" would
+      // contradict that toast and send the user to remove destinations that
+      // were never the problem.
+      failure = result.reason === "cap" ? "cap" : "other";
+      notWritten.push(match.contact.name);
     }
+
+    writingRef.current = false;
     setWriting(false);
     setWriteResult(
-      notWritten.length === 0
+      failure === null
         ? null
-        : `Added ${written.join(", ") || "none"}. The log is full, so ${notWritten.join(", ")} ${
-            notWritten.length === 1 ? "was" : "were"
-          } not added.`
+        : `Added ${written.join(", ") || "none"}. ${
+            failure === "cap"
+              ? "The log is full, so"
+              : "Something went wrong, so"
+          } ${notWritten.join(", ")} ${notWritten.length === 1 ? "was" : "were"} not added.`
     );
   };
 
@@ -4044,13 +5118,21 @@ export function CalendarProposal({
         );
       })}
 
+      {/*
+        The label switches on `reason`. Task 4 computes `archived` precisely
+        because it is NOT a softer "no-contact" - the partner record exists, it
+        is just archived, and telling the user there is no contact for someone
+        who is in their Odoo would send them to create a duplicate.
+      */}
       {proposal?.unmatched.map((entry) => (
         <p
           key={entry.participant.address}
           data-testid={`calendar-unmatched-${entry.participant.address}`}
           className="text-[11px] text-muted-foreground"
         >
-          {`${entry.participant.name ?? entry.participant.address} — no Odoo contact`}
+          {`${entry.participant.name ?? entry.participant.address} — ${
+            entry.reason === "archived" ? "archived in Odoo" : "no Odoo contact"
+          }`}
         </p>
       ))}
 
@@ -4160,6 +5242,8 @@ In the resize effect (`:1929-1953`), beside `void targetCount;` add `void calend
 
 Export `calendarBlockPresent` and `setCalendarBlockPresent` from the return object (`:2320-2327`).
 
+`<Completion />` also needs `useMemo` added to its React import (it already imports `useEffect`, `useLayoutEffect`, `useMemo`, `useState` — verify before editing).
+
 - [ ] **Step 4: Add the prop to `ContactPicker`**
 
 In `ContactPickerProps` (after `onOpenChange`, `:157`):
@@ -4179,6 +5263,13 @@ In `ContactPickerProps` (after `onOpenChange`, `:157`):
     onPickCandidate: (eventId: string) => void;
     onRetry: () => void;
   };
+```
+
+The two imports this file gains — the type from `@/types`, never from the hook (see Task 3's placement note), and the component by the same relative path `index.tsx` already uses for `./ContactPicker`:
+
+```tsx
+import { CalendarProposal } from "./CalendarProposal";
+import type { CalendarProposalState } from "@/types";
 ```
 
 Destructure `calendar` in the parameter list, and render it as the first child of the popover's `flex flex-col gap-2` container (`:320`), above the "Logging to" section:
@@ -4207,26 +5298,42 @@ In `src/pages/app/components/completion/index.tsx`, **after** the `useOdooTarget
   // contacts exist.
   const calendar = useCalendarProposal({
     isPickerOpen: completion.isContactPickerOpen,
-    cache: odoo.pickerProps.cache,
+    // Narrowed HERE, not inside the hook: the hook takes contacts, not the
+    // cache variant, so it never has to import a page's type. `null` while the
+    // cache is not ready.
+    contacts:
+      odoo.pickerProps.cache.kind === "ready" ? odoo.pickerProps.cache.contacts : null,
     setCalendarBlockPresent: completion.setCalendarBlockPresent,
   });
+
+  /**
+   * MEMOIZED, not an inline literal at the call site.
+   *
+   * `ContactPicker` is `React.memo`'d with ~30 props, and `<Completion />`
+   * re-renders on every streamed AI token (`completion.state.response`). A
+   * fresh `{ state, onPickCandidate, onRetry }` object each render makes
+   * memo's shallow compare see a changed prop every single time, defeating the
+   * memo for as long as the feature is active — popover closed included. With
+   * the picker open during a stream that means re-diffing the contact list (up
+   * to MAX_RENDERED_ROWS = 100) once per token.
+   */
+  const calendarProps = useMemo(
+    () =>
+      calendar.present
+        ? {
+            state: calendar.state,
+            onPickCandidate: calendar.onPickCandidate,
+            onRetry: calendar.onRetry,
+          }
+        : undefined,
+    [calendar.present, calendar.state, calendar.onPickCandidate, calendar.onRetry]
+  );
 ```
 
 And at `:158`:
 
 ```tsx
-        <ContactPicker
-          {...odoo.pickerProps}
-          calendar={
-            calendar.present
-              ? {
-                  state: calendar.state,
-                  onPickCandidate: calendar.onPickCandidate,
-                  onRetry: calendar.onRetry,
-                }
-              : undefined
-          }
-        />
+        <ContactPicker {...odoo.pickerProps} calendar={calendarProps} />
 ```
 
 - [ ] **Step 6: Run the full picker and hook suites, lint and types**
@@ -4289,6 +5396,19 @@ Five items. Nothing automated can cover any of them.
       gone AND a subsequent proposal fails rather than succeeding on a
       still-live in-memory access token. (Clearing only the keychain leaves a
       token that keeps working until its expiry.)
+- [ ] **`invalid_grant` clears the stored token.** Revoke the app's consent in
+      Entra (or change the account password), then open the picker. Expect
+      `GRAPH_AUTH_EXPIRED`, the keychain entry GONE, and `/odoo` showing
+      disconnected. The cargo tests cover `classify_token_error`'s output codes
+      but nothing exercises the branch that acts on them — that wiring lives in
+      an async `#[tauri::command]` making real network calls, so this is the
+      only place it can be checked.
+- [ ] **A transport failure RETAINS the token.** With a connected account whose
+      access token has expired, cut the network and open the picker. Expect
+      `GRAPH_NETWORK`, and — once the network is back — a working proposal with
+      NO reconnect required. A test asserting only "auth failure clears the
+      token" would lock in the exact defect this three-way split corrected, so
+      the retain half has to be exercised too.
 - [ ] **`GRAPH_CONSENT_REQUIRED` in a tenant that blocks third-party consent.**
       It is the NORMAL first result there, not an edge case. Confirm the page
       shows the admin-consent URL for the user's own client ID.
@@ -4341,4 +5461,20 @@ git commit -m "docs(calendar): add the manual acceptance checklist"
 **3. Type consistency.** `CalendarEvent` / `CalendarParticipant` / `GraphStatus` / `CurrentMeetings` are declared once in `src/types/calendar.ts` (Task 3) and mirrored field-for-field by the serde structs in Task 6 with `rename_all = "camelCase"`; `startMs`/`start_ms`, `ownResponse`/`own_response`, `isOrganizer`/`is_organizer` and `sessionOnly`/`session_only` are the pairs to keep aligned. `matchAttendees` returns `{ matched, unmatched, excluded }` in Task 4 and Task 13 forwards exactly `matched` and `unmatched` into `CalendarProposalState`; `excluded` is deliberately not rendered. `onAddTarget`'s signature `(t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>` matches `ContactPickerProps` (`ContactPicker.tsx:130`) and `useOdooTarget.addTarget` (`useOdooTarget.ts:163`) exactly.
 
 **Known deviation from the spec's wording, resolved deliberately:** the spec says "fixed max-height, internally scrollable region" and, in the same paragraph, that the footprint is identical whether the block is empty, loading, showing two rows or twelve. A `max-height` alone does not deliver the second, so Task 14 uses a **fixed** height with internal scrolling. The stronger of the two statements wins.
+
+## Review pass 1 — what changed and why it matters
+
+Seven CRITICALs, all in planned *code* rather than prose, and five of them in Task 11's credential lifecycle. Recorded here because several are the kind of defect that reads as correct until you trace a specific interleaving:
+
+- **The 401-retry path never handled `invalid_grant`.** The three-way split was implemented at the first refresh call site and left on a bare `?` at the second. A password change revokes the access token and the refresh token together — the single commonest cause — so the dead credential would have stayed in the keychain forever. Both sites now go through one `refresh_and_adopt`, which is the only durable fix: two call sites with hand-copied error handling drift again.
+- **A disconnect landing mid-refresh re-armed the credential.** The generation check sat *after* the fetch, while `persist_rotated` and `adopt` ran before it — so a refresh already in the air would rewrite the keychain entry the user had just deleted, and `status()` would report connected again. `adopt` now compares the generation *under the session lock* and writes nothing on a mismatch.
+- **Disconnect could never succeed on the session-only path.** It deleted the keychain entry with `?` before clearing memory; on that path `available()` was false at connect, so the delete always errors and the early return left both tokens live — on the one platform where memory holds the only copy.
+- **`persist_rotated` was unguarded**, so on the session-only path every call after access-token expiry died with `GRAPH_NO_KEYCHAIN` and discarded the rotated token. Now: adopt into memory first, persist second, and *degrade* to session-only on a persist failure rather than throwing away a credential that already cost a browser round trip.
+- **`status()` read a keychain `Err` as "disconnected"**, so a transient read failure made the whole feature vanish silently — indistinguishable from never having set it up.
+- **The pre-check effect re-checked rows mid-write.** Each successful write mutates `targets`, which recomputes `writable`, which re-fires the effect that rebuilds the checked set — so an attendee the user deliberately unchecked could be written anyway. That is a write to `odoo_selected_targets` the user never authorised, which is exactly what the confirm gate exists to prevent. The sequential-write test could not catch it because it held `targets` static; there is now a test that re-renders with the growing list the way `<Completion />` does.
+- **The authority was unvalidated free text.** `authorize_url` used `.expect(...)` where nothing validated anything, and there was no scheme check — so a typo panicked Rust mid-connect, and a wrong or `http` authority meant `post_token` sent the authorization code, the PKCE verifier and later the refresh token to that host. Now validated in both layers, https-only, `Result` rather than `expect`. Neither reviewer rated this critical alone; merged, it is credential exfiltration rather than a panic, so it was upgraded.
+
+Two test-quality findings were about tests that *could not fail against the defect they named* — the "not on a calendar-data change" test reused one `cache` reference, and the cap-rejection test only checked that each name appeared somewhere in the message. Both are now written so the regression they target actually breaks them.
+
+Seven Sonnet MINORs were reported but withheld by the review's auto-apply guard, and are worth a look before execution: a `GRAPH_UNKNOWN` code so programming errors stop rendering a "Try again" that cannot help; suppressing that same retry affordance for `GRAPH_AUTH_EXPIRED`/`GRAPH_NOT_CONNECTED`; and renaming `graph-*.test.ts` to `calendar-*` to match the folder, per the uniform `odoo-` precedent.
 
