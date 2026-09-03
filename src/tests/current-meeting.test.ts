@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickCurrentMeeting } from "@/lib/calendar/current-meeting";
+import { EARLY_JOIN_MS, ENDED_GRACE_MS, pickCurrentMeeting } from "@/lib/calendar/current-meeting";
 import type { CalendarEvent, CalendarParticipant } from "@/types";
 
 const NOW = Date.UTC(2026, 8, 2, 14, 0, 0); // 2026-09-02T14:00:00Z
@@ -47,6 +47,24 @@ describe("pickCurrentMeeting", () => {
     expect(pickCurrentMeeting([event(over)], NOW)).toEqual({ kind: "none" });
   });
 
+  // `declined` is the ONLY value that rejects. A regression that rewrote the
+  // rule as an allow-list of known-good values would still reject "declined"
+  // correctly, and pass every test above, while silently dropping every
+  // meeting where responseStatus.response carries something outside the
+  // accepted/declined/tentativelyAccepted/notResponded/none set. The live
+  // tenant probe returned the literal "organizer" for a self-organized
+  // meeting; that value must still resolve to "one", not "none".
+  it.each([
+    "notResponded",
+    "none",
+    "tentativelyAccepted",
+    "accepted",
+    "organizer",
+  ])("still selects a live meeting when ownResponse is %s", (ownResponse) => {
+    const result = pickCurrentMeeting([event({ ownResponse })], NOW);
+    expect(result).toEqual({ kind: "one", event: expect.objectContaining({ id: "e1" }) });
+  });
+
   // Focus blocks and reminders. This filter alone collapses most apparent
   // overlaps.
   it("rejects an event whose only participant is the user", () => {
@@ -68,8 +86,8 @@ describe("pickCurrentMeeting", () => {
     expect(pickCurrentMeeting([solo], NOW)).toEqual({ kind: "none" });
   });
 
-  // The issue's opening scenario. The CLIENT organized, so `attendees` is just
-  // the user - a naive rule discards this as a focus block.
+  // The issue opening scenario. The CLIENT organized, so `attendees` is just
+  // the user, and a naive rule discards this as a focus block.
   it("keeps a client-organized 1:1 where the only attendee is the user", () => {
     const clientCall = event({
       participants: [
@@ -91,6 +109,21 @@ describe("pickCurrentMeeting", () => {
       expect(pickCurrentMeeting([later], NOW)).toEqual({ kind: "none" });
     });
 
+    // Pinned to the exact boundary via the exported constant, not a
+    // re-derived number: a `>` -> `>=` flip at the implementation check
+    // `startMs > nowMs + EARLY_JOIN_MS` would reject this, and the
+    // +4min/+6min cases above (both off the line) would not catch it.
+    it("accepts a meeting starting exactly at the early-join boundary", () => {
+      const atBoundary = event({
+        startMs: NOW + EARLY_JOIN_MS,
+        endMs: NOW + EARLY_JOIN_MS + 30 * MIN,
+      });
+      expect(pickCurrentMeeting([atBoundary], NOW)).toEqual({
+        kind: "one",
+        event: expect.objectContaining({ id: "e1" }),
+      });
+    });
+
     it("accepts a meeting that ended inside the 10-minute grace", () => {
       const justEnded = event({ startMs: NOW - 40 * MIN, endMs: NOW - 9 * MIN });
       expect(pickCurrentMeeting([justEnded], NOW)).toMatchObject({ kind: "one" });
@@ -101,6 +134,21 @@ describe("pickCurrentMeeting", () => {
       expect(pickCurrentMeeting([over], NOW)).toEqual({ kind: "none" });
     });
 
+    // Pinned to the exact boundary via the exported constant: a `<` -> `<=`
+    // flip at the implementation check `endMs < nowMs - ENDED_GRACE_MS`
+    // would reject this, and the -9min/-11min cases above (both off the
+    // line) would not catch it.
+    it("accepts a meeting that ended exactly at the grace boundary", () => {
+      const atBoundary = event({
+        startMs: NOW - ENDED_GRACE_MS - 30 * MIN,
+        endMs: NOW - ENDED_GRACE_MS,
+      });
+      expect(pickCurrentMeeting([atBoundary], NOW)).toEqual({
+        kind: "one",
+        event: expect.objectContaining({ id: "e1" }),
+      });
+    });
+
     // The window is anchored on `now`, not on when recording started, so
     // joining late needs no special handling.
     it("accepts a long meeting joined late", () => {
@@ -109,13 +157,17 @@ describe("pickCurrentMeeting", () => {
     });
   });
 
+  // Order is significant: soonest-starting first, ties broken by id. Asserts
+  // the exact sequence (a starts at NOW-5min, b starts at NOW) rather than a
+  // sorted comparison, so a regression that reversed or randomized the
+  // implementation own sort is caught.
   it("returns every survivor when more than one qualifies", () => {
     const a = event({ id: "a" });
     const b = event({ id: "b", subject: "Other", startMs: NOW, endMs: NOW + 30 * MIN });
     const result = pickCurrentMeeting([a, b], NOW);
     expect(result.kind).toBe("several");
     if (result.kind === "several") {
-      expect(result.candidates.map((c) => c.id).sort()).toEqual(["a", "b"]);
+      expect(result.candidates.map((c) => c.id)).toEqual(["a", "b"]);
     }
   });
 
