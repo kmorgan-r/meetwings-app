@@ -6,6 +6,7 @@ export * from "./curl-validator";
 export * from "./platform-instructions";
 export * from "./database";
 export * from "./odoo";
+export * from "./calendar";
 export * from "./chat-constants";
 export * from "./platform";
 export * from "./analytics";
