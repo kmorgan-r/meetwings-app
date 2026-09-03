@@ -3,6 +3,7 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod graph;
 mod meeting_detect;
 mod shortcuts;
 mod window;

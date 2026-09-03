@@ -43,6 +43,27 @@ tokio = { version = "1.0", features = ["full"] }
 once_cell = "1.19.0"
 uuid = { version = "1.0", features = ["v4"] }
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+# Graph OAuth. `base64` (0.22) is already present above and covers the
+# URL-safe encoding PKCE needs; `reqwest` covers the token and data calls.
+sha2 = "0.10"           # PKCE S256 challenge
+rand = "0.8"            # verifier, state, nonce - CSPRNG, never a counter
+url = "2"               # authorize-URL construction and callback parsing
+# refresh token at rest. Probe 2 (Task 1) found no Rust-side API on
+# tauri-plugin-keychain on desktop, so this crate carries the keychain
+# instead. keyring 3.x has NO default platform backend - every OS store is
+# gated behind an explicit feature, and with none enabled it silently falls
+# back to an in-memory mock (keyring-3.6.3/src/lib.rs: `not(feature =
+# "windows-native")` etc. each `pub use mock as default`), which would make
+# "at rest" actually mean "until process exit." windows-native/apple-native
+# pull only additional Rust deps (windows-sys / security-framework), so
+# enabling both here is safe regardless of the host platform doing the
+# build; the crate's own manifest target-gates their transitive deps.
+# Linux is deliberately left on the mock fallback: its only persistent
+# option (sync-secret-service) pulls dbus-secret-service, which needs
+# libdbus at build time - an unverified CI/runtime dependency this task
+# does not add unilaterally. FINDING for the controller: decide the Linux
+# keychain backend before Task 7 ships a Linux build.
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
 dotenv = "0.15"
 futures-util = "0.3"
 anyhow = "1.0"
