@@ -116,13 +116,20 @@ pub struct Session {
     pub generation: u64,
 }
 
-/// **Lock order, strictly outermost first:** `refresh_op` -> `persist_op` ->
-/// `session` -> `session_only`. Every function in this module that takes more
-/// than one of these follows this order; nothing ever acquires a later one
-/// and then tries to acquire an earlier one. `graph_disconnect` takes
-/// `persist_op` -> `session` -> `session_only` - a prefix of the same order -
-/// so it can never deadlock against `refresh_and_adopt`, which is the only
-/// function that ever takes `refresh_op`.
+/// **Lock invariant:** `persist_op` and `refresh_op` are always outermost -
+/// each is held for its whole function body (`refresh_op` even across an
+/// `.await`; see its own doc comment). `session` and `session_only` are
+/// never held AT THE SAME TIME, so there is no ordering between them to
+/// violate: nothing anywhere in this module - production code or tests -
+/// ever takes one of the two while already holding the other. In the
+/// production code (outside `mod tests`), only `clear_session`, `adopt`, and
+/// `fresh_access_token` bind either to a local variable for their own body;
+/// every other acquisition is a statement-scoped temporary that drops
+/// immediately. `forget_refresh_token_with` reads `session_only` and only
+/// then takes `session` (via `clear_session`) - the reverse of the order an
+/// earlier version of this comment claimed was universal - and that is
+/// harmless for exactly this reason: the two locks are never nested, in
+/// either direction.
 #[derive(Default)]
 pub struct GraphState {
     pub session: Mutex<Session>,
@@ -405,20 +412,37 @@ fn fresh_access_token(state: &GraphState) -> Option<String> {
 /// doc comment for the full lock order, which is why this function is free to
 /// call `adopt_and_persist` (itself taking `persist_op`) while still holding
 /// `refresh_op`.
+///
+/// `stale` is the access token the caller already knows is no good - `None`
+/// at the initial call site (there is no prior token to disbelieve), and
+/// `Some(&access)` at the 401-retry call site, carrying the token that was
+/// just rejected. It exists because local expiry (`expires_at_ms`, set ~55
+/// minutes out) is not cleared on a 401: without `stale`, the post-lock
+/// re-read below would find that same rejected token still sitting in
+/// memory, still locally "fresh", and hand it straight back - turning the
+/// mandated refresh-and-retry into a no-op that reproduces the identical 401
+/// for up to that long. See `graph_current_meetings`'s retry arm for the
+/// full consequence.
 async fn refresh_and_adopt(
     state: &GraphState,
     authority: &str,
     client_id: &str,
     generation: u64,
+    stale: Option<&str>,
 ) -> Result<String, String> {
     let _refresh_guard = state.refresh_op.lock().await;
 
     // Re-read AFTER acquiring the lock: a call that was waiting here may have
-    // queued behind one that already redeemed and adopted a fresh token. If
-    // memory now holds one that has not expired, use it instead of redeeming
-    // the stored refresh token a second time.
+    // queued behind one that already redeemed and adopted a fresh token. Take
+    // the shortcut only when memory now holds a token DIFFERENT from `stale`
+    // - proof that a concurrent winner adopted something new, not just that
+    // the caller's own already-rejected token is still sitting there
+    // unexpired. Redeeming the stored refresh token a second time is skipped
+    // only in that first case.
     if let Some(token) = fresh_access_token(state) {
-        return Ok(token);
+        if Some(token.as_str()) != stale {
+            return Ok(token);
+        }
     }
 
     let stored = stored_refresh_token(state)?;
@@ -575,9 +599,11 @@ pub async fn graph_current_meetings(
     let mut token = fresh_access_token(&state);
 
     // BOTH refresh sites go through refresh_and_adopt, which is what makes the
-    // invalid_grant handling identical between them.
+    // invalid_grant handling identical between them. `stale: None` here -
+    // there is no prior token at this call site for the post-lock re-read to
+    // mistake for a live one.
     if token.is_none() {
-        token = Some(refresh_and_adopt(&state, &authority, &client_id, generation).await?);
+        token = Some(refresh_and_adopt(&state, &authority, &client_id, generation, None).await?);
     }
 
     let access = token.ok_or_else(|| NOT_CONNECTED.to_string())?;
@@ -586,8 +612,22 @@ pub async fn graph_current_meetings(
         // ONE refresh-and-retry on a 401, then give up. A second 401 after a
         // fresh token is a real authorization failure - scopes or tenant
         // policy changed - and the refresh token is RETAINED.
+        //
+        // `stale: Some(&access)` - the token that was JUST rejected - is what
+        // makes this a real retry rather than a no-op. `access` stays locally
+        // "fresh" for up to ~55 more minutes (a 401 never clears
+        // `expires_at_ms`), so without `stale` the post-lock re-read inside
+        // `refresh_and_adopt` would find that same rejected token still in
+        // memory and hand it straight back, and this arm would refetch with
+        // the identical token Graph just refused, reproducing the identical
+        // 401. Passing `stale` forces `refresh_and_adopt` to tell "a
+        // concurrent call already adopted something new" (shortcut fires)
+        // apart from "memory still holds what I had rejected" (shortcut
+        // skipped, a real redemption is attempted).
         Err(code) if code == AUTH_REJECTED => {
-            let refreshed = refresh_and_adopt(&state, &authority, &client_id, generation).await?;
+            let refreshed =
+                refresh_and_adopt(&state, &authority, &client_id, generation, Some(&access))
+                    .await?;
             calendar::fetch_calendar_view(&refreshed, &start_iso, &end_iso).await?
         }
         Err(code) => return Err(code),
@@ -1014,12 +1054,13 @@ mod tests {
     /// token endpoint, so the FIRST call is simulated directly: it adopts a
     /// fresh token via `adopt_and_persist_with`, exactly as a real
     /// `refresh_and_adopt` would have. The SECOND call goes through the real
-    /// `refresh_and_adopt`, with the authority pointed at a loopback address
-    /// nothing listens on: if the post-lock re-read were missing or broken,
-    /// this call would fall through to `auth::refresh` and fail with NETWORK
-    /// (see `post_token_maps_a_refused_connection_to_network` in auth.rs,
-    /// which dials the same address) instead of returning the token the first
-    /// call already adopted.
+    /// `refresh_and_adopt`, with `stale: None` (the initial call site's case
+    /// - there is no prior token to disbelieve) and the authority pointed at
+    /// a loopback address nothing listens on: if the post-lock re-read were
+    /// missing or broken, this call would fall through to `auth::refresh` and
+    /// fail with NETWORK (see `post_token_maps_a_refused_connection_to_network`
+    /// in auth.rs, which dials the same address) instead of returning the
+    /// token the first call already adopted.
     #[tokio::test]
     async fn refresh_and_adopt_finds_a_token_another_call_already_adopted_and_does_not_redeem_again(
     ) {
@@ -1036,7 +1077,74 @@ mod tests {
             Ok(())
         );
 
-        let result = refresh_and_adopt(&state, "https://127.0.0.1:1", "client-1", generation).await;
+        let result =
+            refresh_and_adopt(&state, "https://127.0.0.1:1", "client-1", generation, None).await;
         assert_eq!(result, Ok("already-fresh".to_string()));
+    }
+
+    /// The bug this whole parameter exists to fix: the 401-retry call site
+    /// passes `stale: Some(&access)`, the token that was just rejected. If
+    /// memory still holds exactly that token - because a 401 never clears
+    /// `expires_at_ms`, so `fresh_access_token` still calls it "fresh" - the
+    /// post-lock shortcut must NOT fire. It must fall through to a real
+    /// redemption attempt, which (same loopback trick as the sibling test
+    /// above) fails with NETWORK rather than silently handing back the
+    /// rejected token and turning the mandated retry into a no-op.
+    #[tokio::test]
+    async fn refresh_and_adopt_does_not_shortcut_on_the_token_the_caller_just_had_rejected() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "rejected-but-locally-unexpired".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rt".into()),
+            id_token: None,
+        };
+        assert_eq!(
+            adopt_and_persist_with(&state, &tokens, generation, |_| Ok(())),
+            Ok(())
+        );
+
+        let result = refresh_and_adopt(
+            &state,
+            "https://127.0.0.1:1",
+            "client-1",
+            generation,
+            Some("rejected-but-locally-unexpired"),
+        )
+        .await;
+        assert_eq!(result, Err(NETWORK.to_string()));
+    }
+
+    /// Pins the comparison to the STALE value specifically, not to
+    /// `stale.is_some()`. Memory holds a token different from `stale`, so the
+    /// concurrent-winner shortcut this parameter must not disable still
+    /// fires - proving a naive `if stale.is_none()` implementation (which
+    /// would also pass the two tests above) is wrong: it would silently skip
+    /// the shortcut, and re-redeem, on every single retry.
+    #[tokio::test]
+    async fn refresh_and_adopt_still_takes_the_shortcut_when_memory_holds_a_different_token() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "adopted-by-a-concurrent-winner".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rt".into()),
+            id_token: None,
+        };
+        assert_eq!(
+            adopt_and_persist_with(&state, &tokens, generation, |_| Ok(())),
+            Ok(())
+        );
+
+        let result = refresh_and_adopt(
+            &state,
+            "https://127.0.0.1:1",
+            "client-1",
+            generation,
+            Some("some-other-token"),
+        )
+        .await;
+        assert_eq!(result, Ok("adopted-by-a-concurrent-winner".to_string()));
     }
 }
