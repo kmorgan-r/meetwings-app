@@ -87,6 +87,415 @@ pub const NETWORK: &str = "GRAPH_NETWORK";
 #[allow(dead_code)]
 pub const NO_KEYCHAIN: &str = "GRAPH_NO_KEYCHAIN";
 
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
+
+/// The access token lives HERE and nowhere else - process memory, never
+/// plugin-store, never localStorage, never a log line.
+#[derive(Default)]
+pub struct Session {
+    pub access_token: Option<String>,
+    pub expires_at_ms: i64,
+    /**
+     * The refresh token IN MEMORY - the session-only path's only copy.
+     *
+     * On Linux with no keychain service nothing is written to disk, so without
+     * this field the connection would die at ACCESS-token expiry (~55 minutes)
+     * rather than at app quit. The spec says re-authenticate each LAUNCH.
+     *
+     * On the normal path this mirrors the keychain entry, and the refresh path
+     * reads memory first so a keychain hiccup mid-session does not force a
+     * reconnect.
+     */
+    pub refresh_token: Option<String>,
+    pub own_address: Option<String>,
+    /// Bumped by disconnect. An in-flight call captures it before awaiting and
+    /// discards its result if the value moved - which is how "aborts in-flight
+    /// calls" is delivered without cancellation tokens threaded everywhere.
+    pub generation: u64,
+}
+
+#[derive(Default)]
+pub struct GraphState {
+    pub session: Mutex<Session>,
+    /// True when no keychain service was available: the connection works for
+    /// this launch and NOTHING is written to disk.
+    pub session_only: Mutex<bool>,
+}
+
+impl GraphState {
+    pub fn clear_session(&self) {
+        let mut session = self.session.lock().unwrap();
+        session.access_token = None;
+        session.refresh_token = None;
+        session.expires_at_ms = 0;
+        session.own_address = None;
+        session.generation = session.generation.wrapping_add(1);
+    }
+
+    /// Returns `Err` when the keychain cannot be READ.
+    ///
+    /// It must not collapse that into `connected: false`. `matches!(load(),
+    /// Ok(Some(_)))` treats a real read failure as "disconnected", so a
+    /// genuinely connected user hits a transient keychain problem, gets
+    /// `connected: false` with no error anywhere, and the calendar block simply
+    /// VANISHES (`present` goes false in Task 13) instead of saying anything.
+    /// A feature that disappears silently is indistinguishable from one that
+    /// was never set up.
+    pub fn status(&self) -> Result<GraphStatus, String> {
+        let session_only = *self.session_only.lock().unwrap();
+        // The REFRESH token, not the access token: a connection whose access
+        // token has expired is still connected - the next call refreshes.
+        // Testing the access token would report a disconnection roughly every
+        // 55 minutes.
+        let in_memory = self.session.lock().unwrap().refresh_token.is_some();
+        // Memory first, and on the session-only path memory is all there is.
+        let connected = if session_only || in_memory {
+            in_memory
+        } else {
+            keychain::load_refresh_token()?.is_some()
+        };
+        Ok(GraphStatus {
+            connected,
+            session_only,
+        })
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Adopt a freshly obtained token set into the session.
+///
+/// Returns `false` when a disconnect landed while the caller was awaiting -
+/// the generation moved, so these tokens belong to a connection the user has
+/// since destroyed. The caller must then write NOTHING, keychain included.
+///
+/// Checking the generation INSIDE the lock is what makes this sound: a caller
+/// that checked first and adopted second would race the very disconnect it is
+/// trying to observe.
+fn adopt(state: &GraphState, tokens: &auth::Tokens, generation: u64) -> bool {
+    let mut session = state.session.lock().unwrap();
+    if session.generation != generation {
+        return false;
+    }
+    session.access_token = Some(tokens.access_token.clone());
+    session.expires_at_ms = tokens.expires_at_ms;
+    // Entra ROTATES on every redemption; `None` means this response carried no
+    // new one, so the existing value stands rather than being cleared.
+    if tokens.refresh_token.is_some() {
+        session.refresh_token = tokens.refresh_token.clone();
+    }
+    if let Some(id_token) = &tokens.id_token {
+        if let Some(address) = auth::own_address_from_id_token(id_token) {
+            session.own_address = Some(address);
+        }
+    }
+    true
+}
+
+/// Adopt into MEMORY first, persist SECOND, and never let a persist failure
+/// throw away a credential we already hold.
+///
+/// Three separate rules live here, each of which was a defect when this was an
+/// inline `persist_rotated(&tokens)?; adopt(&state, &tokens);` pair:
+///
+/// 1. **A disconnect that landed mid-flight wins.** `adopt` returning false
+///    means the user disconnected while we were awaiting; persisting anyway
+///    would REWRITE the keychain entry they just destroyed and leave `status()`
+///    reporting connected again after a disconnect that appeared to succeed.
+/// 2. **Session-only never touches disk.** The write is skipped, not attempted
+///    and ignored - `persist_rotated` would fail and its `?` would abort the
+///    whole call, so every request after access-token expiry died on the one
+///    platform where the refuse-to-persist rule applies.
+/// 3. **A persist failure degrades; it does not discard.** `available()` is a
+///    heuristic over error variants (see keychain.rs), so it can be wrong, and
+///    the keychain can also go away mid-session. We already hold working tokens
+///    in memory at this point - falling back to session-only keeps the user
+///    working until quit, where propagating the error would throw away a
+///    credential that is fine.
+fn adopt_and_persist(
+    state: &GraphState,
+    tokens: &auth::Tokens,
+    generation: u64,
+) -> Result<(), String> {
+    if !adopt(state, tokens, generation) {
+        return Err(NOT_CONNECTED.to_string());
+    }
+    if *state.session_only.lock().unwrap() {
+        return Ok(());
+    }
+    if auth::persist_rotated(tokens).is_err() {
+        *state.session_only.lock().unwrap() = true;
+    }
+    Ok(())
+}
+
+/// The shared clear-and-decide sequence behind both `forget_refresh_token`
+/// (called on an explicit `invalid_grant`) and `graph_disconnect` (called on a
+/// user-initiated disconnect).
+///
+/// Memory is cleared first and unconditionally, before `delete` - whatever the
+/// keychain does, a token this caller has decided to discard must not survive
+/// in this process. On the session-only path `delete` is never invoked at all:
+/// `available()` was false at connect, so a real keychain call would always
+/// error, and Disconnect/forget would be impossible on exactly the platform
+/// where memory holds the ONLY copy of the credential. Otherwise `delete`'s
+/// result is propagated rather than discarded with `let _ =` - a silently
+/// failed delete leaves a token on disk while memory says disconnected, so the
+/// next launch reads it straight back with nothing telling the user why.
+///
+/// `delete` is injected rather than calling `keychain::delete_refresh_token`
+/// directly so tests can prove BOTH halves of the contract - that it runs
+/// exactly once on the normal path, and NOT AT ALL on the session-only path -
+/// without any test touching a real keychain entry. A pure-function extraction
+/// (returning "should delete: bool" for a caller to act on) would not do this:
+/// the defect this seam guards against lives in whether `delete` actually gets
+/// invoked, which only a fake in the dispatch position can observe.
+fn forget_refresh_token_with(
+    state: &GraphState,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let was_session_only = *state.session_only.lock().unwrap();
+    state.clear_session();
+    if was_session_only {
+        return Ok(());
+    }
+    delete()
+}
+
+/// Called ONLY on an explicit `invalid_grant` - the one response that proves
+/// the refresh token is genuinely dead. See `forget_refresh_token_with` for
+/// the clear-then-delete sequence this wraps with the real keychain call.
+fn forget_refresh_token(state: &GraphState) -> Result<(), String> {
+    forget_refresh_token_with(state, keychain::delete_refresh_token)
+}
+
+/// The ONE refresh path. Both call sites in `graph_current_meetings` go through
+/// it, which is what keeps the `invalid_grant` handling identical between them.
+///
+/// The earlier draft special-cased AUTH_EXPIRED at the first call site and used
+/// a bare `?` at the second, so a refresh token revoked at the same moment as
+/// the access token - a password change, the single commonest cause - left the
+/// dead credential sitting in the keychain forever.
+async fn refresh_and_adopt(
+    state: &GraphState,
+    authority: &str,
+    client_id: &str,
+    generation: u64,
+) -> Result<String, String> {
+    let stored = stored_refresh_token(state)?;
+    let tokens = match auth::refresh(authority, client_id, &stored, now_ms()).await {
+        Ok(tokens) => tokens,
+        Err(code) if code == AUTH_EXPIRED => {
+            // A keychain failure while forgetting is surfaced, not swallowed:
+            // "your credential is dead AND it is stuck on disk" is a different
+            // problem from "reconnect", and the user can act on it.
+            forget_refresh_token(state)?;
+            return Err(AUTH_EXPIRED.to_string());
+        }
+        Err(code) => return Err(code),
+    };
+    let access = tokens.access_token.clone();
+    adopt_and_persist(state, &tokens, generation)?;
+    Ok(access)
+}
+
+/// MEMORY FIRST, then the keychain.
+///
+/// The session-only path (Linux with no keychain service) has no keychain
+/// entry at all, so a keychain-only read would strand it at access-token
+/// expiry. On the normal path memory and keychain hold the same value, and
+/// preferring memory also survives a transient keychain failure mid-session.
+fn stored_refresh_token(state: &GraphState) -> Result<String, String> {
+    if let Some(token) = state.session.lock().unwrap().refresh_token.clone() {
+        return Ok(token);
+    }
+    if *state.session_only.lock().unwrap() {
+        // Nothing was ever written to disk, so there is nothing to fall back
+        // to - this is the re-authenticate-each-launch state.
+        return Err(NOT_CONNECTED.to_string());
+    }
+    keychain::load_refresh_token()?.ok_or_else(|| NOT_CONNECTED.to_string())
+}
+
+#[tauri::command]
+pub async fn graph_connect(
+    app: AppHandle,
+    client_id: String,
+    authority: String,
+) -> Result<GraphStatus, String> {
+    let state = app.state::<GraphState>();
+
+    // Bind BEFORE opening the browser: the redirect URI must carry the real
+    // port, and a bind failure must not leave a consent screen with nowhere
+    // to land.
+    let (port, rx) = auth::listen_once(auth::LISTENER_TIMEOUT)?;
+    let pkce = auth::new_pkce();
+    let expected_state = auth::random_token(24);
+    let expected_nonce = auth::random_token(24);
+
+    // Returns Err on a malformed or non-https authority - the user typed it,
+    // and it is the host that will receive the code, the verifier and the
+    // refresh token. Nothing is opened until it is validated.
+    let url = auth::authorize_url(
+        &authority,
+        &client_id,
+        port,
+        &pkce.challenge,
+        &expected_state,
+        &expected_nonce,
+    )?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| NETWORK.to_string())?;
+
+    // Read the channel EXACTLY ONCE. There is no "already delivered" guard
+    // downstream - the watchdog/success race in `listen_once` is safe by
+    // TIMING, not by construction, and a stale watchdog can dial a RECYCLED
+    // ephemeral port belonging to a later listener and deliver a spurious
+    // empty `Ok` into this channel. A second read, or a loop, would risk
+    // consuming that spurious delivery as if it were real.
+    //
+    // An empty `Callback` (all fields `None`, as `listen_once` sends on a
+    // parse failure or a recycled-port race) fails closed here with no extra
+    // guard needed: its `state` is `None`, and `validate_state` below rejects
+    // a `None` state exactly like a mismatched one.
+    let callback = tauri::async_runtime::spawn_blocking(move || rx.recv())
+        .await
+        .map_err(|_| NETWORK.to_string())?
+        .map_err(|_| AUTH_CANCELLED.to_string())??;
+
+    if let Some(error) = &callback.error {
+        return Err(auth::classify_callback_error(error).to_string());
+    }
+    // Validated BEFORE the code is redeemed - a mismatch sends nothing to the
+    // token endpoint.
+    auth::validate_state(&expected_state, callback.state.as_deref())?;
+    let code = callback.code.ok_or_else(|| AUTH_CANCELLED.to_string())?;
+
+    let tokens = auth::exchange_code(
+        &authority,
+        &client_id,
+        &code,
+        &pkce.verifier,
+        port,
+        now_ms(),
+    )
+    .await?;
+
+    // The nonce binds this ID token to this authorize request. An ABSENT id
+    // token is a rejection, not a skip - see auth::validate_nonce.
+    auth::validate_nonce(&expected_nonce, tokens.id_token.as_deref())?;
+
+    // `available()` is only the fast path. adopt_and_persist degrades to
+    // session-only if the write fails anyway, so a wrong guess here costs
+    // nothing - where propagating a persist failure would discard a credential
+    // we have already paid for the browser round trip to obtain, forcing the
+    // user through the whole flow again.
+    *state.session_only.lock().unwrap() = !keychain::available();
+    let generation = state.session.lock().unwrap().generation;
+    adopt_and_persist(&state, &tokens, generation)?;
+    state.status()
+}
+
+#[tauri::command]
+pub async fn graph_disconnect(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<GraphState>();
+
+    // Routed through the same clear-then-delete sequence `forget_refresh_token`
+    // uses, rather than hand-copied: the two functions differ only in that
+    // this one also resets `session_only` to `false` afterwards, and that
+    // reset is a no-op on every path that matters. On the session-only branch
+    // `forget_refresh_token_with` returns before any delete, so there is no
+    // delete for the reset to race; on the normal branch the flag is already
+    // `false`, so setting it again after `delete()` rather than before is
+    // unobservable. Doing it after (rather than threading it through the seam)
+    // keeps the seam's contract - clear memory, then run `delete` or not -
+    // free of a disconnect-specific detail the forget-on-invalid_grant path
+    // has no use for.
+    let result = forget_refresh_token_with(&state, keychain::delete_refresh_token);
+    *state.session_only.lock().unwrap() = false;
+    result
+}
+
+#[tauri::command]
+pub fn graph_status(app: AppHandle) -> Result<GraphStatus, String> {
+    app.state::<GraphState>().status()
+}
+
+#[tauri::command]
+pub async fn graph_current_meetings(
+    app: AppHandle,
+    client_id: String,
+    authority: String,
+    start_iso: String,
+    end_iso: String,
+) -> Result<CurrentMeetings, String> {
+    let state = app.state::<GraphState>();
+    let generation = state.session.lock().unwrap().generation;
+
+    let mut token = {
+        let session = state.session.lock().unwrap();
+        match &session.access_token {
+            Some(token) if session.expires_at_ms > now_ms() => Some(token.clone()),
+            _ => None,
+        }
+    };
+
+    // BOTH refresh sites go through refresh_and_adopt, which is what makes the
+    // invalid_grant handling identical between them.
+    if token.is_none() {
+        token = Some(refresh_and_adopt(&state, &authority, &client_id, generation).await?);
+    }
+
+    let access = token.ok_or_else(|| NOT_CONNECTED.to_string())?;
+    let body = match calendar::fetch_calendar_view(&access, &start_iso, &end_iso).await {
+        Ok(body) => body,
+        // ONE refresh-and-retry on a 401, then give up. A second 401 after a
+        // fresh token is a real authorization failure - scopes or tenant
+        // policy changed - and the refresh token is RETAINED.
+        Err(code) if code == AUTH_REJECTED => {
+            let refreshed = refresh_and_adopt(&state, &authority, &client_id, generation).await?;
+            calendar::fetch_calendar_view(&refreshed, &start_iso, &end_iso).await?
+        }
+        Err(code) => return Err(code),
+    };
+
+    // A disconnect that landed while this was in flight invalidates the
+    // result: returning it would answer a question the user has withdrawn.
+    //
+    // This check is now a BACKSTOP rather than the only guard. `adopt` makes
+    // the same comparison under the session lock before writing anything, so a
+    // disconnect can no longer be undone by a refresh that was already in the
+    // air - which is what this check alone, sitting after the fetch, allowed.
+    if state.session.lock().unwrap().generation != generation {
+        return Err(NOT_CONNECTED.to_string());
+    }
+
+    // **DEVIATION from the task brief, reported per its instructions:** the
+    // brief's verbatim form read `own_address` inline inside the
+    // `CurrentMeetings { .. }` struct literal that is this function's tail
+    // expression. That does not compile (E0597): the `MutexGuard` temporary
+    // this produces is, per the tail-expression drop-order rule, kept alive
+    // until after `state` itself would be dropped at the end of the block,
+    // which the borrow checker rejects even though nothing here actually
+    // depends on `state` outliving the guard. Hoisting the read into its own
+    // `let` - the same pattern `generation` already uses a few lines up -
+    // drops the guard immediately, before `state` goes out of scope, and
+    // sidesteps the conflict entirely.
+    let own_address = state.session.lock().unwrap().own_address.clone();
+    Ok(CurrentMeetings {
+        own_address,
+        events: calendar::parse_events(&body)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +564,204 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn disconnect_zeroes_the_in_memory_access_token() {
+        // Clearing only the keychain leaves a live token in Rust memory that
+        // keeps working until its expiry - a disconnect that does not
+        // disconnect.
+        let state = GraphState::default();
+        {
+            let mut session = state.session.lock().unwrap();
+            session.access_token = Some("live".into());
+            session.refresh_token = Some("also-live".into());
+            session.expires_at_ms = i64::MAX;
+            session.generation = 3;
+        }
+        state.clear_session();
+        let session = state.session.lock().unwrap();
+        assert!(session.access_token.is_none());
+        // The session-only path's ONLY copy of the refresh token lives here,
+        // so a disconnect that left it behind would not disconnect at all.
+        assert!(session.refresh_token.is_none());
+        assert_eq!(session.expires_at_ms, 0);
+        // A bumped generation is what makes an in-flight call abandon its
+        // result instead of writing it back after the disconnect.
+        assert_eq!(session.generation, 4);
+    }
+
+    #[test]
+    fn session_only_reports_disconnected_with_nothing_in_memory() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        assert_eq!(
+            state.status().unwrap(),
+            GraphStatus {
+                connected: false,
+                session_only: true
+            }
+        );
+    }
+
+    /// A session-only connection lasts until app QUIT, not until access-token
+    /// expiry. Reading the access token in `status()` would report a
+    /// disconnection roughly every 55 minutes, and `stored_refresh_token`
+    /// reading only the keychain would make the next call fail outright - on
+    /// the one platform where the refuse-to-persist rule applies.
+    #[test]
+    fn session_only_survives_access_token_expiry() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        {
+            let mut session = state.session.lock().unwrap();
+            session.refresh_token = Some("in-memory-only".into());
+            session.access_token = Some("stale".into());
+            session.expires_at_ms = 0; // long expired
+        }
+        assert_eq!(
+            state.status().unwrap(),
+            GraphStatus {
+                connected: true,
+                session_only: true
+            }
+        );
+        assert_eq!(
+            stored_refresh_token(&state),
+            Ok("in-memory-only".to_string())
+        );
+    }
+
+    /// A disconnect landing while a refresh is in the air must not be undone by
+    /// that refresh completing. `adopt` compares the generation UNDER the
+    /// session lock and writes nothing on a mismatch; `adopt_and_persist` then
+    /// refuses to touch the keychain at all, so the entry the user just deleted
+    /// is not rewritten behind them.
+    #[test]
+    fn a_disconnect_mid_flight_beats_a_refresh_that_was_already_running() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        // The disconnect lands first, bumping the generation.
+        state.clear_session();
+
+        assert!(
+            !adopt(&state, &tokens, generation),
+            "stale generation must not adopt"
+        );
+        assert_eq!(
+            adopt_and_persist(&state, &tokens, generation),
+            Err(NOT_CONNECTED.to_string())
+        );
+        let session = state.session.lock().unwrap();
+        assert!(
+            session.access_token.is_none(),
+            "a disconnected session stayed disconnected"
+        );
+        assert!(session.refresh_token.is_none());
+    }
+
+    /// On the session-only path `available()` was false at connect, so any
+    /// keychain call errors. Deleting BEFORE clearing memory therefore made
+    /// Disconnect impossible on exactly the platform where memory holds the only
+    /// copy of the credential. Memory is cleared unconditionally and first.
+    ///
+    /// **Ruling 20:** this is routed through `forget_refresh_token_with` with a
+    /// spy `delete`, not through the `forget_refresh_token` wrapper. A version
+    /// that called `forget_refresh_token(&state)` directly and asserted only
+    /// `Ok(())` plus a cleared session - the test's original form - passes
+    /// identically whether or not the `if was_session_only { return Ok(()); }`
+    /// early return is even present, because `keychain::delete_refresh_token`
+    /// maps a missing entry to `Ok(())` too. That is bad on its own (the
+    /// "touches no keychain" half of this test's own name was asserted
+    /// nowhere) and worse on a developer machine that DOES have a stored
+    /// credential: the same missing early return would make `cargo test`
+    /// delete it for real. The spy below makes "untouched" an assertion, and -
+    /// unlike the wrapper - can never reach a real keychain no matter what this
+    /// test does or doesn't catch.
+    #[test]
+    fn forgetting_on_the_session_only_path_touches_no_keychain_and_clears_memory() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        state.session.lock().unwrap().refresh_token = Some("in-memory-only".into());
+
+        let delete_was_called = std::cell::Cell::new(false);
+        let result = forget_refresh_token_with(&state, || {
+            delete_was_called.set(true);
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(state.session.lock().unwrap().refresh_token.is_none());
+        assert!(
+            !delete_was_called.get(),
+            "the session-only path must never call the keychain delete"
+        );
+    }
+
+    /// The other half of the seam's contract: on the normal (non-session-only)
+    /// path, `delete` runs, and runs exactly once.
+    #[test]
+    fn forgetting_on_the_normal_path_calls_delete_exactly_once() {
+        let state = GraphState::default();
+        state.session.lock().unwrap().refresh_token = Some("stored".into());
+
+        let delete_calls = std::cell::Cell::new(0u32);
+        let result = forget_refresh_token_with(&state, || {
+            delete_calls.set(delete_calls.get() + 1);
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(delete_calls.get(), 1);
+        assert!(state.session.lock().unwrap().refresh_token.is_none());
+    }
+
+    /// A delete failure is surfaced, not swallowed - the half of the contract a
+    /// real regression is likelier to hit than the "runs at all" half above.
+    #[test]
+    fn forgetting_surfaces_a_delete_error_rather_than_swallowing_it() {
+        let state = GraphState::default();
+        state.session.lock().unwrap().refresh_token = Some("stored".into());
+
+        let result = forget_refresh_token_with(&state, || Err(NO_KEYCHAIN.to_string()));
+
+        assert_eq!(result, Err(NO_KEYCHAIN.to_string()));
+    }
+
+    /// Session-only must never write to disk, and a skipped write is not a
+    /// failure: the tokens still reach memory and the call proceeds.
+    #[test]
+    fn session_only_adopts_without_persisting() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        assert_eq!(adopt_and_persist(&state, &tokens, generation), Ok(()));
+        let session = state.session.lock().unwrap();
+        assert_eq!(session.access_token.as_deref(), Some("fresh"));
+        assert_eq!(session.refresh_token.as_deref(), Some("rotated"));
+    }
+
+    /// Nothing was written to disk, so there is nothing to fall back to. This
+    /// is the re-authenticate-each-launch state, and it must be NOT_CONNECTED
+    /// rather than a keychain error.
+    #[test]
+    fn session_only_with_no_memory_token_is_not_connected() {
+        let state = GraphState::default();
+        *state.session_only.lock().unwrap() = true;
+        assert_eq!(stored_refresh_token(&state), Err(NOT_CONNECTED.to_string()));
     }
 }

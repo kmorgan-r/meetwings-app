@@ -114,6 +114,7 @@ pub fn run() {
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
         .manage(meeting_detect::MeetingWatcherState::default())
+        .manage(graph::GraphState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -190,6 +191,10 @@ pub fn run() {
             meeting_detect::start_meeting_watcher,
             meeting_detect::stop_meeting_watcher,
             meeting_detect::get_meeting_watcher_status,
+            graph::graph_connect,
+            graph::graph_disconnect,
+            graph::graph_status,
+            graph::graph_current_meetings,
         ])
         .setup(|app| {
             // Setup main window positioning
