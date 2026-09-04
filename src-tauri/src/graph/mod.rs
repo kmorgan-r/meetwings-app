@@ -5,6 +5,7 @@
 //! `meeting_detect`.
 
 mod auth;
+mod keychain;
 
 use serde::{Deserialize, Serialize};
 

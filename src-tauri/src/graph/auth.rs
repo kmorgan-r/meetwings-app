@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use super::{AUTH_REJECTED, NETWORK};
+use super::{AUTH_EXPIRED, AUTH_REJECTED, BAD_RESPONSE, NETWORK, THROTTLED};
 
 /// `allow(dead_code)`: unused until Tasks 8, 9 and 11 wire the listener and
 /// token lifecycle that call these - same reason `graph::mod` allows its
@@ -279,6 +279,206 @@ pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, 
     });
 
     Ok((port, rx))
+}
+
+/// SEE PROBE 1 (Task 2). ReadBasic additionally withholds the meeting body -
+/// text this feature never needs and would rather not hold - so it is the
+/// default. If the probe found any filter property absent under ReadBasic,
+/// this becomes `Calendars.Read` and nothing else changes.
+#[allow(dead_code)]
+pub const GRAPH_SCOPES: &str =
+    "openid profile offline_access https://graph.microsoft.com/Calendars.ReadBasic";
+
+#[allow(dead_code)]
+pub struct Tokens {
+    pub access_token: String,
+    pub expires_at_ms: i64,
+    /// Entra ROTATES the refresh token on every redemption. `None` means the
+    /// response carried none and the caller keeps the one it has.
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+}
+
+/// The authority is FREE TEXT the user typed on the `/odoo` page, and it is the
+/// host this module sends credentials to: `post_token` POSTs the authorization
+/// code, the PKCE verifier and later the refresh token to
+/// `{authority}/oauth2/v2.0/token`. An unvalidated authority is therefore not a
+/// cosmetic problem — it is an arbitrary exfiltration target, and a plain `http`
+/// one puts those values on the wire in clear.
+///
+/// So: parse it, require `https`, and reject anything else. The previous draft
+/// used `.expect("authority is validated before this point")` when nothing
+/// validated it anywhere — a typo would have PANICKED the Rust side mid-connect,
+/// bypassing the whole GRAPH_*/redaction path this feature is built on.
+///
+/// Returning `Result` rather than validating only in the TypeScript layer is
+/// deliberate: this is the last point before credentials move, and a check that
+/// lives only on the caller's side is one refactor away from being skipped.
+#[allow(dead_code)]
+pub fn validate_authority(authority: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(authority.trim_end_matches('/')).map_err(|_| AUTH_REJECTED.to_string())?;
+    if parsed.scheme() != "https" {
+        return Err(AUTH_REJECTED.to_string());
+    }
+    if !parsed.has_host() {
+        return Err(AUTH_REJECTED.to_string());
+    }
+    Ok(parsed)
+}
+
+#[allow(dead_code)]
+pub fn authorize_url(
+    authority: &str,
+    client_id: &str,
+    port: u16,
+    challenge: &str,
+    state: &str,
+    nonce: &str,
+) -> Result<String, String> {
+    let redirect = format!("http://127.0.0.1:{port}");
+    let base = validate_authority(authority)?;
+    let mut url = url::Url::parse(&format!("{}/oauth2/v2.0/authorize", base.as_str().trim_end_matches('/')))
+        .map_err(|_| AUTH_REJECTED.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("client_id", client_id)
+        .append_pair("response_type", "code")
+        .append_pair("redirect_uri", &redirect)
+        .append_pair("response_mode", "query")
+        .append_pair("scope", GRAPH_SCOPES)
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state)
+        .append_pair("nonce", nonce);
+    Ok(url.to_string())
+}
+
+/// ONLY `invalid_grant` proves the refresh token is dead (revoked, expired,
+/// password changed). Everything else RETAINS it: destroying a working ~90-day
+/// credential over a transport blip can need an administrator to undo, in a
+/// consent-blocked tenant.
+#[allow(dead_code)]
+pub fn classify_token_error(status: u16, body: &str) -> &'static str {
+    if status == 429 {
+        return THROTTLED;
+    }
+    if status >= 500 {
+        return NETWORK;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return AUTH_REJECTED;
+    };
+    match json.get("error").and_then(|v| v.as_str()) {
+        Some("invalid_grant") => AUTH_EXPIRED,
+        Some("consent_required") | Some("interaction_required")
+        | Some("admin_consent_required") => CONSENT_REQUIRED,
+        _ => AUTH_REJECTED,
+    }
+}
+
+async fn post_token(
+    authority: &str,
+    form: &[(&str, &str)],
+    now_ms: i64,
+) -> Result<Tokens, String> {
+    // Validated HERE too, not only in authorize_url. This is the call that
+    // actually carries the authorization code, the PKCE verifier and the
+    // refresh token, so it does its own check rather than trusting that some
+    // earlier caller did one.
+    let base = validate_authority(authority)?;
+    let endpoint = format!("{}/oauth2/v2.0/token", base.as_str().trim_end_matches('/'));
+    // A transport failure is NETWORK, never AUTH_EXPIRED. This mapping is the
+    // one that decides whether a working credential survives a flaky café
+    // wifi.
+    let response = reqwest::Client::new()
+        .post(&endpoint)
+        .form(form)
+        .send()
+        .await
+        .map_err(|_| NETWORK.to_string())?;
+    let status = response.status().as_u16();
+    let body = response.text().await.map_err(|_| NETWORK.to_string())?;
+    if status != 200 {
+        return Err(classify_token_error(status, &body).to_string());
+    }
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| BAD_RESPONSE.to_string())?;
+    let access_token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| BAD_RESPONSE.to_string())?
+        .to_string();
+    let expires_in = json.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    Ok(Tokens {
+        access_token,
+        // 60s of slack so a call started just under the wire does not race the
+        // expiry it just checked.
+        expires_at_ms: now_ms + (expires_in - 60).max(0) * 1000,
+        refresh_token: json
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        id_token: json.get("id_token").and_then(|v| v.as_str()).map(str::to_string),
+    })
+}
+
+#[allow(dead_code)]
+pub async fn exchange_code(
+    authority: &str,
+    client_id: &str,
+    code: &str,
+    verifier: &str,
+    port: u16,
+    now_ms: i64,
+) -> Result<Tokens, String> {
+    let redirect = format!("http://127.0.0.1:{port}");
+    post_token(
+        authority,
+        &[
+            ("client_id", client_id),
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &redirect),
+            ("code_verifier", verifier),
+            ("scope", GRAPH_SCOPES),
+        ],
+        now_ms,
+    )
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn refresh(
+    authority: &str,
+    client_id: &str,
+    refresh_token: &str,
+    now_ms: i64,
+) -> Result<Tokens, String> {
+    post_token(
+        authority,
+        &[
+            ("client_id", client_id),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("scope", GRAPH_SCOPES),
+        ],
+        now_ms,
+    )
+    .await
+}
+
+/// Rotation: WRITE THE NEW TOKEN BEFORE DELETING THE OLD ONE.
+///
+/// keyring's set_password overwrites the same entry, so there is no separate
+/// delete to order wrongly - but the ordering is stated because a future
+/// backend with distinct create/delete calls must preserve it. Deleting first
+/// and then failing the write leaves the user with no credential and no way
+/// back.
+#[allow(dead_code)]
+pub fn persist_rotated(tokens: &Tokens) -> Result<(), String> {
+    match &tokens.refresh_token {
+        Some(token) => super::keychain::store_refresh_token(token),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -586,5 +786,98 @@ mod tests {
                 "a callback arriving after the timeout was redeemed"
             );
         }
+    }
+
+    // The three-way split is load-bearing, not bookkeeping. A test that only
+    // asserted "auth failure clears the token" would lock in the exact defect
+    // the spec corrected.
+    #[test]
+    fn only_invalid_grant_means_the_refresh_token_is_dead() {
+        assert_eq!(
+            classify_token_error(400, r#"{"error":"invalid_grant"}"#),
+            AUTH_EXPIRED
+        );
+        assert_eq!(
+            classify_token_error(400, r#"{"error":"consent_required"}"#),
+            CONSENT_REQUIRED
+        );
+        assert_eq!(
+            classify_token_error(400, r#"{"error":"invalid_client"}"#),
+            AUTH_REJECTED
+        );
+        assert_eq!(classify_token_error(429, "{}"), THROTTLED);
+        assert_eq!(classify_token_error(503, "{}"), NETWORK);
+        // A body that is not JSON at all is unusable, not a dead credential.
+        assert_eq!(classify_token_error(400, "<html>"), AUTH_REJECTED);
+    }
+
+    /// The authority is the host this module POSTs the auth code, the PKCE
+    /// verifier and later the refresh token to. An unvalidated one is an
+    /// arbitrary exfiltration target, and a plain-http one puts those values on
+    /// the wire in clear - so anything that is not an absolute https URL with a
+    /// host is rejected BEFORE a browser is ever opened.
+    #[test]
+    fn a_non_https_or_malformed_authority_is_rejected_not_panicked_on() {
+        for bad in [
+            "login.microsoftonline.com/organizations", // no scheme - the typo case
+            "http://login.microsoftonline.com/organizations", // clear text
+            "ftp://example.test",
+            "https://",  // no host
+            "",
+            "not a url",
+        ] {
+            assert_eq!(
+                validate_authority(bad),
+                Err(AUTH_REJECTED.to_string()),
+                "authority {bad:?} must be rejected"
+            );
+            assert!(
+                authorize_url(bad, "client-1", 8123, "c", "s", "n").is_err(),
+                "authorize_url must return Err, never panic, for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorize_url_carries_pkce_state_nonce_and_the_loopback_redirect() {
+        let url = authorize_url(
+            "https://login.microsoftonline.com/organizations",
+            "client-1",
+            8123,
+            "challenge-x",
+            "state-y",
+            "nonce-z",
+        )
+        .expect("a well-formed https authority");
+        assert!(url.starts_with(
+            "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"
+        ));
+        for expected in [
+            "client_id=client-1",
+            "response_type=code",
+            "code_challenge=challenge-x",
+            "code_challenge_method=S256",
+            "state=state-y",
+            "nonce=nonce-z",
+            // Literal 127.0.0.1, percent-encoded in the query.
+            "redirect_uri=http%3A%2F%2F127.0.0.1%3A8123",
+            // openid and profile are requested EXPLICITLY - the own-address
+            // exclusion depends on the ID token carrying a username claim.
+            "openid",
+            "profile",
+            "offline_access",
+        ] {
+            assert!(url.contains(expected), "authorize URL is missing {expected}");
+        }
+        assert!(!url.contains("localhost"));
+    }
+
+    #[test]
+    fn scopes_request_exactly_one_calendars_permission() {
+        let calendars: Vec<&str> = GRAPH_SCOPES
+            .split_whitespace()
+            .filter(|s| s.contains("Calendars."))
+            .collect();
+        assert_eq!(calendars.len(), 1, "exactly one Calendars scope: {calendars:?}");
     }
 }
