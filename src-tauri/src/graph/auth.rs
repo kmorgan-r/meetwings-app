@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use super::AUTH_REJECTED;
+use super::{AUTH_REJECTED, NETWORK};
 
 /// `allow(dead_code)`: unused until Tasks 8, 9 and 11 wire the listener and
 /// token lifecycle that call these - same reason `graph::mod` allows its
@@ -98,9 +98,163 @@ pub fn own_address_from_id_token(id_token: &str) -> Option<String> {
     None
 }
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+use super::{AUTH_CANCELLED, CONSENT_REQUIRED};
+
+/// Long enough for a real consent screen with an MFA prompt, short enough that
+/// an abandoned flow does not leave a socket open all session.
+#[allow(dead_code)]
+pub const LISTENER_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Callback {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.replace('+', " ").into_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parses `GET /?code=...&state=... HTTP/1.1` - the only line of the request
+/// this listener reads. Anything it cannot parse yields an empty Callback,
+/// which the caller treats as a rejected redemption rather than a success.
+#[allow(dead_code)]
+pub fn parse_callback(request_line: &str) -> Callback {
+    let mut callback = Callback::default();
+    let Some(target) = request_line.split_whitespace().nth(1) else {
+        return callback;
+    };
+    let Some((_, query)) = target.split_once('?') else {
+        return callback;
+    };
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let decoded = percent_decode(value);
+        match key {
+            "code" => callback.code = Some(decoded),
+            "state" => callback.state = Some(decoded),
+            "error" => callback.error = Some(decoded),
+            _ => {}
+        }
+    }
+    callback
+}
+
+/// `access_denied` is the user clicking Cancel. It is the COMMONEST outcome of
+/// this flow and it is not a failure.
+#[allow(dead_code)]
+pub fn classify_callback_error(error: &str) -> &'static str {
+    match error {
+        "access_denied" => AUTH_CANCELLED,
+        "consent_required" | "interaction_required" | "admin_consent_required" => CONSENT_REQUIRED,
+        _ => AUTH_REJECTED,
+    }
+}
+
+/// Binds a single-use loopback listener and returns its port immediately, so
+/// the authorize URL can be built with the real redirect before the browser
+/// opens.
+///
+/// LITERAL `127.0.0.1`, never `localhost` (which can resolve to `::1` or, in a
+/// poisoned hosts file, off-box) and never `0.0.0.0` (which would accept from
+/// the network). Port 0 asks the OS for a random ephemeral port, chosen per
+/// attempt.
+///
+/// The accept loop runs EXACTLY ONCE. A second callback to a consumed listener
+/// finds nothing listening - that is the single-use property, and it is why
+/// the listener is moved into the thread rather than borrowed.
+#[allow(dead_code)]
+pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, String>>), String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| NETWORK.to_string())?;
+    let port = listener.local_addr().map_err(|_| NETWORK.to_string())?.port();
+    listener
+        .set_nonblocking(false)
+        .map_err(|_| NETWORK.to_string())?;
+
+    let (tx, rx) = mpsc::channel();
+    let timeout_tx = tx.clone();
+
+    std::thread::spawn(move || {
+        // A watchdog rather than a socket read timeout: `accept` has no
+        // per-call timeout on a blocking listener, and an abandoned flow must
+        // not hold the thread for the life of the process.
+        //
+        // The self-connect on the last line is the whole point. Sending the
+        // timeout into the channel does NOT unblock `accept`, so a watchdog
+        // that only sent would leave this thread parked and the loopback port
+        // bound until the process exits - one leaked thread and one leaked
+        // port per abandoned connect attempt. Dialling our own port wakes
+        // `accept`, which lets the thread finish and DROP the listener, which
+        // is also what makes the port genuinely stop listening after a timeout
+        // rather than merely stop being read.
+        std::thread::spawn(move || {
+            std::thread::sleep(timeout);
+            let _ = timeout_tx.send(Err(AUTH_CANCELLED.to_string()));
+            let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        });
+
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let mut reader = BufReader::new(&stream);
+                let mut request_line = String::new();
+                let outcome = match reader.read_line(&mut request_line) {
+                    Ok(_) => Ok(parse_callback(&request_line)),
+                    Err(_) => Err(NETWORK.to_string()),
+                };
+                // A static page that NEVER echoes the code back into the
+                // browser's history, title or DOM.
+                let body = "<!doctype html><meta charset=utf-8><title>Meetwings</title>\
+                            <p>You can close this tab and return to Meetwings.";
+                let mut stream = stream;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.flush();
+                let _ = tx.send(outcome);
+            }
+            Err(_) => {
+                let _ = tx.send(Err(NETWORK.to_string()));
+            }
+        }
+        // `listener` drops here. The port stops accepting: single-use.
+    });
+
+    Ok((port, rx))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// RFC 7636 Appendix B's published vector. A hand-rolled S256 that base64s
     /// the HEX digest instead of the raw bytes still "looks right" and fails
@@ -257,5 +411,113 @@ mod tests {
     fn own_address_is_none_when_neither_claim_is_present() {
         assert_eq!(own_address_from_id_token(&fake_id_token(r#"{"sub":"x"}"#)), None);
         assert_eq!(own_address_from_id_token("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn parses_the_success_callback() {
+        let cb = parse_callback("GET /?code=abc123&state=xyz HTTP/1.1");
+        assert_eq!(cb.code.as_deref(), Some("abc123"));
+        assert_eq!(cb.state.as_deref(), Some("xyz"));
+        assert!(cb.error.is_none());
+    }
+
+    #[test]
+    fn parses_percent_encoded_values() {
+        let cb = parse_callback("GET /?code=a%2Bb%2Fc&state=x%20y HTTP/1.1");
+        assert_eq!(cb.code.as_deref(), Some("a+b/c"));
+        assert_eq!(cb.state.as_deref(), Some("x y"));
+    }
+
+    #[test]
+    fn parses_the_error_callback_form() {
+        let cb = parse_callback("GET /?error=access_denied&error_description=User+cancelled HTTP/1.1");
+        assert_eq!(cb.error.as_deref(), Some("access_denied"));
+        assert!(cb.code.is_none());
+    }
+
+    #[test]
+    fn a_malformed_request_line_yields_an_empty_callback() {
+        let cb = parse_callback("garbage");
+        assert!(cb.code.is_none() && cb.state.is_none() && cb.error.is_none());
+    }
+
+    // The commonest outcome of a loopback flow is not a failure and must not
+    // be dressed as one.
+    #[test]
+    fn cancellation_forms_map_to_auth_cancelled() {
+        assert_eq!(classify_callback_error("access_denied"), AUTH_CANCELLED);
+        assert_eq!(classify_callback_error("consent_required"), CONSENT_REQUIRED);
+        assert_eq!(classify_callback_error("interaction_required"), CONSENT_REQUIRED);
+        assert_eq!(classify_callback_error("something_else"), AUTH_REJECTED);
+    }
+
+    #[test]
+    fn listener_binds_loopback_only_and_reports_its_port() {
+        let (port, _rx) = listen_once(Duration::from_millis(200)).unwrap();
+        assert!(port > 0);
+    }
+
+    /// Single-use: the accept loop runs exactly once, so a SECOND connection to
+    /// the same port after the first was consumed is never redeemed.
+    #[test]
+    fn a_second_callback_to_a_consumed_listener_is_not_redeemed() {
+        use std::io::Write;
+        use std::net::TcpStream;
+
+        let (port, rx) = listen_once(Duration::from_secs(5)).unwrap();
+        let mut first = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        first
+            .write_all(b"GET /?code=first&state=s HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let received = rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(received.code.as_deref(), Some("first"));
+
+        // The listener is dropped after one accept, so this either refuses or
+        // connects to nothing that will ever deliver a second Callback.
+        if let Ok(mut second) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = second.write_all(b"GET /?code=second&state=s HTTP/1.1\r\n\r\n");
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    }
+
+    #[test]
+    fn the_listener_times_out_rather_than_waiting_forever() {
+        let (_port, rx) = listen_once(Duration::from_millis(150)).unwrap();
+        let outcome = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome, Err(AUTH_CANCELLED.to_string()));
+    }
+
+    /// The spec's third listener case: "a second callback to a consumed OR
+    /// STALE listener is rejected, not redeemed."
+    ///
+    /// This is the one that fails against a watchdog which only messages the
+    /// channel. Sending `Err(AUTH_CANCELLED)` does not unblock `accept`, so
+    /// without the self-connect the thread stays parked, the port stays bound,
+    /// and a late callback is still accepted and parsed - the listener has
+    /// "timed out" only from the receiver's point of view.
+    #[test]
+    fn a_callback_arriving_after_the_timeout_is_not_redeemed() {
+        use std::io::Write;
+        use std::net::TcpStream;
+
+        let (port, rx) = listen_once(Duration::from_millis(150)).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(AUTH_CANCELLED.to_string())
+        );
+
+        // Give the watchdog's self-connect time to wake `accept` and drop the
+        // listener, then try to deliver a code to the dead port.
+        std::thread::sleep(Duration::from_millis(200));
+        if let Ok(mut late) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = late.write_all(b"GET /?code=late&state=s HTTP/1.1\r\n\r\n");
+        }
+        // Nothing carrying a code may ever arrive.
+        while let Ok(outcome) = rx.recv_timeout(Duration::from_millis(300)) {
+            assert!(
+                !matches!(&outcome, Ok(cb) if cb.code.is_some()),
+                "a callback arriving after the timeout was redeemed"
+            );
+        }
     }
 }
