@@ -4,6 +4,8 @@
 //! so it compiles and is unit-tested on every target - the same shape as
 //! `meeting_detect`.
 
+mod auth;
+
 use serde::{Deserialize, Serialize};
 
 /// Mirrors `src/types/calendar.ts` exactly. `rename_all = "camelCase"` is what
