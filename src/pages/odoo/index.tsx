@@ -21,6 +21,7 @@ import {
   saveOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
 import {
+  classifyGraphConfig,
   DEFAULT_AUTHORITY,
   loadGraphConfigState,
   saveGraphConfig,
@@ -399,6 +400,36 @@ export default function OdooSettings() {
     };
   }, []);
 
+  // A SEPARATE effect, deliberately not folded into the graph_status effect
+  // above. graph_status calls invoke(), which rejects in this repo's own
+  // tests and, in production, on a genuine keychain read failure - if seeding
+  // shared that try, either failure would skip the seed and leave the form
+  // blank for a user who is in fact connected, reintroducing the destructive
+  // write this whole seeding step exists to prevent (blank fields -> Connect
+  // -> saveGraphConfig overwrites the good stored config with nothing).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await loadGraphConfigState();
+        // Only `complete` seeds the form. `unreadable` does NOT - see the
+        // GraphConfigState doc comment in graph-config.storage.ts: that state
+        // carries no raw values to show back to the user, so a stored
+        // authority that fails validation renders as blank fields rather than
+        // the invalid ones. Accepted v1 limitation, not a bug to "fix" here.
+        if (!cancelled && state.state === "complete") setGraph(state.config);
+      } catch {
+        // loadGraphConfigState does not itself throw - every internal failure
+        // already collapses to a returned state - but this is best-effort
+        // form prefill, not a user-facing operation, so a failure here must
+        // never block the page or interact with the graph_status effect above.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function handleSave() {
     // The one action that can silently convince a user their credentials are
     // stored when they are not: saveOdooConfig awaits secureGet, secureSet and
@@ -489,38 +520,53 @@ export default function OdooSettings() {
    * disconnecting here would leave the overlay believing it is still connected
    * and erroring on every open. Same shape as the existing
    * `odoo-instance-changed` broadcast this page already emits.
+   *
+   * Best-effort, exactly like notifyOtherWindows above: by the time this is
+   * called the connect/disconnect has already succeeded or failed on its own
+   * terms, so a rejected emit must never relabel that outcome - and without
+   * its own try/catch a rejection here is an unhandled promise rejection,
+   * since both call sites below invoke it with `void`.
    */
-  const notifyCalendarConnectionChanged = () => emit("graph-connection-changed");
+  async function notifyCalendarConnectionChanged(): Promise<void> {
+    try {
+      await emit("graph-connection-changed");
+    } catch {
+      // best-effort; see doc comment above.
+    }
+  }
 
   async function handleConnect() {
-    const config = await (async () => {
-      try {
-        // INSIDE the try. Sitting outside it, a genuine secureSet write failure
-        // was an unhandled rejection that set no message at all, unlike every
-        // other failure path in this handler.
-        await saveGraphConfig(graph);
-        return await loadGraphConfigState();
-      } catch (err) {
-        setGraphMessage(errorStatus(reportGraphError(err, "save calendar config").code));
-        return null;
-      }
-    })();
-    if (config === null) return;
-    if (config.state === "absent") {
+    // Classified BEFORE any save, and from the in-memory form - not a
+    // save-then-reload round trip. A blank/invalid form must never reach
+    // saveGraphConfig at all: doing so would overwrite a previously-valid
+    // stored config with garbage before the error below has a chance to say
+    // anything, which is exactly the destructive write this ordering exists
+    // to prevent.
+    const classified = classifyGraphConfig(graph);
+    if (classified.state === "absent") {
       setGraphMessage(errorStatus("Enter the application (client) ID from your app registration."));
       return;
     }
-    if (config.state === "unreadable") {
+    if (classified.state === "unreadable") {
       setGraphMessage(
         errorStatus("The authority must be an https URL, e.g. " + DEFAULT_AUTHORITY)
       );
       return;
     }
     try {
+      // INSIDE its own try. Sitting outside it, a genuine secureSet write
+      // failure was an unhandled rejection that set no message at all, unlike
+      // every other failure path in this handler.
+      await saveGraphConfig(classified.config);
+    } catch (err) {
+      setGraphMessage(errorStatus(reportGraphError(err, "save calendar config").code));
+      return;
+    }
+    try {
       setGraphStatus(
         await invoke<GraphStatus>("graph_connect", {
-          clientId: config.config.clientId,
-          authority: config.config.authority,
+          clientId: classified.config.clientId,
+          authority: classified.config.authority,
         })
       );
       setGraphMessage(okStatus("Calendar connected."));
@@ -537,7 +583,7 @@ export default function OdooSettings() {
       setGraphMessage(
         report.code === "GRAPH_CONSENT_REQUIRED"
           ? infoStatus(
-              `Your tenant requires administrator consent. Send an administrator this URL: ${config.config.authority}/adminconsent?client_id=${config.config.clientId}`
+              `Your tenant requires administrator consent. Send an administrator this URL: ${classified.config.authority}/adminconsent?client_id=${classified.config.clientId}`
             )
           : report.code === "GRAPH_NO_KEYCHAIN"
             ? infoStatus(

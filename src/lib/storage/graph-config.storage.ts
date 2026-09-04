@@ -32,11 +32,49 @@ export interface GraphConfig {
  * that once worked and whose store is now corrupt - and returning `absent` for
  * it would take the whole feature away from a previously-connected user with
  * nothing on screen to say why.
+ *
+ * `unreadable` deliberately carries `config: null`, not the raw values that
+ * failed validation - this is the shape Task 13's mocks pin. The consequence
+ * is that a caller wanting to prefill a form (the /odoo page's seeding effect)
+ * cannot recover an invalid stored authority to show it back to the user; it
+ * shows blank fields instead. Accepted v1 limitation - do not widen this arm
+ * to work around it.
  */
 export type GraphConfigState =
   | { state: "absent"; config: null }
   | { state: "unreadable"; config: null }
   | { state: "complete"; config: GraphConfig };
+
+/**
+ * Pure classification of an already-parsed blob. Split out of
+ * `loadGraphConfigState` so `/odoo`'s Connect handler can classify the
+ * in-memory form the same way storage does, without a save-then-reload round
+ * trip through secure storage just to find out whether the form is complete.
+ */
+export function classifyGraphConfig(parsed: Partial<GraphConfig>): GraphConfigState {
+  const clientId = (parsed.clientId ?? "").trim();
+  // A blank client ID is "not set up yet", not corruption: the fields exist
+  // and are empty, which is exactly what a half-finished setup looks like.
+  if (clientId === "") return { state: "absent", config: null };
+
+  const authorityInput = (parsed.authority ?? "").trim();
+  // Trailing slash(es) stripped HERE, the one place both the admin-consent URL
+  // and the value passed to Rust are built from, so neither has to patch a
+  // doubled slash after the fact. Rust re-defends with the same
+  // trim_end_matches('/') at auth.rs:333 and :426; this is belt-and-braces,
+  // not the only guard.
+  const resolved = (authorityInput === "" ? DEFAULT_AUTHORITY : authorityInput).replace(
+    /\/+$/,
+    ""
+  );
+  // Validated here as well as in Rust. Rust's check is the one that actually
+  // protects the credentials (see auth::validate_authority); this one exists so
+  // the /odoo page can say something useful instead of surfacing a bare
+  // GRAPH_AUTH_REJECTED from deep in the connect flow.
+  if (!isHttpsUrl(resolved)) return { state: "unreadable", config: null };
+
+  return { state: "complete", config: { clientId, authority: resolved } };
+}
 
 export async function loadGraphConfigState(): Promise<GraphConfigState> {
   let raw: string | null;
@@ -54,20 +92,7 @@ export async function loadGraphConfigState(): Promise<GraphConfigState> {
     return { state: "unreadable", config: null };
   }
 
-  const clientId = (parsed.clientId ?? "").trim();
-  // A blank client ID is "not set up yet", not corruption: the fields exist
-  // and are empty, which is exactly what a half-finished setup looks like.
-  if (clientId === "") return { state: "absent", config: null };
-
-  const authority = (parsed.authority ?? "").trim();
-  const resolved = authority === "" ? DEFAULT_AUTHORITY : authority;
-  // Validated here as well as in Rust. Rust's check is the one that actually
-  // protects the credentials (see auth::validate_authority); this one exists so
-  // the /odoo page can say something useful instead of surfacing a bare
-  // GRAPH_AUTH_REJECTED from deep in the connect flow.
-  if (!isHttpsUrl(resolved)) return { state: "unreadable", config: null };
-
-  return { state: "complete", config: { clientId, authority: resolved } };
+  return classifyGraphConfig(parsed);
 }
 
 export function isHttpsUrl(value: string): boolean {

@@ -32,6 +32,14 @@ describe("loadGraphConfig", () => {
     await expect(loadGraphConfig()).resolves.toBeNull();
   });
 
+  // Pins the OTHER non-complete collapse: the two existing cases above cover
+  // "absent" collapsing to null, this one covers "unreadable" collapsing to
+  // null too - loadGraphConfig treats both non-complete states the same way.
+  it("returns null when the stored blob is unreadable", async () => {
+    store.secureGet.mockResolvedValue("{not json");
+    await expect(loadGraphConfig()).resolves.toBeNull();
+  });
+
   it("defaults the authority to /organizations", async () => {
     store.secureGet.mockResolvedValue(JSON.stringify({ clientId: "abc" }));
     await expect(loadGraphConfig()).resolves.toEqual({
@@ -51,6 +59,19 @@ describe("loadGraphConfig", () => {
   // screen to say why - the exact distinction loadOdooConfigState draws.
   it("reports an unreadable blob as unreadable, not absent", async () => {
     store.secureGet.mockResolvedValue("{not json");
+    await expect(loadGraphConfigState()).resolves.toEqual({
+      state: "unreadable",
+      config: null,
+    });
+  });
+
+  // The outer try/catch around secureGet, not just the JSON.parse one below -
+  // a rejecting read (a locked or corrupt store file) must land on the same
+  // "unreadable" state as a corrupt blob, never on "absent". Every other test
+  // in this file drives secureGet with mockResolvedValue; this is the only one
+  // that exercises a rejection.
+  it("reports a secureGet rejection as unreadable", async () => {
+    store.secureGet.mockRejectedValue(new Error("keychain locked"));
     await expect(loadGraphConfigState()).resolves.toEqual({
       state: "unreadable",
       config: null,

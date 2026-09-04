@@ -32,6 +32,29 @@ vi.mock("@/lib/database/meeting-log.action", () => ({ getQueueCounts, countAllQu
 const emit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@tauri-apps/api/event", () => ({ emit, listen: vi.fn(async () => () => {}) }));
 
+// Mocked at the SAME boundary as graph-config.storage.test.ts
+// (@/lib/secure-storage), not the whole storage module - classifyGraphConfig
+// now lives in graph-config.storage.ts and this file needs the real
+// classify/load logic exercised, not a hand-rolled stand-in that would
+// silently diverge from it as the module grows.
+const secureStorage = vi.hoisted(() => ({
+  secureGet: vi.fn(async () => null as string | null),
+  secureSet: vi.fn(async () => {}),
+  secureDelete: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/secure-storage", () => secureStorage);
+
+// The calendar section's `invoke` calls (graph_status / graph_connect /
+// graph_disconnect). Routed by command name so a test can fail one call
+// (e.g. graph_status) without affecting another in the same render.
+const tauriCore = vi.hoisted(() => ({
+  invoke: vi.fn(async (cmd: string) => {
+    if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+    throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+  }),
+}));
+vi.mock("@tauri-apps/api/core", () => tauriCore);
+
 const odoo = vi.hoisted(() => ({
   // SyncOutcome, not SyncResult - `ran` is what tells a skip apart from a
   // completed sync that changed nothing.
@@ -98,6 +121,13 @@ beforeEach(() => {
   storage.saveOdooConfig.mockResolvedValue({ instanceChanged: false, becameUsable: false });
   getQueueCounts.mockResolvedValue({
     waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
+  });
+  // Baseline for the calendar section: nothing stored, graph_status reports
+  // disconnected. Individual tests below override one or both.
+  secureStorage.secureGet.mockResolvedValue(null);
+  tauriCore.invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+    throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
   });
   setOdooRedactor([KEY]);
 });
@@ -612,5 +642,49 @@ describe("the queue status block", () => {
 
     expect(await screen.findByTestId("meeting-log-stranded")).toBeInTheDocument();
     expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
+  });
+});
+
+describe("the calendar connect section", () => {
+  // Kills a reorder back to save-before-validate: if handleConnect saved the
+  // in-memory form before checking whether it is complete, this would call
+  // secureSet (what saveGraphConfig writes through) even though the form was
+  // never touched - and would overwrite any previously-stored, valid config
+  // with blanks before the error below is ever shown.
+  it("does not save when Connect is clicked with a blank form", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /connect calendar/i }));
+    expect(await screen.findByText(/enter the application \(client\) id/i)).toBeInTheDocument();
+    expect(secureStorage.secureSet).not.toHaveBeenCalled();
+  });
+
+  // Kills a mutant that removes the seeding effect (or drops its setGraph
+  // call): without it, a returning connected user opens /odoo to two blank
+  // fields even though a complete config is on disk.
+  it("seeds the calendar fields from a stored complete config on mount", async () => {
+    secureStorage.secureGet.mockResolvedValue(
+      JSON.stringify({ clientId: "abc-123", authority: "https://login.microsoftonline.com/contoso" })
+    );
+    renderPage();
+    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("abc-123");
+    expect(screen.getByLabelText(/^authority$/i)).toHaveValue(
+      "https://login.microsoftonline.com/contoso"
+    );
+  });
+
+  // The property the dispatch called "the most important line": seeding must
+  // be decoupled from graph_status, not just typically-not-broken-together.
+  // A shared try/catch would make this fail (the rejection swallows the seed
+  // along with the status read) even though the two tests above still pass.
+  it("still seeds the calendar fields when the graph_status call rejects", async () => {
+    secureStorage.secureGet.mockResolvedValue(
+      JSON.stringify({ clientId: "xyz-999", authority: "https://login.microsoftonline.com/contoso" })
+    );
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NETWORK");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("xyz-999");
   });
 });
