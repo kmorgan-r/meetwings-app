@@ -38,7 +38,6 @@ fn entry() -> Result<keyring::Entry, String> {
 /// controller, without adding `sync-secret-service`/`dbus-secret-service`
 /// (which the ruling reserves for the user, since it pulls libdbus as a
 /// build-time dependency).
-#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 pub fn available() -> bool {
     false
@@ -63,7 +62,6 @@ pub fn available() -> bool {
 ///
 /// `NoEntry` is success: it means the keychain answered, and answered "nothing
 /// stored yet" - the normal state before a first connect.
-#[allow(dead_code)]
 #[cfg(not(target_os = "linux"))]
 pub fn available() -> bool {
     match entry() {
@@ -96,7 +94,6 @@ pub fn store_refresh_token(token: &str) -> Result<(), String> {
 
 /// `Ok(None)` means "no entry", which is NOT an error - it is the normal state
 /// before a first connect and after a disconnect.
-#[allow(dead_code)]
 pub fn load_refresh_token() -> Result<Option<String>, String> {
     match entry()?.get_password() {
         Ok(token) => Ok(Some(token)),
@@ -105,7 +102,6 @@ pub fn load_refresh_token() -> Result<Option<String>, String> {
     }
 }
 
-#[allow(dead_code)]
 pub fn delete_refresh_token() -> Result<(), String> {
     match entry()?.delete_credential() {
         Ok(()) => Ok(()),

@@ -6,7 +6,6 @@ use super::{CalendarEvent, CalendarParticipant, AUTH_REJECTED, BAD_RESPONSE, NET
 /// Without this header Graph answers in the mailbox's own zone, named in
 /// Windows style ("Pacific Standard Time"), and resolving those needs a
 /// timezone database this crate deliberately does not carry.
-#[allow(dead_code)]
 pub const PREFER_UTC: &str = "outlook.timezone=\"UTC\"";
 
 /// Days since 1970-01-01 for a proleptic Gregorian date. Howard Hinnant's
@@ -60,7 +59,6 @@ fn days_in_month(year: i64, month: i64) -> i64 {
 /// to `1..=9999` BEFORE it reaches the multiplication below - the same
 /// clamp-before-multiply shape as `expiry_at` in auth.rs, and for the same
 /// reason: an unbounded year overflows `i64` there, not merely here.
-#[allow(dead_code)]
 pub fn parse_graph_utc(dt: &str) -> Option<i64> {
     let (date, rest) = dt.split_once('T')?;
     let mut date_parts = date.split('-');
@@ -75,9 +73,14 @@ pub fn parse_graph_utc(dt: &str) -> Option<i64> {
         return None;
     }
 
-    let (clock, fraction) = match rest.split_once('.') {
-        Some((clock, fraction)) => (clock, fraction),
-        None => (rest, ""),
+    // `has_fraction` tracks whether a `.` was present AT ALL, separately from
+    // whether anything followed it - `fraction` alone is "" for both "no dot"
+    // and "a trailing dot with nothing after it", and those two must not be
+    // treated the same: the first means no fractional seconds were sent, the
+    // second is a malformed timestamp.
+    let (clock, fraction, has_fraction) = match rest.split_once('.') {
+        Some((clock, fraction)) => (clock, fraction, true),
+        None => (rest, "", false),
     };
     let mut clock_parts = clock.split(':');
     let hour = parse_digits(clock_parts.next()?)?;
@@ -87,10 +90,15 @@ pub fn parse_graph_utc(dt: &str) -> Option<i64> {
         return None;
     }
 
-    // Graph sends seven fractional digits; take three, pad short ones.
-    let millis: i64 = if fraction.is_empty() {
+    // Graph sends seven fractional digits; take three, pad short ones. A
+    // present-but-empty fraction (a trailing "." with no digits) and a
+    // fraction longer than Graph's own seven digits are both rejected rather
+    // than silently accepted - the empty case previously fell through to the
+    // `fraction.is_empty()` arm below and was treated as "no fraction," and a
+    // too-long one was previously just truncated to its first three digits.
+    let millis: i64 = if !has_fraction {
         0
-    } else if !is_ascii_digits(fraction) {
+    } else if fraction.is_empty() || fraction.len() > 7 || !is_ascii_digits(fraction) {
         return None;
     } else {
         let digits: String = fraction.chars().take(3).collect();
@@ -123,7 +131,6 @@ fn utc_millis(node: Option<&serde_json::Value>) -> Option<i64> {
     parse_graph_utc(node.get("dateTime")?.as_str()?)
 }
 
-#[allow(dead_code)]
 pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
     let json: serde_json::Value =
         serde_json::from_str(body).map_err(|_| BAD_RESPONSE.to_string())?;
@@ -219,13 +226,16 @@ pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
 /// oversight. The window this is queried over is narrow ("what is happening
 /// now"), so a mailbox would need 50+ concurrent/overlapping events in that
 /// window before a real meeting silently fell off the end.
-#[allow(dead_code)]
 pub async fn fetch_calendar_view(
     access_token: &str,
     start_iso: &str,
     end_iso: &str,
 ) -> Result<String, String> {
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(super::GRAPH_HTTP_TIMEOUT)
+        .build()
+        .map_err(|_| NETWORK.to_string())?;
+    let response = client
         .get("https://graph.microsoft.com/v1.0/me/calendarView")
         .query(&[
             ("startDateTime", start_iso),
@@ -336,6 +346,23 @@ mod tests {
     #[test]
     fn a_short_fraction_is_padded_not_truncated_to_zero() {
         assert_eq!(parse_graph_utc("1970-01-01T00:00:00.5"), Some(500));
+    }
+
+    // A trailing "." with nothing after it is a malformed timestamp, not "no
+    // fraction" - `fraction` is "" either way, so without tracking whether the
+    // "." was present at all, this used to fall through to the same arm as a
+    // genuinely absent fraction and parse as millis=0.
+    #[test]
+    fn a_present_but_empty_fraction_is_rejected_not_treated_as_zero() {
+        assert_eq!(parse_graph_utc("2026-09-02T14:00:00."), None);
+    }
+
+    // Graph sends at most seven fractional digits. An eighth all-digit
+    // character used to be silently accepted and truncated away by
+    // `.take(3)` rather than rejected as the malformed response it is.
+    #[test]
+    fn a_fraction_longer_than_seven_digits_is_rejected_not_truncated() {
+        assert_eq!(parse_graph_utc("2026-09-02T14:00:00.12345678"), None);
     }
 
     fn event_json(extra: &str) -> String {

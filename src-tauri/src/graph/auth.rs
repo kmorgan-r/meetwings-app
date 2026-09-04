@@ -7,7 +7,6 @@ use super::{AUTH_EXPIRED, AUTH_REJECTED, BAD_RESPONSE, NETWORK, THROTTLED};
 /// `allow(dead_code)`: unused until Tasks 8, 9 and 11 wire the listener and
 /// token lifecycle that call these - same reason `graph::mod` allows its
 /// structs per-item.
-#[allow(dead_code)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
@@ -16,7 +15,6 @@ pub struct Pkce {
 /// URL-safe base64 of 32 CSPRNG bytes: 43 characters, inside RFC 7636's
 /// 43..128 range, and made only of unreserved characters so it needs no
 /// further escaping in the token request body.
-#[allow(dead_code)]
 pub fn random_token(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::thread_rng().fill_bytes(&mut buf);
@@ -25,12 +23,10 @@ pub fn random_token(bytes: usize) -> String {
 
 /// S256: base64url(SHA256(ASCII(verifier))) over the RAW DIGEST BYTES.
 /// Encoding the hex digest instead is the classic silent break.
-#[allow(dead_code)]
 pub fn challenge_for(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-#[allow(dead_code)]
 pub fn new_pkce() -> Pkce {
     let verifier = random_token(32);
     let challenge = challenge_for(&verifier);
@@ -42,7 +38,6 @@ pub fn new_pkce() -> Pkce {
 
 /// A mismatched or absent `state` is rejected BEFORE the code is redeemed -
 /// nothing is sent to the token endpoint.
-#[allow(dead_code)]
 pub fn validate_state(expected: &str, received: Option<&str>) -> Result<(), String> {
     match received {
         Some(value) if !expected.is_empty() && value == expected => Ok(()),
@@ -53,14 +48,12 @@ pub fn validate_state(expected: &str, received: Option<&str>) -> Result<(), Stri
 /// The ID token's payload segment, decoded. NOT a signature verification: the
 /// token arrived over TLS directly from the token endpoint, so this reads
 /// claims rather than establishing trust.
-#[allow(dead_code)]
 fn id_token_claims(id_token: &str) -> Option<serde_json::Value> {
     let payload = id_token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-#[allow(dead_code)]
 pub fn nonce_from_id_token(id_token: &str) -> Option<String> {
     Some(
         id_token_claims(id_token)?
@@ -79,7 +72,6 @@ pub fn nonce_from_id_token(id_token: &str) -> Option<String> {
 /// something other than what we asked for came back - and the earlier inline
 /// form, guarded by `if let Some(id_token)`, would have silently accepted it and
 /// bound nothing.
-#[allow(dead_code)]
 pub fn validate_nonce(expected: &str, id_token: Option<&str>) -> Result<(), String> {
     match id_token.and_then(nonce_from_id_token) {
         Some(actual) if !expected.is_empty() && actual == expected => Ok(()),
@@ -93,7 +85,6 @@ pub fn validate_nonce(expected: &str, id_token: Option<&str>) -> Result<(), Stri
 /// exact string in `attendees[]` - but that needs `User.Read`, and widening a
 /// mailbox-adjacent grant to improve a cosmetic exclusion is a bad exchange
 /// when the failure mode is one extra visible row.
-#[allow(dead_code)]
 pub fn own_address_from_id_token(id_token: &str) -> Option<String> {
     let claims = id_token_claims(id_token)?;
     for key in ["preferred_username", "upn"] {
@@ -115,10 +106,8 @@ use super::{AUTH_CANCELLED, CONSENT_REQUIRED};
 
 /// Long enough for a real consent screen with an MFA prompt, short enough that
 /// an abandoned flow does not leave a socket open all session.
-#[allow(dead_code)]
 pub const LISTENER_TIMEOUT: Duration = Duration::from_secs(300);
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Callback {
     pub code: Option<String>,
@@ -149,7 +138,6 @@ fn percent_decode(value: &str) -> String {
 /// Parses `GET /?code=...&state=... HTTP/1.1` - the only line of the request
 /// this listener reads. Anything it cannot parse yields an empty Callback,
 /// which the caller treats as a rejected redemption rather than a success.
-#[allow(dead_code)]
 pub fn parse_callback(request_line: &str) -> Callback {
     let mut callback = Callback::default();
     let Some(target) = request_line.split_whitespace().nth(1) else {
@@ -175,7 +163,6 @@ pub fn parse_callback(request_line: &str) -> Callback {
 
 /// `access_denied` is the user clicking Cancel. It is the COMMONEST outcome of
 /// this flow and it is not a failure.
-#[allow(dead_code)]
 pub fn classify_callback_error(error: &str) -> &'static str {
     match error {
         "access_denied" => AUTH_CANCELLED,
@@ -219,7 +206,6 @@ const MAX_REQUEST_LINE_BYTES: u64 = 8192;
 /// The accept loop runs EXACTLY ONCE. A second callback to a consumed listener
 /// finds nothing listening - that is the single-use property, and it is why
 /// the listener is moved into the thread rather than borrowed.
-#[allow(dead_code)]
 pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, String>>), String> {
     let listener = bind_loopback_ephemeral()?;
     let port = listener
@@ -294,15 +280,28 @@ pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, 
     Ok((port, rx))
 }
 
+/// Wakes a still-blocked `listen_once` accept loop the same way its own
+/// timeout watchdog does - a self-connect, not a socket-level cancellation
+/// API, because `TcpListener` offers none. Sending nothing to `rx` and
+/// dropping the connection immediately lets the accept thread's `accept()`
+/// return, finish its (fruitless) read, and drop `listener` - releasing the
+/// port in milliseconds instead of leaving it bound for the rest of
+/// `LISTENER_TIMEOUT`.
+///
+/// Idempotent and safe to call after the listener has already been consumed:
+/// a connect to a port nothing is listening on simply fails, and the caller
+/// discards that failure exactly as the watchdog's own self-connect does.
+pub fn cancel_listener(port: u16) {
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+}
+
 /// SEE PROBE 1 (Task 2). ReadBasic additionally withholds the meeting body -
 /// text this feature never needs and would rather not hold - so it is the
 /// default. If the probe found any filter property absent under ReadBasic,
 /// this becomes `Calendars.Read` and nothing else changes.
-#[allow(dead_code)]
 pub const GRAPH_SCOPES: &str =
     "openid profile offline_access https://graph.microsoft.com/Calendars.ReadBasic";
 
-#[allow(dead_code)]
 pub struct Tokens {
     pub access_token: String,
     pub expires_at_ms: i64,
@@ -327,7 +326,6 @@ pub struct Tokens {
 /// Returning `Result` rather than validating only in the TypeScript layer is
 /// deliberate: this is the last point before credentials move, and a check that
 /// lives only on the caller's side is one refactor away from being skipped.
-#[allow(dead_code)]
 pub fn validate_authority(authority: &str) -> Result<url::Url, String> {
     let parsed =
         url::Url::parse(authority.trim_end_matches('/')).map_err(|_| AUTH_REJECTED.to_string())?;
@@ -340,7 +338,6 @@ pub fn validate_authority(authority: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
-#[allow(dead_code)]
 pub fn authorize_url(
     authority: &str,
     client_id: &str,
@@ -373,7 +370,6 @@ pub fn authorize_url(
 /// password changed). Everything else RETAINS it: destroying a working ~90-day
 /// credential over a transport blip can need an administrator to undo, in a
 /// consent-blocked tenant.
-#[allow(dead_code)]
 pub fn classify_token_error(status: u16, body: &str) -> &'static str {
     if status == 429 {
         return THROTTLED;
@@ -431,6 +427,7 @@ async fn post_token(authority: &str, form: &[(&str, &str)], now_ms: i64) -> Resu
     // the exfiltration path validate_authority exists to close off.
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(super::GRAPH_HTTP_TIMEOUT)
         .build()
         .map_err(|_| NETWORK.to_string())?;
     // A transport failure is NETWORK, never AUTH_EXPIRED. This mapping is the
@@ -479,7 +476,6 @@ async fn post_token(authority: &str, form: &[(&str, &str)], now_ms: i64) -> Resu
     })
 }
 
-#[allow(dead_code)]
 pub async fn exchange_code(
     authority: &str,
     client_id: &str,
@@ -504,7 +500,6 @@ pub async fn exchange_code(
     .await
 }
 
-#[allow(dead_code)]
 pub async fn refresh(
     authority: &str,
     client_id: &str,
@@ -561,12 +556,30 @@ fn rotation_target(tokens: &Tokens) -> Option<&str> {
 /// Windows/macOS the same `Err` can also mean a real, occasional keychain
 /// failure. The two cases are indistinguishable from this return value alone,
 /// and that is fine: the correct response is identical either way.
-#[allow(dead_code)]
-pub fn persist_rotated(tokens: &Tokens) -> Result<(), String> {
+/// `store` is injected rather than calling `keychain::store_refresh_token`
+/// directly, for the same reason `adopt_and_persist_with` and
+/// `forget_refresh_token_with` in `graph/mod.rs` inject their own keychain
+/// calls (Ruling 20): a test proving "a rotated token reaches the store, and
+/// an unrotated one does not" must not be able to reach the developer's real
+/// OS credential store either way. Before this seam existed, the `Some`
+/// branch had no test at all for exactly that reason - the only way to
+/// exercise it was through `persist_rotated`, which calls the real
+/// `keychain::store_refresh_token` - and that gap is what let a missing guard
+/// upstream clobber a live Windows Credential Manager entry during Task 11.
+pub fn persist_rotated_with(
+    tokens: &Tokens,
+    store: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
     match rotation_target(tokens) {
-        Some(token) => super::keychain::store_refresh_token(token),
+        Some(token) => store(token),
         None => Ok(()),
     }
+}
+
+/// Called with the real keychain write. See `persist_rotated_with` for the
+/// seam this wraps.
+pub fn persist_rotated(tokens: &Tokens) -> Result<(), String> {
+    persist_rotated_with(tokens, super::keychain::store_refresh_token)
 }
 
 #[cfg(test)]
@@ -800,12 +813,6 @@ mod tests {
         assert_eq!(classify_callback_error("something_else"), AUTH_REJECTED);
     }
 
-    #[test]
-    fn listener_binds_loopback_only_and_reports_its_port() {
-        let (port, _rx) = listen_once(Duration::from_millis(200)).unwrap();
-        assert!(port > 0);
-    }
-
     /// The property in this test's name is NOT checked by connecting: a
     /// `0.0.0.0` listener answers a `TcpStream::connect(("127.0.0.1", port))`
     /// exactly as a `127.0.0.1` listener does, because `0.0.0.0` means "every
@@ -856,6 +863,23 @@ mod tests {
         let (_port, rx) = listen_once(Duration::from_millis(150)).unwrap();
         let outcome = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(outcome, Err(AUTH_CANCELLED.to_string()));
+    }
+
+    /// `cancel_listener` must release the port well before `LISTENER_TIMEOUT`
+    /// elapses on its own - the whole point of calling it on an early return
+    /// from `graph_connect` rather than letting the accept thread sit parked
+    /// for the rest of a five-minute window. A long timeout here is what
+    /// makes this a real test of the CANCEL path rather than of the
+    /// watchdog: if `cancel_listener` did nothing, this would time out
+    /// waiting on `rx`, not return quickly with a result.
+    #[test]
+    fn cancel_listener_unblocks_the_accept_loop_well_before_the_timeout() {
+        let (port, rx) = listen_once(Duration::from_secs(300)).unwrap();
+        cancel_listener(port);
+        // Generous relative to the 300s timeout, tight relative to a local
+        // loopback round trip: this must return because of the cancel, not
+        // because the timeout also happened to be short.
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
     }
 
     /// The spec's third listener case: "a second callback to a consumed OR
@@ -1041,6 +1065,55 @@ mod tests {
             id_token: None,
         };
         assert_eq!(persist_rotated(&tokens), Ok(()));
+    }
+
+    /// The `Some` branch of `persist_rotated`, exercised through the
+    /// `persist_rotated_with` seam so this never reaches a real keychain.
+    /// Before that seam existed there was no way to write this test at all:
+    /// the only way to drive the `Some` branch was through `persist_rotated`
+    /// itself, which calls `keychain::store_refresh_token` for real - and a
+    /// version of this test that did that (asserting only `Ok(())`) is
+    /// exactly what clobbered a live Windows Credential Manager entry with
+    /// the literal string `"rotated"` during Task 11's own test-writing.
+    #[test]
+    fn persist_rotated_with_calls_store_exactly_once_with_the_rotated_token() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: Some("rt-new".to_string()),
+            id_token: None,
+        };
+
+        let store_calls = std::cell::RefCell::new(Vec::new());
+        let result = persist_rotated_with(&tokens, |token| {
+            store_calls.borrow_mut().push(token.to_string());
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(store_calls.into_inner(), vec!["rt-new".to_string()]);
+    }
+
+    /// The other half of the seam's contract, proved as a spy assertion
+    /// rather than an accident of `rotation_target` returning `None`: with
+    /// nothing to rotate, `store` must never run at all.
+    #[test]
+    fn persist_rotated_with_never_calls_store_when_there_is_nothing_to_rotate() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: None,
+            id_token: None,
+        };
+
+        let store_was_called = std::cell::Cell::new(false);
+        let result = persist_rotated_with(&tokens, |_| {
+            store_was_called.set(true);
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(!store_was_called.get());
     }
 
     // Lifecycle rule 3's PRESERVE case, and the only lifecycle rule this task
