@@ -524,6 +524,27 @@ pub async fn refresh(
     .await
 }
 
+/// The pure decision inside `persist_rotated`, split out for the same reason
+/// `expiry_at` was: `graph/mod.rs`'s own header prescribes decision logic as
+/// pure functions, unit-tested on every target. "Does this response's
+/// refresh_token warrant a keychain write" was previously buried inside a
+/// function that also performs real keychain I/O, so nothing could pin the
+/// None case - or the empty-string case - without either mutating the
+/// developer's real OS credential store or trusting a comment instead of an
+/// assertion.
+///
+/// Re-checks emptiness independently of `post_token`'s own
+/// `.filter(|s| !s.is_empty())` on the way in, rather than assuming every
+/// `Tokens` this function ever sees came from there: `Tokens`'s fields are
+/// `pub`, so a `Tokens` built directly - by a future caller, or a test - must
+/// not have an empty string read back out as "rotate to this."
+fn rotation_target(tokens: &Tokens) -> Option<&str> {
+    tokens
+        .refresh_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+}
+
 /// Rotation: WRITE THE NEW TOKEN BEFORE DELETING THE OLD ONE.
 ///
 /// keyring's set_password overwrites the same entry, so there is no separate
@@ -542,7 +563,7 @@ pub async fn refresh(
 /// and that is fine: the correct response is identical either way.
 #[allow(dead_code)]
 pub fn persist_rotated(tokens: &Tokens) -> Result<(), String> {
-    match &tokens.refresh_token {
+    match rotation_target(tokens) {
         Some(token) => super::keychain::store_refresh_token(token),
         None => Ok(()),
     }
@@ -1003,14 +1024,16 @@ mod tests {
         assert_eq!(expiry_at(1_000, 60), 1_000);
     }
 
-    // Lifecycle rule 3's PRESERVE case, and the only lifecycle rule this task
-    // owns end-to-end: a token response that carried no rotated refresh
-    // token must leave the keychain untouched. The `None` arm of
-    // `persist_rotated` is `Ok(())` with no call into `keychain::*` at all,
-    // so this is structural, not a race with a mock - there is nothing in
-    // that arm capable of writing anywhere.
+    // `persist_rotated` still succeeds when there is nothing to rotate. This
+    // assertion alone does NOT prove the keychain went untouched - a mutant
+    // that reroutes the `None` case to `keychain::delete_refresh_token()`
+    // passes it too, since `delete` on an absent entry is also `Ok(())`. The
+    // "touches nothing" half is proved separately below, by
+    // `rotation_target_is_none_when_no_refresh_token_was_returned`, which
+    // checks the pure decision directly with no I/O in the loop at all - see
+    // that test's comment for why this split exists.
     #[test]
-    fn persist_rotated_with_no_rotated_token_touches_nothing_and_succeeds() {
+    fn persist_rotated_with_no_rotated_token_succeeds() {
         let tokens = Tokens {
             access_token: "at".to_string(),
             expires_at_ms: 0,
@@ -1018,6 +1041,53 @@ mod tests {
             id_token: None,
         };
         assert_eq!(persist_rotated(&tokens), Ok(()));
+    }
+
+    // Lifecycle rule 3's PRESERVE case, and the only lifecycle rule this task
+    // owns end-to-end: a token response that carried no rotated refresh
+    // token must leave the keychain untouched. Asserting on `rotation_target`
+    // directly - rather than on `persist_rotated`'s `Result` - is what makes
+    // this a real test of "touches nothing": there is no I/O in this
+    // function at all, so a mutant that swaps the `None` arm for a
+    // `keychain::delete_refresh_token()` call (which would delete a live
+    // stored credential, on a machine that has one, while still returning
+    // `Ok(())`) cannot make this assertion pass no matter what the keychain
+    // holds - the keychain is never consulted here.
+    #[test]
+    fn rotation_target_is_none_when_no_refresh_token_was_returned() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: None,
+            id_token: None,
+        };
+        assert_eq!(rotation_target(&tokens), None);
+    }
+
+    #[test]
+    fn rotation_target_carries_a_present_refresh_token_through() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: Some("rt-1".to_string()),
+            id_token: None,
+        };
+        assert_eq!(rotation_target(&tokens), Some("rt-1"));
+    }
+
+    /// Pins the `.filter(|s| !s.is_empty())` behaviour `post_token` applies
+    /// on the way in (round 1) - independently, at the level `rotation_target`
+    /// actually runs at, since a `Tokens` can be built directly without going
+    /// through `post_token` at all.
+    #[test]
+    fn rotation_target_treats_an_empty_refresh_token_as_absent() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: Some(String::new()),
+            id_token: None,
+        };
+        assert_eq!(rotation_target(&tokens), None);
     }
 
     // Rule 1's RETAIN side: a transport failure must classify as NETWORK, not
