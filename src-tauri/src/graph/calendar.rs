@@ -22,19 +22,56 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// True only for a non-empty run of ASCII digits. Used to keep every numeric
+/// component's own parser (`i64::from_str`) from quietly accepting things it
+/// is willing to parse but this format does not allow - a leading sign, or
+/// (for the fraction) a trailing non-digit like a stray offset marker.
+fn is_ascii_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Parses a component as an unsigned decimal integer, rejecting anything that
+/// is not purely ASCII digits rather than deferring to `i64::from_str`'s own
+/// (sign-accepting) notion of what counts as a number.
+fn parse_digits(s: &str) -> Option<i64> {
+    if !is_ascii_digits(s) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// Days in `month` of `year`, with the Gregorian leap rule for February. The
+/// caller has already range-checked `month` to `1..=12`.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
 /// Parses Graph's fixed `YYYY-MM-DDTHH:MM:SS[.fffffff]` layout as UTC.
 ///
 /// The caller has already established `timeZone == "UTC"`; this function does
 /// NOT interpret an offset suffix, and returns None for anything that is not
-/// this exact layout rather than guessing.
+/// this exact layout rather than guessing. Every numeric component is
+/// validated as ASCII-digits-only before it is trusted, and `year` is bounded
+/// to `1..=9999` BEFORE it reaches the multiplication below - the same
+/// clamp-before-multiply shape as `expiry_at` in auth.rs, and for the same
+/// reason: an unbounded year overflows `i64` there, not merely here.
 #[allow(dead_code)]
 pub fn parse_graph_utc(dt: &str) -> Option<i64> {
     let (date, rest) = dt.split_once('T')?;
     let mut date_parts = date.split('-');
-    let year: i64 = date_parts.next()?.parse().ok()?;
-    let month: i64 = date_parts.next()?.parse().ok()?;
-    let day: i64 = date_parts.next()?.parse().ok()?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    let year = parse_digits(date_parts.next()?)?;
+    let month = parse_digits(date_parts.next()?)?;
+    let day = parse_digits(date_parts.next()?)?;
+    if date_parts.next().is_some()
+        || !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+    {
         return None;
     }
 
@@ -43,9 +80,9 @@ pub fn parse_graph_utc(dt: &str) -> Option<i64> {
         None => (rest, ""),
     };
     let mut clock_parts = clock.split(':');
-    let hour: i64 = clock_parts.next()?.parse().ok()?;
-    let minute: i64 = clock_parts.next()?.parse().ok()?;
-    let second: i64 = clock_parts.next()?.parse().ok()?;
+    let hour = parse_digits(clock_parts.next()?)?;
+    let minute = parse_digits(clock_parts.next()?)?;
+    let second = parse_digits(clock_parts.next()?)?;
     if clock_parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
@@ -53,6 +90,8 @@ pub fn parse_graph_utc(dt: &str) -> Option<i64> {
     // Graph sends seven fractional digits; take three, pad short ones.
     let millis: i64 = if fraction.is_empty() {
         0
+    } else if !is_ascii_digits(fraction) {
+        return None;
     } else {
         let digits: String = fraction.chars().take(3).collect();
         let padded = format!("{digits:0<3}");
@@ -244,6 +283,59 @@ mod tests {
         assert_eq!(parse_graph_utc(""), None);
         assert_eq!(parse_graph_utc("2026-09-02"), None);
         assert_eq!(parse_graph_utc("not a date"), None);
+    }
+
+    // The doc comment promises "returns None ... rather than guessing" - a
+    // negative component is exactly the kind of guess i64::from_str's own
+    // sign handling would otherwise let through unchallenged.
+    #[test]
+    fn rejects_a_negative_time_component() {
+        assert_eq!(parse_graph_utc("2026-09-02T-1:00:00.0000000"), None);
+        assert_eq!(parse_graph_utc("2026-09-02T00:-1:00.0000000"), None);
+        assert_eq!(parse_graph_utc("2026-09-02T00:00:-1.0000000"), None);
+    }
+
+    // This year's millisecond value overflows i64 if it ever reaches the
+    // multiply in days_from_civil's caller (~3.16e22ms against i64::MAX's
+    // ~9.2e18) - the range check must reject it before that arithmetic runs,
+    // not merely after.
+    #[test]
+    fn an_out_of_range_year_is_rejected_not_overflowed() {
+        assert_eq!(parse_graph_utc("999999999999-01-01T00:00:00.0000000"), None);
+    }
+
+    #[test]
+    fn rejects_a_day_that_does_not_exist_in_its_month() {
+        assert_eq!(parse_graph_utc("2026-02-30T00:00:00.0000000"), None);
+    }
+
+    #[test]
+    fn rejects_february_29_in_a_non_leap_year() {
+        assert_eq!(parse_graph_utc("2026-02-29T00:00:00.0000000"), None);
+    }
+
+    #[test]
+    fn accepts_february_29_in_a_leap_year() {
+        assert_eq!(
+            parse_graph_utc("2024-02-29T00:00:00.0000000"),
+            Some(1_709_164_800_000)
+        );
+    }
+
+    // Without a fraction, a trailing "Z" is already rejected because "00Z"
+    // fails to parse as an integer clock component. WITH a full fraction the
+    // same suffix used to be silently dropped, because only the first three
+    // characters were ever read.
+    #[test]
+    fn rejects_trailing_garbage_after_a_full_fraction() {
+        assert_eq!(parse_graph_utc("2026-09-02T14:00:00.0000000Z"), None);
+    }
+
+    // Pins the padding path: a short fraction is padded, not truncated to
+    // zero, by the all-digits validation added alongside it.
+    #[test]
+    fn a_short_fraction_is_padded_not_truncated_to_zero() {
+        assert_eq!(parse_graph_utc("1970-01-01T00:00:00.5"), Some(500));
     }
 
     fn event_json(extra: &str) -> String {
