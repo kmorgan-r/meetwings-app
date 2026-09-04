@@ -62,7 +62,7 @@ url = "2"               # authorize-URL construction and callback parsing
 # option (sync-secret-service) pulls dbus-secret-service, which needs
 # libdbus at build time - an unverified CI/runtime dependency this task
 # does not add unilaterally. FINDING for the controller: decide the Linux
-# keychain backend before Task 7 ships a Linux build.
+# keychain backend before Task 9 ships a Linux build.
 keyring = { version = "3", features = ["windows-native", "apple-native"] }
 dotenv = "0.15"
 futures-util = "0.3"
