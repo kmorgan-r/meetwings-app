@@ -81,6 +81,16 @@ export function CalendarProposal({
    *   only covers repeat clicks on that one control.
    */
   const writingRef = useRef(false);
+  /**
+   * Bumped every time the idle-reset effect below runs. `confirm` captures
+   * this before its write loop and re-checks it after every `onAddTarget`
+   * await: `useOdooTarget.addTarget` resolves a target's partner id against
+   * whichever Odoo instance is CURRENT per call (useOdooTarget.ts:1038), so a
+   * batch that keeps writing after an instance change would write the
+   * remaining rows - ids that name partners in the OLD instance - into the
+   * NEW one under those stale ids. A mismatch aborts the rest of the loop.
+   */
+  const epochRef = useRef(0);
 
   const proposal = state.kind === "proposal" ? state : null;
 
@@ -137,31 +147,63 @@ export function CalendarProposal({
   }, [writableKey, freeSlots]);
 
   /**
-   * The popover closed. `ContactPicker` — and therefore this component — stays
-   * MOUNTED when it does (see its `confirmingClear` reset keyed on `open`), so
-   * without this every local flag survives into the next open.
+   * Flips `writingRef` back to `false`, but deferred to its OWN effect
+   * declared after the pre-check effect above, rather than folded into
+   * `confirm`'s `finally`. React runs a commit's effects in declaration
+   * order, and the render where a write's LAST successful `onAddTarget`
+   * lands is the SAME commit where `targets` (and therefore `writableKey`)
+   * changes to reflect it: `setTargets` from inside that last call and
+   * `confirm`'s own `setWriting(false)` land in the same batch. Resetting
+   * the ref synchronously in `finally` flips it BEFORE that commit's effects
+   * even run, so the pre-check effect above would see `writingRef.current
+   * === false` on EXACTLY that render and re-derive `checked` from the
+   * just-shrunk `writable` list - silently re-ticking whatever the user had
+   * unchecked. Resetting it here instead means the pre-check effect (which
+   * runs first) still sees the write as in progress on that render; only
+   * after it has run does this effect unlock the ref for the NEXT write.
+   */
+  useEffect(() => {
+    if (!writing) writingRef.current = false;
+  }, [writing]);
+
+  /**
+   * `idle` while this component is still mounted and rendering - NOT "the
+   * popover closed, so this never runs again" as it might look. Radix's
+   * `Popover` unmounts its content on a normal close (no `forceMount` in
+   * src/components/ui/popover.tsx, and `Presence` unmounts without one), and
+   * `<Completion />` unmounts the whole picker subtree on a meeting-log hold
+   * (completion/index.tsx swaps `<ContactPicker />` for `<MeetingLogStrip />`).
+   * This effect exists for the cases that DO keep the component mounted while
+   * idle: an Odoo instance change resets `useCalendarProposal`'s state to idle
+   * while the picker stays open; the brief exit-animation window where Radix's
+   * `Presence` keeps content mounted after `open` has already gone false; and
+   * `config.state === "absent"` while `blockPresent` is still true from an
+   * earlier connected session.
    *
-   * `writing` is the one that matters most: it had no reset path at all, and a
-   * real force-close exists — `<Completion />`'s layout effect closes the picker
-   * when `meetingLog.holding` flips true. Closed mid-write, `writing` stayed
-   * true forever and the confirm button was dead on every subsequent open, for
-   * an unrelated later meeting, with nothing saying why.
+   * `writing` is the one that matters most: without this it had no reset path
+   * at all, and a write in flight when the instance changes would leave the
+   * confirm button dead on every later open, for an unrelated later meeting,
+   * with nothing saying why. Bumping `epochRef` here is what lets `confirm`
+   * (below) tell that its own in-flight write has been abandoned.
    */
   useEffect(() => {
     if (state.kind !== "idle") return;
+    epochRef.current += 1;
     writingRef.current = false;
     setWriting(false);
     setChecked(new Set());
     setWriteResult(null);
   }, [state.kind]);
 
-  if (state.kind === "idle") return null;
-
   const region = (children: React.ReactNode) => (
     <div className={REGION_CLASS} data-testid="calendar-proposal-region">
       {children}
     </div>
   );
+
+  // Reserved, not absent: see the doc comment on the idle-reset effect above
+  // for the cases this component renders while genuinely idle.
+  if (state.kind === "idle") return region(null);
 
   if (state.kind === "loading") {
     return region(<p className="text-[11px] text-muted-foreground">Checking your calendar…</p>);
@@ -218,6 +260,10 @@ export function CalendarProposal({
     writingRef.current = true;
     setWriting(true);
 
+    // Captured so a mid-write instance change (bumped by the idle-reset
+    // effect above) can be detected below.
+    const epoch = epochRef.current;
+
     // SNAPSHOT the user's choice before the first await. `targets` mutates
     // under us as the loop lands rows, so re-reading `checkedWritable` mid-loop
     // would write whatever the recomputed set says rather than what the user
@@ -227,44 +273,63 @@ export function CalendarProposal({
     const notWritten: string[] = [];
     let failure: "cap" | "other" | null = null;
 
-    // SEQUENTIAL. addSelectedTarget is a non-atomic check-then-act; issued
-    // concurrently every call reads the same pre-write count, all pass, and
-    // more than MAX_TARGETS rows land.
-    for (const match of batch) {
-      if (failure !== null) {
+    try {
+      // SEQUENTIAL. addSelectedTarget is a non-atomic check-then-act; issued
+      // concurrently every call reads the same pre-write count, all pass, and
+      // more than MAX_TARGETS rows land.
+      for (const match of batch) {
+        if (failure !== null) {
+          notWritten.push(match.contact.name);
+          continue;
+        }
+        const result = await onAddTarget({
+          model: "res.partner",
+          resId: match.contact.id,
+          name: match.contact.name,
+        });
+        // The instance changed while this call was in flight. The rest of
+        // `batch` would land in the NEW instance under the OLD instance's
+        // partner ids - abort with no further writes and no write-result
+        // message; the popover already reset to idle underneath us.
+        if (epochRef.current !== epoch) return;
+        if (result.ok) {
+          written.push(match.contact.name);
+          continue;
+        }
+        // `reason` MATTERS. useOdooTarget.addTarget returns a bare `{ ok: false }`
+        // from its catch for any thrown error - a busy database,
+        // ODOO_NOT_CONFIGURED - and it has already shown the user a toast naming
+        // the real cause. Reporting every failure as "the log is full" would
+        // contradict that toast and send the user to remove destinations that
+        // were never the problem.
+        failure = result.reason === "cap" ? "cap" : "other";
         notWritten.push(match.contact.name);
-        continue;
       }
-      const result = await onAddTarget({
-        model: "res.partner",
-        resId: match.contact.id,
-        name: match.contact.name,
-      });
-      if (result.ok) {
-        written.push(match.contact.name);
-        continue;
-      }
-      // `reason` MATTERS. useOdooTarget.addTarget returns a bare `{ ok: false }`
-      // from its catch for any thrown error - a busy database,
-      // ODOO_NOT_CONFIGURED - and it has already shown the user a toast naming
-      // the real cause. Reporting every failure as "the log is full" would
-      // contradict that toast and send the user to remove destinations that
-      // were never the problem.
-      failure = result.reason === "cap" ? "cap" : "other";
-      notWritten.push(match.contact.name);
-    }
 
-    writingRef.current = false;
-    setWriting(false);
-    setWriteResult(
-      failure === null
-        ? null
-        : `Added ${written.join(", ") || "none"}. ${
-            failure === "cap"
-              ? "The log is full, so"
-              : "Something went wrong, so"
-          } ${notWritten.join(", ")} ${notWritten.length === 1 ? "was" : "were"} not added.`
-    );
+      if (epochRef.current === epoch) {
+        setWriteResult(
+          failure === null
+            ? null
+            : `${written.length === 0 ? "Nothing was added" : `Added ${written.join(", ")}`}. ${
+                failure === "cap"
+                  ? "The log is full, so"
+                  : "Something went wrong, so"
+              } ${notWritten.join(", ")} ${notWritten.length === 1 ? "was" : "were"} not added.`
+        );
+      }
+    } finally {
+      // `addTarget`'s contract says it never rejects (it catches its own
+      // errors into `{ ok: false }`), but if it ever did, this is the
+      // difference between a confirm button that's dead until the popover
+      // closes and one that recovers - the same failure mode the idle-reset
+      // effect exists to guard against.
+      //
+      // `writingRef.current` is deliberately NOT reset here - see the
+      // "unlock" effect above for why doing it synchronously in this
+      // `finally` block is exactly the bug that let a write silently
+      // re-check a row the user had excluded.
+      setWriting(false);
+    }
   };
 
   return region(

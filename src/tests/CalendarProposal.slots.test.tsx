@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CalendarProposal } from "@/pages/app/components/completion/CalendarProposal";
@@ -80,6 +80,27 @@ describe("slot rule", () => {
     expect(notice).toContain("8 attendees matched");
     expect(notice).toContain("2 slots left");
     expect(notice).not.toContain(String(MAX_TARGETS));
+  });
+
+  /**
+   * The slot rule is "fits the FREE slots", not "fits under MAX_TARGETS" -
+   * and no other case in this file discriminates the two: every other
+   * overflow case here also happens to exceed MAX_TARGETS, and every
+   * within-bounds case also happens to be within MAX_TARGETS. Here
+   * `writable` (4) sits strictly between `freeSlots` (3) and `MAX_TARGETS`
+   * (5), so a mutant comparing against `MAX_TARGETS` instead of `freeSlots`
+   * would pre-check everything and pass every other test in this file, but
+   * fails here.
+   */
+  it("pre-checks nothing when matches exceed free slots but stay within MAX_TARGETS", () => {
+    const contacts = Array.from({ length: 4 }, (_, i) => contact(i + 1));
+    renderProposal({ contacts, targets: [target(90), target(91)] });
+    for (const c of contacts) {
+      expect(screen.getByTestId(`calendar-proposal-row-${c.id}`)).not.toBeChecked();
+    }
+    const notice = screen.getByTestId("calendar-proposal-notice").textContent ?? "";
+    expect(notice).toContain("4 attendees matched");
+    expect(notice).toContain("3 slots left");
   });
 
   it("offers nothing checkable when there are no free slots", () => {
@@ -165,9 +186,11 @@ describe("the write", () => {
    * In production every successful `onAddTarget` updates the parent's `targets`,
    * so this test re-renders with the grown list exactly as `<Completion />`
    * would. Without the `writingRef` guard on the pre-check effect, the row the
-   * user UNCHECKED gets re-checked mid-write and written anyway - a write to
-   * odoo_selected_targets they never authorised, which is the one thing the
-   * confirm gate exists to prevent.
+   * user UNCHECKED gets re-checked mid-write - and once the write settles and
+   * the button re-enables, clicking it again would write the row the user
+   * never authorised. That is asserted directly below, not just inferred: the
+   * checkbox, the button's own label, its disabled state, AND a second click
+   * that must add nothing.
    */
   it("never writes a row the user unchecked, even as targets grow mid-write", async () => {
     const contacts = [contact(1), contact(2), contact(3)];
@@ -208,6 +231,20 @@ describe("the write", () => {
     await waitFor(() => expect(added).toHaveLength(2));
     expect(added).toEqual([1, 3]);
     expect(live.map((t) => t.resId)).toEqual([1, 3]);
+
+    // The write finished. Did the pre-check effect silently re-tick the row
+    // the user excluded while `targets` grew mid-loop? If it did, the
+    // checkbox is back on screen checked, the confirm button names a nonzero
+    // count, and it is enabled again - exactly what the `writingRef` guard
+    // exists to prevent.
+    expect(screen.getByTestId("calendar-proposal-row-2")).not.toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-confirm")).toHaveTextContent("Add 0 to log");
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeDisabled();
+
+    // A disabled button does not dispatch a click; this is the end-to-end
+    // proof that the excluded row can never reach `onAddTarget` again.
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    expect(added).toEqual([1, 3]);
   });
 
   // The action-layer cap remains the backstop; a rejection is SURFACED, never
@@ -245,30 +282,57 @@ describe("the write", () => {
   });
 
   /**
-   * `<Completion />` force-closes the picker when a meeting-log hold begins,
-   * and this component stays MOUNTED across that. With no reset path, `writing`
-   * stayed true forever and the confirm button was dead on every later open.
+   * `<Completion />` force-closes the picker when a meeting-log hold begins
+   * (or an Odoo instance change resets the hook to idle while it stays open),
+   * and this component keeps rendering across that. With no reset path,
+   * `writing` stayed true forever and the confirm button was dead on every
+   * later open, for an unrelated later meeting, with nothing saying why.
+   *
+   * The write itself must not survive the reset either: `useOdooTarget`
+   * resolves a target's partner id against whichever Odoo instance is CURRENT
+   * per call, so a write still in flight when the instance changes must not
+   * keep going - it would write the remaining rows into the NEW instance
+   * under the ids the user confirmed against the OLD one. Two matched
+   * contacts, not one: a single-row batch has nothing left to abort, so this
+   * is only a meaningful check with a second row still pending when the
+   * reset happens.
    */
-  it("clears in-flight state when the popover closes", async () => {
-    const { rerender } = render(
+  it("clears in-flight state when the popover closes, and aborts a write still in flight", async () => {
+    let resolveFirst: ((value: { ok: boolean }) => void) | null = null;
+    let calls = 0;
+    const onAddTarget = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<{ ok: boolean }>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return { ok: true };
+    });
+
+    const proposal = (
       <CalendarProposal
         state={{
           kind: "proposal",
           eventId: "e1",
           subject: "Client sync",
-          matched: matched([contact(1)]),
+          matched: matched([contact(1), contact(2)]),
           unmatched: [],
         }}
         targets={[]}
-        onAddTarget={vi.fn(async () => ({ ok: false, reason: "cap" as const }))}
+        onAddTarget={onAddTarget}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
     );
-    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
-    await screen.findByTestId("calendar-proposal-write-result");
 
-    const closed = (
+    const { rerender } = render(proposal);
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await waitFor(() => expect(onAddTarget).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeDisabled();
+
+    // The instance changes while the first row's write is still pending.
+    rerender(
       <CalendarProposal
         state={{ kind: "idle" }}
         targets={[]}
@@ -277,27 +341,29 @@ describe("the write", () => {
         onRetry={vi.fn()}
       />
     );
-    rerender(closed);
-    expect(screen.queryByTestId("calendar-proposal-region")).toBeNull();
+    // Reserved, not gone: an idle reset while the picker stays open must not
+    // collapse the box out from under whatever sits below it.
+    expect(screen.getByTestId("calendar-proposal-region")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-proposal-region").textContent).toBe("");
 
-    // Reopened for a later meeting: the confirm control is live again, and no
-    // stale failure message survives.
-    rerender(
-      <CalendarProposal
-        state={{
-          kind: "proposal",
-          eventId: "e2",
-          subject: "Another meeting",
-          matched: matched([contact(4)]),
-          unmatched: [],
-        }}
-        targets={[]}
-        onAddTarget={vi.fn(async () => ({ ok: true }))}
-        onPickCandidate={vi.fn()}
-        onRetry={vi.fn()}
-      />
-    );
+    // Reopened on the SAME matched contacts, so `writableKey` returns to
+    // exactly what it was before - the ordinary pre-check effect (keyed on
+    // `writableKey`/`freeSlots`) cannot be what re-enables the button here,
+    // since from its point of view nothing changed. Only the idle-reset
+    // effect's own `writing`/`writingRef` reset can.
+    rerender(proposal);
     expect(screen.getByTestId("calendar-proposal-confirm")).toBeEnabled();
     expect(screen.queryByTestId("calendar-proposal-write-result")).toBeNull();
+
+    // The first row's write - abandoned when the popover went idle - finally
+    // resolves. If `confirm`'s epoch guard did not abort the loop, it would
+    // now call `onAddTarget` a SECOND time for the row that was never
+    // re-confirmed, writing it under an instance that has changed since the
+    // user saw it.
+    await act(async () => {
+      resolveFirst!({ ok: true });
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
   });
 });

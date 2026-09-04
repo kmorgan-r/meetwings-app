@@ -31,6 +31,11 @@ describe("several survivors", () => {
     expect(screen.getByTestId("calendar-candidate-a")).toHaveTextContent("Client sync");
     // An untitled event is a real event; the row still has to name a time.
     expect(screen.getByTestId("calendar-candidate-b")).toHaveTextContent(/untitled/i);
+    // Locale/TZ-safe: don't pin the exact hour, just that a start-end range
+    // is actually printed, not silently dropped alongside the subject.
+    expect(screen.getByTestId("calendar-candidate-b").textContent).toMatch(
+      /\d{1,2}:\d{2}.*–.*\d{1,2}:\d{2}/
+    );
     expect(screen.getAllByTestId(/^calendar-candidate-/)).toHaveLength(2);
   });
 
@@ -74,9 +79,22 @@ describe("unmatched attendees", () => {
     expect(screen.getByTestId("calendar-unmatched-old@acme.example")).toHaveTextContent(
       /archived in odoo/i
     );
-    // Greyed, and there is no create-contact action anywhere in this block.
+    // GREYED, not just present: both entries actually carry the muted style.
+    expect(screen.getByTestId("calendar-unmatched-new@acme.example")).toHaveClass(
+      "text-muted-foreground"
+    );
+    expect(screen.getByTestId("calendar-unmatched-old@acme.example")).toHaveClass(
+      "text-muted-foreground"
+    );
+    // No add control anywhere in this block: no checkbox at all (an id-0
+    // testid probe is vacuous - no code path ever emits one), and no
+    // create-contact escape hatch either.
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /create/i })).toBeNull();
-    expect(screen.queryByTestId("calendar-proposal-row-0")).toBeNull();
+    // The fixed-height region is what keeps the popover's footprint from
+    // jumping around as content behind it changes; a proposal is the state
+    // most likely to grow content, so pin the class here too.
+    expect(screen.getByTestId("calendar-proposal-region")).toHaveClass("h-28");
   });
 });
 
@@ -86,12 +104,28 @@ describe("other states", () => {
     ["no-meeting", { kind: "no-meeting" } as const],
   ])("renders the reserved region for %s", (_label, state) => {
     renderState(state);
-    expect(screen.getByTestId("calendar-proposal-region")).toBeInTheDocument();
+    const region = screen.getByTestId("calendar-proposal-region");
+    expect(region).toBeInTheDocument();
+    // FIXED height, not max-height - see the comment on REGION_CLASS. A
+    // max-height (or no height at all) passes every other assertion in this
+    // file while breaking the one constraint the region exists to hold.
+    expect(region).toHaveClass("h-28");
   });
 
-  it("renders nothing at all when idle", () => {
+  // `idle` is reachable with the popover still open and rendering - an Odoo
+  // instance change resets the hook to idle while the picker stays open
+  // (src/types/calendar.ts's CalendarProposalState doc comment), and
+  // Radix's Presence also keeps content mounted through the exit-animation
+  // window after `open` has already gone false. Returning `null` in either
+  // case collapses the box out from under whatever sits below it - the
+  // region must stay reserved, just empty.
+  it("reserves the region but renders nothing in it when idle", () => {
     renderState({ kind: "idle" });
-    expect(screen.queryByTestId("calendar-proposal-region")).toBeNull();
+    const region = screen.getByTestId("calendar-proposal-region");
+    expect(region).toBeInTheDocument();
+    expect(region.textContent).toBe("");
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+    expect(screen.queryByTestId("calendar-proposal-confirm")).toBeNull();
   });
 
   it("offers a retry on an error", async () => {
