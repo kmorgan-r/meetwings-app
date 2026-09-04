@@ -116,12 +116,46 @@ pub struct Session {
     pub generation: u64,
 }
 
+/// **Lock order, strictly outermost first:** `refresh_op` -> `persist_op` ->
+/// `session` -> `session_only`. Every function in this module that takes more
+/// than one of these follows this order; nothing ever acquires a later one
+/// and then tries to acquire an earlier one. `graph_disconnect` takes
+/// `persist_op` -> `session` -> `session_only` - a prefix of the same order -
+/// so it can never deadlock against `refresh_and_adopt`, which is the only
+/// function that ever takes `refresh_op`.
 #[derive(Default)]
 pub struct GraphState {
     pub session: Mutex<Session>,
     /// True when no keychain service was available: the connection works for
     /// this launch and NOTHING is written to disk.
     pub session_only: Mutex<bool>,
+    /// Guards the adopt-then-persist sequence in `adopt_and_persist_with` and
+    /// the clear-then-delete sequence in `forget_refresh_token_with` against
+    /// EACH OTHER, so the two can never interleave - see both functions' doc
+    /// comments for the race this closes (Task 11 review round 2, Finding B).
+    ///
+    /// A `std::sync::Mutex`, not a `tokio` one, and deliberately so: neither
+    /// critical section contains an `.await` (adopting is in-memory; the
+    /// keychain write/delete is a synchronous OS call), so a caller can only
+    /// ever block here on the OTHER critical section's keychain I/O -
+    /// milliseconds, never the network. That matters concretely for
+    /// `graph_disconnect`, which takes this same lock: it must never be able
+    /// to block on a `reqwest` call, and this codebase sets no timeout on any
+    /// of them.
+    persist_op: Mutex<()>,
+    /// Serializes `refresh_and_adopt` calls against EACH OTHER - not against
+    /// `persist_op`; see that field's own doc comment for why disconnect must
+    /// not be made to wait on this one (Task 11 review round 2, Finding C).
+    /// Entra rotates the refresh token on every redemption, so two
+    /// overlapping `graph_current_meetings` calls redeeming the same stored
+    /// token concurrently would leave memory and the keychain holding two
+    /// different tokens, or trip Entra's replay detection and revoke the
+    /// whole token family.
+    ///
+    /// A `tokio::sync::Mutex`, not a `std` one: this one IS held across the
+    /// `.await` on the token endpoint, which a `std::sync::MutexGuard` must
+    /// never do.
+    refresh_op: tokio::sync::Mutex<()>,
 }
 
 impl GraphState {
@@ -176,9 +210,17 @@ fn now_ms() -> i64 {
 /// the generation moved, so these tokens belong to a connection the user has
 /// since destroyed. The caller must then write NOTHING, keychain included.
 ///
-/// Checking the generation INSIDE the lock is what makes this sound: a caller
-/// that checked first and adopted second would race the very disconnect it is
-/// trying to observe.
+/// Checking the generation INSIDE the lock is what makes THIS comparison
+/// sound: a caller that checked first and adopted second would race the very
+/// disconnect it is trying to observe.
+///
+/// That is NOT, by itself, what makes the whole adopt-then-persist sequence
+/// safe against a disconnect (Task 11 review round 2, Finding B). A
+/// disconnect landing AFTER this function returns `true` but before the
+/// caller's keychain write completes is a separate race this function cannot
+/// see or close - it only ever looks at the generation at the single instant
+/// it holds the session lock. `adopt_and_persist_with` closes that second
+/// race, with `GraphState::persist_op`, not with anything in here.
 fn adopt(state: &GraphState, tokens: &auth::Tokens, generation: u64) -> bool {
     let mut session = state.session.lock().unwrap();
     if session.generation != generation {
@@ -202,43 +244,89 @@ fn adopt(state: &GraphState, tokens: &auth::Tokens, generation: u64) -> bool {
 /// Adopt into MEMORY first, persist SECOND, and never let a persist failure
 /// throw away a credential we already hold.
 ///
-/// Three separate rules live here, each of which was a defect when this was an
-/// inline `persist_rotated(&tokens)?; adopt(&state, &tokens);` pair:
+/// Four separate rules live here:
 ///
-/// 1. **A disconnect that landed mid-flight wins.** `adopt` returning false
-///    means the user disconnected while we were awaiting; persisting anyway
-///    would REWRITE the keychain entry they just destroyed and leave `status()`
-///    reporting connected again after a disconnect that appeared to succeed.
-/// 2. **Session-only never touches disk.** The write is skipped, not attempted
-///    and ignored - `persist_rotated` would fail and its `?` would abort the
-///    whole call, so every request after access-token expiry died on the one
+/// 1. **A disconnect that landed before this call even started wins.**
+///    `adopt` returning false means the user disconnected while we were
+///    awaiting, before this function ran; persisting anyway would REWRITE the
+///    keychain entry they just destroyed and leave `status()` reporting
+///    connected again after a disconnect that appeared to succeed.
+/// 2. **A disconnect that lands DURING this call also wins - `persist_op` is
+///    why (Task 11 review round 2, Finding B).** Rule 1's generation check
+///    only catches a disconnect that finished before `adopt` runs; it says
+///    nothing about one that starts partway through THIS function's body,
+///    between a successful `adopt` and the `persist` call below - see
+///    `adopt`'s own doc comment. Holding `state.persist_op` for this entire
+///    function closes that window: `forget_refresh_token_with` (which
+///    `graph_disconnect` calls) takes the SAME lock for its own
+///    clear-then-delete sequence, so the two can never interleave. Either
+///    this function's adopt-then-persist runs to completion first and a
+///    disconnect then clears/deletes what it just wrote, or a disconnect's
+///    clear-then-delete runs first and `adopt` here sees the bumped
+///    generation and returns false before `persist` is ever reached. There is
+///    no state in between where a disconnect could observe an adopted-but-
+///    not-yet-persisted (or persisted-but-about-to-be-overwritten) token.
+/// 3. **Session-only never touches disk.** The write is skipped, not attempted
+///    and ignored - `persist` would still run and its `Err` would still need
+///    handling, so every request after access-token expiry died on the one
 ///    platform where the refuse-to-persist rule applies.
-/// 3. **A persist failure degrades; it does not discard.** `available()` is a
+/// 4. **A persist failure degrades; it does not discard.** `available()` is a
 ///    heuristic over error variants (see keychain.rs), so it can be wrong, and
 ///    the keychain can also go away mid-session. We already hold working tokens
 ///    in memory at this point - falling back to session-only keeps the user
 ///    working until quit, where propagating the error would throw away a
 ///    credential that is fine.
-fn adopt_and_persist(
+///
+/// `persist` is injected rather than calling `auth::persist_rotated` directly,
+/// for the same reason `forget_refresh_token_with` injects `delete` (Ruling
+/// 20): a test proving "the session-only path never persists" must not be
+/// able to reach a real keychain regardless of whether rule 3's early return
+/// is even there. A version that called the real `auth::persist_rotated` and
+/// only checked `Ok(())` plus the two memory values passed identically with
+/// or without that early return - a stored refresh token this test never
+/// created has nothing to overwrite - and on a developer machine that DOES
+/// have one stored, the same missing guard would silently overwrite it with
+/// this test's literal `"rotated"` (Task 11 review round 2, Finding A).
+fn adopt_and_persist_with(
     state: &GraphState,
     tokens: &auth::Tokens,
     generation: u64,
+    persist: impl FnOnce(&auth::Tokens) -> Result<(), String>,
 ) -> Result<(), String> {
+    let _persist_guard = state.persist_op.lock().unwrap();
     if !adopt(state, tokens, generation) {
         return Err(NOT_CONNECTED.to_string());
     }
     if *state.session_only.lock().unwrap() {
         return Ok(());
     }
-    if auth::persist_rotated(tokens).is_err() {
+    if persist(tokens).is_err() {
         *state.session_only.lock().unwrap() = true;
     }
     Ok(())
 }
 
+/// Called with the real keychain write. See `adopt_and_persist_with` for the
+/// full contract this wraps.
+fn adopt_and_persist(
+    state: &GraphState,
+    tokens: &auth::Tokens,
+    generation: u64,
+) -> Result<(), String> {
+    adopt_and_persist_with(state, tokens, generation, auth::persist_rotated)
+}
+
 /// The shared clear-and-decide sequence behind both `forget_refresh_token`
 /// (called on an explicit `invalid_grant`) and `graph_disconnect` (called on a
 /// user-initiated disconnect).
+///
+/// Held under `state.persist_op` for its entire body - the SAME lock
+/// `adopt_and_persist_with` holds for its own adopt-then-persist sequence
+/// (Task 11 review round 2, Finding B). That is what stops a refresh's
+/// persist and a disconnect's clear-then-delete from interleaving: whichever
+/// of the two acquires `persist_op` first runs to completion, keychain I/O
+/// included, before the other's body even starts. See `adopt_and_persist_
+/// with`'s doc comment (rule 2) for the failure this closes.
 ///
 /// Memory is cleared first and unconditionally, before `delete` - whatever the
 /// keychain does, a token this caller has decided to discard must not survive
@@ -261,6 +349,7 @@ fn forget_refresh_token_with(
     state: &GraphState,
     delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    let _persist_guard = state.persist_op.lock().unwrap();
     let was_session_only = *state.session_only.lock().unwrap();
     state.clear_session();
     if was_session_only {
@@ -276,6 +365,22 @@ fn forget_refresh_token(state: &GraphState) -> Result<(), String> {
     forget_refresh_token_with(state, keychain::delete_refresh_token)
 }
 
+/// The access token already in memory, if any, and not yet expired.
+///
+/// Shared by two call sites for the same reason: the fast path at the top of
+/// `graph_current_meetings` (skip refreshing entirely when a valid token is
+/// already there) and the re-read inside `refresh_and_adopt`, immediately
+/// after acquiring `refresh_op` (skip a redundant redemption when a
+/// concurrent call already refreshed while this one was waiting for the
+/// lock - Task 11 review round 2, Finding C).
+fn fresh_access_token(state: &GraphState) -> Option<String> {
+    let session = state.session.lock().unwrap();
+    match &session.access_token {
+        Some(token) if session.expires_at_ms > now_ms() => Some(token.clone()),
+        _ => None,
+    }
+}
+
 /// The ONE refresh path. Both call sites in `graph_current_meetings` go through
 /// it, which is what keeps the `invalid_grant` handling identical between them.
 ///
@@ -283,12 +388,39 @@ fn forget_refresh_token(state: &GraphState) -> Result<(), String> {
 /// a bare `?` at the second, so a refresh token revoked at the same moment as
 /// the access token - a password change, the single commonest cause - left the
 /// dead credential sitting in the keychain forever.
+///
+/// Held under `state.refresh_op` for the whole call, ACROSS the `.await` on
+/// the token endpoint (Task 11 review round 2, Finding C) - `refresh_op` is a
+/// `tokio::sync::Mutex` specifically so a guard can do that; a
+/// `std::sync::MutexGuard` must never cross an `.await`. Two overlapping
+/// `graph_current_meetings` calls would otherwise both read the same stored
+/// refresh token and both redeem it: Entra rotates on every redemption, so
+/// the loser's redemption either fails outright or leaves memory and the
+/// keychain disagreeing about which token is current, and a double
+/// redemption can also trip Entra's replay detection and revoke the whole
+/// token family. Deliberately a SEPARATE lock from `persist_op`: a caller
+/// waiting here waits on the NETWORK, and this codebase sets no `reqwest`
+/// timeout anywhere, so `graph_disconnect` sharing this lock could hang
+/// indefinitely instead of returning in milliseconds. See `GraphState`'s own
+/// doc comment for the full lock order, which is why this function is free to
+/// call `adopt_and_persist` (itself taking `persist_op`) while still holding
+/// `refresh_op`.
 async fn refresh_and_adopt(
     state: &GraphState,
     authority: &str,
     client_id: &str,
     generation: u64,
 ) -> Result<String, String> {
+    let _refresh_guard = state.refresh_op.lock().await;
+
+    // Re-read AFTER acquiring the lock: a call that was waiting here may have
+    // queued behind one that already redeemed and adopted a fresh token. If
+    // memory now holds one that has not expired, use it instead of redeeming
+    // the stored refresh token a second time.
+    if let Some(token) = fresh_access_token(state) {
+        return Ok(token);
+    }
+
     let stored = stored_refresh_token(state)?;
     let tokens = match auth::refresh(authority, client_id, &stored, now_ms()).await {
         Ok(tokens) => tokens,
@@ -440,13 +572,7 @@ pub async fn graph_current_meetings(
     let state = app.state::<GraphState>();
     let generation = state.session.lock().unwrap().generation;
 
-    let mut token = {
-        let session = state.session.lock().unwrap();
-        match &session.access_token {
-            Some(token) if session.expires_at_ms > now_ms() => Some(token.clone()),
-            _ => None,
-        }
-    };
+    let mut token = fresh_access_token(&state);
 
     // BOTH refresh sites go through refresh_and_adopt, which is what makes the
     // invalid_grant handling identical between them.
@@ -634,9 +760,14 @@ mod tests {
 
     /// A disconnect landing while a refresh is in the air must not be undone by
     /// that refresh completing. `adopt` compares the generation UNDER the
-    /// session lock and writes nothing on a mismatch; `adopt_and_persist` then
-    /// refuses to touch the keychain at all, so the entry the user just deleted
-    /// is not rewritten behind them.
+    /// session lock and writes nothing on a mismatch; `adopt_and_persist_with`
+    /// then refuses to touch the keychain at all, so the entry the user just
+    /// deleted is not rewritten behind them.
+    ///
+    /// Routed through `adopt_and_persist_with` with a spy `persist`, not
+    /// through the `adopt_and_persist` wrapper, so "persist is never reached"
+    /// is an assertion here rather than an accident of `adopt` failing first -
+    /// the same reasoning as `session_only_adopts_without_persisting` above.
     #[test]
     fn a_disconnect_mid_flight_beats_a_refresh_that_was_already_running() {
         let state = GraphState::default();
@@ -655,9 +786,17 @@ mod tests {
             !adopt(&state, &tokens, generation),
             "stale generation must not adopt"
         );
+        let persist_was_called = std::cell::Cell::new(false);
         assert_eq!(
-            adopt_and_persist(&state, &tokens, generation),
+            adopt_and_persist_with(&state, &tokens, generation, |_| {
+                persist_was_called.set(true);
+                Ok(())
+            }),
             Err(NOT_CONNECTED.to_string())
+        );
+        assert!(
+            !persist_was_called.get(),
+            "a stale generation must never reach persist"
         );
         let session = state.session.lock().unwrap();
         assert!(
@@ -737,6 +876,21 @@ mod tests {
 
     /// Session-only must never write to disk, and a skipped write is not a
     /// failure: the tokens still reach memory and the call proceeds.
+    ///
+    /// **Finding A (Task 11 review round 2):** the same seam Ruling 20
+    /// required for `forget_refresh_token`, one level up. The pre-fix version
+    /// of this test called the real `adopt_and_persist(&state, &tokens,
+    /// generation)` and asserted only `Ok(())` plus the two memory values -
+    /// and passed identically whether or not the `if
+    /// *state.session_only.lock().unwrap() { return Ok(()); }` guard inside
+    /// `adopt_and_persist_with` was even there: with the guard deleted,
+    /// `adopt` still succeeds, `persist_rotated` still runs for real, and
+    /// `store_refresh_token("rotated")` still succeeds - straight into the
+    /// developer's actual Credential Manager entry under
+    /// `com.meetwings.graph`, clobbering a live refresh token with the
+    /// literal string `"rotated"`. All three of the old assertions still
+    /// held. The spy below makes "session-only never persists" an assertion
+    /// instead of an accident of which stored value happened to be there.
     #[test]
     fn session_only_adopts_without_persisting() {
         let state = GraphState::default();
@@ -749,7 +903,72 @@ mod tests {
             id_token: None,
         };
 
-        assert_eq!(adopt_and_persist(&state, &tokens, generation), Ok(()));
+        let persist_was_called = std::cell::Cell::new(false);
+        let result = adopt_and_persist_with(&state, &tokens, generation, |_| {
+            persist_was_called.set(true);
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            !persist_was_called.get(),
+            "the session-only path must never call persist"
+        );
+        let session = state.session.lock().unwrap();
+        assert_eq!(session.access_token.as_deref(), Some("fresh"));
+        assert_eq!(session.refresh_token.as_deref(), Some("rotated"));
+    }
+
+    /// The other half of the seam's contract: on the normal (non-session-only)
+    /// path, `persist` runs, and runs exactly once.
+    #[test]
+    fn adopt_and_persist_on_the_normal_path_calls_persist_exactly_once() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        let persist_calls = std::cell::Cell::new(0u32);
+        let result = adopt_and_persist_with(&state, &tokens, generation, |_| {
+            persist_calls.set(persist_calls.get() + 1);
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(persist_calls.get(), 1);
+    }
+
+    /// Rule 4 of `adopt_and_persist_with`'s own doc comment - a persist
+    /// failure degrades to session-only rather than discarding the
+    /// credential - asserted nowhere before this test. `Ok(())` alone would
+    /// also be returned by a version that silently dropped the tokens on a
+    /// persist failure, so this checks both the return value AND that the
+    /// tokens are still live in memory with `session_only` now `true`.
+    #[test]
+    fn adopt_and_persist_degrades_to_session_only_on_a_persist_failure() {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        };
+
+        let result =
+            adopt_and_persist_with(
+                &state,
+                &tokens,
+                generation,
+                |_| Err(NO_KEYCHAIN.to_string()),
+            );
+
+        assert_eq!(result, Ok(()));
+        assert!(*state.session_only.lock().unwrap());
         let session = state.session.lock().unwrap();
         assert_eq!(session.access_token.as_deref(), Some("fresh"));
         assert_eq!(session.refresh_token.as_deref(), Some("rotated"));
@@ -763,5 +982,61 @@ mod tests {
         let state = GraphState::default();
         *state.session_only.lock().unwrap() = true;
         assert_eq!(stored_refresh_token(&state), Err(NOT_CONNECTED.to_string()));
+    }
+
+    #[test]
+    fn fresh_access_token_is_none_when_absent_or_expired_some_when_valid() {
+        let state = GraphState::default();
+        assert_eq!(fresh_access_token(&state), None);
+
+        {
+            let mut session = state.session.lock().unwrap();
+            session.access_token = Some("stale".into());
+            session.expires_at_ms = 0; // long expired
+        }
+        assert_eq!(fresh_access_token(&state), None);
+
+        {
+            let mut session = state.session.lock().unwrap();
+            session.access_token = Some("fresh".into());
+            session.expires_at_ms = i64::MAX;
+        }
+        assert_eq!(fresh_access_token(&state), Some("fresh".to_string()));
+    }
+
+    /// **Finding C (Task 11 review round 2):** two overlapping
+    /// `graph_current_meetings` calls must not both redeem the same stored
+    /// refresh token - Entra rotates on every redemption, so a double
+    /// redemption leaves memory and the keychain holding different tokens, or
+    /// trips Entra's replay detection outright.
+    ///
+    /// A literal two-call test can't drive a real redemption without a live
+    /// token endpoint, so the FIRST call is simulated directly: it adopts a
+    /// fresh token via `adopt_and_persist_with`, exactly as a real
+    /// `refresh_and_adopt` would have. The SECOND call goes through the real
+    /// `refresh_and_adopt`, with the authority pointed at a loopback address
+    /// nothing listens on: if the post-lock re-read were missing or broken,
+    /// this call would fall through to `auth::refresh` and fail with NETWORK
+    /// (see `post_token_maps_a_refused_connection_to_network` in auth.rs,
+    /// which dials the same address) instead of returning the token the first
+    /// call already adopted.
+    #[tokio::test]
+    async fn refresh_and_adopt_finds_a_token_another_call_already_adopted_and_does_not_redeem_again(
+    ) {
+        let state = GraphState::default();
+        let generation = state.session.lock().unwrap().generation;
+        let tokens = auth::Tokens {
+            access_token: "already-fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rt".into()),
+            id_token: None,
+        };
+        assert_eq!(
+            adopt_and_persist_with(&state, &tokens, generation, |_| Ok(())),
+            Ok(())
+        );
+
+        let result = refresh_and_adopt(&state, "https://127.0.0.1:1", "client-1", generation).await;
+        assert_eq!(result, Ok("already-fresh".to_string()));
     }
 }
