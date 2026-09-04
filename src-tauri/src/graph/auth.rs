@@ -42,7 +42,7 @@ pub fn new_pkce() -> Pkce {
 #[allow(dead_code)]
 pub fn validate_state(expected: &str, received: Option<&str>) -> Result<(), String> {
     match received {
-        Some(value) if value == expected => Ok(()),
+        Some(value) if !expected.is_empty() && value == expected => Ok(()),
         _ => Err(AUTH_REJECTED.to_string()),
     }
 }
@@ -74,7 +74,7 @@ pub fn nonce_from_id_token(id_token: &str) -> Option<String> {
 #[allow(dead_code)]
 pub fn validate_nonce(expected: &str, id_token: Option<&str>) -> Result<(), String> {
     match id_token.and_then(nonce_from_id_token) {
-        Some(actual) if actual == expected => Ok(()),
+        Some(actual) if !expected.is_empty() && actual == expected => Ok(()),
         _ => Err(AUTH_REJECTED.to_string()),
     }
 }
@@ -138,6 +138,14 @@ mod tests {
         assert_eq!(validate_state("abc", None), Err(AUTH_REJECTED.to_string()));
     }
 
+    /// An empty `expected` must never be satisfiable - if it were, a caller
+    /// that failed to generate a `state` (or passed one through unset) would
+    /// have its CSRF check pass while binding nothing.
+    #[test]
+    fn empty_expected_state_is_rejected() {
+        assert_eq!(validate_state("", Some("")), Err(AUTH_REJECTED.to_string()));
+    }
+
     // Not a signature check - Entra's own transport is TLS and the token came
     // straight from the token endpoint. This reads the claim the flow binds.
     fn fake_id_token(claims: &str) -> String {
@@ -151,6 +159,34 @@ mod tests {
         assert_eq!(nonce_from_id_token(&token), Some("n-123".to_string()));
     }
 
+    /// Malformed shapes `nonce_from_id_token` must fail closed on, not panic
+    /// on - locked in by test rather than left to inspection of the `?` chain.
+    #[test]
+    fn nonce_from_id_token_is_none_for_malformed_shapes() {
+        // Only one `.`-separated segment: no payload to index.
+        assert_eq!(nonce_from_id_token("not-a-jwt"), None);
+        // A payload segment that is not valid base64.
+        assert_eq!(nonce_from_id_token("header.not!valid!base64.sig"), None);
+        // Valid base64, but the decoded bytes are not valid JSON.
+        assert_eq!(
+            nonce_from_id_token(&format!(
+                "header.{}.sig",
+                URL_SAFE_NO_PAD.encode("not json")
+            )),
+            None
+        );
+        // Valid JSON, but not an object - `.get("nonce")` has nothing to index.
+        assert_eq!(
+            nonce_from_id_token(&format!("header.{}.sig", URL_SAFE_NO_PAD.encode("[1,2,3]"))),
+            None
+        );
+        // A `nonce` claim present but not a string.
+        assert_eq!(
+            nonce_from_id_token(&fake_id_token(r#"{"nonce":123}"#)),
+            None
+        );
+    }
+
     /// The spec asks for "nonce validation in the returned ID token" — a
     /// REJECTION behaviour, not extraction. Extraction passing tells you
     /// nothing about whether a wrong nonce is refused.
@@ -161,6 +197,19 @@ mod tests {
         assert!(validate_nonce("n-123", Some(&good)).is_ok());
         assert_eq!(
             validate_nonce("n-123", Some(&wrong)),
+            Err(AUTH_REJECTED.to_string())
+        );
+    }
+
+    /// An empty `expected` must never be satisfiable, even against an ID
+    /// token that itself carries an empty `nonce` claim - the same failure
+    /// mode as `empty_expected_state_is_rejected`, for the other CSRF-shaped
+    /// check in this file.
+    #[test]
+    fn empty_expected_nonce_is_rejected() {
+        let empty_claim = fake_id_token(r#"{"nonce":""}"#);
+        assert_eq!(
+            validate_nonce("", Some(&empty_claim)),
             Err(AUTH_REJECTED.to_string())
         );
     }
