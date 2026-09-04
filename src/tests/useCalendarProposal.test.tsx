@@ -324,7 +324,7 @@ describe("fetching", () => {
   it("recomputes on each open and not on a calendar-data change", async () => {
     mockGraph([meeting("e1", "Sync")]);
     const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
-    const { rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
+    const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
       initialProps: props,
     });
     await waitFor(() =>
@@ -333,6 +333,13 @@ describe("fetching", () => {
     const afterFirstOpen = invoke.mock.calls.filter(
       ([cmd]) => cmd === "graph_current_meetings"
     ).length;
+    // Captured before the contacts-reference-changing rerenders below, so the
+    // toBe assertions after them prove these three members survive a
+    // `contacts` identity change with no new fetch behind it - not just that
+    // no fetch happened (the invoke-count assertions already cover that).
+    const stateBeforeRerenders = result.current.state;
+    const onRetryBeforeRerenders = result.current.onRetry;
+    const onPickCandidateBeforeRerenders = result.current.onPickCandidate;
 
     // A NEW array reference with identical contents, while the picker stays
     // open. Rerendering with the SAME `contacts` reference could not fail this
@@ -349,6 +356,19 @@ describe("fetching", () => {
     expect(
       invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings")
     ).toHaveLength(afterFirstOpen);
+
+    // The other half of the property completion-calendar-wiring.test.tsx pins
+    // at the call site: that test proves <Completion />'s calendarProps memo
+    // survives a rerender GIVEN a hook that returns stable members; this
+    // proves the real hook IS that stable member source, not just a mock
+    // standing in for one. `project`'s deps are `[]` (it reads `contacts` via
+    // `rowsRef`, per the doc comment on `project` in useCalendarProposal.ts),
+    // which is what keeps `onPickCandidate`/`onRetry`/`state` from changing
+    // identity here even though `contacts` itself is a fresh array on both
+    // rerenders above.
+    expect(result.current.state).toBe(stateBeforeRerenders);
+    expect(result.current.onRetry).toBe(onRetryBeforeRerenders);
+    expect(result.current.onPickCandidate).toBe(onPickCandidateBeforeRerenders);
 
     rerender({ ...props, isPickerOpen: false });
     rerender({ ...props, isPickerOpen: true });
