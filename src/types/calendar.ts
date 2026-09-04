@@ -129,7 +129,20 @@ export interface CandidateSummary {
 }
 
 export type CalendarProposalState =
-  /** Popover closed, or reset. The region is not reserved. */
+  /**
+   * Popover closed, or reset. Usually the region is not reserved - but NOT
+   * always: an Odoo instance change resets to `idle` while the picker stays
+   * open (useCalendarProposal.ts's `odoo-instance-changed` listener), and in
+   * that case `present` can still be `true`. The hook deliberately does not
+   * refetch to fill it: `useOdooTarget`'s `handleInstanceChanged`
+   * (useOdooTarget.ts:652-690) clears `target` and the disclosure cache on an
+   * instance change, but never touches `cache` - the contact list `contacts`
+   * is read from - so `contacts` still holds the OUTGOING instance's rows,
+   * at the same array reference, until the resync that follows resolves. A
+   * refetch here would match the new instance's meeting against that stale
+   * cache. The region stays reserved but empty until the picker next closes
+   * and reopens. Task 14 must render this deliberately, not discover it.
+   */
   | { kind: "idle" }
   | { kind: "loading" }
   /**

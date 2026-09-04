@@ -140,6 +140,21 @@ async function fillAndSave() {
   await userEvent.click(screen.getByRole("button", { name: /save/i }));
 }
 
+// Real per-character userEvent.type() across all four fields is the cost
+// driver here (React re-renders on every keystroke, x4 fields), not a hang:
+// each of the tests below takes 2.6-3.7s even in isolation with no other
+// suite running. Under the full suite (`npm test -- --run`, what CI actually
+// runs) that headroom is eaten by CPU contention from every other test file
+// running concurrently, and the vitest default of 5000ms is occasionally not
+// enough - not because anything is broken, but because there is real
+// wall-clock work here that a busier machine takes longer to get through.
+// Applied only to the tests that type all four fields (via `fillAndSave()`
+// or inline); every other test in this file is well under a second and does
+// not need it. A genuine hang still fails loudly at this timeout - it would
+// never resolve at 5s OR 15s - so this does not hide a deadlock, it only
+// stops a slow machine from being mistaken for one.
+const SLOW_FORM_FILL_TIMEOUT_MS = 15_000;
+
 describe("saving credentials", () => {
   // The picker lives in the other window and cannot see this write. The event
   // is the only thing that tells it to re-resolve.
@@ -148,7 +163,7 @@ describe("saving credentials", () => {
     renderPage();
     await fillAndSave();
     await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   // The blank-login repair: same url and db, so the fingerprint is UNCHANGED.
   // Gating only on instanceChanged leaves the picker stuck on "not set up",
@@ -158,14 +173,14 @@ describe("saving credentials", () => {
     renderPage();
     await fillAndSave();
     await waitFor(() => expect(emit).toHaveBeenCalledWith("odoo-instance-changed"));
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   it("does not notify when nothing meaningful changed", async () => {
     renderPage();
     await fillAndSave();
     await waitFor(() => expect(storage.saveOdooConfig).toHaveBeenCalled());
     expect(emit).not.toHaveBeenCalled();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   // A failed credential write must not leave the user believing it succeeded.
   // saveOdooConfig awaits secureGet, secureSet and the store's own save(), all
@@ -176,7 +191,7 @@ describe("saving credentials", () => {
     await fillAndSave();
     expect(await screen.findByText(/ODOO_INTERNAL/)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain("i9j0");
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   // Review finding 1: the credentials were already written by the time
   // `emit` runs. A rejecting `emit` must not relabel that as a failed save -
@@ -210,7 +225,7 @@ describe("saving credentials", () => {
 
     expect(screen.queryByText(/ODOO_INTERNAL/)).not.toBeInTheDocument();
     expect(screen.getByText(/saved/i)).toBeInTheDocument();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   // Finding 4: the only prior observable difference between a successful save
   // and a click that did nothing was the absence of an error line. Credential
@@ -219,7 +234,7 @@ describe("saving credentials", () => {
     renderPage();
     await fillAndSave();
     expect(await screen.findByText(/saved/i)).toBeInTheDocument();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   it("clears the success confirmation on the next edit", async () => {
     renderPage();
@@ -227,7 +242,7 @@ describe("saving credentials", () => {
     expect(await screen.findByText(/saved/i)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText(/url/i), "1");
     expect(screen.queryByText(/saved/i)).not.toBeInTheDocument();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 });
 
 describe("the Odoo settings page", () => {
@@ -363,14 +378,14 @@ describe("the Odoo settings page", () => {
 
     expect(screen.queryByText(/credentials stored/i)).not.toBeInTheDocument();
     expect(screen.getByText(/press save to store them/i)).toBeInTheDocument();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   it("marks the credentials stored once the save succeeds", async () => {
     renderPage();
     await fillAndSave();
     expect(await screen.findByText(/credentials stored/i)).toBeInTheDocument();
     expect(screen.queryByText(/press save to store them/i)).not.toBeInTheDocument();
-  });
+  }, SLOW_FORM_FILL_TIMEOUT_MS);
 
   // The returning user. Nothing else in this file asserts the first row green,
   // so without this case the load path could stop setting the flag and every

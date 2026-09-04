@@ -1,5 +1,14 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+// The mock factory below owns this reference too - importing it here (rather
+// than adding a second vi.hoisted export) gets the SAME mock `listen`
+// function the hook calls, so `.mockImplementationOnce` on it intercepts the
+// hook's own next `listen()` call. `vi.mocked` is a TYPE-ONLY cast (it
+// returns its argument unchanged at runtime) - needed because the import
+// itself resolves to `@tauri-apps/api/event`'s real .d.ts, which has no
+// `mockImplementationOnce`.
+import { listen as listenImport } from "@tauri-apps/api/event";
+const listen = vi.mocked(listenImport);
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -88,16 +97,29 @@ describe("presence", () => {
     expect(setCalendarBlockPresent).toHaveBeenLastCalledWith(false);
   });
 
+  /**
+   * `present` reads `false` at t=0 regardless of `rows.length` - `connected`
+   * itself starts `false` - so a bare `waitFor(() => expect(present).toBe(false))`
+   * passes on its FIRST synchronous check, before `connected` ever resolves
+   * true, and would pass identically if the `rows.length > 0` half of
+   * `present`'s guard were deleted entirely. Waiting on `graph_status` having
+   * actually been called forces a real flush: `connected` genuinely resolves
+   * `true` here (mockGraph), so this only stays `false` because the cache
+   * check is doing its job.
+   */
   it("is statically absent while the contact cache is not ready", async () => {
     mockGraph([meeting("e1", "Sync")]);
     const { result } = setup({ contacts: null });
-    await waitFor(() => expect(result.current.present).toBe(false));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("graph_status"));
+    expect(result.current.present).toBe(false);
   });
 
+  // Same non-discrimination risk as above, and the same fix.
   it("is statically absent when the contact cache is empty", async () => {
     mockGraph([meeting("e1", "Sync")]);
     const { result } = setup({ contacts: [] });
-    await waitFor(() => expect(result.current.present).toBe(false));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("graph_status"));
+    expect(result.current.present).toBe(false);
   });
 
   it("is present when connected with a populated cache", async () => {
@@ -171,6 +193,24 @@ describe("presence", () => {
   });
 
   /**
+   * The existing "unreadable" test (above) actually drives `graph_status` to
+   * THROW - it never gives `loadGraphConfigState` an `unreadable` result, so a
+   * mutant collapsing the `unreadable` branch into the `absent` one (silent,
+   * no error) passes the whole suite untouched. "Never collapse absent and
+   * unreadable" is a global constraint of this feature; this is what actually
+   * pins it on the `readStatus` path; the next describe block pins it on
+   * `fetchNow`.
+   */
+  it("treats an unreadable config as an error, not a disconnected account", async () => {
+    config.loadGraphConfigState.mockResolvedValue({ state: "unreadable", config: null });
+    const { result } = setup();
+    await waitFor(() =>
+      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_AUTH_REJECTED" })
+    );
+    expect(result.current.present).toBe(true);
+  });
+
+  /**
    * `/odoo` lives in the `dashboard` webview and this hook runs in `main`.
    * Without the cross-window listener, connecting there would not reach here
    * until an app restart, and disconnecting there would leave this window
@@ -237,6 +277,48 @@ describe("fetching", () => {
     );
   });
 
+  /**
+   * The companion to the two "statically absent" presence tests: THIS is the
+   * case that actually discriminates the `rows.length > 0` half of
+   * `present`'s guard, because it observes something that would be different
+   * under the `const present = connected` mutant - a fetch that never
+   * happens - rather than a value (`present === false`) that mutant also
+   * produces, just for the wrong reason. The picker opens immediately and
+   * `connected` genuinely resolves `true` (mockGraph); only the cache never
+   * arriving is why `graph_current_meetings` must never be called.
+   */
+  it("never calls Graph when the picker opens against a cache that never arrives", async () => {
+    mockGraph([meeting("e1", "Sync")]);
+    const props = { isPickerOpen: true, contacts: null as OdooContact[] | null, setCalendarBlockPresent: vi.fn() };
+    renderHook((p: typeof props) => useCalendarProposal(p), { initialProps: props });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("graph_status"));
+    expect(invoke).not.toHaveBeenCalledWith("graph_current_meetings", expect.anything());
+  });
+
+  /**
+   * `fetchNow` reads `loadGraphConfigState` a SECOND time (readStatus already
+   * read it once at mount) - the config can go bad between mount and open.
+   * Without this, only `readStatus`'s own unreadable branch is pinned; a
+   * mutant collapsing fetchNow's `unreadable` arm into its `absent` one (no
+   * error, just `idle`) would still pass every other test in this file.
+   */
+  it("surfaces GRAPH_AUTH_REJECTED from fetchNow when the config goes unreadable after mount", async () => {
+    mockGraph([]);
+    config.loadGraphConfigState
+      .mockResolvedValueOnce({
+        state: "complete",
+        config: { clientId: "c", authority: "https://login.microsoftonline.com/organizations" },
+      })
+      .mockResolvedValueOnce({ state: "unreadable", config: null });
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
+    const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
+      initialProps: props,
+    });
+    await waitFor(() =>
+      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_AUTH_REJECTED" })
+    );
+  });
+
   // Recomputed each time the picker opens - which covers the realistic case
   // (the calendar entry changing mid-meeting) without a watcher.
   it("recomputes on each open and not on a calendar-data change", async () => {
@@ -285,8 +367,35 @@ describe("fetching", () => {
     });
     await waitFor(() => expect(result.current.state.kind).toBe("several"));
 
+    // Full shape, not just `state.kind` - `matched`/`unmatched`/`candidates`
+    // are asserted nowhere else in this file. `toEqual`, not `toMatchObject`:
+    // a mutant that drops `summarize` (useCalendarProposal.ts) and returns
+    // `picked.candidates` raw type-checks (a `CalendarEvent` is structurally
+    // assignable to `CandidateSummary`) and would push every attendee's
+    // address into UI state - a `toMatchObject` subset check tolerates the
+    // extra `participants` field the raw event carries and would not catch
+    // that; `toEqual` requires an exact key set and does.
+    expect(result.current.state).toEqual({
+      kind: "several",
+      candidates: [
+        { id: "a", subject: "Client sync", startMs: NOW - 5 * MIN, endMs: NOW + 25 * MIN },
+        { id: "b", subject: "Standup", startMs: NOW - 5 * MIN, endMs: NOW + 25 * MIN },
+      ],
+    });
+
     act(() => result.current.onPickCandidate("b"));
-    expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Standup" });
+    // `matched`/`unmatched` here also catch two mutants a bare `subject`
+    // check misses: `ownAddress: null` hardcoded into `project`'s
+    // `matchAttendees` call (the organizer stops being excluded as self and
+    // shows up in `unmatched` instead), and `contacts: []` hardcoded in place
+    // of `rows` (the CFO drops out of `matched` entirely).
+    expect(result.current.state).toMatchObject({
+      kind: "proposal",
+      eventId: "b",
+      subject: "Standup",
+      matched: [{ contact: { id: 7 } }],
+      unmatched: [],
+    });
   });
 
   it("reports no-meeting rather than an error when nothing is live", async () => {
@@ -373,5 +482,30 @@ describe("lifecycle", () => {
       resolvers[0]({ ownAddress: "me@corp.test", events: [meeting("old", "Stale")] });
     });
     expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Newer" });
+  });
+
+  /**
+   * The only test in this file that can actually catch a regression of the
+   * disposed-flag guard on the `listen()` cleanups. Every other test's
+   * `listen` mock (from the module factory above) resolves synchronously, so
+   * the unmount-before-resolve race those guards exist for never occurs
+   * elsewhere - a cleanup that reverted to a bare `let unlisten; ... return
+   * () => unlisten?.();` would still pass every other test in this file.
+   * Intercepting exactly the NEXT `listen()` call and holding it open until
+   * after `unmount()` is what forces that race.
+   */
+  it("unsubscribes a listener whose listen() promise resolves after unmount", async () => {
+    mockGraph([]);
+    let resolveListen: ((unlisten: () => void) => void) | undefined;
+    listen.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveListen = resolve; })
+    );
+    const { unmount } = setup();
+    expect(resolveListen).toBeDefined();
+
+    unmount();
+    const un = vi.fn();
+    resolveListen!(un);
+    await waitFor(() => expect(un).toHaveBeenCalled());
   });
 });
