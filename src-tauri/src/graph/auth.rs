@@ -98,7 +98,7 @@ pub fn own_address_from_id_token(id_token: &str) -> Option<String> {
     None
 }
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -177,21 +177,44 @@ pub fn classify_callback_error(error: &str) -> &'static str {
     }
 }
 
-/// Binds a single-use loopback listener and returns its port immediately, so
-/// the authorize URL can be built with the real redirect before the browser
-/// opens.
-///
 /// LITERAL `127.0.0.1`, never `localhost` (which can resolve to `::1` or, in a
 /// poisoned hosts file, off-box) and never `0.0.0.0` (which would accept from
 /// the network). Port 0 asks the OS for a random ephemeral port, chosen per
 /// attempt.
+///
+/// Split out from `listen_once` so a test can pin down exactly what address
+/// this binds to - `listen_once` returns only a `u16` port, which cannot
+/// distinguish a `127.0.0.1` bind from a `0.0.0.0` one from the outside: a
+/// `0.0.0.0` listener answers on `127.0.0.1` too, so a client that connects
+/// successfully proves nothing about which interfaces are exposed.
+fn bind_loopback_ephemeral() -> Result<TcpListener, String> {
+    TcpListener::bind(("127.0.0.1", 0)).map_err(|_| NETWORK.to_string())
+}
+
+/// The post-accept read timeout, distinct from the caller-supplied `timeout`
+/// (the consent-screen window `LISTENER_TIMEOUT` covers). Once `accept`
+/// returns, the peer is already connected - a browser that has completed the
+/// OAuth redirect has the request line ready immediately. A connection that
+/// accepts and then sends nothing (or trickles bytes with no `\n`) is not a
+/// slow human deciding; it must not park this thread for the life of
+/// `timeout`, let alone forever.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The request line is capped so a peer that streams bytes with no `\n`
+/// cannot grow the buffer without limit. A real OAuth callback request line
+/// is a few hundred bytes at most.
+const MAX_REQUEST_LINE_BYTES: u64 = 8192;
+
+/// Binds a single-use loopback listener and returns its port immediately, so
+/// the authorize URL can be built with the real redirect before the browser
+/// opens.
 ///
 /// The accept loop runs EXACTLY ONCE. A second callback to a consumed listener
 /// finds nothing listening - that is the single-use property, and it is why
 /// the listener is moved into the thread rather than borrowed.
 #[allow(dead_code)]
 pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, String>>), String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|_| NETWORK.to_string())?;
+    let listener = bind_loopback_ephemeral()?;
     let port = listener.local_addr().map_err(|_| NETWORK.to_string())?.port();
     listener
         .set_nonblocking(false)
@@ -221,11 +244,18 @@ pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, 
 
         match listener.accept() {
             Ok((stream, _)) => {
-                let mut reader = BufReader::new(&stream);
-                let mut request_line = String::new();
-                let outcome = match reader.read_line(&mut request_line) {
-                    Ok(_) => Ok(parse_callback(&request_line)),
-                    Err(_) => Err(NETWORK.to_string()),
+                let outcome = if stream.set_read_timeout(Some(CALLBACK_READ_TIMEOUT)).is_err() {
+                    Err(NETWORK.to_string())
+                } else {
+                    let mut reader = BufReader::new(&stream).take(MAX_REQUEST_LINE_BYTES);
+                    let mut request_line = String::new();
+                    match reader.read_line(&mut request_line) {
+                        Ok(_) => Ok(parse_callback(&request_line)),
+                        // Covers a read timeout (WouldBlock/TimedOut) the same
+                        // way as any other read failure: no code, no state,
+                        // no reflection of anything the peer sent.
+                        Err(_) => Err(NETWORK.to_string()),
+                    }
                 };
                 // A static page that NEVER echoes the code back into the
                 // browser's history, title or DOM.
@@ -428,6 +458,21 @@ mod tests {
         assert_eq!(cb.state.as_deref(), Some("x y"));
     }
 
+    /// Both the authorization code and `state` pass through `percent_decode`
+    /// on every real callback - its safety on malformed escapes is otherwise
+    /// established only by hand-tracing the bounds check.
+    #[test]
+    fn percent_decode_handles_malformed_escapes_without_panicking() {
+        // A trailing '%' with nothing after it.
+        assert_eq!(percent_decode("abc%"), "abc%");
+        // '%' followed by only one character - one short of a full escape.
+        assert_eq!(percent_decode("abc%2"), "abc%2");
+        // '%' followed by two characters that are not valid hex digits.
+        assert_eq!(percent_decode("abc%ZZdef"), "abc%ZZdef");
+        // '+' decodes to a literal space.
+        assert_eq!(percent_decode("a+b"), "a b");
+    }
+
     #[test]
     fn parses_the_error_callback_form() {
         let cb = parse_callback("GET /?error=access_denied&error_description=User+cancelled HTTP/1.1");
@@ -455,6 +500,28 @@ mod tests {
     fn listener_binds_loopback_only_and_reports_its_port() {
         let (port, _rx) = listen_once(Duration::from_millis(200)).unwrap();
         assert!(port > 0);
+    }
+
+    /// The property in this test's name is NOT checked by connecting: a
+    /// `0.0.0.0` listener answers a `TcpStream::connect(("127.0.0.1", port))`
+    /// exactly as a `127.0.0.1` listener does, because `0.0.0.0` means "every
+    /// interface, loopback included" - a successful connect (or its observed
+    /// addresses) is identical either way and cannot tell them apart.
+    /// `listen_once` also only returns a `u16` port, not the bind address, so
+    /// there is nothing to inspect on its own return value either.
+    ///
+    /// What DOES distinguish them is the bound socket's own address, which is
+    /// why this pins down `bind_loopback_ephemeral` - the exact call
+    /// `listen_once` uses - directly. Mutating that call's `"127.0.0.1"` to
+    /// `"0.0.0.0"` makes this assertion fail (verified by hand for this fix;
+    /// see the fix report for the observed output).
+    #[test]
+    fn bind_loopback_ephemeral_binds_only_to_the_loopback_interface() {
+        let listener = bind_loopback_ephemeral().unwrap();
+        assert_eq!(
+            listener.local_addr().unwrap().ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     /// Single-use: the accept loop runs exactly once, so a SECOND connection to
