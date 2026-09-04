@@ -116,20 +116,29 @@ pub struct Session {
     pub generation: u64,
 }
 
-/// **Lock invariant:** `persist_op` and `refresh_op` are always outermost -
-/// each is held for its whole function body (`refresh_op` even across an
-/// `.await`; see its own doc comment). `session` and `session_only` are
-/// never held AT THE SAME TIME, so there is no ordering between them to
-/// violate: nothing anywhere in this module - production code or tests -
-/// ever takes one of the two while already holding the other. In the
-/// production code (outside `mod tests`), only `clear_session`, `adopt`, and
-/// `fresh_access_token` bind either to a local variable for their own body;
-/// every other acquisition is a statement-scoped temporary that drops
-/// immediately. `forget_refresh_token_with` reads `session_only` and only
-/// then takes `session` (via `clear_session`) - the reverse of the order an
-/// earlier version of this comment claimed was universal - and that is
-/// harmless for exactly this reason: the two locks are never nested, in
-/// either direction.
+/// **Lock invariant, in two parts.**
+///
+/// 1. `persist_op` and `refresh_op` are each held for a whole function body
+///    (`refresh_op` even across an `.await`; see its own doc comment), and
+///    both are outermost with respect to `session` and `session_only`.
+///    Where the two meet EACH OTHER the order is `refresh_op` ->
+///    `persist_op`: `refresh_and_adopt` holds `refresh_op` while calling
+///    `adopt_and_persist`, which takes `persist_op`. That is the only
+///    nesting of the two, and `refresh_op` is acquired at exactly one site,
+///    so no competing order exists for it to deadlock against.
+///
+/// 2. `session` and `session_only` are never held AT THE SAME TIME, so there
+///    is no ordering between them to violate: nothing anywhere in this
+///    module - production code or tests - ever takes one of the two while
+///    already holding the other. In the production code (outside
+///    `mod tests`), only `clear_session`, `adopt`, and `fresh_access_token`
+///    bind either to a local variable for their own body; every other
+///    acquisition is a statement-scoped temporary that drops immediately.
+///    `forget_refresh_token_with` reads `session_only` and only then takes
+///    `session` (via `clear_session`) - the reverse of the order an earlier
+///    version of this comment claimed was universal - and that is harmless
+///    for exactly this reason: the two locks are never nested, in either
+///    direction.
 #[derive(Default)]
 pub struct GraphState {
     pub session: Mutex<Session>,
