@@ -528,4 +528,35 @@ describe("lifecycle", () => {
     resolveListen!(un);
     await waitFor(() => expect(un).toHaveBeenCalled());
   });
+
+  /**
+   * The `odoo-instance-changed` effect carries the identical disposed-flag
+   * guard, on its own separate `listen()` call - a regression there would
+   * ship undetected if only the connection listener above were ever tested.
+   * The connection-changed effect is declared first in the hook, so its
+   * `listen()` call always fires before this one on mount; the leading
+   * `mockImplementationOnce` below reproduces the module mock's own default
+   * behaviour for that first call, purely so the SECOND `mockImplementationOnce`
+   * lands on the `odoo-instance-changed` call this test actually targets.
+   */
+  it("unsubscribes the odoo-instance-changed listener whose listen() promise resolves after unmount", async () => {
+    mockGraph([]);
+    listen.mockImplementationOnce(async (name: string, handler: (e: unknown) => void) => {
+      const set = listeners.get(name) ?? new Set();
+      set.add(handler);
+      listeners.set(name, set);
+      return () => set.delete(handler);
+    });
+    let resolveListen: ((unlisten: () => void) => void) | undefined;
+    listen.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveListen = resolve; })
+    );
+    const { unmount } = setup();
+    expect(resolveListen).toBeDefined();
+
+    unmount();
+    const un = vi.fn();
+    resolveListen!(un);
+    await waitFor(() => expect(un).toHaveBeenCalled());
+  });
 });

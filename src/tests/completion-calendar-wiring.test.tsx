@@ -194,6 +194,12 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     // extra renders between them without invalidating the memo.
     rerender(<Completion isHidden={false} systemAudio={systemAudio as any} />);
     const calls = pickerSpy.mock.calls;
+    // Non-vacuous only because the stubbed ContactPicker above is
+    // unmemoized, so a rerender producing at least a second call holds by
+    // construction rather than by assertion. Pinned explicitly so a future
+    // harness change (e.g. memoizing the stub) fails loudly here instead of
+    // degrading the compare below to `x toBe x`.
+    expect(pickerSpy.mock.calls.length).toBeGreaterThan(1);
     expect(calls[calls.length - 1][0].calendar).toBe(calls[0][0].calendar);
   });
 });
