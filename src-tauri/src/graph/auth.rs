@@ -34,7 +34,10 @@ pub fn challenge_for(verifier: &str) -> String {
 pub fn new_pkce() -> Pkce {
     let verifier = random_token(32);
     let challenge = challenge_for(&verifier);
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 /// A mismatched or absent `state` is rejected BEFORE the code is redeemed -
@@ -59,7 +62,12 @@ fn id_token_claims(id_token: &str) -> Option<serde_json::Value> {
 
 #[allow(dead_code)]
 pub fn nonce_from_id_token(id_token: &str) -> Option<String> {
-    Some(id_token_claims(id_token)?.get("nonce")?.as_str()?.to_string())
+    Some(
+        id_token_claims(id_token)?
+            .get("nonce")?
+            .as_str()?
+            .to_string(),
+    )
 }
 
 /// The nonce check, as its OWN function for the same reason `validate_state` is
@@ -124,10 +132,9 @@ fn percent_decode(value: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(byte);
                 i += 3;
                 continue;
@@ -215,7 +222,10 @@ const MAX_REQUEST_LINE_BYTES: u64 = 8192;
 #[allow(dead_code)]
 pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, String>>), String> {
     let listener = bind_loopback_ephemeral()?;
-    let port = listener.local_addr().map_err(|_| NETWORK.to_string())?.port();
+    let port = listener
+        .local_addr()
+        .map_err(|_| NETWORK.to_string())?
+        .port();
     listener
         .set_nonblocking(false)
         .map_err(|_| NETWORK.to_string())?;
@@ -244,7 +254,10 @@ pub fn listen_once(timeout: Duration) -> Result<(u16, Receiver<Result<Callback, 
 
         match listener.accept() {
             Ok((stream, _)) => {
-                let outcome = if stream.set_read_timeout(Some(CALLBACK_READ_TIMEOUT)).is_err() {
+                let outcome = if stream
+                    .set_read_timeout(Some(CALLBACK_READ_TIMEOUT))
+                    .is_err()
+                {
                     Err(NETWORK.to_string())
                 } else {
                     let mut reader = BufReader::new(&stream).take(MAX_REQUEST_LINE_BYTES);
@@ -316,7 +329,8 @@ pub struct Tokens {
 /// lives only on the caller's side is one refactor away from being skipped.
 #[allow(dead_code)]
 pub fn validate_authority(authority: &str) -> Result<url::Url, String> {
-    let parsed = url::Url::parse(authority.trim_end_matches('/')).map_err(|_| AUTH_REJECTED.to_string())?;
+    let parsed =
+        url::Url::parse(authority.trim_end_matches('/')).map_err(|_| AUTH_REJECTED.to_string())?;
     if parsed.scheme() != "https" {
         return Err(AUTH_REJECTED.to_string());
     }
@@ -337,8 +351,11 @@ pub fn authorize_url(
 ) -> Result<String, String> {
     let redirect = format!("http://127.0.0.1:{port}");
     let base = validate_authority(authority)?;
-    let mut url = url::Url::parse(&format!("{}/oauth2/v2.0/authorize", base.as_str().trim_end_matches('/')))
-        .map_err(|_| AUTH_REJECTED.to_string())?;
+    let mut url = url::Url::parse(&format!(
+        "{}/oauth2/v2.0/authorize",
+        base.as_str().trim_end_matches('/')
+    ))
+    .map_err(|_| AUTH_REJECTED.to_string())?;
     url.query_pairs_mut()
         .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
@@ -369,7 +386,8 @@ pub fn classify_token_error(status: u16, body: &str) -> &'static str {
     };
     match json.get("error").and_then(|v| v.as_str()) {
         Some("invalid_grant") => AUTH_EXPIRED,
-        Some("consent_required") | Some("interaction_required")
+        Some("consent_required")
+        | Some("interaction_required")
         | Some("admin_consent_required") => CONSENT_REQUIRED,
         _ => AUTH_REJECTED,
     }
@@ -399,11 +417,7 @@ fn expiry_at(now_ms: i64, expires_in: i64) -> i64 {
     now_ms + (expires_in - 60).max(0) * 1000
 }
 
-async fn post_token(
-    authority: &str,
-    form: &[(&str, &str)],
-    now_ms: i64,
-) -> Result<Tokens, String> {
+async fn post_token(authority: &str, form: &[(&str, &str)], now_ms: i64) -> Result<Tokens, String> {
     // Validated HERE too, not only in authorize_url. This is the call that
     // actually carries the authorization code, the PKCE verifier and the
     // refresh token, so it does its own check rather than trusting that some
@@ -443,7 +457,10 @@ async fn post_token(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| BAD_RESPONSE.to_string())?
         .to_string();
-    let expires_in = json.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    let expires_in = json
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
     Ok(Tokens {
         access_token,
         expires_at_ms: expiry_at(now_ms, expires_in),
@@ -455,7 +472,10 @@ async fn post_token(
             // clobber the working refresh token with an unusable one.
             .filter(|s| !s.is_empty())
             .map(str::to_string),
-        id_token: json.get("id_token").and_then(|v| v.as_str()).map(str::to_string),
+        id_token: json
+            .get("id_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
     })
 }
 
@@ -564,7 +584,10 @@ mod tests {
     #[test]
     fn state_mismatch_is_rejected() {
         assert!(validate_state("abc", Some("abc")).is_ok());
-        assert_eq!(validate_state("abc", Some("xyz")), Err(AUTH_REJECTED.to_string()));
+        assert_eq!(
+            validate_state("abc", Some("xyz")),
+            Err(AUTH_REJECTED.to_string())
+        );
         // A callback with no `state` at all is a mismatch, not a pass.
         assert_eq!(validate_state("abc", None), Err(AUTH_REJECTED.to_string()));
     }
@@ -651,7 +674,10 @@ mod tests {
     /// guard around the comparison would accept it while binding nothing.
     #[test]
     fn a_missing_id_token_or_nonce_claim_is_rejected_not_skipped() {
-        assert_eq!(validate_nonce("n-123", None), Err(AUTH_REJECTED.to_string()));
+        assert_eq!(
+            validate_nonce("n-123", None),
+            Err(AUTH_REJECTED.to_string())
+        );
         let no_claim = fake_id_token(r#"{"sub":"x"}"#);
         assert_eq!(
             validate_nonce("n-123", Some(&no_claim)),
@@ -686,7 +712,10 @@ mod tests {
     // than dropping an attendee when this is None.
     #[test]
     fn own_address_is_none_when_neither_claim_is_present() {
-        assert_eq!(own_address_from_id_token(&fake_id_token(r#"{"sub":"x"}"#)), None);
+        assert_eq!(
+            own_address_from_id_token(&fake_id_token(r#"{"sub":"x"}"#)),
+            None
+        );
         assert_eq!(own_address_from_id_token("not-a-jwt"), None);
     }
 
@@ -722,7 +751,8 @@ mod tests {
 
     #[test]
     fn parses_the_error_callback_form() {
-        let cb = parse_callback("GET /?error=access_denied&error_description=User+cancelled HTTP/1.1");
+        let cb =
+            parse_callback("GET /?error=access_denied&error_description=User+cancelled HTTP/1.1");
         assert_eq!(cb.error.as_deref(), Some("access_denied"));
         assert!(cb.code.is_none());
     }
@@ -738,8 +768,14 @@ mod tests {
     #[test]
     fn cancellation_forms_map_to_auth_cancelled() {
         assert_eq!(classify_callback_error("access_denied"), AUTH_CANCELLED);
-        assert_eq!(classify_callback_error("consent_required"), CONSENT_REQUIRED);
-        assert_eq!(classify_callback_error("interaction_required"), CONSENT_REQUIRED);
+        assert_eq!(
+            classify_callback_error("consent_required"),
+            CONSENT_REQUIRED
+        );
+        assert_eq!(
+            classify_callback_error("interaction_required"),
+            CONSENT_REQUIRED
+        );
         assert_eq!(classify_callback_error("something_else"), AUTH_REJECTED);
     }
 
@@ -869,7 +905,7 @@ mod tests {
             "login.microsoftonline.com/organizations", // no scheme - the typo case
             "http://login.microsoftonline.com/organizations", // clear text
             "ftp://example.test",
-            "https://",  // no host
+            "https://", // no host
             "",
             "not a url",
         ] {
@@ -896,9 +932,8 @@ mod tests {
             "nonce-z",
         )
         .expect("a well-formed https authority");
-        assert!(url.starts_with(
-            "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"
-        ));
+        assert!(url
+            .starts_with("https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?"));
         for expected in [
             "client_id=client-1",
             "response_type=code",
@@ -914,7 +949,10 @@ mod tests {
             "profile",
             "offline_access",
         ] {
-            assert!(url.contains(expected), "authorize URL is missing {expected}");
+            assert!(
+                url.contains(expected),
+                "authorize URL is missing {expected}"
+            );
         }
         assert!(!url.contains("localhost"));
     }
@@ -925,7 +963,11 @@ mod tests {
             .split_whitespace()
             .filter(|s| s.contains("Calendars."))
             .collect();
-        assert_eq!(calendars.len(), 1, "exactly one Calendars scope: {calendars:?}");
+        assert_eq!(
+            calendars.len(),
+            1,
+            "exactly one Calendars scope: {calendars:?}"
+        );
     }
 
     // `expires_in` is attacker-influenced (straight from the token response
