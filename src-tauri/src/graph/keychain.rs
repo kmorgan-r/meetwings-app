@@ -19,12 +19,40 @@ fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, ACCOUNT).map_err(|_| NO_KEYCHAIN.to_string())
 }
 
-/// Whether a keychain service is reachable at all. Probed by opening an entry
-/// and reading it: on Linux with no Secret Service this fails at the D-Bus
-/// connection, which is exactly the condition the refuse-to-persist rule tests.
+/// **DEVIATION from the task brief, reported per its instructions:** the
+/// brief's verbatim `available()` body (see the heuristic on the
+/// `cfg(not(target_os = "linux"))` variant below) was written as the whole
+/// function on every platform. On Linux that is the "keyring mock trap"
+/// Cargo.toml's own `keyring` comment and the controller ruling for this task
+/// both warn about: with only `windows-native`/`apple-native` enabled,
+/// `keyring::Entry::new` on Linux resolves to the crate's in-memory `mock`
+/// backend, and an empty mock entry's `get_password()` returns `NoEntry` -
+/// the SAME variant a real, working keychain returns for "nothing stored
+/// yet." `NoEntry` doesn't match `PlatformFailure`/`NoStorageAccess`, so the
+/// heuristic below would report `true` on a backend that cannot actually
+/// hold a secret past process exit. That is the opposite of "refuse to
+/// persist": `store_refresh_token` would go on to "succeed" into memory that
+/// evaporates at exit, and a caller trusting this signal would believe it has
+/// a durable credential. So Linux is hard-coded to `false` here instead of
+/// probed - closing the decision Cargo.toml's comment left for the
+/// controller, without adding `sync-secret-service`/`dbus-secret-service`
+/// (which the ruling reserves for the user, since it pulls libdbus as a
+/// build-time dependency).
+#[allow(dead_code)]
+#[cfg(target_os = "linux")]
+pub fn available() -> bool {
+    false
+}
+
+/// Whether a keychain service is reachable at all. Only compiled on
+/// non-Linux targets - see the `cfg(target_os = "linux")` stub above, which
+/// never reaches this code and is hard-coded to `false` instead. Probed by
+/// opening an entry and reading it: a locked keychain, no login session, or
+/// similar platform-level unavailability fails at the
+/// `PlatformFailure`/`NoStorageAccess` boundary matched below.
 ///
 /// **This is a HEURISTIC and Task 11 must not trust it.** It decides by matching
-/// error variants, and which variant a keychain-less platform actually produces
+/// error variants, and which variant an unavailable keychain actually produces
 /// is a question Probe 2 records rather than one this code can know. Guessing
 /// wrong here is expensive in the worst place: `available()` returns true, the
 /// write then fails, and `graph_connect` errors AFTER `exchange_code` has already
@@ -35,32 +63,6 @@ fn entry() -> Result<keyring::Entry, String> {
 ///
 /// `NoEntry` is success: it means the keychain answered, and answered "nothing
 /// stored yet" - the normal state before a first connect.
-///
-/// **DEVIATION from the task brief, reported per its instructions:** the
-/// brief's verbatim body below is the whole function on every platform. On
-/// Linux that is the "keyring mock trap" Cargo.toml's own `keyring` comment
-/// and the controller ruling for this task both warn about: with only
-/// `windows-native`/`apple-native` enabled, `keyring::Entry::new` on Linux
-/// resolves to the crate's in-memory `mock` backend, and an empty mock
-/// entry's `get_password()` returns `NoEntry` - the SAME variant a real,
-/// working keychain returns for "nothing stored yet." `NoEntry` doesn't match
-/// `PlatformFailure`/`NoStorageAccess` below, so the heuristic would report
-/// `true` on a backend that cannot actually hold a secret past process exit.
-/// That is the opposite of "refuse to persist": `store_refresh_token` would
-/// go on to "succeed" into memory that evaporates at exit, and a caller
-/// trusting this signal would believe it has a durable credential. So Linux
-/// is hard-coded to `false` here instead of probed - closing the decision
-/// Cargo.toml's comment left for the controller, without adding
-/// `sync-secret-service`/`dbus-secret-service` (which the ruling reserves for
-/// the user, since it pulls libdbus as a build-time dependency).
-#[allow(dead_code)]
-#[cfg(target_os = "linux")]
-pub fn available() -> bool {
-    false
-}
-
-/// `allow(dead_code)`: unused until Task 11 wires the connect/disconnect
-/// commands that call it - same reason `auth.rs`'s own items allow it.
 #[allow(dead_code)]
 #[cfg(not(target_os = "linux"))]
 pub fn available() -> bool {

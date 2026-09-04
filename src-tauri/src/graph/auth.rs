@@ -375,6 +375,30 @@ pub fn classify_token_error(status: u16, body: &str) -> &'static str {
     }
 }
 
+/// Pure arithmetic, split out of `post_token` so the clamp is unit-testable
+/// without a network round trip - `graph/mod.rs`'s own header says decision
+/// logic belongs in pure functions "so it compiles and is unit-tested on
+/// every target," and this multiplication was the one exception.
+///
+/// `expires_in` is ATTACKER-INFLUENCED: it comes straight from the token
+/// response body of whatever `authority` the user typed, the same free-text
+/// trust boundary `validate_authority`'s doc comment calls out. A response
+/// carrying `i64::MAX` would overflow `* 1000` outright - PANICKING in a
+/// debug/`tauri dev` build (this crate sets no `[profile]` to change that)
+/// and silently WRAPPING to a past-dated expiry in release, which produces a
+/// refresh loop. So `expires_in` is clamped to `0..=86_400` (24 hours) BEFORE
+/// any arithmetic runs: real Graph/Entra access tokens live on the order of
+/// 60-90 minutes, so this is generous headroom, not a realistic ceiling, and
+/// it keeps every multiplication below well inside `i64` range no matter what
+/// the response claims.
+fn expiry_at(now_ms: i64, expires_in: i64) -> i64 {
+    let expires_in = expires_in.clamp(0, 86_400);
+    // 60s of slack so a call started just under the wire does not race the
+    // expiry it just checked. `.max(0)` keeps a sub-60s expiry (including the
+    // clamped-to-0 case above) from going negative.
+    now_ms + (expires_in - 60).max(0) * 1000
+}
+
 async fn post_token(
     authority: &str,
     form: &[(&str, &str)],
@@ -386,10 +410,19 @@ async fn post_token(
     // earlier caller did one.
     let base = validate_authority(authority)?;
     let endpoint = format!("{}/oauth2/v2.0/token", base.as_str().trim_end_matches('/'));
+    // No redirects: the default reqwest policy follows up to 10 hops, which
+    // would re-send this form body - the authorization code, the PKCE
+    // verifier, or a refresh token - to whatever host a 307/308 names. That
+    // host was never run through validate_authority, so a redirect is exactly
+    // the exfiltration path validate_authority exists to close off.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| NETWORK.to_string())?;
     // A transport failure is NETWORK, never AUTH_EXPIRED. This mapping is the
     // one that decides whether a working credential survives a flaky café
     // wifi.
-    let response = reqwest::Client::new()
+    let response = client
         .post(&endpoint)
         .form(form)
         .send()
@@ -405,17 +438,22 @@ async fn post_token(
     let access_token = json
         .get("access_token")
         .and_then(|v| v.as_str())
+        // An empty string is not usable credential material - treat it the
+        // same as an absent field rather than handing the caller "".
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| BAD_RESPONSE.to_string())?
         .to_string();
     let expires_in = json.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
     Ok(Tokens {
         access_token,
-        // 60s of slack so a call started just under the wire does not race the
-        // expiry it just checked.
-        expires_at_ms: now_ms + (expires_in - 60).max(0) * 1000,
+        expires_at_ms: expiry_at(now_ms, expires_in),
         refresh_token: json
             .get("refresh_token")
             .and_then(|v| v.as_str())
+            // An empty string here must NOT overwrite a good stored token:
+            // `persist_rotated` treats any `Some(_)` as "rotate," so "" would
+            // clobber the working refresh token with an unusable one.
+            .filter(|s| !s.is_empty())
             .map(str::to_string),
         id_token: json.get("id_token").and_then(|v| v.as_str()).map(str::to_string),
     })
@@ -473,6 +511,15 @@ pub async fn refresh(
 /// backend with distinct create/delete calls must preserve it. Deleting first
 /// and then failing the write leaves the user with no credential and no way
 /// back.
+///
+/// **Caller contract for `Err`:** `Err(NO_KEYCHAIN)` means degrade to
+/// session-only and KEEP `tokens` in memory - never fail the connect, never
+/// discard the credential. On Linux this `Err` fires on EVERY call that
+/// carries a refresh token, unconditionally (see `keychain::
+/// store_refresh_token`'s Linux stub) - not just after a genuine failure. On
+/// Windows/macOS the same `Err` can also mean a real, occasional keychain
+/// failure. The two cases are indistinguishable from this return value alone,
+/// and that is fine: the correct response is identical either way.
 #[allow(dead_code)]
 pub fn persist_rotated(tokens: &Tokens) -> Result<(), String> {
     match &tokens.refresh_token {
@@ -879,5 +926,91 @@ mod tests {
             .filter(|s| s.contains("Calendars."))
             .collect();
         assert_eq!(calendars.len(), 1, "exactly one Calendars scope: {calendars:?}");
+    }
+
+    // `expires_in` is attacker-influenced (straight from the token response
+    // body of a user-typed authority), so the clamp that keeps `expiry_at`'s
+    // arithmetic inside i64 range is exercised at both ends plus the two
+    // boundaries that decide how much slack survives.
+    #[test]
+    fn expiry_at_clamps_an_overflow_prone_expires_in_instead_of_panicking_or_wrapping() {
+        // Unclamped, `i64::MAX * 1000` overflows outright. Clamped to the
+        // 24h ceiling first, the result is an ordinary near-term timestamp.
+        assert_eq!(expiry_at(1_000, i64::MAX), 1_000 + (86_400 - 60) * 1000);
+    }
+
+    #[test]
+    fn expiry_at_floors_a_negative_expires_in_at_zero_slack() {
+        assert_eq!(expiry_at(1_000, -5), 1_000);
+    }
+
+    #[test]
+    fn expiry_at_a_zero_expires_in_has_no_slack_to_subtract() {
+        assert_eq!(expiry_at(1_000, 0), 1_000);
+    }
+
+    #[test]
+    fn expiry_at_a_normal_hour_long_token_gets_the_full_slack_applied() {
+        assert_eq!(expiry_at(1_000, 3_600), 1_000 + (3_600 - 60) * 1000);
+    }
+
+    #[test]
+    fn expiry_at_sixty_seconds_is_exactly_the_slack_boundary() {
+        // expires_in equals the slack itself: nothing left once it's
+        // subtracted, but still no negative excursion.
+        assert_eq!(expiry_at(1_000, 60), 1_000);
+    }
+
+    // Lifecycle rule 3's PRESERVE case, and the only lifecycle rule this task
+    // owns end-to-end: a token response that carried no rotated refresh
+    // token must leave the keychain untouched. The `None` arm of
+    // `persist_rotated` is `Ok(())` with no call into `keychain::*` at all,
+    // so this is structural, not a race with a mock - there is nothing in
+    // that arm capable of writing anywhere.
+    #[test]
+    fn persist_rotated_with_no_rotated_token_touches_nothing_and_succeeds() {
+        let tokens = Tokens {
+            access_token: "at".to_string(),
+            expires_at_ms: 0,
+            refresh_token: None,
+            id_token: None,
+        };
+        assert_eq!(persist_rotated(&tokens), Ok(()));
+    }
+
+    // Rule 1's RETAIN side: a transport failure must classify as NETWORK, not
+    // as a dead-credential signal. Dialling a loopback port nothing listens
+    // on refuses instantly - no real network access, no new dependency
+    // (`tokio` with `features = ["full"]` is already a regular dependency).
+    #[tokio::test]
+    async fn post_token_maps_a_refused_connection_to_network() {
+        let result = post_token("https://127.0.0.1:1", &[("grant_type", "refresh_token")], 0).await;
+        assert_eq!(result.err().as_deref(), Some(NETWORK));
+    }
+
+    /// The status/body shapes `only_invalid_grant_means_the_refresh_token_is_dead`
+    /// doesn't already cover: client-error statuses other than the classified
+    /// body still fall through to AUTH_REJECTED, both consent-adjacent error
+    /// strings map to CONSENT_REQUIRED, and valid JSON with no `"error"` key
+    /// at all is unusable, not a dead credential.
+    #[test]
+    fn classify_token_error_covers_the_remaining_status_and_body_shapes() {
+        assert_eq!(
+            classify_token_error(401, r#"{"error":"invalid_client"}"#),
+            AUTH_REJECTED
+        );
+        assert_eq!(
+            classify_token_error(403, r#"{"error":"invalid_client"}"#),
+            AUTH_REJECTED
+        );
+        assert_eq!(
+            classify_token_error(400, r#"{"error":"interaction_required"}"#),
+            CONSENT_REQUIRED
+        );
+        assert_eq!(
+            classify_token_error(400, r#"{"error":"admin_consent_required"}"#),
+            CONSENT_REQUIRED
+        );
+        assert_eq!(classify_token_error(400, r#"{"foo":"bar"}"#), AUTH_REJECTED);
     }
 }
