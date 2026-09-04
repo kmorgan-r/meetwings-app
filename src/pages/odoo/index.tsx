@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { emit } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, Circle, XCircle } from "lucide-react";
 import { Button, Input, Label, StatusIcon } from "@/components";
 import { PageLayout } from "@/layouts";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
 import { runSync, testOdooConnection } from "@/lib/odoo";
+import { reportGraphError } from "@/lib/calendar";
 import {
   countAllQueued,
   getQueueCounts,
@@ -18,7 +20,13 @@ import {
   loadOdooConfigState,
   saveOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { OdooConfig } from "@/types";
+import {
+  DEFAULT_AUTHORITY,
+  loadGraphConfigState,
+  saveGraphConfig,
+  type GraphConfig,
+} from "@/lib/storage/graph-config.storage";
+import type { GraphStatus, OdooConfig } from "@/types";
 
 const EMPTY: OdooConfig = { url: "", db: "", login: "", apiKey: "" };
 
@@ -275,6 +283,11 @@ export default function OdooSettings() {
   // exists to serve.
   const [queueReadKey, setQueueReadKey] = useState(0);
 
+  // Two fields, exactly like Odoo's own: the user brings their own registration.
+  const [graph, setGraph] = useState<GraphConfig>({ clientId: "", authority: "" });
+  const [graphStatus, setGraphStatus] = useState<GraphStatus | null>(null);
+  const [graphMessage, setGraphMessage] = useState<Status | null>(null);
+
   // "Saved" is only true of the config that was actually written. The next
   // keystroke makes it stale, so it is cleared on every field edit rather
   // than left to read as confirmation of unsaved changes.
@@ -366,6 +379,26 @@ export default function OdooSettings() {
     };
   }, [queueReadKey]);
 
+  // Seeded on MOUNT, not only by handleConnect. Without this a user who
+  // connected in a previous session opens /odoo and sees no Disconnect button
+  // (it is gated on graphStatus?.connected) and no session-only banner - the page
+  // would claim they had never connected.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await invoke<GraphStatus>("graph_status");
+        if (!cancelled) setGraphStatus(status);
+      } catch (err) {
+        // A keychain that cannot be READ is a real failure, not "disconnected".
+        if (!cancelled) setGraphMessage(errorStatus(reportGraphError(err, "calendar status").code));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function handleSave() {
     // The one action that can silently convince a user their credentials are
     // stored when they are not: saveOdooConfig awaits secureGet, secureSet and
@@ -446,6 +479,102 @@ export default function OdooSettings() {
           : errorStatus(`Sync failed: ${describe(report)}`)
       );
     }
+  }
+
+  /**
+   * Tauri events broadcast to every window. The overlay's own
+   * `useCalendarProposal` listens for this, because /odoo runs in the `dashboard`
+   * webview and <Completion /> runs in `main` — without it, connecting here would
+   * not make the proposal block appear over there until the app restarted, and
+   * disconnecting here would leave the overlay believing it is still connected
+   * and erroring on every open. Same shape as the existing
+   * `odoo-instance-changed` broadcast this page already emits.
+   */
+  const notifyCalendarConnectionChanged = () => emit("graph-connection-changed");
+
+  async function handleConnect() {
+    const config = await (async () => {
+      try {
+        // INSIDE the try. Sitting outside it, a genuine secureSet write failure
+        // was an unhandled rejection that set no message at all, unlike every
+        // other failure path in this handler.
+        await saveGraphConfig(graph);
+        return await loadGraphConfigState();
+      } catch (err) {
+        setGraphMessage(errorStatus(reportGraphError(err, "save calendar config").code));
+        return null;
+      }
+    })();
+    if (config === null) return;
+    if (config.state === "absent") {
+      setGraphMessage(errorStatus("Enter the application (client) ID from your app registration."));
+      return;
+    }
+    if (config.state === "unreadable") {
+      setGraphMessage(
+        errorStatus("The authority must be an https URL, e.g. " + DEFAULT_AUTHORITY)
+      );
+      return;
+    }
+    try {
+      setGraphStatus(
+        await invoke<GraphStatus>("graph_connect", {
+          clientId: config.config.clientId,
+          authority: config.config.authority,
+        })
+      );
+      setGraphMessage(okStatus("Calendar connected."));
+      void notifyCalendarConnectionChanged();
+    } catch (err) {
+      const report = reportGraphError(err, "connect calendar");
+      // GRAPH_AUTH_CANCELLED is the commonest outcome of a loopback flow - the
+      // user closed the tab or clicked Cancel. It returns the control to idle
+      // with NO error styling.
+      if (report.code === "GRAPH_AUTH_CANCELLED") {
+        setGraphMessage(null);
+        return;
+      }
+      setGraphMessage(
+        report.code === "GRAPH_CONSENT_REQUIRED"
+          ? infoStatus(
+              `Your tenant requires administrator consent. Send an administrator this URL: ${config.config.authority}/adminconsent?client_id=${config.config.clientId}`
+            )
+          : report.code === "GRAPH_NO_KEYCHAIN"
+            ? infoStatus(
+                "No keychain service is available, so the connection lasts only until you quit. Nothing was written to disk."
+              )
+            : errorStatus(report.code)
+      );
+    }
+  }
+
+  /**
+   * `graph_disconnect` is exposed by Task 11 and this is its ONLY caller. Without
+   * it the command ships with nothing invoking it, and a user has no way to
+   * revoke a stored credential from inside the app.
+   *
+   * The catch matters as much as the call: `graph_disconnect` clears memory
+   * unconditionally and THEN propagates a keychain delete failure, so an error
+   * here means "you are disconnected in this session, but the stored credential
+   * survived on disk" — which the user needs told, not swallowed.
+   */
+  async function handleDisconnect() {
+    try {
+      await invoke("graph_disconnect");
+      setGraphStatus({ connected: false, sessionOnly: false });
+      setGraphMessage(okStatus("Calendar disconnected."));
+    } catch (err) {
+      setGraphStatus({ connected: false, sessionOnly: false });
+      const report = reportGraphError(err, "disconnect calendar");
+      setGraphMessage(
+        report.code === "GRAPH_NO_KEYCHAIN"
+          ? errorStatus(
+              "Disconnected in this session, but the stored credential could not be removed from the keychain. Remove it manually."
+            )
+          : errorStatus(report.code)
+      );
+    }
+    void notifyCalendarConnectionChanged();
   }
 
   const filled = useMemo(() => filledCount(config), [config]);
@@ -561,6 +690,52 @@ export default function OdooSettings() {
             </Link>
           </div>
         )}
+
+      <div className="rounded-lg border border-border bg-card p-4 mt-6 max-w-md space-y-4">
+        <h2 className="text-sm font-semibold text-foreground">Calendar</h2>
+        <p className="text-xs text-muted-foreground">
+          Connect your own Azure app registration to propose the current meeting's attendees as
+          Odoo targets.
+        </p>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="graph-client-id">Application (client) ID</Label>
+          <Input
+            id="graph-client-id"
+            value={graph.clientId}
+            onChange={(e) => setGraph((g) => ({ ...g, clientId: e.target.value }))}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="graph-authority">Authority</Label>
+          <Input
+            id="graph-authority"
+            placeholder={DEFAULT_AUTHORITY}
+            value={graph.authority}
+            onChange={(e) => setGraph((g) => ({ ...g, authority: e.target.value }))}
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button type="button" onClick={() => void handleConnect()}>
+            Connect calendar
+          </Button>
+          {graphStatus?.connected && (
+            <Button type="button" variant="outline" onClick={() => void handleDisconnect()}>
+              Disconnect
+            </Button>
+          )}
+        </div>
+
+        {graphMessage && <StatusLine status={graphMessage} testId="graph-status" />}
+
+        {graphStatus?.sessionOnly && (
+          <p className="text-xs text-muted-foreground">
+            This connection is session-only and will not survive an app restart.
+          </p>
+        )}
+      </div>
     </PageLayout>
   );
 }
