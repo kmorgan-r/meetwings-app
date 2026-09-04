@@ -281,6 +281,19 @@ describe("the write", () => {
     expect(message).not.toHaveTextContent(/log is full/i);
   });
 
+  // Both message tests above always have at least one success, so the
+  // `written.length === 0` branch - "Nothing was added", not "Added ." -
+  // has never actually run.
+  it("says nothing was added when the batch fails outright", async () => {
+    const onAddTarget = vi.fn(async () => ({ ok: false, reason: "cap" as const }));
+    renderProposal({ contacts: [contact(1)], onAddTarget });
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    const message = await screen.findByTestId("calendar-proposal-write-result");
+    expect(message).toHaveTextContent(
+      "Nothing was added. The log is full, so Person 1 was not added."
+    );
+  });
+
   /**
    * `<Completion />` force-closes the picker when a meeting-log hold begins
    * (or an Odoo instance change resets the hook to idle while it stays open),
@@ -342,18 +355,22 @@ describe("the write", () => {
       />
     );
     // Reserved, not gone: an idle reset while the picker stays open must not
-    // collapse the box out from under whatever sits below it.
-    expect(screen.getByTestId("calendar-proposal-region")).toBeInTheDocument();
-    expect(screen.getByTestId("calendar-proposal-region").textContent).toBe("");
+    // collapse the box out from under whatever sits below it. Same fixed
+    // height as every other state, not just "some element with this testid".
+    const idleRegion = screen.getByTestId("calendar-proposal-region");
+    expect(idleRegion).toBeInTheDocument();
+    expect(idleRegion).toHaveClass("h-28");
+    expect(idleRegion.textContent).toBe("");
 
-    // Reopened on the SAME matched contacts, so `writableKey` returns to
-    // exactly what it was before - the ordinary pre-check effect (keyed on
-    // `writableKey`/`freeSlots`) cannot be what re-enables the button here,
-    // since from its point of view nothing changed. Only the idle-reset
-    // effect's own `writing`/`writingRef` reset can.
+    // Reopened on the SAME matched contacts - but `writableKey` does NOT
+    // "return to what it was": it passes through "" while idle (matched is
+    // empty there), so the ordinary pre-check effect DOES re-fire on this
+    // reopen, same as any other proposal render. What it can't do is touch
+    // `writing`: that effect only ever calls `setChecked`/`setWriteResult`,
+    // so a still-disabled button here could only mean the idle-reset
+    // effect's own `writing`/`writingRef` reset did not run.
     rerender(proposal);
     expect(screen.getByTestId("calendar-proposal-confirm")).toBeEnabled();
-    expect(screen.queryByTestId("calendar-proposal-write-result")).toBeNull();
 
     // The first row's write - abandoned when the popover went idle - finally
     // resolves. If `confirm`'s epoch guard did not abort the loop, it would
@@ -365,5 +382,181 @@ describe("the write", () => {
       await new Promise((r) => setTimeout(r, 10));
     });
     expect(onAddTarget).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * `useCalendarProposal` never re-fetches within one mount after an idle
+   * reset today (its fetch effect stays blocked by `hasFetched.current`), so
+   * write A's abandoned `finally` currently only ever runs while `writing`
+   * is already `false` - a same-value no-op. But that is a fact about the
+   * HOOK, not something this component enforces, and nothing stops a caller
+   * from driving it through exactly this prop sequence: idle, then straight
+   * into a SECOND proposal with its OWN write already running, before write
+   * A's abandoned promise ever settles. If write A's `finally` set `writing`
+   * unconditionally, it would flip write B's still-running button back to
+   * enabled out from under it - the same "clicks Add again trusting what is
+   * on screen" hazard the whole guard exists to close, just from a second
+   * write instead of a re-tick.
+   */
+  it("does not let an abandoned write's finally touch a later write in progress", async () => {
+    let resolveA: ((value: { ok: boolean }) => void) | null = null;
+    const onAddTargetA = vi.fn(
+      () => new Promise<{ ok: boolean }>((resolve) => { resolveA = resolve; })
+    );
+    let resolveB: ((value: { ok: boolean }) => void) | null = null;
+    const onAddTargetB = vi.fn(
+      () => new Promise<{ ok: boolean }>((resolve) => { resolveB = resolve; })
+    );
+
+    const { rerender } = render(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e1",
+          subject: "Client sync",
+          matched: matched([contact(1), contact(2)]),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={onAddTargetA}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await waitFor(() => expect(onAddTargetA).toHaveBeenCalledTimes(1));
+
+    // The instance changes mid-write-A, and the next open lands straight on
+    // a second meeting rather than sitting idle.
+    rerender(
+      <CalendarProposal
+        state={{ kind: "idle" }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    rerender(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e2",
+          subject: "Another meeting",
+          matched: matched([contact(3), contact(4)]),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={onAddTargetB}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    // Write B starts, and is still running - its own first row has not
+    // resolved yet - when write A's abandoned promise settles below.
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await waitFor(() => expect(onAddTargetB).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeDisabled();
+
+    await act(async () => {
+      resolveA!({ ok: true });
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Write B has not finished - onAddTargetB has not resolved - so the
+    // button must still be disabled. An unguarded `finally` in write A would
+    // have flipped it back to enabled here.
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeDisabled();
+
+    await act(async () => {
+      resolveB!({ ok: true });
+      await new Promise((r) => setTimeout(r, 10));
+    });
+  });
+
+  /**
+   * The test above dropped its own write-result assertion: the write now
+   * aborts under the epoch guard before ever setting a message, so there is
+   * nothing to be null there and the assertion could not fail. This exercises
+   * the real scenario (a message IS present, then an idle reset must not let
+   * it survive) and isolates the idle-reset effect's OWN `setChecked` /
+   * `setWriteResult` specifically, rather than the pre-check effect's
+   * incidental ones: the SECOND write below is still pending -
+   * `writingRef.current` is true - when the instance changes, so the
+   * pre-check effect's guard blocks it from also clearing the message on
+   * that render; and the reopened proposal matches NOTHING, so `writableKey`
+   * stays "" - unchanged from during idle - and the pre-check effect never
+   * fires there either. Only the idle-reset effect's own reset can be what
+   * makes the message gone below.
+   */
+  it("does not carry a stale write-result message across an idle reset", async () => {
+    let resolveSecond: ((value: { ok: boolean }) => void) | null = null;
+    let calls = 0;
+    const onAddTarget = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, reason: "cap" as const };
+      return new Promise<{ ok: boolean }>((resolve) => {
+        resolveSecond = resolve;
+      });
+    });
+
+    const { rerender } = render(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e1",
+          subject: "Client sync",
+          matched: matched([contact(1)]),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={onAddTarget}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await screen.findByTestId("calendar-proposal-write-result");
+
+    // A second attempt at the same still-unwritten row - still pending when
+    // the instance changes below.
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    await waitFor(() => expect(onAddTarget).toHaveBeenCalledTimes(2));
+
+    rerender(
+      <CalendarProposal
+        state={{ kind: "idle" }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    // Matches NOTHING, on purpose - see the comment above.
+    rerender(
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e2",
+          subject: "Another meeting",
+          matched: [],
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+    expect(screen.queryByTestId("calendar-proposal-write-result")).toBeNull();
+
+    // Let the abandoned second write settle so it doesn't leak into a later
+    // test as a dangling update.
+    await act(async () => {
+      resolveSecond!({ ok: true });
+      await new Promise((r) => setTimeout(r, 10));
+    });
   });
 });

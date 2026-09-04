@@ -123,6 +123,12 @@ describe("other states", () => {
     renderState({ kind: "idle" });
     const region = screen.getByTestId("calendar-proposal-region");
     expect(region).toBeInTheDocument();
+    // Same fixed height as every other state - idle is the one that failed
+    // the Global Constraint before, and it's the only state where a mutant
+    // that bypasses `region()` entirely for idle (a bare
+    // `<div data-testid="calendar-proposal-region" />`) would otherwise
+    // survive the whole suite.
+    expect(region).toHaveClass("h-28");
     expect(region.textContent).toBe("");
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
     expect(screen.queryByTestId("calendar-proposal-confirm")).toBeNull();

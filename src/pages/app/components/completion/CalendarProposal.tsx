@@ -328,7 +328,20 @@ export function CalendarProposal({
       // "unlock" effect above for why doing it synchronously in this
       // `finally` block is exactly the bug that let a write silently
       // re-check a row the user had excluded.
-      setWriting(false);
+      //
+      // EPOCH-GUARDED too. Today an idle reset never re-fetches within the
+      // same mount, so an abandoned loop's `setWriting(false)` currently
+      // lands as a same-value no-op - but that is a cross-file invariant
+      // (useCalendarProposal.ts's fetch effect stays blocked by
+      // hasFetched.current once a reset has run), not something enforced
+      // here. If a later change ever makes an instance change re-fetch, an
+      // abandoned write A's `finally` would otherwise flip `writing` false
+      // mid-write-B, the unlock effect would clear `writingRef`, and the
+      // pre-check effect would re-tick whatever write B's user had
+      // unchecked - the same hazard this whole guard exists to close. A
+      // plain throw still recovers: it leaves `epochRef` unchanged, so the
+      // guard passes and `writing` still resets.
+      if (epochRef.current === epoch) setWriting(false);
     }
   };
 
