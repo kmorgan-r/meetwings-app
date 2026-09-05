@@ -31,11 +31,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Ground truth for the verify step below. Any claude[bot] comment older than
+      # this belongs to an earlier run and must not be mistaken for this run's review.
+      - name: Mark run start
+        id: t0
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Tag mode. The action creates its own tracking comment and publishes the
+          # agent's review into it, so delivery no longer depends on the model
+          # choosing to shell out to `gh pr comment`. Documented in action.yml as
+          # applicable to pull_request opened/synchronize, and in the action's
+          # docs/solutions.md "Enhanced Example (With Progress Tracking)".
+          # Prior evidence in this repo: the PR #41 "Claude finished ..." comment is
+          # a tag-mode comment, posted under this same read-only permissions block.
+          track_progress: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -49,21 +63,54 @@ jobs:
 
             Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
 
-            Post your review as a PR comment like this, and only like this:
-            1. Write the review body to a file with the Write tool, e.g. `/tmp/review.md`.
-            2. Run `gh pr comment <PR NUMBER> --body-file /tmp/review.md` with your Bash tool.
+            Note: the PR branch is already checked out in the current working directory,
+            so read files directly rather than paging a large `gh pr diff`.
 
-            Do NOT pass the review inline via `--body "..."`. Markdown tables (`|`) and code
-            fences (backticks) in the body trip the Bash permission matcher, the call is
-            denied, and the review is silently lost even though the job reports success.
+            Your final message is published as the review. Use
+            `mcp__github_inline_comment__create_inline_comment` for issues tied to a
+            specific line.
 
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-          # Write is required: it is the only way to build the review body as a file for
-          # `gh pr comment --body-file`. Without it the agent can only try an inline
-          # `--body "..."`, which the Bash permission matcher denies on any review
-          # containing tables or code fences (16 denials, 0 comments posted, on PR #41).
-          # The inline-comment MCP tool feeds the action's own "Post buffered inline
-          # comments" step, a second delivery path that was previously unreachable.
+          # Unchanged from the previous revision. Note for future readers: a nonzero
+          # permission-denial count is NOT a failure signal. Run 33569663144 posted its
+          # review with 10 denials; runs 33944259744 (14) and 33944658687 (32) posted
+          # nothing. Denials are ordinary tool-shopping noise. Only the verify step below
+          # distinguishes a delivered review from a lost one.
           claude_args: '--allowed-tools "Read,Grep,Glob,Write,mcp__github_inline_comment__create_inline_comment,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
 
+      # The whole point of this job is a review on the PR. If one did not land, the job
+      # must be red. A green check that carries no information is the original defect:
+      # this silently produced nothing on PRs #19, #41 and #51 while reporting success.
+      - name: Verify a review was posted
+        # Not bare `always()`: when the action declines a PR that modifies this workflow
+        # it posts nothing BY DESIGN, and a red there would be noise that trains people
+        # to ignore this check. A declined run produces no execution file. The upstream
+        # skip flag is internal to the composite action and cannot be read from here, so
+        # this proxy needs confirming on the first workflow-touching PR.
+        if: always() && steps.claude-review.outputs.execution_file != ''
+        env:
+          GH_TOKEN: ${{ github.token }}   # read-only; no new permission is granted
+          PR: ${{ github.event.pull_request.number }}
+          SINCE: ${{ steps.t0.outputs.at }}
+        run: |
+          set -euo pipefail
+          # `since` on this endpoint filters by LAST-UPDATED, not created. That matters:
+          # tag mode creates its tracking comment before the agent runs, so a create-time
+          # check would pass a run that posted a placeholder and never wrote the review.
+          # No --paginate: `since` plus per_page=100 bounds the window to this run, and
+          # `gh --paginate` applies --jq per page, which would break the aggregate.
+          len=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?since=${SINCE}&per_page=100" \
+                  --jq '[.[] | select(.user.login == "claude[bot]") | .body | length] | max // 0')
+          # A size floor rather than matching the action's "Claude finished ..." marker:
+          # the marker is upstream template text that can change, and this way an upstream
+          # change gives a false red, which is the safe direction.
+          if [ "$len" -lt 400 ]; then
+            echo "::error::Claude review job finished green but delivered no review to PR #${PR} (largest fresh claude[bot] comment: ${len} chars)."
+            exit 1
+          fi
+          echo "Review delivered to PR #${PR}: ${len} chars."
+
+      # Optional forensics, DELIBERATELY LEFT OFF. This repo is PUBLIC and the execution
+      # file contains every tool result, which can include secrets. Enable only for a
+      # one-off debug run, and prefer `show_full_output: true` on a private fork instead.
