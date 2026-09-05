@@ -582,8 +582,18 @@ export default function OdooSettings() {
       }
       setGraphMessage(
         report.code === "GRAPH_CONSENT_REQUIRED"
-          ? infoStatus(
-              `Your tenant requires administrator consent. Send an administrator this URL: ${classified.config.authority}/adminconsent?client_id=${classified.config.clientId}`
+          ? // NOT a constructed admin-consent URL. The v2 protocol's
+            // adminconsent endpoint requires a `redirect_uri` that exactly
+            // matches a REGISTERED one, and this app registers loopback URIs
+            // that bind a random ephemeral port per attempt - there is no
+            // stable redirect URI to put in a link an administrator opens
+            // later, so a well-formed link would land them on a dead socket
+            // regardless. Instructions instead: robust against the
+            // registration's redirect-URI shape, and needs no listener.
+            // `clientId` is a public identifier (see GraphConfig's own doc
+            // comment), not a secret - safe to show here.
+            infoStatus(
+              `Your tenant requires administrator consent. Ask an administrator to open the Microsoft Entra admin center (https://entra.microsoft.com), find the app registration with client ID ${classified.config.clientId}, and grant admin consent for the Calendars.ReadBasic permission.`
             )
           : report.code === "GRAPH_NO_KEYCHAIN"
             ? infoStatus(

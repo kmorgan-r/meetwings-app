@@ -1,6 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+
+// Only the error branch's "Open Settings" button (Important 3) reaches this -
+// it opens the dashboard webview via `invoke("open_dashboard")` rather than
+// promising a deep link this command cannot provide. Mocked here so clicking
+// it in a test does not reject against the real (Tauri-less) module.
+const invoke = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
 import { CalendarProposal } from "@/pages/app/components/completion/CalendarProposal";
 import type { CalendarProposalState } from "@/types";
 
@@ -144,4 +152,39 @@ describe("other states", () => {
     renderState({ kind: "error", code: "GRAPH_AUTH_REJECTED" });
     expect(screen.getByTestId("calendar-proposal-region").textContent ?? "").not.toMatch(/eyJ/);
   });
+
+  /**
+   * IMPORTANT 3's fail-first case. By the time GRAPH_AUTH_EXPIRED reaches the
+   * webview, mod.rs's refresh_and_adopt has already deleted the stored
+   * refresh token - "Try again" re-runs the same fetch, finds nothing to
+   * refresh, and the SECOND attempt shows GRAPH_NOT_CONNECTED instead. A
+   * retry button offering a fix that cannot work is worse than none: it must
+   * be replaced by a pointer at the actual remedy.
+   */
+  it.each([
+    ["GRAPH_AUTH_EXPIRED", /reconnect/i],
+    ["GRAPH_NOT_CONNECTED", /connect/i],
+    ["GRAPH_CONSENT_REQUIRED", /administrator|consent/i],
+    ["GRAPH_NO_KEYCHAIN", /secure storage/i],
+  ] as const)("offers a settings pointer, not a retry, for %s", async (code, remedyPattern) => {
+    invoke.mockClear();
+    renderState({ kind: "error", code });
+    expect(screen.queryByTestId("calendar-proposal-retry")).toBeNull();
+    const settingsButton = screen.getByTestId("calendar-proposal-open-settings");
+    expect(screen.getByTestId("calendar-proposal-region")).toHaveTextContent(remedyPattern);
+
+    await userEvent.click(settingsButton);
+    expect(invoke).toHaveBeenCalledWith("open_dashboard");
+  });
+
+  // The three codes retrying genuinely fixes stay exactly as they were -
+  // Important 3 narrows the OTHER six, not these.
+  it.each(["GRAPH_NETWORK", "GRAPH_THROTTLED", "GRAPH_BAD_RESPONSE"] as const)(
+    "keeps the retry control, with no settings pointer, for %s",
+    (code) => {
+      renderState({ kind: "error", code });
+      expect(screen.getByTestId("calendar-proposal-retry")).toBeInTheDocument();
+      expect(screen.queryByTestId("calendar-proposal-open-settings")).toBeNull();
+    }
+  );
 });

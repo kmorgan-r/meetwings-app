@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components";
 import { MAX_TARGETS } from "@/lib/odoo";
 // From @/types, NOT from the hook - see the placement note in
@@ -6,6 +7,7 @@ import { MAX_TARGETS } from "@/lib/odoo";
 // depends on that page is the cycle this avoids.
 import type {
   CalendarProposalState,
+  GraphErrorCode,
   OdooContact,
   SelectedTarget,
   SelectedTargets,
@@ -25,6 +27,62 @@ import type {
  * identical-footprint rule the spec states in the same paragraph.
  */
 const REGION_CLASS = "h-28 overflow-y-auto border-b pb-2 flex flex-col gap-1";
+
+/**
+ * The three codes where re-running the SAME call is the correct action: a
+ * transient network failure, a rate limit, or a response Graph sent this time
+ * that happened to be unparseable. Every other code gets a settings pointer
+ * instead - see `CALENDAR_SETTINGS_REMEDY` below.
+ */
+const RETRYABLE_CODES: ReadonlySet<GraphErrorCode> = new Set([
+  "GRAPH_NETWORK",
+  "GRAPH_THROTTLED",
+  "GRAPH_BAD_RESPONSE",
+]);
+
+/**
+ * Static copy, keyed on the code alone - NEVER server-supplied prose, a
+ * subject or an address. src/lib/calendar/errors.ts already drops all three
+ * at the boundary; this table exists so the region does not become the one
+ * place that rule gets relaxed for the sake of being more specific.
+ *
+ * Retrying cannot fix any of these. GRAPH_AUTH_EXPIRED reaches here only
+ * after mod.rs's refresh_and_adopt has already deleted the stored refresh
+ * token (the AUTH_EXPIRED arm), so a second attempt just re-derives
+ * GRAPH_NOT_CONNECTED - "Try again" promises a fix it cannot deliver.
+ * GRAPH_NOT_CONNECTED, GRAPH_CONSENT_REQUIRED and GRAPH_NO_KEYCHAIN are
+ * milder versions of the same gap. GRAPH_AUTH_REJECTED (a rejected stored
+ * config) and GRAPH_AUTH_CANCELLED (not reachable from this fetch path today
+ * - it is specific to the interactive graph_connect flow, not a background
+ * token refresh) get the same treatment for the same reason: nothing this
+ * component can re-run fixes either one.
+ *
+ * The `Exclude<...>` key type is what makes this exhaustive: a new
+ * `GraphErrorCode` that is not added to `RETRYABLE_CODES` above fails to
+ * compile here until it is also given a remedy, rather than silently falling
+ * through as neither.
+ *
+ * The consent copy deliberately matches /odoo's own admin-consent
+ * instructions (index.tsx's connect handler) - same venue, same permission
+ * name - so a user who sees this here and an administrator reading the fuller
+ * instructions on /odoo are not told two different things.
+ */
+const CALENDAR_SETTINGS_REMEDY: Record<
+  Exclude<GraphErrorCode, "GRAPH_NETWORK" | "GRAPH_THROTTLED" | "GRAPH_BAD_RESPONSE">,
+  string
+> = {
+  GRAPH_NOT_CONNECTED: "Your calendar isn't connected. Connect it from the Odoo page's Calendar section.",
+  GRAPH_CONSENT_REQUIRED:
+    "Your organization must approve this app in the Microsoft Entra admin center before it can read your calendar (permission: Calendars.ReadBasic). Continue from the Odoo page's Calendar section.",
+  GRAPH_AUTH_CANCELLED:
+    "The calendar connection was not completed. Reconnect from the Odoo page's Calendar section.",
+  GRAPH_AUTH_EXPIRED:
+    "Your Microsoft sign-in expired, and the connection was reset. Reconnect from the Odoo page's Calendar section.",
+  GRAPH_AUTH_REJECTED:
+    "This calendar connection's settings are invalid. Reconnect from the Odoo page's Calendar section.",
+  GRAPH_NO_KEYCHAIN:
+    "The saved calendar connection could not be read from this device's secure storage. Reconnect from the Odoo page's Calendar section.",
+};
 
 export interface CalendarProposalProps {
   state: CalendarProposalState;
@@ -265,17 +323,43 @@ export function CalendarProposal({
   if (state.kind === "error") {
     // The code only. Subjects, addresses and tokens were never put into the
     // error in the first place - see src/lib/calendar/errors.ts.
+    const retryable = RETRYABLE_CODES.has(state.code);
     return region(
       <>
         <p className="text-[11px] text-destructive">{state.code}</p>
-        <button
-          type="button"
-          data-testid="calendar-proposal-retry"
-          className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground self-start"
-          onClick={onRetry}
-        >
-          Try again
-        </button>
+        {!retryable && (
+          <p className="text-[11px] text-muted-foreground">
+            {
+              CALENDAR_SETTINGS_REMEDY[
+                state.code as keyof typeof CALENDAR_SETTINGS_REMEDY
+              ]
+            }
+          </p>
+        )}
+        {retryable ? (
+          <button
+            type="button"
+            data-testid="calendar-proposal-retry"
+            className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground self-start"
+            onClick={onRetry}
+          >
+            Try again
+          </button>
+        ) : (
+          // `open_dashboard` focuses/opens the dashboard webview at whatever
+          // route it is already on - it does not deep-link to /odoo, so this
+          // is labelled the same as ContactPicker's own "Odoo is not set up
+          // yet" button (a few lines below in the same popover) rather than
+          // promising a jump straight to the Calendar section.
+          <button
+            type="button"
+            data-testid="calendar-proposal-open-settings"
+            className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground self-start"
+            onClick={() => void invoke("open_dashboard")}
+          >
+            Open Settings
+          </button>
+        )}
       </>
     );
   }

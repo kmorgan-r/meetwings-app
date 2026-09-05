@@ -696,4 +696,32 @@ describe("the calendar connect section", () => {
     renderPage();
     expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("xyz-999");
   });
+
+  /**
+   * S6. The v2 admin-consent protocol's `adminconsent` endpoint requires a
+   * `redirect_uri` that exactly matches a REGISTERED one - and this app
+   * registers loopback URIs on a random ephemeral port per attempt, so a URL
+   * built as `${authority}/adminconsent?client_id=...` (missing `/v2.0`,
+   * `scope` and `redirect_uri` besides) would land an administrator on a dead
+   * socket even if it were otherwise well-formed. Instructions naming the
+   * Entra admin center, the client ID and the permission replace it.
+   */
+  it("points an administrator at the Microsoft Entra admin center for GRAPH_CONSENT_REQUIRED, not a constructed URL", async () => {
+    const user = userEvent.setup({ delay: null });
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+      if (cmd === "graph_connect") throw new Error("GRAPH_CONSENT_REQUIRED");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    await user.type(await screen.findByLabelText(/application \(client\) id/i), "abc-123");
+    await user.click(screen.getByRole("button", { name: /connect calendar/i }));
+
+    const message = await screen.findByTestId("graph-status");
+    expect(message.textContent).toMatch(/entra\.microsoft\.com/i);
+    expect(message.textContent).toMatch(/abc-123/);
+    expect(message.textContent).toMatch(/Calendars\.ReadBasic/);
+    // The old, malformed deep link must be gone.
+    expect(message.textContent).not.toMatch(/adminconsent\?client_id=/);
+  });
 });
