@@ -725,9 +725,19 @@ mod tests {
 
     /// The executable form of the spec's central security invariant.
     ///
-    /// Every struct an exposed command can return is serialized here and
-    /// scanned for credential-shaped keys. A future edit that widens one of
-    /// these to carry a token fails this test rather than shipping.
+    /// The structs CURRENTLY returned by an exposed command - `GraphStatus`
+    /// (`graph_connect`, `graph_status`) and `CurrentMeetings`
+    /// (`graph_current_meetings`) - are serialized here and scanned for
+    /// credential-shaped keys. A future edit that widens one of these to
+    /// carry a token fails this test rather than shipping.
+    ///
+    /// MARKER, not an enforced guarantee: nothing ties this list to
+    /// `lib.rs`'s `generate_handler!` list mechanically. A new field on
+    /// either struct above breaks this test's struct literals - a real
+    /// forcing function - but a new #[tauri::command] with a NEW return type
+    /// is covered by nothing until its struct is added to the `payloads` vec
+    /// below. `lib.rs`'s handler list carries a matching comment pointing
+    /// back here; keep the two in sync by hand when either changes.
     #[test]
     fn no_exposed_command_return_type_serializes_a_credential() {
         const FORBIDDEN: &[&str] = &[

@@ -4,9 +4,6 @@ use sha2::{Digest, Sha256};
 
 use super::{AUTH_EXPIRED, AUTH_REJECTED, BAD_RESPONSE, NETWORK, THROTTLED};
 
-/// `allow(dead_code)`: unused until Tasks 8, 9 and 11 wire the listener and
-/// token lifecycle that call these - same reason `graph::mod` allows its
-/// structs per-item.
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,

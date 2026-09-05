@@ -16,6 +16,19 @@ export type GraphErrorCode =
  * Graph puts rooms and equipment in the same `attendees[]` array as people,
  * distinguished only by `type: "resource"`. They are dropped before any rule
  * sees them - see participantsOf.
+ *
+ * NOT EXHAUSTIVE, on purpose - documented here rather than widened, because
+ * widening it (e.g. to `AttendeeType | (string & {})`) would cost every
+ * existing call site (matches, tests, mocks) the autocomplete and typo
+ * protection these three known values give, for a risk that is narrow and
+ * specific: mod.rs deliberately keeps `r#type` a plain `String`, so an
+ * unknown value from Graph forwards verbatim rather than failing the whole
+ * response (see the comment there), and calendar.rs forwards it unchanged
+ * too. `participantsOf`'s only read of this field is `type === "resource"`,
+ * which is safe against a value outside this union - but an EXHAUSTIVE
+ * `switch` with an `assertNever` default, added later, would throw on
+ * exactly the value Rust forwards by design. Do not write one over this
+ * type; treat any value other than the three below as "not a resource".
  */
 export type AttendeeType = "required" | "optional" | "resource";
 

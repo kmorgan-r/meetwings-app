@@ -387,6 +387,15 @@ export default function OdooSettings() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Same discipline useCalendarProposal's readStatus applies: `absent`
+      // stays silent. `graph_status` reads the keychain unconditionally
+      // whenever no session/in-memory token exists (GraphState::status in
+      // mod.rs), regardless of whether a client ID was ever saved - so
+      // without this check, a machine with an unreadable keychain shows a
+      // red graph_status error on this page to a user who has never touched
+      // the Calendar section at all.
+      const configState = await loadGraphConfigState();
+      if (configState.state === "absent") return;
       try {
         const status = await invoke<GraphStatus>("graph_status");
         if (!cancelled) setGraphStatus(status);

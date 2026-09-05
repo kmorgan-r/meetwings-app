@@ -191,6 +191,11 @@ pub fn run() {
             meeting_detect::start_meeting_watcher,
             meeting_detect::stop_meeting_watcher,
             meeting_detect::get_meeting_watcher_status,
+            // The four commands below return GraphStatus or CurrentMeetings.
+            // Both are scanned for credential-shaped keys by
+            // graph::tests::no_exposed_command_return_type_serializes_a_credential
+            // - adding a command here with a NEW return struct must add that
+            // struct to that test's `payloads` vec too; nothing else checks it.
             graph::graph_connect,
             graph::graph_disconnect,
             graph::graph_status,

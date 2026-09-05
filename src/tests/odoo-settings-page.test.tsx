@@ -667,6 +667,34 @@ describe("the calendar connect section", () => {
     expect(secureStorage.secureSet).not.toHaveBeenCalled();
   });
 
+  /**
+   * S4. `graph_status` reads the keychain unconditionally whenever no
+   * session/in-memory token exists (GraphState::status), regardless of
+   * whether a client ID was ever saved - so without a config check first, a
+   * machine with a broken keychain shows this page's red graph_status error
+   * to a user who never configured the calendar feature at all. The
+   * overlay's `useCalendarProposal.readStatus` already applies this
+   * discipline; this pins the same discipline here.
+   *
+   * The default `secureGet` mock (beforeEach) already resolves `null`, so
+   * `loadGraphConfigState()` classifies as "absent" with no override needed.
+   */
+  it("does not surface a graph_status failure when the calendar was never configured", async () => {
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    // Let both mount effects (this one, and the unrelated Odoo-config seed)
+    // fully settle before asserting an ABSENCE.
+    await waitFor(() => expect(storage.loadOdooConfigState).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(screen.queryByTestId("graph-status")).toBeNull();
+    expect(tauriCore.invoke).not.toHaveBeenCalledWith("graph_status");
+  });
+
   // Kills a mutant that removes the seeding effect (or drops its setGraph
   // call): without it, a returning connected user opens /odoo to two blank
   // fields even though a complete config is on disk.

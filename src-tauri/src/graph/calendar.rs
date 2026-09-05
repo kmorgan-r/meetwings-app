@@ -141,8 +141,13 @@ pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
 
     let mut events = Vec::with_capacity(values.len());
     for value in values {
-        // EVERY property a rule reads is required. A missing `isCancelled` is
-        // not "false" - it is an unusable response.
+        // The three properties current-meeting.ts's filter reads directly off
+        // the event - isCancelled, isAllDay and responseStatus - are required
+        // here: a missing `isCancelled` is not "false", it is an unusable
+        // response. `organizer` and `attendees` below are NOT in that set -
+        // they are read leniently, on purpose (see the comments at their own
+        // `.get(...)` calls), and a participant-less event fails closed at
+        // the filter (current-meeting.ts:115) rather than here.
         let id = value
             .get("id")
             .and_then(|v| v.as_str())
