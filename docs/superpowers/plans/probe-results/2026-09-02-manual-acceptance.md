@@ -38,7 +38,14 @@ acknowledgement of the same jsdom limitation.
       the retain half has to be exercised too.
 - [ ] **`GRAPH_CONSENT_REQUIRED` in a tenant that blocks third-party consent.**
       It is the NORMAL first result there, not an edge case. Confirm the page
-      shows the admin-consent URL for the user's own client ID.
+      names the Microsoft Entra admin center, the app's own client ID, and the
+      `Calendars.ReadBasic` permission an administrator has to grant — and that
+      it does NOT hand out a constructed `adminconsent` link. A constructed one
+      was removed deliberately: the v2 protocol requires a `redirect_uri` that
+      exactly matches a REGISTERED URI, and this app registers loopback URIs on
+      a random ephemeral port per attempt, so any such link would either fail
+      validation or land the administrator on a dead socket. Then confirm the
+      proposal block shows the same remedy, so the two agree.
 - [ ] **Linux with no keychain service.** Stop the Secret Service, connect, and
       confirm: the connection is session-only, the UI says so plainly, NOTHING
       is written to disk, and relaunching requires re-authentication.
