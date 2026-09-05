@@ -90,20 +90,18 @@ export function useCalendarProposal({
   // dependency that changes identity every render regardless of `contacts`.
   const rows = useMemo(() => contacts ?? [], [contacts]);
   /**
-   * `project` reads THIS, not `rows` directly - see the ref-sync effect right
-   * below. Closing over `rows` made `project` (and everything chained off it:
-   * `fetchNow`, `onPickCandidate`, `onRetry`) change identity every time the
-   * `contacts` prop's reference changed, which is exactly the identity
-   * `<Completion />`'s `calendarProps` memo depends on to keep
-   * `ContactPicker`'s `React.memo` intact - a plan review already caught one
-   * memo defect on this exact component, so this hook keeps its returned
-   * callbacks stable rather than pushing that requirement onto Task 15's
-   * caller.
+   * `project` reads THIS, not `rows` directly - see the sync effect below
+   * `project`'s own declaration (it has to come after: it calls `project`,
+   * which is a `const` declared further down). Closing over `rows` made
+   * `project` (and everything chained off it: `fetchNow`, `onPickCandidate`,
+   * `onRetry`) change identity every time the `contacts` prop's reference
+   * changed, which is exactly the identity `<Completion />`'s `calendarProps`
+   * memo depends on to keep `ContactPicker`'s `React.memo` intact - a plan
+   * review already caught one memo defect on this exact component, so this
+   * hook keeps its returned callbacks stable rather than pushing that
+   * requirement onto Task 15's caller.
    */
   const rowsRef = useRef(rows);
-  useEffect(() => {
-    rowsRef.current = rows;
-  }, [rows]);
   // All three inputs are known BEFORE the popover opens. That is what makes
   // this the STATIC absence the resize effect can route on.
   const present = connected && rows.length > 0;
@@ -263,11 +261,88 @@ export function useCalendarProposal({
       } as const;
     },
     // Permanently stable: `rowsRef.current` is always the latest `rows`
-    // (synced above), so `project` never needs to change identity for
+    // (synced below), so `project` never needs to change identity for
     // `contacts` to be current. That makes `fetchNow`, `onPickCandidate` and
     // `onRetry` - all chained off `project` - permanently stable too.
+    //
+    // That currency is true for every FUTURE call to `project` - a fetch, a
+    // candidate pick - but on its own says nothing about a `proposal` state
+    // already sitting on screen from an EARLIER call. The re-projection
+    // effect right below is what keeps that one current too.
     []
   );
+
+  /**
+   * Two jobs in one effect, because the second only makes sense once the
+   * first has run for this commit: sync `rowsRef` (this is that sync effect
+   * - `project` reads `rowsRef.current`, never `rows` directly, exactly as
+   * the comment above says), then re-project whatever `proposal` is
+   * currently on screen against the contacts that just changed.
+   *
+   * WHY re-project at all: `state` is a snapshot computed once, at fetch
+   * time. Nothing else re-derives it, so a matched attendee who becomes a
+   * colleague after the proposal is already showing - the colleague toggle
+   * in ContactPicker.tsx, or an `isColleague`/`active` flip that lands via
+   * Refresh - stays rendered as a checkable, PRE-TICKED row. `matchAttendees`
+   * would now place that contact in `excluded` (reason "colleague") or move
+   * an archived one from `matched` to `unmatched`; confirming before this
+   * effect catches up logs the meeting onto the wrong record, or misses that
+   * a contact is no longer safe to write to - the exact outcome exclusion and
+   * the archived/no-contact split exist to prevent.
+   *
+   * `forcedId: prev.eventId` is what keeps this from silently changing WHICH
+   * meeting is proposed: it forces `project` to re-use the event already
+   * picked rather than falling through to `pickCurrentMeeting(events,
+   * Date.now())`, which could pick a different meeting entirely purely
+   * because time has passed since the original fetch. This effect corrects
+   * the MATCH, never the selection.
+   *
+   * VALUE-COMPARED before writing, not written unconditionally. An
+   * unconditional `setState(project(...))` produces a brand-new object every
+   * time `rows` changes at all - including a change with no bearing on THIS
+   * meeting's attendees, like an unrelated contact being added by a sync -
+   * and CalendarProposal.tsx's own pre-check effect keys off exactly that
+   * object identity (by way of `writableKey`) to decide whether the proposal
+   * is a NEW one (safe to auto-select fitting rows) or the SAME one with a
+   * shrunk `writable` set (must only ever drop ids from `checked`, never add
+   * them back - see that file's comment on the exact defect this closes).
+   * Comparing by contact id / participant address+reason first and bailing
+   * out to `prev` when nothing actually changed is what lets
+   * useCalendarProposal.test.tsx's "recomputes on each open and not on a
+   * calendar-data change" pin `state`'s reference through an irrelevant
+   * `contacts` change, while a REAL change (a ticked row's contact moving out
+   * of `matched`) still produces a new object CalendarProposal.tsx can react
+   * to correctly.
+   *
+   * NOT a fetch, and does not interact with `hasFetched`/`generation`: it
+   * runs synchronously off data already in `eventsRef`/`ownAddressRef` from
+   * the last fetch, so "contacts changing must still not refetch" (the fetch
+   * effect's own comment, further below) stays true - this effect changes
+   * `state`, never calls Graph.
+   */
+  useEffect(() => {
+    rowsRef.current = rows;
+    setState((prev) => {
+      if (prev.kind !== "proposal") return prev;
+      const next = project(eventsRef.current, ownAddressRef.current, prev.eventId);
+      if (next.kind !== "proposal") return next;
+      const sameMatched =
+        prev.matched.length === next.matched.length &&
+        prev.matched.every(
+          (m, i) =>
+            m.participant.address === next.matched[i].participant.address &&
+            m.contact.id === next.matched[i].contact.id
+        );
+      const sameUnmatched =
+        prev.unmatched.length === next.unmatched.length &&
+        prev.unmatched.every(
+          (u, i) =>
+            u.participant.address === next.unmatched[i].participant.address &&
+            u.reason === next.unmatched[i].reason
+        );
+      return sameMatched && sameUnmatched ? prev : next;
+    });
+  }, [rows, project]);
 
   const fetchNow = useCallback(async () => {
     // BEFORE any await, all three of them:
@@ -341,18 +416,43 @@ export function useCalendarProposal({
    * is the ONE property that made `fetchNow` safe to add - `contacts`
    * changing must still not refetch, and now it structurally can't, rather
    * than relying on keeping it out of the array.
+   *
+   * `connected` is ALSO in the dependency array, and its handling is the same
+   * shape as `odoo-instance-changed`'s listener above, for a reason that
+   * listener does not cover: the picker can stay open (`isPickerOpen` never
+   * goes false) across a disconnect-then-reconnect on `/odoo`, possibly to a
+   * DIFFERENT account or tenant. `readStatus` updates `connected` on that
+   * broadcast, but nothing previously cleared `hasFetched` for it - so on
+   * reconnect `present` flips back true, `hasFetched.current` is still `true`
+   * from the earlier session, and the block above just skips past, leaving
+   * the PREVIOUS account's meeting, attendees and matches on screen with a
+   * live confirm button. `prevConnectedRef` is what tells a genuine
+   * true<->false transition apart from `connected` merely being read for the
+   * first time; on a real transition, this clears `hasFetched` and resets
+   * `state` to `idle` exactly as the `!isPickerOpen` branch above does,
+   * before falling through to the normal present/hasFetched check - which is
+   * what lets a reconnect that resolves `present` true immediately refetch in
+   * the very same effect run, rather than needing a second trigger.
    */
   const hasFetched = useRef(false);
+  const prevConnectedRef = useRef(connected);
   useEffect(() => {
+    const connectedChanged = prevConnectedRef.current !== connected;
+    prevConnectedRef.current = connected;
+
     if (!isPickerOpen) {
       hasFetched.current = false;
       reset();
       return;
     }
+    if (connectedChanged) {
+      hasFetched.current = false;
+      reset();
+    }
     if (!present || hasFetched.current) return;
     hasFetched.current = true;
     void fetchNow();
-  }, [isPickerOpen, present, fetchNow, reset]);
+  }, [isPickerOpen, present, connected, fetchNow, reset]);
 
   const onPickCandidate = useCallback(
     (eventId: string) => {
@@ -397,13 +497,22 @@ export function useCalendarProposal({
    *
    * `!hasFetched.current` scopes this to that ONE commit. Without it, a reset
    * that lands while the picker stays open - an Odoo instance change is the
-   * only case that does this - would read back as `idle` from `reset()` and
+   * case this guards against - would read back as `idle` from `reset()` and
    * get relabeled `loading` here forever, because nothing re-triggers a fetch
    * (an instance change does not touch `isPickerOpen`, `present`, `fetchNow`
    * or `reset` - the fetch effect's deps just above - so it never re-runs) to
    * ever resolve that phantom spinner. Once a fetch has already run for this
    * open, `idle` means "reset, nothing pending" and must render as idle, not
    * as a lie about work in flight.
+   *
+   * A `connected` transition (the fetch effect's other `reset()` call site)
+   * resets too, but does not land in this same trap: `hasFetched.current` is
+   * cleared in that SAME effect run, right before the present/hasFetched
+   * check that decides whether to fetch - so a transition that resolves
+   * `present` true fetches again immediately, and one that resolves it false
+   * unmounts this component entirely (`calendar.present` gates whether
+   * `<Completion />` even passes `calendar` to `ContactPicker`). Neither path
+   * leaves an `idle` sitting here with no fetch ever coming.
    *
    * Reading `hasFetched.current` here IS a render-phase ref read, and
    * react-hooks/refs correctly flags that - the same warning this codebase

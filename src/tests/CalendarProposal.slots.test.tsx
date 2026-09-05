@@ -560,3 +560,69 @@ describe("the write", () => {
     });
   });
 });
+
+describe("reprojection reconciliation", () => {
+  /**
+   * IMPORTANT 1's fail-first case, on the `checked` reconciliation half.
+   *
+   * `useCalendarProposal.ts` re-projects a proposal already on screen when
+   * the contact cache changes (a colleague toggle, an archive picked up by
+   * Refresh) - see that hook's own tests. The SAME `eventId` on both renders
+   * is what a reprojection looks like from here (a genuinely new proposal
+   * would carry a different one); this component must react to it by only
+   * ever DROPPING ids from `checked`, never re-adding one the user
+   * deliberately unchecked, even though `writable` shrinking is otherwise
+   * exactly what the pre-check effect treats as "select every row that fits"
+   * on a fresh proposal.
+   *
+   * Against the code before this fix, the pre-check effect has no way to
+   * tell a reprojection apart from a new proposal: `writableKey` changing
+   * (contact 2 drops out) re-derives `checked` from scratch as "every row in
+   * the new `writable` that fits" - which RE-TICKS contact 1, the row the
+   * user had explicitly unchecked. That is the exact defect this fix closes.
+   */
+  it("drops a colleague's row without re-checking a row the user had already unchecked", async () => {
+    const proposal = (matchedContacts: OdooContact[]) => (
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e1",
+          subject: "Client sync",
+          matched: matched(matchedContacts),
+          unmatched: [],
+        }}
+        targets={[]}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    // 3 matches, all fit MAX_TARGETS free slots - the pre-check effect ticks
+    // all three.
+    const { rerender } = render(proposal([contact(1), contact(2), contact(3)]));
+    await waitFor(() => expect(screen.getByTestId("calendar-proposal-row-1")).toBeChecked());
+    expect(screen.getByTestId("calendar-proposal-row-2")).toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-row-3")).toBeChecked();
+
+    // The user deliberately unchecks contact 1.
+    await userEvent.click(screen.getByTestId("calendar-proposal-row-1"));
+    expect(screen.getByTestId("calendar-proposal-row-1")).not.toBeChecked();
+
+    // A REPROJECTION: same `eventId`, contact 2 became a colleague and
+    // dropped out of `matched` entirely - simulating what
+    // useCalendarProposal.ts's reprojection effect now produces.
+    rerender(proposal([contact(1), contact(3)]));
+
+    // Contact 2's row is gone - no longer writable, no longer even rendered.
+    expect(screen.queryByTestId("calendar-proposal-row-2")).toBeNull();
+    // Contact 1 stays UNCHECKED - the user's choice survives the
+    // reprojection. This is the assertion that fails against the unfixed
+    // pre-check effect.
+    expect(screen.getByTestId("calendar-proposal-row-1")).not.toBeChecked();
+    // Contact 3 was never touched by the user and stays checked.
+    expect(screen.getByTestId("calendar-proposal-row-3")).toBeChecked();
+    // The confirm button reflects exactly the one row still checked.
+    expect(screen.getByTestId("calendar-proposal-confirm")).toHaveTextContent("Add 1 to log");
+  });
+});

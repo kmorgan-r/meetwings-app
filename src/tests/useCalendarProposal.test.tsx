@@ -442,6 +442,49 @@ describe("fetching", () => {
   });
 });
 
+describe("reprojection", () => {
+  /**
+   * IMPORTANT 1's fail-first case. `state` is a snapshot computed once, at
+   * fetch time - nothing previously re-derived it, so a matched attendee who
+   * becomes a colleague WHILE their proposal is already on screen stayed
+   * rendered as a checkable, pre-ticked row forever (until the picker closed
+   * and reopened). `matchAttendees` would now exclude this contact (reason
+   * "colleague"), so a fixed hook must drop it out of `matched` on the very
+   * next `contacts` update, without a new fetch.
+   *
+   * Against the unfixed hook this fails: `state.matched` keeps the stale
+   * `{ contact: { id: 7 } }` entry forever, since nothing re-projects it.
+   */
+  it("drops a matched contact from the proposal once it becomes a colleague, with no new fetch", async () => {
+    mockGraph([meeting("e1", "Sync")]);
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
+    const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
+      initialProps: props,
+    });
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({
+        kind: "proposal",
+        matched: [{ contact: { id: 7 } }],
+      })
+    );
+    const fetchesBefore = invoke.mock.calls.filter(
+      ([cmd]) => cmd === "graph_current_meetings"
+    ).length;
+
+    const colleague = { ...contact(7, "cfo@acme.example"), isColleague: true };
+    rerender({ ...props, contacts: [colleague] });
+
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({ kind: "proposal", matched: [] })
+    );
+    // Re-projected locally against the events/ownAddress already in hand -
+    // never a second round trip to Graph.
+    expect(
+      invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings")
+    ).toHaveLength(fetchesBefore);
+  });
+});
+
 describe("lifecycle", () => {
   // ContactPicker stays MOUNTED when the popover closes (ContactPicker.tsx:205-206),
   // so without an explicit reset the previous meeting's matches are what the
@@ -475,6 +518,55 @@ describe("lifecycle", () => {
       }
     });
     expect(result.current.state).toEqual({ kind: "idle" });
+  });
+
+  /**
+   * IMPORTANT 2's fail-first case. The picker stays open across a
+   * disconnect-then-reconnect broadcast from `/odoo` - `isPickerOpen` never
+   * goes false, so `hasFetched.current` was never cleared for it. Against the
+   * unfixed hook, `state` is untouched by the disconnect (nothing resets it),
+   * and on reconnect `hasFetched.current` is still `true`, so the fetch
+   * effect skips straight past and the PREVIOUS account's proposal - subject,
+   * attendees, matches, a live confirm button - resurfaces once `present`
+   * flips back true, even though the account behind it is now a different
+   * one.
+   */
+  it("discards a stale proposal and refetches on a disconnect-then-reconnect while the picker stays open", async () => {
+    mockGraph([meeting("e1", "Sync")]);
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
+    const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
+      initialProps: props,
+    });
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
+    );
+
+    // Disconnected on /odoo; broadcast reaches this window.
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    await act(async () => {
+      for (const handler of listeners.get("graph-connection-changed") ?? []) {
+        handler({ payload: null });
+      }
+    });
+    await waitFor(() => expect(result.current.present).toBe(false));
+
+    // Reconnected - a DIFFERENT account, with a different meeting live now.
+    mockGraph([meeting("e2", "Someone else's meeting")]);
+    await act(async () => {
+      for (const handler of listeners.get("graph-connection-changed") ?? []) {
+        handler({ payload: null });
+      }
+    });
+
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({
+        kind: "proposal",
+        subject: "Someone else's meeting",
+      })
+    );
   });
 
   // React 19 StrictMode double-invokes effects, and a close-then-reopen can

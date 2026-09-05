@@ -91,8 +91,14 @@ export function CalendarProposal({
    * NEW one under those stale ids. A mismatch aborts the rest of the loop.
    */
   const epochRef = useRef(0);
+  /**
+   * Which meeting the CURRENTLY pre-checked selection belongs to - see the
+   * pre-check effect below, which is the only reader/writer.
+   */
+  const lastProposalEventIdRef = useRef<string | null>(null);
 
   const proposal = state.kind === "proposal" ? state : null;
+  const proposalEventId = proposal?.eventId ?? null;
 
   const { rows, writable, freeSlots } = useMemo(() => {
     const sorted = (proposal?.matched ?? [])
@@ -111,6 +117,36 @@ export function CalendarProposal({
 
   const writableKey = writable.map((m) => m.contact.id).join(",");
   useEffect(() => {
+    /**
+     * `isNewProposal` is what makes this effect safe to also run for a
+     * REPROJECTION - useCalendarProposal.ts re-running `matchAttendees`
+     * against the SAME meeting when the contact cache changes underneath it
+     * (a colleague toggle, an archive picked up by Refresh). That reprojection
+     * changes `writable` - a colleague's row drops out of it entirely - which
+     * changes `writableKey`, which re-fires this effect exactly like a write
+     * completing does. The two cases need OPPOSITE handling:
+     *
+     * - a genuinely NEW proposal (a different `eventId` - the picker just
+     *   opened, or the user picked a different candidate meeting) should
+     *   pre-check every writable row that fits, same as always;
+     * - the SAME proposal with a shrunk `writable` set - from a reprojection,
+     *   or from a write landing (below) - must only ever DROP ids from
+     *   `checked`, never add one back. Recomputing "pre-check every row that
+     *   fits" here would silently RE-TICK a row the user had deliberately
+     *   unchecked, for either cause. `eventId` unchanged is what tells the two
+     *   apart; the ref survives across renders because `lastEventId` itself
+     *   would just be reset to the wrong thing by the very re-render this
+     *   effect responds to.
+     *
+     * Recorded UNCONDITIONALLY, before the write guard below returns: an
+     * eventId transition that happens to land mid-write (an instance change
+     * resets state to `idle`, which counts as a transition) must still be
+     * captured, or a later same-eventId proposal on a still-mounted component
+     * would read as "not new" and wrongly intersect against nothing.
+     */
+    const isNewProposal = proposalEventId !== lastProposalEventIdRef.current;
+    lastProposalEventIdRef.current = proposalEventId;
+
     /**
      * NOT WHILE A WRITE IS RUNNING. This guard is the whole finding.
      *
@@ -131,20 +167,33 @@ export function CalendarProposal({
      * only surface to a `targets` update flushing after the loop.
      */
     if (writingRef.current) return;
-    // Pre-check only when EVERY writable match fits. Auto-selecting an
-    // arbitrary subset is the wrong-record risk this feature exists to avoid.
-    setChecked(
-      writable.length > 0 && writable.length <= freeSlots
-        ? new Set(writable.map((m) => m.contact.id))
-        : new Set()
-    );
+
+    setChecked((prev) => {
+      if (isNewProposal) {
+        // Pre-check only when EVERY writable match fits. Auto-selecting an
+        // arbitrary subset is the wrong-record risk this feature exists to
+        // avoid.
+        return writable.length > 0 && writable.length <= freeSlots
+          ? new Set(writable.map((m) => m.contact.id))
+          : new Set();
+      }
+      // SAME proposal, `writable` shrank for a reason that is not a write in
+      // progress (a reprojection - see the block comment above). INTERSECT
+      // ONLY: an id that vanished from `writable` is dropped, but nothing is
+      // ever added back, so a row the user unchecked before the reprojection
+      // stays unchecked after it.
+      const writableIds = new Set(writable.map((m) => m.contact.id));
+      const next = new Set<number>();
+      for (const id of prev) if (writableIds.has(id)) next.add(id);
+      return next;
+    });
     setWriteResult(null);
     // `writableKey` stands in for `writable` on purpose - see the comment
     // above. Depending on `writable` itself would re-run this effect on every
     // render (a fresh array from the memo above) instead of only when its
     // contents actually change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [writableKey, freeSlots]);
+  }, [writableKey, freeSlots, proposalEventId]);
 
   /**
    * Flips `writingRef` back to `false`, but deferred to its OWN effect
