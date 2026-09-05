@@ -141,6 +141,18 @@ export const useCompletion = () => {
   // in <Completion />, so this hook cannot read targetCount off
   // useOdooTarget's return value, only own a slot the other hook writes into.
   const [targetCount, setTargetCount] = useState(0);
+  // Whether the calendar proposal block will occupy space in the picker.
+  //
+  // Mirrors targetCount above EXACTLY, including why: useCompletion runs
+  // before useCalendarProposal in <Completion />, so this hook cannot read the
+  // value off that hook - only own a slot it writes into.
+  //
+  // This is the STATIC half of the absence rule. Not connected, Odoo
+  // unconfigured or an empty contact cache are all known BEFORE the popover
+  // opens, so they belong in this flag-driven effect. "Connected but no
+  // meeting right now" resolves AFTER open and is handled inside the block by
+  // the identical-footprint rule instead.
+  const [calendarBlockPresent, setCalendarBlockPresent] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
 
@@ -1935,6 +1947,16 @@ export const useCompletion = () => {
     // asked to re-apply around the new row. See the doc comment at
     // targetCount's declaration above.
     void targetCount;
+    // calendarBlockPresent is read but not otherwise used below, for the same
+    // reason as targetCount just above: `blockPresent` can flip while the
+    // picker is already open (a status-read failing or recovering, the
+    // contact cache becoming ready) - a content-driven height change that
+    // toggles no flag in the OR list below, so without this dependency the
+    // effect would never re-run and the window would never be asked to
+    // re-apply around the block. It is deliberately NOT added to the OR
+    // itself: the block only ever renders inside the already-open picker, and
+    // ORing it in would grow the 54px bar for a picker that is not even open.
+    void calendarBlockPresent;
     resizeWindow(
       isPopoverOpen ||
         micOpen ||
@@ -1950,6 +1972,7 @@ export const useCompletion = () => {
     isFilesPopoverOpen,
     isContactPickerOpen,
     targetCount,
+    calendarBlockPresent,
   ]);
 
   // Auto scroll to bottom when response updates
@@ -2325,6 +2348,8 @@ export const useCompletion = () => {
     setIsContactPickerOpen,
     targetCount,
     setTargetCount,
+    calendarBlockPresent,
+    setCalendarBlockPresent,
     onRemoveAllFiles,
     inputRef,
     captureScreenshot,

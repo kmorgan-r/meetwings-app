@@ -12,3 +12,4 @@ export * from "./meeting-log-watermark.storage";
 export * from "./verification.storage";
 export * from "./secure-provider-configs";
 export * from "./odoo-config.storage";
+export * from "./graph-config.storage";

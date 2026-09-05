@@ -1,8 +1,15 @@
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { AddToggle, Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts, kindLabel, MAX_TARGETS } from "@/lib/odoo";
-import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
+import type {
+  CalendarProposalState,
+  OdooContact,
+  OdooOpportunity,
+  SelectedTarget,
+  SelectedTargets,
+} from "@/types";
 import { CheckIcon, ChevronDownIcon, StarIcon, UsersIcon } from "lucide-react";
+import { CalendarProposal } from "./CalendarProposal";
 
 export const MAX_RENDERED_ROWS = 100;
 
@@ -154,6 +161,20 @@ export interface ContactPickerProps {
   // popover the same way it already does for Files/mic/message-history.
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * The calendar proposal block, or undefined when it is STATICALLY absent -
+   * not connected, Odoo unconfigured, or an empty contact cache. Optional
+   * because those three are the common v1 case and must reserve nothing.
+   *
+   * `targets` and `onAddTarget` are NOT in here: CalendarProposal reads them
+   * from this component's own props, so there is exactly one source for the
+   * list the slot rule counts against.
+   */
+  calendar?: {
+    state: CalendarProposalState;
+    onPickCandidate: (eventId: string) => void;
+    onRetry: () => void;
+  };
 }
 
 export const ContactPicker = memo(function ContactPicker({
@@ -186,6 +207,7 @@ export const ContactPicker = memo(function ContactPicker({
   onRetryContactOpportunities,
   open,
   onOpenChange,
+  calendar,
 }: ContactPickerProps) {
   const [query, setQuery] = useState("");
   // Task 12: which contact rows' own deal disclosure is open. Purely local
@@ -318,6 +340,15 @@ export const ContactPicker = memo(function ContactPicker({
       */}
       <PopoverContent className="w-80 p-3 popover-opaque">
         <div className="flex flex-col gap-2">
+          {calendar !== undefined && (
+            <CalendarProposal
+              state={calendar.state}
+              targets={targets}
+              onAddTarget={onAddTarget}
+              onPickCandidate={calendar.onPickCandidate}
+              onRetry={calendar.onRetry}
+            />
+          )}
           {targets.length > 0 && (
             <div
               /*
