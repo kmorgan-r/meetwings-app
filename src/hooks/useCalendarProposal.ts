@@ -326,6 +326,15 @@ export function useCalendarProposal({
       if (prev.kind !== "proposal") return prev;
       const next = project(eventsRef.current, ownAddressRef.current, prev.eventId);
       if (next.kind !== "proposal") return next;
+      // STRUCTURAL guard, not an argued one: `project` falls through to
+      // `pickCurrentMeeting(events, Date.now())` whenever `forcedId` is not
+      // found in `events` (see `project`'s own body), which can name a
+      // DIFFERENT meeting than `prev.eventId`. Unreachable today - the only
+      // thing that empties `eventsRef` is `reset()`, which also queues
+      // `idle` in the same call - but "corrects the match, never the
+      // selection" (the block comment above) must not depend on that staying
+      // true elsewhere in this file.
+      if (next.eventId !== prev.eventId) return prev;
       const sameMatched =
         prev.matched.length === next.matched.length &&
         prev.matched.every(

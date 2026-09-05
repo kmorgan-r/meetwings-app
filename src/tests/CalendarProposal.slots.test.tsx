@@ -625,4 +625,57 @@ describe("reprojection reconciliation", () => {
     // The confirm button reflects exactly the one row still checked.
     expect(screen.getByTestId("calendar-proposal-confirm")).toHaveTextContent("Add 1 to log");
   });
+
+  /**
+   * FINDING A's fail-first case, from the closing-round review.
+   *
+   * `freeSlots` is a dependency of the pre-check effect, but before this fix
+   * the intersect branch never READ it - only the `isNewProposal` branch did.
+   * Adding unrelated targets by hand elsewhere in the same popover shrinks
+   * `freeSlots` without touching `matched`, `writable` or `writableKey` at
+   * all, so the intersect branch ran (the effect still fires - `freeSlots`
+   * changed) and kept every previously-checked id, even though there is no
+   * longer room to write all of them. Confirm would then write an ARBITRARY
+   * SUBSET - whichever rows land first by recency before the DB layer starts
+   * cap-rejecting - which is exactly what the "every writable match fits, or
+   * none" rule (the `isNewProposal` branch's own comment, just above) exists
+   * to prevent.
+   */
+  it("clears every checked row when free slots shrink below what stayed checked", async () => {
+    const renderWith = (targets: SelectedTargets) => (
+      <CalendarProposal
+        state={{
+          kind: "proposal",
+          eventId: "e1",
+          subject: "Client sync",
+          matched: matched([contact(1), contact(2), contact(3)]),
+          unmatched: [],
+        }}
+        targets={targets}
+        onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onPickCandidate={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    // 3 matches, 0 targets -> 5 free slots (MAX_TARGETS). All three pre-tick.
+    const { rerender } = render(renderWith([]));
+    await waitFor(() => expect(screen.getByTestId("calendar-proposal-row-1")).toBeChecked());
+    expect(screen.getByTestId("calendar-proposal-row-2")).toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-row-3")).toBeChecked();
+
+    // 3 UNRELATED targets added by hand elsewhere in the same popover - none
+    // of these resIds match a matched contact, so `writable`/`writableKey`
+    // are untouched. `freeSlots` drops from 5 to 2; `eventId` is unchanged.
+    rerender(renderWith([target(101), target(102), target(103)]));
+
+    // Nothing stays checked: 3 checked ids no longer fit in 2 free slots, so
+    // the pre-check's own "fits entirely, or none" rule must apply here too,
+    // not just on a genuinely new proposal.
+    expect(screen.getByTestId("calendar-proposal-row-1")).not.toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-row-2")).not.toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-row-3")).not.toBeChecked();
+    expect(screen.getByTestId("calendar-proposal-confirm")).toHaveTextContent("Add 0 to log");
+    expect(screen.getByTestId("calendar-proposal-confirm")).toBeDisabled();
+  });
 });

@@ -33,12 +33,18 @@ const REGION_CLASS = "h-28 overflow-y-auto border-b pb-2 flex flex-col gap-1";
  * transient network failure, a rate limit, or a response Graph sent this time
  * that happened to be unparseable. Every other code gets a settings pointer
  * instead - see `CALENDAR_SETTINGS_REMEDY` below.
+ *
+ * The ONE list both the runtime check and `CALENDAR_SETTINGS_REMEDY`'s key
+ * type derive from - see that constant's own comment for why a second,
+ * separately-typed copy of this list is exactly the drift this closes.
  */
-const RETRYABLE_CODES: ReadonlySet<GraphErrorCode> = new Set([
+const RETRYABLE_CODES = [
   "GRAPH_NETWORK",
   "GRAPH_THROTTLED",
   "GRAPH_BAD_RESPONSE",
-]);
+] as const satisfies readonly GraphErrorCode[];
+type RetryableGraphErrorCode = (typeof RETRYABLE_CODES)[number];
+const RETRYABLE_CODE_SET: ReadonlySet<GraphErrorCode> = new Set(RETRYABLE_CODES);
 
 /**
  * Static copy, keyed on the code alone - NEVER server-supplied prose, a
@@ -57,10 +63,16 @@ const RETRYABLE_CODES: ReadonlySet<GraphErrorCode> = new Set([
  * token refresh) get the same treatment for the same reason: nothing this
  * component can re-run fixes either one.
  *
- * The `Exclude<...>` key type is what makes this exhaustive: a new
- * `GraphErrorCode` that is not added to `RETRYABLE_CODES` above fails to
- * compile here until it is also given a remedy, rather than silently falling
- * through as neither.
+ * The `Exclude<RetryableGraphErrorCode>` key type is what makes this
+ * exhaustive: a new `GraphErrorCode` that is not added to `RETRYABLE_CODES`
+ * above fails to compile here until it is also given a remedy, rather than
+ * silently falling through as neither. `RetryableGraphErrorCode` is DERIVED
+ * from `RETRYABLE_CODES` (`(typeof RETRYABLE_CODES)[number]`), not a second,
+ * separately-typed union - a code moved off that list without this Record
+ * being updated used to type-check anyway (the lookup below was cast to
+ * `keyof typeof CALENDAR_SETTINGS_REMEDY`, which reported `string`, not
+ * `string | undefined`) and render an empty line beside "Open Settings".
+ * With one shared source, that drift cannot compile.
  *
  * The consent copy deliberately matches /odoo's own admin-consent
  * instructions (index.tsx's connect handler) - same venue, same permission
@@ -68,7 +80,7 @@ const RETRYABLE_CODES: ReadonlySet<GraphErrorCode> = new Set([
  * instructions on /odoo are not told two different things.
  */
 const CALENDAR_SETTINGS_REMEDY: Record<
-  Exclude<GraphErrorCode, "GRAPH_NETWORK" | "GRAPH_THROTTLED" | "GRAPH_BAD_RESPONSE">,
+  Exclude<GraphErrorCode, RetryableGraphErrorCode>,
   string
 > = {
   GRAPH_NOT_CONNECTED: "Your calendar isn't connected. Connect it from the Odoo page's Calendar section.",
@@ -243,7 +255,21 @@ export function CalendarProposal({
       const writableIds = new Set(writable.map((m) => m.contact.id));
       const next = new Set<number>();
       for (const id of prev) if (writableIds.has(id)) next.add(id);
-      return next;
+      // The slot rule still applies to what survives the intersect. A
+      // reprojection never REMOVES a target (only a write does that, and
+      // this branch already can't run mid-write - see the guard above), but
+      // ADDING targets by hand in the same popover shrinks `freeSlots`
+      // without touching `writable` or `writableKey` at all, so this effect
+      // still fires (it depends on `freeSlots`) while every id already in
+      // `checked` survives the intersect untouched - silently leaving MORE
+      // rows checked than there is room to write. Confirm would then write
+      // whichever ones land first by recency and cap-reject the rest: an
+      // arbitrary subset, which is exactly what the pre-check's own "every
+      // writable match fits, or none" rule (just above) exists to prevent.
+      // Clearing instead of trimming to fit keeps this branch the same
+      // shape as that rule: an auto-selected PARTIAL batch is never offered,
+      // only "all" or "none".
+      return next.size > freeSlots ? new Set() : next;
     });
     setWriteResult(null);
     // `writableKey` stands in for `writable` on purpose - see the comment
@@ -323,7 +349,7 @@ export function CalendarProposal({
   if (state.kind === "error") {
     // The code only. Subjects, addresses and tokens were never put into the
     // error in the first place - see src/lib/calendar/errors.ts.
-    const retryable = RETRYABLE_CODES.has(state.code);
+    const retryable = RETRYABLE_CODE_SET.has(state.code);
     return region(
       <>
         <p className="text-[11px] text-destructive">{state.code}</p>
