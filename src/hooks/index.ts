@@ -25,3 +25,4 @@ export * from "./useMeetingAutoRecord";
 export * from "./useOdooTarget";
 export * from "./useMeetingLog";
 export * from "./useMeetingLogQueue";
+export * from "./useCalendarProposal";

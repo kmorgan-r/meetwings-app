@@ -3,6 +3,7 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod graph;
 mod meeting_detect;
 mod shortcuts;
 mod window;
@@ -113,6 +114,7 @@ pub fn run() {
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
         .manage(meeting_detect::MeetingWatcherState::default())
+        .manage(graph::GraphState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -189,6 +191,15 @@ pub fn run() {
             meeting_detect::start_meeting_watcher,
             meeting_detect::stop_meeting_watcher,
             meeting_detect::get_meeting_watcher_status,
+            // The four commands below return GraphStatus or CurrentMeetings.
+            // Both are scanned for credential-shaped keys by
+            // graph::tests::no_exposed_command_return_type_serializes_a_credential
+            // - adding a command here with a NEW return struct must add that
+            // struct to that test's `payloads` vec too; nothing else checks it.
+            graph::graph_connect,
+            graph::graph_disconnect,
+            graph::graph_status,
+            graph::graph_current_meetings,
         ])
         .setup(|app| {
             // Setup main window positioning

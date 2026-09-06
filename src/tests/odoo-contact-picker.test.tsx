@@ -1165,3 +1165,29 @@ describe("clearing every destination", () => {
     expect(screen.getByTestId("logging-to-section")).toHaveTextContent(/Logging to \(3\)/);
   });
 });
+
+describe("calendar proposal slot", () => {
+  // Statically absent must cost NOTHING: the default v1 user ships no client
+  // ID, and reserving blank space in a 54px window for them is the exact
+  // regression the static/dynamic split exists to prevent.
+  it("renders no region at all when no calendar prop is passed", async () => {
+    setup(); // the file's existing helper, which passes no `calendar`
+    await openPopover();
+    expect(screen.queryByTestId("calendar-proposal-region")).toBeNull();
+  });
+
+  it("renders the region above the search box when a proposal is present", async () => {
+    setup({
+      calendar: {
+        state: { kind: "no-meeting" as const },
+        onPickCandidate: vi.fn(),
+        onRetry: vi.fn(),
+      },
+    });
+    await openPopover();
+    const region = screen.getByTestId("calendar-proposal-region");
+    const search = screen.getByPlaceholderText("Search contacts");
+    // Node.DOCUMENT_POSITION_FOLLOWING: the search box comes after the region.
+    expect(region.compareDocumentPosition(search) & 4).toBeTruthy();
+  });
+});

@@ -11,3 +11,4 @@ export * from "./meeting-context";
 export * from "./speaker-id";
 export * from "./user-identity";
 export * from "./odoo";
+export * from "./calendar";

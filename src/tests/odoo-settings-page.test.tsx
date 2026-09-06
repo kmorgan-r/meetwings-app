@@ -32,6 +32,29 @@ vi.mock("@/lib/database/meeting-log.action", () => ({ getQueueCounts, countAllQu
 const emit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@tauri-apps/api/event", () => ({ emit, listen: vi.fn(async () => () => {}) }));
 
+// Mocked at the SAME boundary as graph-config.storage.test.ts
+// (@/lib/secure-storage), not the whole storage module - classifyGraphConfig
+// now lives in graph-config.storage.ts and this file needs the real
+// classify/load logic exercised, not a hand-rolled stand-in that would
+// silently diverge from it as the module grows.
+const secureStorage = vi.hoisted(() => ({
+  secureGet: vi.fn(async () => null as string | null),
+  secureSet: vi.fn(async () => {}),
+  secureDelete: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/secure-storage", () => secureStorage);
+
+// The calendar section's `invoke` calls (graph_status / graph_connect /
+// graph_disconnect). Routed by command name so a test can fail one call
+// (e.g. graph_status) without affecting another in the same render.
+const tauriCore = vi.hoisted(() => ({
+  invoke: vi.fn(async (cmd: string) => {
+    if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+    throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+  }),
+}));
+vi.mock("@tauri-apps/api/core", () => tauriCore);
+
 const odoo = vi.hoisted(() => ({
   // SyncOutcome, not SyncResult - `ran` is what tells a skip apart from a
   // completed sync that changed nothing.
@@ -99,15 +122,30 @@ beforeEach(() => {
   getQueueCounts.mockResolvedValue({
     waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
   });
+  // Baseline for the calendar section: nothing stored, graph_status reports
+  // disconnected. Individual tests below override one or both.
+  secureStorage.secureGet.mockResolvedValue(null);
+  tauriCore.invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+    throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+  });
   setOdooRedactor([KEY]);
 });
 
+// `delay: null` (rather than the default per-keystroke `setTimeout`) is what
+// used to make the four-field fill in `fillAndSave` take 2.6-3.7s even in
+// isolation, and occasionally miss vitest's 5000ms default under full-suite
+// CPU contention - a slow machine mistaken for a hang, not an actual one.
+// Safe here because `updateField` (src/pages/odoo/index.tsx:307-312) is
+// synchronous state-only, with no debounce and no per-keystroke timing
+// dependency: typing speed cannot change what these tests exercise.
 async function fillAndSave() {
-  await userEvent.type(await screen.findByLabelText(/url/i), "http://h:8069");
-  await userEvent.type(screen.getByLabelText(/database/i), "odoo");
-  await userEvent.type(screen.getByLabelText(/login/i), "bob@example.com");
-  await userEvent.type(screen.getByLabelText(/api key/i), KEY);
-  await userEvent.click(screen.getByRole("button", { name: /save/i }));
+  const user = userEvent.setup({ delay: null });
+  await user.type(await screen.findByLabelText(/url/i), "http://h:8069");
+  await user.type(screen.getByLabelText(/database/i), "odoo");
+  await user.type(screen.getByLabelText(/login/i), "bob@example.com");
+  await user.type(screen.getByLabelText(/api key/i), KEY);
+  await user.click(screen.getByRole("button", { name: /save/i }));
 }
 
 describe("saving credentials", () => {
@@ -326,10 +364,11 @@ describe("the Odoo settings page", () => {
   // via requireOdooConfig and answers ODOO_NOT_CONFIGURED.
   it("does not claim the credentials are stored until Save is pressed", async () => {
     renderPage();
-    await userEvent.type(await screen.findByLabelText(/url/i), "http://h:8069");
-    await userEvent.type(screen.getByLabelText(/database/i), "odoo");
-    await userEvent.type(screen.getByLabelText(/login/i), "bob@example.com");
-    await userEvent.type(screen.getByLabelText(/api key/i), KEY);
+    const user = userEvent.setup({ delay: null });
+    await user.type(await screen.findByLabelText(/url/i), "http://h:8069");
+    await user.type(screen.getByLabelText(/database/i), "odoo");
+    await user.type(screen.getByLabelText(/login/i), "bob@example.com");
+    await user.type(screen.getByLabelText(/api key/i), KEY);
 
     expect(screen.queryByText(/credentials stored/i)).not.toBeInTheDocument();
     expect(screen.getByText(/press save to store them/i)).toBeInTheDocument();
@@ -612,5 +651,105 @@ describe("the queue status block", () => {
 
     expect(await screen.findByTestId("meeting-log-stranded")).toBeInTheDocument();
     expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
+  });
+});
+
+describe("the calendar connect section", () => {
+  // Kills a reorder back to save-before-validate: if handleConnect saved the
+  // in-memory form before checking whether it is complete, this would call
+  // secureSet (what saveGraphConfig writes through) even though the form was
+  // never touched - and would overwrite any previously-stored, valid config
+  // with blanks before the error below is ever shown.
+  it("does not save when Connect is clicked with a blank form", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /connect calendar/i }));
+    expect(await screen.findByText(/enter the application \(client\) id/i)).toBeInTheDocument();
+    expect(secureStorage.secureSet).not.toHaveBeenCalled();
+  });
+
+  /**
+   * S4. `graph_status` reads the keychain unconditionally whenever no
+   * session/in-memory token exists (GraphState::status), regardless of
+   * whether a client ID was ever saved - so without a config check first, a
+   * machine with a broken keychain shows this page's red graph_status error
+   * to a user who never configured the calendar feature at all. The
+   * overlay's `useCalendarProposal.readStatus` already applies this
+   * discipline; this pins the same discipline here.
+   *
+   * The default `secureGet` mock (beforeEach) already resolves `null`, so
+   * `loadGraphConfigState()` classifies as "absent" with no override needed.
+   */
+  it("does not surface a graph_status failure when the calendar was never configured", async () => {
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    // Let both mount effects (this one, and the unrelated Odoo-config seed)
+    // fully settle before asserting an ABSENCE.
+    await waitFor(() => expect(storage.loadOdooConfigState).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    expect(screen.queryByTestId("graph-status")).toBeNull();
+    expect(tauriCore.invoke).not.toHaveBeenCalledWith("graph_status");
+  });
+
+  // Kills a mutant that removes the seeding effect (or drops its setGraph
+  // call): without it, a returning connected user opens /odoo to two blank
+  // fields even though a complete config is on disk.
+  it("seeds the calendar fields from a stored complete config on mount", async () => {
+    secureStorage.secureGet.mockResolvedValue(
+      JSON.stringify({ clientId: "abc-123", authority: "https://login.microsoftonline.com/contoso" })
+    );
+    renderPage();
+    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("abc-123");
+    expect(screen.getByLabelText(/^authority$/i)).toHaveValue(
+      "https://login.microsoftonline.com/contoso"
+    );
+  });
+
+  // The property the dispatch called "the most important line": seeding must
+  // be decoupled from graph_status, not just typically-not-broken-together.
+  // A shared try/catch would make this fail (the rejection swallows the seed
+  // along with the status read) even though the two tests above still pass.
+  it("still seeds the calendar fields when the graph_status call rejects", async () => {
+    secureStorage.secureGet.mockResolvedValue(
+      JSON.stringify({ clientId: "xyz-999", authority: "https://login.microsoftonline.com/contoso" })
+    );
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") throw new Error("GRAPH_NETWORK");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("xyz-999");
+  });
+
+  /**
+   * S6. The v2 admin-consent protocol's `adminconsent` endpoint requires a
+   * `redirect_uri` that exactly matches a REGISTERED one - and this app
+   * registers loopback URIs on a random ephemeral port per attempt, so a URL
+   * built as `${authority}/adminconsent?client_id=...` (missing `/v2.0`,
+   * `scope` and `redirect_uri` besides) would land an administrator on a dead
+   * socket even if it were otherwise well-formed. Instructions naming the
+   * Entra admin center, the client ID and the permission replace it.
+   */
+  it("points an administrator at the Microsoft Entra admin center for GRAPH_CONSENT_REQUIRED, not a constructed URL", async () => {
+    const user = userEvent.setup({ delay: null });
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return { connected: false, sessionOnly: false };
+      if (cmd === "graph_connect") throw new Error("GRAPH_CONSENT_REQUIRED");
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+    renderPage();
+    await user.type(await screen.findByLabelText(/application \(client\) id/i), "abc-123");
+    await user.click(screen.getByRole("button", { name: /connect calendar/i }));
+
+    const message = await screen.findByTestId("graph-status");
+    expect(message.textContent).toMatch(/entra\.microsoft\.com/i);
+    expect(message.textContent).toMatch(/abc-123/);
+    expect(message.textContent).toMatch(/Calendars\.ReadBasic/);
+    // The old, malformed deep link must be gone.
+    expect(message.textContent).not.toMatch(/adminconsent\?client_id=/);
   });
 });

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
+  useCalendarProposal,
   useCompletion,
   useMeetingAutoRecord,
   useMeetingLog,
@@ -57,6 +58,44 @@ export const Completion = ({
     // field; without this the call here would not compile.
     setTargetCount: completion.setTargetCount,
   });
+
+  // Mounted HERE, not inside ContactPicker: a hook there would re-run on every
+  // keystroke in the search box, and could not survive the popover's lifecycle
+  // rules. `cache` comes from useOdooTarget rather than a second listContacts
+  // read, so the matcher and the picker can never disagree about which
+  // contacts exist.
+  const calendar = useCalendarProposal({
+    isPickerOpen: completion.isContactPickerOpen,
+    // Narrowed HERE, not inside the hook: the hook takes contacts, not the
+    // cache variant, so it never has to import a page's type. `null` while the
+    // cache is not ready.
+    contacts:
+      odoo.pickerProps.cache.kind === "ready" ? odoo.pickerProps.cache.contacts : null,
+    setCalendarBlockPresent: completion.setCalendarBlockPresent,
+  });
+
+  /**
+   * MEMOIZED, not an inline literal at the call site.
+   *
+   * `ContactPicker` is `React.memo`'d with ~30 props, and `<Completion />`
+   * re-renders on every streamed AI token (`completion.state.response`). A
+   * fresh `{ state, onPickCandidate, onRetry }` object each render makes
+   * memo's shallow compare see a changed prop every single time, defeating the
+   * memo for as long as the feature is active - popover closed included. With
+   * the picker open during a stream that means re-diffing the contact list (up
+   * to MAX_RENDERED_ROWS = 100) once per token.
+   */
+  const calendarProps = useMemo(
+    () =>
+      calendar.present
+        ? {
+            state: calendar.state,
+            onPickCandidate: calendar.onPickCandidate,
+            onRetry: calendar.onRetry,
+          }
+        : undefined,
+    [calendar.present, calendar.state, calendar.onPickCandidate, calendar.onRetry]
+  );
 
   // The AI provider, built exactly as useCompletion.ts:1313-1324 does it.
   //
@@ -155,7 +194,7 @@ export const Completion = ({
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
       ) : (
-        <ContactPicker {...odoo.pickerProps} />
+        <ContactPicker {...odoo.pickerProps} calendar={calendarProps} />
       )}
       <Audio {...completion} />
       <Input

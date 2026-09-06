@@ -195,6 +195,17 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onOpenChange: vi.fn(),
         },
       }),
+      // Task 15: <Completion /> now also mounts useCalendarProposal
+      // (index.tsx, after useOdooTarget). This suite's assertions are about
+      // useMeetingAutoRecord's own call, not the calendar feature, so
+      // `present: false` keeps `calendarProps` undefined and ContactPicker's
+      // render path unchanged - same reasoning as the passthrough stubs below.
+      useCalendarProposal: () => ({
+        present: false,
+        state: { kind: "idle" },
+        onPickCandidate: vi.fn(),
+        onRetry: vi.fn(),
+      }),
       // Returns the RENDER PROPS shape, not a bare vi.fn(). <Completion />
       // destructures holding/onUndo/undoBlockedMessage, so an undefined return
       // throws before any assertion - byte-for-byte the failure slice 1 hit with
@@ -341,6 +352,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
           onOpenChange: vi.fn(),
         },
       }),
+      // Task 15: see the F34 block above - same reasoning, `present: false`.
+      useCalendarProposal: () => ({
+        present: false,
+        state: { kind: "idle" },
+        onPickCandidate: vi.fn(),
+        onRetry: vi.fn(),
+      }),
       useMeetingLog,
     }));
     vi.doMock("@/contexts", () => ({
@@ -478,6 +496,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
           open: true,
           onOpenChange: vi.fn(),
         },
+      }),
+      // Task 15: see the F34 block above - same reasoning, `present: false`.
+      useCalendarProposal: () => ({
+        present: false,
+        state: { kind: "idle" },
+        onPickCandidate: vi.fn(),
+        onRetry: vi.fn(),
       }),
       // holding true from mount, so the picker-close effect has work to do
       // (and something to race the shouldUseMeetwingsAPI probe against) on
