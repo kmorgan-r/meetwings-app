@@ -2,6 +2,7 @@ export * from "./client";
 export * from "./contact-ordering";
 export * from "./contacts-sync";
 export * from "./errors";
+export * from "./expect";
 export * from "./many2one";
 export * from "./meeting-log";
 export * from "./meeting-log-actions";

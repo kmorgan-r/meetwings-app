@@ -48,3 +48,26 @@ export function filterContacts(
     )
   );
 }
+
+/**
+ * lastMeetingAt descending, nulls last, ties by name.
+ *
+ * Moved here from CalendarProposal.tsx, where it was module-private. It is the
+ * same kind of comparator over the same type as `compareContacts` above, and a
+ * pure module under src/lib that needs it (similar-contacts.ts) cannot import
+ * it out of a page without creating a src/lib -> src/pages value edge - a real
+ * runtime cycle, since CalendarProposal.tsx already value-imports MAX_TARGETS
+ * from @/lib/odoo.
+ *
+ * NOT the same as `compareContacts`: that one puts colleagues first, which is
+ * right for the picker's own list and wrong for a proposal, where colleagues
+ * are excluded before the comparator ever sees them.
+ */
+export function byRecency(a: OdooContact, b: OdooContact): number {
+  if (a.lastMeetingAt !== b.lastMeetingAt) {
+    if (a.lastMeetingAt === null) return 1;
+    if (b.lastMeetingAt === null) return -1;
+    return b.lastMeetingAt - a.lastMeetingAt;
+  }
+  return a.name.localeCompare(b.name);
+}

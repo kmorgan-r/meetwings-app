@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components";
-import { MAX_TARGETS } from "@/lib/odoo";
+import { byRecency, MAX_TARGETS } from "@/lib/odoo";
 // From @/types, NOT from the hook - see the placement note in
 // src/types/calendar.ts. A page importing a type back out of a hook that
 // depends on that page is the cycle this avoids.
 import type {
   CalendarProposalState,
   GraphErrorCode,
-  OdooContact,
   SelectedTarget,
   SelectedTargets,
 } from "@/types";
@@ -111,18 +110,6 @@ export interface CalendarProposalProps {
   onAddTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
   onPickCandidate: (eventId: string) => void;
   onRetry: () => void;
-}
-
-/** lastMeetingAt descending, nulls last, ties by name. The field is nullable
- * (types/odoo.ts:37) and a contact never logged to must not sort ahead of one
- * that was. */
-function byRecency(a: OdooContact, b: OdooContact): number {
-  if (a.lastMeetingAt !== b.lastMeetingAt) {
-    if (a.lastMeetingAt === null) return 1;
-    if (b.lastMeetingAt === null) return -1;
-    return b.lastMeetingAt - a.lastMeetingAt;
-  }
-  return a.name.localeCompare(b.name);
 }
 
 function timeRange(startMs: number, endMs: number): string {
