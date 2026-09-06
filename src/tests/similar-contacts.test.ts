@@ -34,7 +34,7 @@ describe("normalizeName", () => {
   // {brien}, which shares nothing with OBrien's {obrien}.
   it("removes apostrophes rather than spacing them", () => {
     expect([...normalizeName("O'Brien")]).toEqual(["obrien"]);
-    expect([...normalizeName("O'Brien")]).toEqual(["obrien"]);
+    expect([...normalizeName("O’Brien")]).toEqual(["obrien"]);
     expect([...normalizeName("J. Doe")]).toEqual(["doe"]);
   });
 
@@ -65,7 +65,7 @@ describe("similar", () => {
   });
 
   it("matches a curly apostrophe against a straight one", () => {
-    expect(like("O'Brien", "OBrien")).toBe(true);
+    expect(like("O’Brien", "O'Brien")).toBe(true);
   });
 
   it("matches a hyphenated surname against its unhyphenated half", () => {

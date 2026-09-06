@@ -15,11 +15,11 @@ export const MAX_SIMILAR = 3;
  * with Jane Doe and so falls under the two-token threshold.
  *
  * The curly apostrophe is in the class deliberately - Graph returns display
- * names as the directory holds them, and a smart-quoted O'Brien is common
+ * names as the directory holds them, and a smart-quoted O’Brien is common
  * enough that treating it as a separator would silently disable the rule for
  * that name.
  */
-const ELISION = /[''.]/g;
+const ELISION = /['’.]/g;
 /** Unicode-aware, NOT [^a-z0-9]: an ASCII-only class wipes a Cyrillic or Greek
  * name to the empty set and switches this rule off for it entirely. */
 const NON_ALPHANUMERIC = /[^\p{L}\p{N}]+/gu;
