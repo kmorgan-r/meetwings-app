@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeName, similar, similarContacts } from "@/lib/calendar/similar-contacts";
+import { inferCompany, normalizeName, similar, similarContacts } from "@/lib/calendar/similar-contacts";
 import type { OdooContact } from "@/types";
 
 function contact(id: number, name: string, over: Partial<OdooContact> = {}): OdooContact {
@@ -141,5 +141,112 @@ describe("similarContacts", () => {
   it("returns nothing when the attendee name normalises to nothing", () => {
     const out = similarContacts({ name: "  ", address: "x@y.test", contacts: [contact(1, "Jane Doe")] });
     expect(out).toEqual([]);
+  });
+});
+
+describe("inferCompany", () => {
+  const acme = contact(90, "Acme Ltd", { isCompany: true, email: null });
+
+  it("returns the majority parent among colleagues on the same domain", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [
+        acme,
+        contact(1, "A", { email: "a@acme.example", parentId: 90 }),
+        contact(2, "B", { email: "b@acme.example", parentId: 90 }),
+        contact(3, "C", { email: "c@acme.example", parentId: 91 }),
+        contact(91, "Other Ltd", { isCompany: true, email: null }),
+      ],
+    });
+    expect(out).toBe(90);
+  });
+
+  it("breaks a tie on the lowest parent id", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [
+        contact(90, "Acme Ltd", { isCompany: true, email: null }),
+        contact(91, "Other Ltd", { isCompany: true, email: null }),
+        contact(1, "A", { email: "a@acme.example", parentId: 91 }),
+        contact(2, "B", { email: "b@acme.example", parentId: 90 }),
+      ],
+    });
+    expect(out).toBe(90);
+  });
+
+  it("does not let an inactive contact vote", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [
+        acme,
+        contact(1, "A", { email: "a@acme.example", parentId: 90, active: false }),
+      ],
+    });
+    expect(out).toBeNull();
+  });
+
+  it("does not let a contact with no parent vote", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [acme, contact(1, "A", { email: "a@acme.example", parentId: null })],
+    });
+    expect(out).toBeNull();
+  });
+
+  // parentId and isCompany are independent - a person can be another partner's
+  // parent. A winner the Company control cannot render must infer nothing.
+  it("infers nothing when the winning parent is not a cached company", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [
+        contact(90, "Jane Senior", { isCompany: false, email: null }),
+        contact(1, "A", { email: "a@acme.example", parentId: 90 }),
+        contact(2, "B", { email: "b@acme.example", parentId: 90 }),
+      ],
+    });
+    expect(out).toBeNull();
+  });
+
+  it("infers nothing when the winning parent is not in the cache at all", () => {
+    const out = inferCompany({
+      address: "new@acme.example",
+      contacts: [contact(1, "A", { email: "a@acme.example", parentId: 90 })],
+    });
+    expect(out).toBeNull();
+  });
+
+  // The fixture DELIBERATELY contains on-domain contacts that would otherwise
+  // produce a confident winner, so this exercises the skip list rather than
+  // passing vacuously through the empty-candidates path.
+  it("skips a free-mail domain even when the tally would be confident", () => {
+    const contacts = [
+      contact(90, "Acme Ltd", { isCompany: true, email: null }),
+      contact(1, "A", { email: "a@gmail.com", parentId: 90 }),
+      contact(2, "B", { email: "b@gmail.com", parentId: 90 }),
+      contact(3, "C", { email: "c@gmail.com", parentId: 90 }),
+    ];
+    expect(inferCompany({ address: "new@gmail.com", contacts })).toBeNull();
+    // Same fixture shape on a corporate domain DOES infer - proving the null
+    // above came from the skip list and not from the filter.
+    const corporate = contacts.map((c) =>
+      c.email === null ? c : { ...c, email: c.email.replace("gmail.com", "acme.example") }
+    );
+    expect(inferCompany({ address: "new@acme.example", contacts: corporate })).toBe(90);
+  });
+
+  it("matches the domain case-insensitively and ignores surrounding space", () => {
+    const out = inferCompany({
+      address: "  New@ACME.Example ",
+      contacts: [
+        contact(90, "Acme Ltd", { isCompany: true, email: null }),
+        contact(1, "A", { email: "a@Acme.example", parentId: 90 }),
+        contact(2, "B", { email: "b@acme.EXAMPLE", parentId: 90 }),
+      ],
+    });
+    expect(out).toBe(90);
+  });
+
+  it("infers nothing from an address with no @", () => {
+    expect(inferCompany({ address: "not-an-address", contacts: [acme] })).toBeNull();
   });
 });
