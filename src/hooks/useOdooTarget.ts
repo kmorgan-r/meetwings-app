@@ -1112,7 +1112,7 @@ export function useOdooTarget({
     ): Promise<CreateContactResult> => {
       // BEFORE the try, so the refusal cannot reach the `finally` and release
       // the in-flight create's guard. Same shape as `confirm`'s early return
-      // above its own try (CalendarProposal.tsx:418 / :435).
+      // above its own try (CalendarProposal.tsx:405-406 / :422).
       if (creatingRef.current) return { kind: "busy" };
       creatingRef.current = true;
 
@@ -1152,7 +1152,7 @@ export function useOdooTarget({
         }
 
         // The CAPTURED selection token, per reload's own contract
-        // (useOdooTarget.ts:556-560) - a live read there would make commit's
+        // (useOdooTarget.ts:591-595) - a live read there would make commit's
         // staleness check a no-op. NOT runSync("refresh"), which claims the
         // sync lock and can fail ODOO_SYNC_BUSY for an unrelated reason.
         await reload(selection);

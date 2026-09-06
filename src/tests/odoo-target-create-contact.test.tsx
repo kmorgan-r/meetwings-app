@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
  * The event listeners the hook registers, captured by name.
  *
  * `handleInstanceChanged` is reachable ONLY through
- * `listen("odoo-instance-changed")` (useOdooTarget.ts:699-710). A mock that
+ * `listen("odoo-instance-changed")` (useOdooTarget.ts:738). A mock that
  * returns a bare no-op leaves the instance-change path untestable, and the
  * alternative - exporting a test-only hook member - puts a surface in
  * production code that exists for no production caller.
@@ -121,6 +121,7 @@ describe("onCreateContact", () => {
     const { result } = mount();
     await waitFor(() => expect(action.loadTargets).toHaveBeenCalled());
     odoo.runSync.mockClear();
+    action.listContacts.mockClear();
 
     let out;
     await act(async () => {
@@ -136,14 +137,17 @@ describe("onCreateContact", () => {
     // runSync would claim the sync lock and can fail ODOO_SYNC_BUSY for a
     // reason unrelated to this write.
     expect(odoo.runSync).not.toHaveBeenCalled();
-    // reload() re-reads the cache.
-    expect(action.listContacts).toHaveBeenCalled();
+    // reload() re-reads the cache. Cleared above so this counts ONLY the
+    // call reload() itself makes - the mount effect's own initial load
+    // already satisfied a bare toHaveBeenCalled() here for reasons unrelated
+    // to onCreateContact.
+    expect(action.listContacts).toHaveBeenCalledTimes(1);
   });
 
   it.each([
     ["adopted-active", true],
     ["adopted-archived", false],
-  ])("caches the found row on a %s hit and makes no create call", async (kind, active) => {
+  ])("caches the found row on a %s hit", async (kind, active) => {
     odoo.createOrAdoptContact.mockResolvedValue({ kind, contact: contact({ id: 9, active }) });
     const { result } = mount();
     await waitFor(() => expect(action.loadTargets).toHaveBeenCalled());
@@ -235,6 +239,16 @@ describe("onCreateContact", () => {
     expect(second).toEqual({ kind: "busy" });
     // The refusal must not have released the in-flight create's guard.
     expect(action.upsertContacts).not.toHaveBeenCalled();
+
+    // A THIRD call, still before the gate resolves. This is what actually
+    // proves the guard sits before the try: if the busy return were inside
+    // the try (and so ran the finally), the second call's refusal would have
+    // released the flag and this one would proceed instead of refusing too.
+    let third;
+    await act(async () => {
+      third = await result.current.onCreateContact(participant, draft);
+    });
+    expect(third).toEqual({ kind: "busy" });
 
     await act(async () => {
       gate.resolve({ kind: "created", contact: contact() });
