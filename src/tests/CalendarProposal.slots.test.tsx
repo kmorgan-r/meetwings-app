@@ -212,12 +212,14 @@ describe("the write", () => {
             unmatched: [],
           }}
           targets={targets}
+          contacts={[]}
           onAddTarget={async (t) => {
             added.push(t.resId);
             // Exactly what useOdooTarget.addTarget does on success.
             setTargets((prev) => [...prev, t]);
             return { ok: true };
           }}
+          onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
           onPickCandidate={vi.fn()}
           onRetry={vi.fn()}
         />
@@ -335,7 +337,9 @@ describe("the write", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={onAddTarget}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -351,7 +355,9 @@ describe("the write", () => {
       <CalendarProposal
         state={{ kind: "idle" }}
         targets={[]}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -420,7 +426,9 @@ describe("the write", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={onAddTargetA}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -434,7 +442,9 @@ describe("the write", () => {
       <CalendarProposal
         state={{ kind: "idle" }}
         targets={[]}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -449,7 +459,9 @@ describe("the write", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={onAddTargetB}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -513,7 +525,9 @@ describe("the write", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={onAddTarget}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -530,7 +544,9 @@ describe("the write", () => {
       <CalendarProposal
         state={{ kind: "idle" }}
         targets={[]}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -547,7 +563,9 @@ describe("the write", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -594,7 +612,9 @@ describe("reprojection reconciliation", () => {
           unmatched: [],
         }}
         targets={[]}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
@@ -654,7 +674,9 @@ describe("reprojection reconciliation", () => {
           unmatched: [],
         }}
         targets={targets}
+        contacts={[]}
         onAddTarget={vi.fn(async () => ({ ok: true }))}
+        onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
         onPickCandidate={vi.fn()}
         onRetry={vi.fn()}
       />
