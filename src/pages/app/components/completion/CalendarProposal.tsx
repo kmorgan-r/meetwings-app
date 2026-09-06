@@ -381,6 +381,23 @@ export function CalendarProposal({
     const isNewProposal = proposalEventId !== lastProposalEventIdRef.current;
     lastProposalEventIdRef.current = proposalEventId;
 
+    // A genuinely new proposal starts these latches over, BEFORE the
+    // write-guard below returns: a proposal change landing mid-`confirm`-write
+    // must still clear `createResult`/`resolvedByHand`/`createdInvisible`, or
+    // they survive from the meeting that just ended into the next one. The
+    // ref update above is unconditional for the exact same reason (see that
+    // comment) - clearing here, gated on the SAME `isNewProposal` the ref
+    // computed from the pre-update value, keeps the two in lock-step. NOT
+    // inside the `setChecked` updater below - an updater must be pure (it can
+    // run more than once for the same commit under StrictMode), and this
+    // component's sibling already carries an explicit comment against nesting
+    // other setters in one (ContactPicker.tsx:240-243).
+    if (isNewProposal) {
+      setCreateResult(null);
+      setResolvedByHand(new Map());
+      setCreatedInvisible(new Set());
+    }
+
     /**
      * NOT WHILE A WRITE IS RUNNING. This guard is the whole finding.
      *
@@ -401,17 +418,6 @@ export function CalendarProposal({
      * only surface to a `targets` update flushing after the loop.
      */
     if (writingRef.current) return;
-
-    // A genuinely new proposal starts both latches over. NOT inside the
-    // `setChecked` updater below - an updater must be pure (it can run more
-    // than once for the same commit under StrictMode), and this component's
-    // sibling already carries an explicit comment against nesting other
-    // setters in one (ContactPicker.tsx:240-243).
-    if (isNewProposal) {
-      setCreateResult(null);
-      setResolvedByHand(new Map());
-      setCreatedInvisible(new Set());
-    }
 
     setChecked((prev) => {
       if (isNewProposal) {

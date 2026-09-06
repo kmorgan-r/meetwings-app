@@ -919,4 +919,56 @@ describe("submitting the create form", () => {
     expect(screen.getByTestId("calendar-proposal-row-9")).toBeDisabled();
     expect(screen.getByTestId("calendar-proposal-notice")).toHaveTextContent(/log is full/i);
   });
+
+  // Regression: the pre-check effect records `isNewProposal` from
+  // `lastProposalEventIdRef` UNCONDITIONALLY, before the `writingRef.current`
+  // guard - so a proposal change landing mid-`confirm`-write must still clear
+  // `createResult` on that SAME pass. If the clearing were gated behind the
+  // guard instead, the guard would swallow it this one time, the ref would
+  // already have advanced to the new eventId, and no later pass would ever
+  // see `isNewProposal` true again for this transition - the stale message
+  // would survive into the next meeting permanently. A promise that never
+  // settles is deliberate: if the write resolved before the rerender,
+  // `writingRef` would already be false, the guard would never fire, and this
+  // test would pass regardless of where the clearing block sits.
+  it("clears a stale create result when the proposal changes while a confirm write is in flight", async () => {
+    const matchedContact = contact(50, "Match Person", { email: "m@acme.example" });
+    const onAddTarget = vi.fn(() => new Promise<{ ok: boolean }>(() => {}));
+    const { rerender } = setup(
+      {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [
+          { participant: participant("m@acme.example", "Match Person"), contact: matchedContact },
+        ],
+        unmatched: [row],
+      },
+      {
+        contacts: [matchedContact],
+        onAddTarget,
+        onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "created", contact: created })),
+      }
+    );
+
+    // Establish a non-null createResult BEFORE the write starts: the Create
+    // button disables on `writing`, so this must happen first.
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(/tick them below/i);
+
+    // Start a confirm write that never settles - `writingRef.current` stays
+    // true for the rest of this test.
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    // A genuinely different meeting (a different eventId - same eventId would
+    // make `isNewProposal` false either way and prove nothing), landing
+    // mid-write.
+    rerender({
+      state: { kind: "proposal", eventId: "e2", subject: "Other", matched: [], unmatched: [] },
+    });
+
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+  });
 });
