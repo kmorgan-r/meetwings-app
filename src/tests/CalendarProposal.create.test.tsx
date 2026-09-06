@@ -611,6 +611,18 @@ describe("submitting the create form", () => {
     expect(screen.getByTestId("calendar-create-submit")).toBeEnabled();
   });
 
+  // The generic-code case above is only pinned by /ODOO_INTERNAL/, a
+  // substring match that prose drifting away from the Global Constraint's
+  // exact wording would still satisfy. The constraint IS the exact string
+  // "Could not create the contact (<CODE>)." - not merely a message
+  // containing the code - so pin it exactly, once.
+  it("uses the exact generic failure wording, not just a message containing the code", async () => {
+    await submit({ kind: "failed", code: "ODOO_INTERNAL" });
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(
+      "Could not create the contact (ODOO_INTERNAL)."
+    );
+  });
+
   // The reciprocal half of the two-gate invariant, and the only test that pins
   // it: two buttons, two writes, no path where one implies the other.
   it("Add N to log does not call onCreateContact", async () => {
@@ -874,6 +886,49 @@ describe("submitting the create form", () => {
     });
     expect(screen.queryByTestId("calendar-create-result")).toBeNull();
     expect(screen.getByTestId("calendar-proposal-region").textContent).toBe("");
+  });
+
+  // The epoch guard inside submitCreate (post-await, before processing the
+  // result) is what this pins. Without it, an abandoned create resolving
+  // AFTER the picker has already moved on to a different, later meeting would
+  // still call setCreateResult - painting meeting A's message inside meeting
+  // B's popover. Going only as far as `idle` and releasing there (the test
+  // above) cannot observe this: the pre-check effect's own isNewProposal
+  // clearing re-fires on that SAME idle transition and wipes the result
+  // regardless of the guard. Continuing on to a SECOND, different-eventId
+  // proposal before releasing is what makes the leak (or its absence)
+  // observable - the isNewProposal clear already ran and finished on step 3,
+  // so anything the guardless code sets afterward in step 4 is the ONLY thing
+  // left standing.
+  it("does not let a stale create resolve into a different, later meeting", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    const { rerender } = setup(proposal([row]), { onCreateContact });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    // Odoo instance changes mid-create - bumps epochRef.
+    rerender({ state: { kind: "idle" } });
+    // The picker opens again, later, for a genuinely different meeting - the
+    // pre-check effect's isNewProposal branch clears createResult here.
+    rerender({
+      state: { kind: "proposal", eventId: "e2", subject: "Other", matched: [], unmatched: [] },
+    });
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+
+    // THEN the abandoned create (still in flight since before the idle reset)
+    // resolves.
+    await act(async () => {
+      release();
+    });
+
+    // Meeting A's message must not leak into meeting B.
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
   });
 
   it("a re-projection while the form is open does not overwrite an edited name", async () => {
