@@ -193,3 +193,63 @@ describe("the name prefill", () => {
     expect(screen.getByTestId("calendar-create-submit")).toBeDisabled();
   });
 });
+
+function contact(id: number, name: string, over: Partial<OdooContact> = {}): OdooContact {
+  return {
+    id, name, email: null, phone: null, companyName: null, parentId: null,
+    isCompany: false, active: true, writeDate: "2026-09-05 10:00:00",
+    isColleague: false, lastMeetingAt: null, ...over,
+  };
+}
+
+describe("the company field", () => {
+  const acme = contact(90, "Acme Ltd", { isCompany: true });
+  const onDomain = [
+    contact(1, "A", { email: "a@acme.example", parentId: 90 }),
+    contact(2, "B", { email: "b@acme.example", parentId: 90 }),
+  ];
+  const row = { participant: participant("new@acme.example", "New Person"), reason: "no-contact" as const };
+
+  it("prefills the inferred company", async () => {
+    setup(proposal([row]), { contacts: [acme, ...onDomain] });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    expect(screen.getByTestId("calendar-create-company")).toHaveValue("Acme Ltd");
+  });
+
+  it("leaves the field blank when nothing is inferred", async () => {
+    setup(proposal([row]), { contacts: [acme] });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    expect(screen.getByTestId("calendar-create-company")).toHaveValue("");
+  });
+
+  it("lists only companies, filtered by the typed query and capped at five", async () => {
+    const many = Array.from({ length: 8 }, (_, i) =>
+      contact(100 + i, `Acme Division ${i}`, { isCompany: true })
+    );
+    setup(proposal([row]), { contacts: [...many, contact(5, "Acme Person")] });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.type(screen.getByTestId("calendar-create-company"), "Acme");
+    const options = screen.getAllByTestId(/^calendar-create-company-option-/);
+    expect(options).toHaveLength(5);
+    // A person matching the query is not a company and must not be offered.
+    expect(screen.queryByText("Acme Person")).toBeNull();
+  });
+
+  it("selecting a row collapses the list back to the chosen name", async () => {
+    setup(proposal([row]), { contacts: [acme, contact(91, "Beta Ltd", { isCompany: true })] });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-company"));
+    await userEvent.type(screen.getByTestId("calendar-create-company"), "Beta");
+    await userEvent.click(screen.getByTestId("calendar-create-company-option-91"));
+    expect(screen.getByTestId("calendar-create-company")).toHaveValue("Beta Ltd");
+    expect(screen.queryAllByTestId(/^calendar-create-company-option-/)).toHaveLength(0);
+  });
+
+  it("clearing the field clears the selection", async () => {
+    setup(proposal([row]), { contacts: [acme, ...onDomain] });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-company"));
+    expect(screen.getByTestId("calendar-create-company")).toHaveValue("");
+    expect(screen.getByTestId("calendar-create-company-none")).toBeInTheDocument();
+  });
+});

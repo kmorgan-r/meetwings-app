@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components";
+import { inferCompany } from "@/lib/calendar";
 import { byRecency, MAX_TARGETS } from "@/lib/odoo";
 // From @/types, NOT from the hook - see the placement note in
 // src/types/calendar.ts. A page importing a type back out of a hook that
@@ -29,6 +30,10 @@ import type {
  * identical-footprint rule the spec states in the same paragraph.
  */
 const REGION_CLASS = "h-28 overflow-y-auto border-b pb-2 flex flex-col gap-1";
+
+/** The Company filter's render cap. Five, not ContactPicker's hundred - this
+ * control shares a 112px scroll region with two other fields. */
+const MAX_COMPANY_ROWS = 5;
 
 /**
  * The three codes where re-running the SAME call is the correct action: a
@@ -162,6 +167,7 @@ export function CalendarProposal({
   state,
   targets,
   onAddTarget,
+  contacts,
   onPickCandidate,
   onRetry,
 }: CalendarProposalProps) {
@@ -183,6 +189,30 @@ export function CalendarProposal({
    * user's edits on a re-projection they did not cause.
    */
   const [draftName, setDraftName] = useState("");
+  /** The chosen company's id, or null for "No company". Snapshotted at open
+   * from inferCompany, then owned by the user. */
+  const [draftParentId, setDraftParentId] = useState<number | null>(null);
+  /** What is typed in the Company filter. Separate from `draftParentId`: the
+   * user can be mid-search with a selection already made. */
+  const [companyQuery, setCompanyQuery] = useState("");
+
+  /**
+   * Capped at FIVE, not MAX_RENDERED_ROWS' hundred: the control lives in a
+   * 112px scroll region beside two other fields.
+   *
+   * In a useMemo for the reason ContactPicker.tsx:262-265 uses one - the cache
+   * routinely holds thousands of partners and this component re-renders on
+   * every parent render.
+   */
+  const companyOptions = useMemo(() => {
+    const needle = companyQuery.trim().toLocaleLowerCase();
+    const companies = contacts.filter((c) => c.isCompany);
+    const matched =
+      needle === ""
+        ? companies
+        : companies.filter((c) => c.name.toLocaleLowerCase().includes(needle));
+    return matched.slice(0, MAX_COMPANY_ROWS);
+  }, [contacts, companyQuery]);
   /**
    * The same fact as `writing`, in a ref, because two different consumers need
    * it at two different times:
@@ -626,8 +656,21 @@ export function CalendarProposal({
                   data-testid={`calendar-create-${address}`}
                   className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
                   onClick={() => {
+                    const parentId = inferCompany({
+                      address: entry.participant.address,
+                      contacts,
+                    });
                     setOpenForm(address);
                     setDraftName(prefillName(entry.participant));
+                    setDraftParentId(parentId);
+                    // The label is the cached company's own name - there is no
+                    // second source for it, which is why inferCompany only ever
+                    // returns an id that names a cached isCompany contact.
+                    setCompanyQuery(
+                      parentId === null
+                        ? ""
+                        : (contacts.find((c) => c.id === parentId)?.name ?? "")
+                    );
                   }}
                 >
                   Create in Odoo
@@ -649,6 +692,43 @@ export function CalendarProposal({
                 <p className="text-[11px] text-muted-foreground" data-testid="calendar-create-email">
                   {address}
                 </p>
+                <input
+                  type="text"
+                  data-testid="calendar-create-company"
+                  placeholder="Company (optional)"
+                  className="text-[11px] border rounded px-1 py-0.5"
+                  value={companyQuery}
+                  onChange={(e) => {
+                    setCompanyQuery(e.target.value);
+                    // Typing invalidates the selection: the field must never
+                    // show one company's name while carrying another's id.
+                    setDraftParentId(null);
+                  }}
+                />
+                {draftParentId === null && companyQuery.trim() === "" && (
+                  <p
+                    className="text-[10px] text-muted-foreground"
+                    data-testid="calendar-create-company-none"
+                  >
+                    No company
+                  </p>
+                )}
+                {draftParentId === null &&
+                  companyQuery.trim() !== "" &&
+                  companyOptions.map((company) => (
+                    <button
+                      key={company.id}
+                      type="button"
+                      data-testid={`calendar-create-company-option-${company.id}`}
+                      className="text-left text-[11px] hover:text-primary"
+                      onClick={() => {
+                        setDraftParentId(company.id);
+                        setCompanyQuery(company.name);
+                      }}
+                    >
+                      {company.name}
+                    </button>
+                  ))}
                 <div className="flex items-center gap-2">
                   <Button
                     size="sm"
@@ -662,9 +742,14 @@ export function CalendarProposal({
                     type="button"
                     data-testid="calendar-create-cancel"
                     className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                    // Task 8 replaces this with `onClick={closeForm}` once
+                    // that helper exists - one exit path, not four setters
+                    // copied per call site.
                     onClick={() => {
                       setOpenForm(null);
                       setDraftName("");
+                      setDraftParentId(null);
+                      setCompanyQuery("");
                     }}
                   >
                     Cancel
