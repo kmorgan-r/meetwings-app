@@ -3,6 +3,7 @@ import { createOrAdoptContact } from "@/lib/odoo/create-contact";
 import { OdooError } from "@/lib/odoo/errors";
 import type { OdooClient } from "@/lib/odoo/client";
 import type { XmlRpcValue } from "@/lib/odoo/xmlrpc-codec";
+import { PARTNER_FIELDS } from "@/lib/odoo/contacts-sync";
 
 /** A raw Odoo record, as search_read returns it (snake_case, false for unset). */
 function row(over: Record<string, unknown> = {}) {
@@ -43,6 +44,11 @@ describe("createOrAdoptContact - the Layer 1 search", () => {
     expect(method).toBe("search_read");
     expect(callArgs).toEqual([[["email", "=ilike", "jane@acme.example"]]]);
     expect(kwargs.context).toEqual({ active_test: false });
+    // Every row() fixture always carries `active`, so dropping it from
+    // PARTNER_FIELDS would go undetected by every other test in this file -
+    // and against a live server, parsePartnerRow's `row.active !== false`
+    // would then read every archived partner as active.
+    expect(kwargs.fields).toEqual(PARTNER_FIELDS);
     // A limit makes the active-vs-archived branch arbitrary - see the spec.
     expect(kwargs).not.toHaveProperty("limit");
   });
@@ -107,6 +113,43 @@ describe("createOrAdoptContact - adopting", () => {
     expect((out as { contact: { name: string } }).contact.name).toBe("Jane From Odoo");
     expect(execute).toHaveBeenCalledTimes(1);
   });
+
+  // `=ilike` is Odoo's SQL ILIKE with no escaping: an underscore in the
+  // searched address matches any single character server-side. A row whose
+  // email is merely a wildcard hit - not an exact match - must not be adopted.
+  it("does not adopt a =ilike wildcard false positive - falls through to create", async () => {
+    const { client } = clientReturning(
+      [row({ id: 5, email: "janexdoe@acme.example" })],
+      7,
+      [row({ id: 7, email: "jane_doe@acme.example" })]
+    );
+    const out = await createOrAdoptContact({
+      client,
+      address: "jane_doe@acme.example",
+      name: "Jane Doe",
+      parentId: null,
+    });
+    expect(out).toMatchObject({ kind: "created" });
+  });
+
+  // The sharp case: a wildcard false positive and the real exact row come
+  // back TOGETHER, and the wildcard row is built to WIN preferForAdoption on
+  // its own (active, lower id) if it were ever allowed to compete. Without
+  // filtering to the exact email first, the wrong partner gets adopted and
+  // the user's notes land on somebody else's record.
+  it("adopts the exact-email row even when a =ilike wildcard match would outrank it", async () => {
+    const wildcard = row({ id: 5, email: "janexdoe@acme.example" });
+    const exact = row({ id: 9, email: "jane_doe@acme.example" });
+    const { client } = clientReturning([wildcard, exact]);
+    const out = await createOrAdoptContact({
+      client,
+      address: "jane_doe@acme.example",
+      name: "Jane Doe",
+      parentId: null,
+    });
+    expect(out).toMatchObject({ kind: "adopted-active" });
+    expect((out as { contact: { id: number } }).contact.id).toBe(9);
+  });
 });
 
 describe("createOrAdoptContact - creating", () => {
@@ -131,6 +174,10 @@ describe("createOrAdoptContact - creating", () => {
     expect(readMethod).toBe("search_read");
     expect(readArgs).toEqual([[["id", "=", 7]]]);
     expect(readKwargs.context).toEqual({ active_test: false });
+    expect(readKwargs.fields).toEqual(PARTNER_FIELDS);
+    // Pins that the returned contact came from the read-back row, not from
+    // whatever `create` returned.
+    expect((out as { contact: { id: number } }).contact.id).toBe(7);
   });
 
   it("sends parent_id false, not null and not omitted, when no company is chosen", async () => {

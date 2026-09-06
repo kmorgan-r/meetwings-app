@@ -76,8 +76,23 @@ export async function createOrAdoptContact({
     "search_read"
   );
 
-  if (found.length > 0) {
-    const best = found.map(parsePartnerRow).reduce(preferForAdoption);
+  // `=ilike` is Odoo's SQL ILIKE with no escaping: `_` matches any single
+  // character and `%` matches any sequence, so a search for
+  // "jane_doe@acme.example" also hits "jane.doe@acme.example",
+  // "jane-doe@acme.example" and "janexdoe@acme.example". Filtering the PARSED
+  // rows to an exact normalized-email match, before the length check, is what
+  // stops a wildcard false positive from ever reaching preferForAdoption and
+  // outranking the real exact row.
+  const hits = found
+    .map(parsePartnerRow)
+    .filter((c) => c.email !== null && normalizeAddress(c.email) === email);
+
+  // If every hit was a wildcard false positive, hits is empty here and
+  // falling through to create() below is correct: by definition they are
+  // different addresses. An exact row always survives this filter, so this
+  // opens no new duplicate path.
+  if (hits.length > 0) {
+    const best = hits.reduce(preferForAdoption);
     return best.active
       ? { kind: "adopted-active", contact: best }
       : { kind: "adopted-archived", contact: best };
