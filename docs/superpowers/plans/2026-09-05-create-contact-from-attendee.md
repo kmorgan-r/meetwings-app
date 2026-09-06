@@ -254,7 +254,7 @@ to:
 import { byRecency, MAX_TARGETS } from "@/lib/odoo";
 ```
 
-Nothing else in that file changes — the two call sites at `:176` and elsewhere keep the same name.
+Nothing else in that file changes — the single call site at `:176` keeps the same name.
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
@@ -999,6 +999,17 @@ describe("createOrAdoptContact - creating", () => {
     });
   });
 
+  // `expectRows` wraps BOTH search_read calls. Without this case a mutant that
+  // drops it from the read-back only - leaving `back.length` to throw a raw
+  // TypeError instead of a typed ODOO_UNEXPECTED_ROW - passes the whole file,
+  // because the search's own non-list case is tested and the read-back's is not.
+  it("raises ODOO_UNEXPECTED_ROW when the read-back returns a non-list", async () => {
+    const { client } = clientReturning([], 7, false);
+    await expect(createOrAdoptContact({ client, ...args })).rejects.toMatchObject({
+      code: "ODOO_UNEXPECTED_ROW",
+    });
+  });
+
   // Record rules can hide a record from the API user that created it. No cache
   // row is fabricated - a synthesised row would produce a proposal row whose
   // target write then fails, or silently succeeds against an unseeable record.
@@ -1228,7 +1239,28 @@ import type { CalendarParticipant, OdooContact } from "@/types";
 
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ label: "main" }) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+
+/**
+ * The event listeners the hook registers, captured by name.
+ *
+ * `handleInstanceChanged` is reachable ONLY through
+ * `listen("odoo-instance-changed")` (useOdooTarget.ts:699-710). A mock that
+ * returns a bare no-op leaves the instance-change path untestable, and the
+ * alternative - exporting a test-only hook member - puts a surface in
+ * production code that exists for no production caller.
+ *
+ * `vi.hoisted`, not a plain const: a `vi.mock` factory closing over an ordinary
+ * outer binding dies at load with a TDZ ReferenceError instead of reporting a
+ * failing test. Same reason the precedent file gives at
+ * odoo-target-new-chat-entry-points.test.tsx:87-89.
+ */
+const listeners = vi.hoisted(() => new Map<string, () => unknown>());
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: () => unknown) => {
+    listeners.set(event, handler);
+    return () => listeners.delete(event);
+  }),
+}));
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
@@ -1310,6 +1342,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  listeners.clear();
   action.listContacts.mockResolvedValue([]);
   action.loadTargets.mockResolvedValue([]);
   action.getSyncState.mockResolvedValue({ last_sync_at: 1000, last_error_code: null });
@@ -1485,9 +1518,10 @@ describe("onCreateContact - the two tokens", () => {
     await act(async () => {
       create = result.current.onCreateContact(participant, draft);
     });
+    // The real cross-window path: /odoo broadcasts, this listener runs, and
+    // handleInstanceChanged bumps instanceToken.
     await act(async () => {
-      window.dispatchEvent(new Event("__unused__"));
-      await result.current.__testOnlyInstanceChanged();
+      await listeners.get("odoo-instance-changed")?.();
     });
     let out;
     await act(async () => {
@@ -1500,8 +1534,6 @@ describe("onCreateContact - the two tokens", () => {
   });
 });
 ```
-
-> **On `__testOnlyInstanceChanged`:** the hook's `handleInstanceChanged` is reached in production through a Tauri `listen("odoo-instance-changed")` subscription, and this suite mocks `listen` to a no-op — so there is no way to fire it. Rather than adding a test-only export, capture the real listener from the `listen` mock: change the mock to `listen: vi.fn(async (_event, handler) => { listeners.push(handler); return () => {}; })` with a `vi.hoisted` `listeners` array, and invoke `listeners[0]()` in the test. Do that; delete `__testOnlyInstanceChanged` from the test above. Production code gets no test-only surface.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -1535,7 +1567,7 @@ export type CreateContactResult =
   /** The instance changed underneath the create. Render nothing. */
   | { kind: "abandoned" }
   /** A create is already in flight. NOT the same as `abandoned`: the component
-   * resets `creating` on every path out of an attempt, and a refusal that
+   * resets `acting` on every path out of an attempt, and a refusal that
    * looked like an abandonment would re-enable the button while the first
    * create is still running. */
   | { kind: "busy" };
@@ -1561,8 +1593,9 @@ In `src/hooks/useOdooTarget.ts`, beside `searchToken` (`:248`):
    * write. The row stays greyed after a write that worked.
    */
   const instanceToken = useRef(0);
-  /** One create at a time, across all rows. The component's `creating` state
-   * only disables one button; this refuses re-entry from any of them. */
+  /** One create at a time, across all rows. The component's own `acting` flag
+   * disables its buttons; this refuses re-entry from any caller, including a
+   * row that has since unmounted. */
   const creatingRef = useRef(false);
 ```
 
@@ -1763,7 +1796,7 @@ function renderState(state: CalendarProposalState, over = {}) {
 }
 ```
 
-Then split the unmatched-attendees test at `:63-106`. Keep every existing assertion about the text, the testid and the `text-muted-foreground` class — those still hold, and the affordance must not disturb them. Replace only the two no-control assertions at `:100-101`:
+Then amend the unmatched-attendees test at `:63-106`. It keeps rendering both reasons in one fixture — that single fixture is what makes the contrast assertable in one pass — so this is an amendment, not a split. Keep every existing assertion about the text, the testid and the `text-muted-foreground` class: those still hold, and the affordance must not disturb them. Replace only the two no-control assertions at `:100-101`:
 
 ```tsx
     // No checkbox anywhere in this block: an unmatched attendee is not
@@ -1783,14 +1816,23 @@ Then split the unmatched-attendees test at `:63-106`. Keep every existing assert
 `src/tests/CalendarProposal.create.test.tsx`:
 
 ```tsx
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => {}) }));
 
-import { CalendarProposal } from "@/pages/app/components/completion/CalendarProposal";
-import type { CalendarProposalState, CalendarParticipant, OdooContact, SelectedTargets } from "@/types";
+import {
+  CalendarProposal,
+  type CalendarProposalProps,
+} from "@/pages/app/components/completion/CalendarProposal";
+import type {
+  CalendarProposalState,
+  CalendarParticipant,
+  CreateContactResult,
+  OdooContact,
+  SelectedTargets,
+} from "@/types";
 
 function participant(address: string, name: string | null = null): CalendarParticipant {
   return { address, name, type: "required", isOrganizer: false };
@@ -1810,12 +1852,15 @@ function proposal(
  */
 function setup(
   state: CalendarProposalState,
+  // NOT `unknown` for the handlers. TypeScript unions a spread's left-hand
+  // property with an optional right-hand one, so `{ onAddTarget: vi.fn(...),
+  // ...handlerOverrides }` would give both keys `Mock | unknown` = `unknown`,
+  // and spreading that onto <CalendarProposal> fails to type-check - which
+  // means `npm run type-check` could never be clean, on any task.
   over: {
     contacts?: OdooContact[];
     targets?: SelectedTargets;
-    onAddTarget?: unknown;
-    onCreateContact?: unknown;
-  } = {}
+  } & Partial<Pick<CalendarProposalProps, "onAddTarget" | "onCreateContact">> = {}
 ) {
   const { contacts = [], targets = [], ...handlerOverrides } = over;
   const handlers = {
@@ -2011,7 +2056,27 @@ Add `CalendarParticipant`, `CreateContactResult` and `OdooContact` to the file's
 
 - [ ] **Step 5: Add the props, the prefill and the form to `CalendarProposal`**
 
-In `src/pages/app/components/completion/CalendarProposal.tsx`, add to `CalendarProposalProps`:
+First extend the file's own type import. `CalendarProposal.tsx:8-14` currently reads
+`import type { CalendarProposalState, GraphErrorCode, OdooContact, SelectedTarget, SelectedTargets } from "@/types";`
+and this task plus Task 9 add three more:
+
+```ts
+import type {
+  CalendarParticipant,
+  CalendarProposalState,
+  CreateContactResult,
+  GraphErrorCode,
+  OdooContact,
+  OdooErrorCode,
+  SelectedTarget,
+  SelectedTargets,
+} from "@/types";
+```
+
+`OdooErrorCode` is unused until Task 9's `CREATE_FAILURE_COPY`; add it there rather
+than here if you would otherwise trip `noUnusedLocals` between the two tasks.
+
+Then add to `CalendarProposalProps`:
 
 ```ts
   /**
@@ -2196,11 +2261,12 @@ absence of this affordance."
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `src/tests/CalendarProposal.create.test.tsx`:
+Append to `src/tests/CalendarProposal.create.test.tsx`. Do **not** import `inferCompany`
+here — the component calls it internally, nothing in this block references it, and
+`tsconfig.json` sets `noUnusedLocals: true`, so an unused import fails `npm run type-check`
+(see the note at `useOdooTarget.ts:363-366`).
 
 ```tsx
-import { inferCompany } from "@/lib/calendar/similar-contacts";
-
 function contact(id: number, name: string, over: Partial<OdooContact> = {}): OdooContact {
   return {
     id, name, email: null, phone: null, companyName: null, parentId: null,
@@ -2417,7 +2483,12 @@ never show one company's name while carrying another's id."
 
 **Interfaces:**
 - Consumes: `similarContacts` (Task 2); `prefillName` (Task 6); `onAddTarget` (existing).
-- Produces: `resolvedByHand: ReadonlyMap<string, OdooContact>` in component state, read by Task 9's render rules.
+- Produces, all in `CalendarProposal`:
+  - `resolvedByHand: ReadonlyMap<string, OdooContact>` — read by Task 9's render rules
+  - `createdInvisible: ReadonlySet<string>` — written by Task 9, read by `canCreate`
+  - `acting` / `actingRef` — the shared in-flight guard for BOTH `Create contact` and every `Use <name>` button
+  - `closeForm()` and `closeIfStillOpen(address)` — both `useCallback`s declared **above the component's early returns**, because Task 9's effects call them from above `:339`
+  - `resolveWithExisting(address, chosen)` — deliberately not Hook-shaped
 
 **A map, not a set.** The row's label has to name the contact that resolved it, and an address alone cannot recover that: `SelectedTarget` carries no address (`src/types/odoo.ts:88-92`), and the added contact is by definition absent from `proposal.matched` since a different email is Layer 2's whole premise.
 
@@ -2495,6 +2566,56 @@ describe("Layer 2 - the similarity warning", () => {
   // freeSlots is a dep of the pre-check effect and a successful Use click
   // changes it by definition. Clearing resolvedByHand there would un-resolve
   // the row on the very next commit.
+  // The spec requires the search to run on the SEEDED name (prefillName,
+  // including the local-part fallback), not participant.name raw - an attendee
+  // with no display name is the population most likely to need Layer 2. An
+  // implementation passing `entry.participant.name ?? ""` passes every other
+  // test in this block and fails only this one.
+  it("matches on the local-part fallback when the attendee has no display name", async () => {
+    setup(proposal([{ participant: participant("jane.doe@corp.example", null), reason: "no-contact" }]), {
+      contacts: [contact(7, "Jane Doe", { email: "jd@acme.example" })],
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-jane.doe@corp.example"));
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+  });
+
+  // Computed ONCE at open. A useMemo keyed on draftName would flicker the list
+  // under a user typing in a 112px scroll region, and would pass every other
+  // test here.
+  it("does not recompute the candidate list as the name is edited", async () => {
+    setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Zzz Qqq");
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+  });
+
+  // addSelectedTarget is a non-atomic check-then-act (CalendarProposal.tsx:436-438).
+  // Two Use buttons clicked before the first resolves would both read the same
+  // pre-write count and both pass the cap check.
+  it("refuses a second Use click while the first is in flight", async () => {
+    let release!: () => void;
+    const onAddTarget = vi.fn(
+      () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
+    );
+    setup(proposal([row]), {
+      contacts: [jane, contact(8, "Jane Doe", { email: "jane2@acme.example" })],
+      onAddTarget,
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    expect(screen.getByTestId("calendar-create-use-8")).toBeDisabled();
+    await userEvent.click(screen.getByTestId("calendar-create-use-8"));
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
   it("stays resolved when another target is added by hand", async () => {
     const { rerender } = setup(proposal([row]), { contacts: [jane] });
     await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
@@ -2516,7 +2637,7 @@ describe("Layer 2 - the similarity warning", () => {
 Run: `npx vitest run src/tests/CalendarProposal.create.test.tsx -t "Layer 2"`
 Expected: FAIL — no `calendar-create-use-*` testid.
 
-- [ ] **Step 3: Add the state**
+- [ ] **Step 3: Add the state, the shared guard, and `closeForm`**
 
 In `CalendarProposal.tsx`, beside `draftParentId`:
 
@@ -2538,6 +2659,93 @@ In `CalendarProposal.tsx`, beside `draftParentId`:
   const [resolvedByHand, setResolvedByHand] = useState<ReadonlyMap<string, OdooContact>>(new Map());
   /** The candidates for the open form, computed once when it opens. */
   const [candidates, setCandidates] = useState<OdooContact[]>([]);
+  /**
+   * ONE flag for both writes the form can start - `Create contact` and any
+   * `Use <name>` button - because they contend for the same thing.
+   *
+   * `addSelectedTarget` is a non-atomic check-then-act: issued concurrently,
+   * every call reads the same pre-write count, all pass, and MORE THAN
+   * MAX_TARGETS rows land. `confirm` documents exactly this at
+   * CalendarProposal.tsx:436-438 and writes sequentially because of it. Up to
+   * three Use buttons render at once and the form stays open until the await
+   * resolves, so without a shared guard two quick clicks ARE that race - a path
+   * past the slot rule, which the Global Constraints forbid.
+   */
+  const [acting, setActing] = useState(false);
+  /**
+   * The synchronous half. `acting` is state and cannot refuse a second click
+   * landing in the same tick, before React re-renders with `disabled`.
+   *
+   * Both handlers check this BEFORE their `try`, exactly as `confirm` returns
+   * above its own try at :418/:435. That placement is load-bearing rather than
+   * stylistic: a refused call that entered the `try` would run the `finally`
+   * and clear `acting` while the FIRST write is still in flight, re-enabling
+   * every button - the precise failure the hook's `busy` member exists to
+   * prevent, reintroduced one layer up.
+   */
+  const actingRef = useRef(false);
+  /**
+   * Addresses whose last create returned `created-invisible`.
+   *
+   * Structural, not advisory. That outcome caches nothing (correctly - no row
+   * may be fabricated), so `matchAttendees` keeps deriving `no-contact` for the
+   * address forever and the row's own `Create in Odoo` button comes straight
+   * back. Clicking it re-runs the create, and by that outcome's own premise the
+   * Layer 1 search still cannot see the hidden partner - so the miss branch
+   * fires and a SECOND invisible duplicate lands. The spec names that failure
+   * and forbids it; closing the form does not prevent it, this does.
+   *
+   * Cleared on the same two triggers as `resolvedByHand`, and never by
+   * re-deriving from `unmatched` - that set never changes for this address.
+   */
+  const [createdInvisible, setCreatedInvisible] = useState<ReadonlySet<string>>(new Set());
+```
+
+**`closeForm` is declared HERE, with the other hooks, above the component's
+early returns** - not beside `confirm`. Task 9 calls it from two effects, and
+those effects are declared above the early returns at `CalendarProposal.tsx:339`
+while `confirm` sits below them at `:417`. A `const` initialised below a `return`
+that already fired is in the temporal dead zone, so on every render where
+`state.kind !== "proposal"` those effects would throw
+`ReferenceError: Cannot access 'closeForm' before initialization`. The
+idle-reset effect runs on exactly that transition, so this is a hard crash on a
+real path - an Odoo instance change with the picker open - not a corner case.
+
+```ts
+  /**
+   * Every exit from the form goes through here: Cancel, a landed write, and the
+   * two effects in Task 9.
+   *
+   * `useCallback` with `[]` - it only calls state setters, whose identities
+   * React guarantees are stable - so it can be listed in an effect's dependency
+   * array without re-running that effect every render.
+   */
+  const closeForm = useCallback(() => {
+    setOpenForm(null);
+    setDraftName("");
+    setDraftParentId(null);
+    setCompanyQuery("");
+    setCandidates([]);
+  }, []);
+
+  /**
+   * Closes the form ONLY if the row it belongs to is still the open one.
+   *
+   * `epochRef` tracks idle resets, not row switches, so a write that resolves
+   * after the user opened a DIFFERENT row would otherwise close that row and
+   * discard its draft. The functional updater is what makes the check and the
+   * write atomic with respect to the render that moved `openForm`.
+   */
+  const closeIfStillOpen = useCallback((address: string) => {
+    setOpenForm((prev) => {
+      if (prev !== address) return prev;
+      setDraftName("");
+      setDraftParentId(null);
+      setCompanyQuery("");
+      setCandidates([]);
+      return null;
+    });
+  }, []);
 ```
 
 - [ ] **Step 4: Compute the candidates when the form opens**
@@ -2576,8 +2784,12 @@ Reset `setCandidates([])` everywhere the form closes.
                         key={c.id}
                         type="button"
                         data-testid={`calendar-create-use-${c.id}`}
-                        className="text-left text-[11px] hover:text-primary"
-                        onClick={() => void useExisting(address, c)}
+                        className="text-left text-[11px] hover:text-primary disabled:opacity-50"
+                        // Every Use button AND the Create button below share one
+                        // flag: all of them end in a write contending for the
+                        // same five slots.
+                        disabled={acting}
+                        onClick={() => void resolveWithExisting(address, c)}
                       >
                         {`Use ${c.name}${c.email === null ? "" : ` · ${c.email}`}`}
                       </button>
@@ -2588,7 +2800,10 @@ Reset `setCandidates([])` everywhere the form closes.
 
 - [ ] **Step 6: Add the handler**
 
-Inside the component, beside `confirm`:
+Inside the component, beside `confirm`. **Not named `useExisting`** - ESLint's
+`react-hooks/rules-of-hooks` treats any identifier matching `/^use[A-Z0-9]/` as a
+Hook, so calling it from an `onClick` is an error-level "React Hook cannot be
+called inside a callback", and Task 9's lint gate would fail on it.
 
 ```ts
   /**
@@ -2598,39 +2813,41 @@ Inside the component, beside `confirm`:
    * exactly what the `Add N to log` gate already authorises the user to do one
    * row at a time - and it writes nothing to Odoo.
    */
-  const useExisting = async (address: string, chosen: OdooContact) => {
+  const resolveWithExisting = async (address: string, chosen: OdooContact) => {
+    // BEFORE the try, so a refused second click can never reach the finally and
+    // release the in-flight write's guard. See actingRef's own comment.
+    if (actingRef.current) return;
+    actingRef.current = true;
+    setActing(true);
+
     const epoch = epochRef.current;
-    const result = await onAddTarget({
-      model: "res.partner",
-      resId: chosen.id,
-      name: chosen.name,
-    });
-    if (epochRef.current !== epoch) return;
-    if (!result.ok) {
-      // A cap rejection resolves nothing, because nothing was added.
-      setCreateResult({
-        address,
-        text:
-          result.reason === "cap"
-            ? "The log is full. Remove a destination above first."
-            : "Could not add that contact.",
+    try {
+      const result = await onAddTarget({
+        model: "res.partner",
+        resId: chosen.id,
+        name: chosen.name,
       });
-      return;
+      if (epochRef.current !== epoch) return;
+      if (!result.ok) {
+        // A cap rejection resolves nothing, because nothing was added.
+        setCreateResult({
+          address,
+          text:
+            result.reason === "cap"
+              ? "The log is full. Remove a destination above first."
+              : "Could not add that contact.",
+        });
+        return;
+      }
+      setResolvedByHand((prev) => new Map(prev).set(address, chosen));
+      // Address-gated, not a bare closeForm() - see closeIfStillOpen.
+      closeIfStillOpen(address);
+    } finally {
+      if (epochRef.current === epoch) {
+        actingRef.current = false;
+        setActing(false);
+      }
     }
-    setResolvedByHand((prev) => new Map(prev).set(address, chosen));
-    closeForm();
-  };
-```
-
-with a shared `closeForm` helper the Cancel button also uses:
-
-```ts
-  const closeForm = () => {
-    setOpenForm(null);
-    setDraftName("");
-    setDraftParentId(null);
-    setCompanyQuery("");
-    setCandidates([]);
   };
 ```
 
@@ -2646,7 +2863,13 @@ Replace the row's `canCreate` with:
         const stillATarget =
           resolved !== null &&
           targets.some((t) => t.model === "res.partner" && t.resId === resolved.id);
-        const canCreate = entry.reason === "no-contact" && !stillATarget;
+        // `createdInvisible` is what actually enforces the spec's rule that a
+        // created-invisible result must never be retried through the create
+        // path. Closing the form does not: the outcome caches nothing, so the
+        // row keeps deriving `no-contact` and this same button would come back
+        // on the next render, one click away from a second hidden duplicate.
+        const invisible = createdInvisible.has(address);
+        const canCreate = entry.reason === "no-contact" && !stillATarget && !invisible;
 ```
 
 and the text line:
@@ -2654,9 +2877,13 @@ and the text line:
 ```tsx
                 {stillATarget && resolved !== null
                   ? `${entry.participant.name ?? address} — added ${resolved.name}`
-                  : `${entry.participant.name ?? address} — ${
-                      entry.reason === "archived" ? "archived in Odoo" : "no Odoo contact"
-                    }`}
+                  : invisible
+                    ? // Say WHY there is no button, rather than showing a bare
+                      // "no Odoo contact" the user cannot act on.
+                      `${entry.participant.name ?? address} — created in Odoo, but not visible to this connection`
+                    : `${entry.participant.name ?? address} — ${
+                        entry.reason === "archived" ? "archived in Odoo" : "no Odoo contact"
+                      }`}
 ```
 
 Add `createResult` state and its region-level render — Task 9 owns its clearing rules, but the cap message above needs somewhere to land now:
@@ -2706,7 +2933,7 @@ The last task. After it the feature works end to end.
 - Test: `src/tests/CalendarProposal.create.test.tsx` (append a `describe`)
 
 **Interfaces:**
-- Consumes: `onCreateContact` (Task 5), `CreateContactResult` (Task 5), all the form state from Tasks 6-8.
+- Consumes: `onCreateContact` and `CreateContactResult` (Task 5); all the form state from Tasks 6-8, including `acting`/`actingRef`, `closeIfStillOpen` and `createdInvisible` (Task 8).
 - Produces: nothing new.
 
 The message and form-lifecycle table, total over the union:
@@ -2731,7 +2958,7 @@ describe("submitting the create form", () => {
   const row = { participant: participant("new@acme.example", "New Person"), reason: "no-contact" as const };
   const created = contact(7, "New Person", { email: "new@acme.example" });
 
-  async function submit(result: unknown, over = {}) {
+  async function submit(result: CreateContactResult, over = {}) {
     const onCreateContact = vi.fn(async () => result);
     const harness = setup(proposal([row]), { onCreateContact, ...over });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
@@ -2767,12 +2994,16 @@ describe("submitting the create form", () => {
     expect(screen.queryByTestId("calendar-create-result")).toBeNull();
   });
 
+  // `as const` on the tuples: without it `code` widens to `string`, which is
+  // not assignable to OdooErrorCode and breaks the typed fixture below.
   it.each([
     ["ODOO_FAULT", /permissions/i],
     ["ODOO_UNREACHABLE", /could not reach odoo/i],
     ["ODOO_INTERNAL", /ODOO_INTERNAL/],
-  ])("keeps the form open with the draft intact after %s", async (code, pattern) => {
-    setup(proposal([row]), { onCreateContact: vi.fn(async () => ({ kind: "failed", code })) });
+  ] as const)("keeps the form open with the draft intact after %s", async (code, pattern) => {
+    setup(proposal([row]), {
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "failed", code })),
+    });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
     await userEvent.clear(screen.getByTestId("calendar-create-name"));
     await userEvent.type(screen.getByTestId("calendar-create-name"), "Edited Name");
@@ -2783,6 +3014,83 @@ describe("submitting the create form", () => {
     expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(pattern);
     // The retry the message promises must actually be clickable.
     expect(screen.getByTestId("calendar-create-submit")).toBeEnabled();
+  });
+
+  // The reciprocal half of the two-gate invariant, and the only test that pins
+  // it: two buttons, two writes, no path where one implies the other.
+  it("Add N to log does not call onCreateContact", async () => {
+    const created = contact(7, "Matched", { email: "m@acme.example" });
+    const { onCreateContact } = setup(
+      {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [{ participant: participant("m@acme.example", "Matched"), contact: created }],
+        unmatched: [row],
+      },
+      { contacts: [created] }
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    expect(onCreateContact).not.toHaveBeenCalled();
+  });
+
+  // `busy` is the one member whose form behaviour is "unchanged". A mutant that
+  // deletes the early return folds it into the closeIfStillOpen path and
+  // silently discards the user's draft.
+  it("leaves the form and the draft alone on a busy refusal", async () => {
+    setup(proposal([row]), {
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "busy" })),
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Half Typed");
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Half Typed");
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+  });
+
+  // The whole point of the createdInvisible latch. Without it the row keeps
+  // deriving no-contact, the affordance returns, and one more click makes a
+  // second partner the search will never see.
+  it("withdraws the create affordance after created-invisible", async () => {
+    await submit({ kind: "created-invisible" });
+    expect(screen.queryByTestId("calendar-create-new@acme.example")).toBeNull();
+    expect(screen.getByTestId("calendar-unmatched-new@acme.example")).toHaveTextContent(
+      /not visible to this connection/i
+    );
+  });
+
+  // epochRef tracks idle resets, not row switches. A create resolving after the
+  // user moved to another row must not wipe THAT row's draft.
+  it("does not close another row's form when a slow create resolves", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    setup(
+      proposal([
+        row,
+        { participant: participant("other@acme.example", "Other Person"), reason: "no-contact" },
+      ]),
+      { onCreateContact }
+    );
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+    await userEvent.click(screen.getByTestId("calendar-create-other@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Other Draft");
+
+    await act(async () => {
+      release();
+    });
+
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Other Draft");
   });
 
   it("never renders server prose", async () => {
@@ -2807,10 +3115,50 @@ describe("submitting the create form", () => {
       contacts: [created],
     });
     expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(/tick them below/i);
-    // And the new row is present, enabled and UNCHECKED.
+    // And the new row is present, enabled and UNCHECKED - the intersect-only
+    // reconciliation never adds an id back to `checked`.
     const box = screen.getByTestId("calendar-proposal-row-7");
     expect(box).toBeEnabled();
     expect(box).not.toBeChecked();
+  });
+
+  // The other half of the intersect-only rule: a create widens `writable`,
+  // which re-fires the pre-check effect. A row the user deliberately unchecked
+  // before the create must not be re-ticked by it.
+  it("leaves a row the user unchecked still unchecked after a create", async () => {
+    const other = contact(9, "Already Matched", { email: "am@acme.example" });
+    const withMatch = (unmatched: typeof row[]) => ({
+      kind: "proposal" as const,
+      eventId: "e1",
+      subject: "Client sync",
+      matched: [{ participant: participant("am@acme.example", "Already Matched"), contact: other }],
+      unmatched,
+    });
+    const { rerender } = setup(withMatch([row]), {
+      contacts: [other],
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "created", contact: created })),
+    });
+    // Pre-checked because it fits; the user unticks it.
+    await userEvent.click(screen.getByTestId("calendar-proposal-row-9"));
+    expect(screen.getByTestId("calendar-proposal-row-9")).not.toBeChecked();
+
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    rerender({
+      state: {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [
+          { participant: participant("am@acme.example", "Already Matched"), contact: other },
+          { participant: participant("new@acme.example", "New Person"), contact: created },
+        ],
+        unmatched: [],
+      },
+      contacts: [other, created],
+    });
+    expect(screen.getByTestId("calendar-proposal-row-9")).not.toBeChecked();
   });
 
   it("clears the message when a different meeting is proposed", async () => {
@@ -2877,20 +3225,31 @@ describe("submitting the create form", () => {
     expect(screen.getByTestId("calendar-create-name")).toHaveValue("Corrected Name");
   });
 
-  it("still offers create at cap, and the created row renders disabled", async () => {
+  it("still offers create at cap, and the resulting row renders disabled", async () => {
     const full = Array.from({ length: 5 }, (_, i) => ({
       model: "res.partner" as const,
       resId: 200 + i,
       name: `T${i}`,
     }));
-    setup(proposal([row]), { targets: full });
-    // The Odoo record has value independent of whether a slot is free.
-    expect(screen.getByTestId("calendar-create-new@acme.example")).toBeInTheDocument();
+    setup(
+      {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [{ participant: participant("new@acme.example", "New Person"), contact: created }],
+        unmatched: [],
+      },
+      { targets: full, contacts: [created] }
+    );
+    // The Odoo record has value independent of whether a slot is free, so the
+    // affordance does not appear and disappear for a reason unrelated to the
+    // attendee - but the row it produces is disabled like every other one while
+    // the log is full.
+    expect(screen.getByTestId("calendar-proposal-row-7")).toBeDisabled();
+    expect(screen.getByTestId("calendar-proposal-notice")).toHaveTextContent(/log is full/i);
   });
 });
 ```
-
-Add `act` to the `@testing-library/react` import at the top of the file.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -2938,11 +3297,20 @@ function createResultText(result: CreateContactResult): string | null {
 Inside the component:
 
 ```ts
-  const [creating, setCreating] = useState(false);
-
   const submitCreate = async (address: string, p: CalendarParticipant) => {
+    // BEFORE the try, sharing `actingRef` with resolveWithExisting (Task 8).
+    //
+    // Both halves matter. Sharing the flag is what stops a Create and a Use
+    // click racing for the same slot. Checking it above the `try` is what stops
+    // the refused call from running the `finally` and clearing `acting` while
+    // the FIRST create is still in flight - which would re-enable the button
+    // and defeat the hook's own `busy` refusal one layer up. `confirm` has the
+    // same shape at :418 / :435.
+    if (actingRef.current) return;
+    actingRef.current = true;
+    setActing(true);
+
     const epoch = epochRef.current;
-    setCreating(true);
     try {
       const result = await onCreateContact(p, {
         name: draftName.trim(),
@@ -2950,7 +3318,16 @@ Inside the component:
       });
       // The popover reset underneath us - no message, no state.
       if (epochRef.current !== epoch) return;
+      // Cannot happen while actingRef guards this call, but the hook may refuse
+      // for a reason this component cannot see (a create started from a row
+      // that has since unmounted). Leave the form exactly as it is.
       if (result.kind === "busy") return;
+
+      // Latch BEFORE the message, so even an interrupted render cannot leave the
+      // affordance live for an address whose partner is already in Odoo.
+      if (result.kind === "created-invisible") {
+        setCreatedInvisible((prev) => new Set(prev).add(address));
+      }
 
       const text = createResultText(result);
       setCreateResult(text === null ? null : { address, text });
@@ -2958,14 +3335,21 @@ Inside the component:
       // member that leaves it open, because it is the only one where a retry is
       // both possible and safe - see created-invisible for why retrying a write
       // the search cannot see would create a SECOND duplicate.
-      if (result.kind !== "failed") closeForm();
+      //
+      // Address-gated: `epochRef` tracks idle resets, not row switches, so a
+      // slow create resolving after the user opened a different row would
+      // otherwise wipe THAT row's draft.
+      if (result.kind !== "failed") closeIfStillOpen(address);
     } finally {
       // On EVERY path, not only via the idle-reset effect: that effect fires
       // only when state.kind becomes "idle", and an inline failure leaves it at
       // "proposal" throughout - so relying on it would leave Create contact
       // permanently disabled on a form the error copy promises stays open for a
       // retry.
-      if (epochRef.current === epoch) setCreating(false);
+      if (epochRef.current === epoch) {
+        actingRef.current = false;
+        setActing(false);
+      }
     }
   };
 ```
@@ -2977,7 +3361,7 @@ Wire the button:
                     size="sm"
                     className="h-6 text-[11px]"
                     data-testid="calendar-create-submit"
-                    disabled={creating || draftName.trim() === ""}
+                    disabled={acting || draftName.trim() === ""}
                     onClick={() => void submitCreate(address, entry.participant)}
                   >
                     Create contact
@@ -2995,16 +3379,23 @@ Wire the button:
    * all.
    */
   const unmatched = proposal?.unmatched;
+  // WITH THE OTHER HOOKS, above the component's early returns at :339 - like
+  // every other effect in this file, and for the same reason `closeForm` is
+  // hoisted (Task 8 Step 3): an effect declared below a `return` that already
+  // fired never registers, and one that reads a `const` declared below it
+  // throws a TDZ ReferenceError.
   useEffect(() => {
     if (openForm === null) return;
     const stillOpen = (unmatched ?? []).some(
       (u) => u.participant.address === openForm && u.reason === "no-contact"
     );
     if (!stillOpen) closeForm();
-    // `closeForm` is a plain function re-created each render; listing it would
-    // re-run this effect every render. It only calls setState.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openForm, unmatched]);
+    // `closeForm` IS listed: Task 8 declares it as a useCallback with `[]`, so
+    // its identity is permanently stable and listing it cannot re-run this
+    // effect. No eslint-disable is needed, and none should be added - a
+    // suppression here would hide a genuinely stale closure if closeForm ever
+    // gains a dependency.
+  }, [openForm, unmatched, closeForm]);
 ```
 
 - [ ] **Step 5: Extend the two existing effects**
@@ -3015,6 +3406,7 @@ In the pre-check effect, clear the create state in the `isNewProposal` branch **
     if (isNewProposal) {
       setCreateResult(null);
       setResolvedByHand(new Map());
+      setCreatedInvisible(new Set());
     }
 ```
 
@@ -3025,9 +3417,11 @@ Leave `setWriteResult(null)` exactly where it is. Do **not** add `setCreateResul
 In the idle-reset effect (`:322-329`), add:
 
 ```ts
-    setCreating(false);
+    actingRef.current = false;
+    setActing(false);
     setCreateResult(null);
     setResolvedByHand(new Map());
+    setCreatedInvisible(new Set());
     closeForm();
 ```
 
@@ -3124,6 +3518,29 @@ Two defects were found in this plan's own code during self-review and fixed inli
 - Task 4's test had an unbalanced `beforeEach(() => vi.clearAllMocks();`. A plan that ships a syntax error teaches the implementer to distrust its code blocks.
 - Task 6's `setup` helper folded `contacts`/`targets` into the handler object and spread it *after* the explicit `targets={}` / `contacts={}` props, so every call passing either would have had it silently overridden by the default. `setup` now destructures data and handlers separately and returns a `rerender(next)` helper; every lifecycle test in Tasks 8 and 9 uses it instead of hand-rolling a full prop list, which is how one of them would otherwise have quietly re-rendered with a *different* mock than it asserted on.
 
+**2a. What the P3 review changed.** A five-reviewer panel found 20 findings against
+this plan; 17 were applied (three Sonnet MINORs withheld). The three CRITICALs are
+worth naming, because each was a defect the plan asserted its way past:
+
+- `closeForm` was declared "beside `confirm`", below the component's five early
+  returns, while Task 9 calls it from two effects declared above them. On every
+  render where `state.kind !== "proposal"` that is a TDZ
+  `ReferenceError` — a hard crash on the idle path, which an Odoo instance change
+  with the picker open reaches. It is now a `useCallback` hoisted with the other
+  hooks, and Task 9's row-close effect is explicitly placed there too.
+- The Layer 2 `Use` buttons had no in-flight guard. Up to three render at once and
+  the form stays open until the await resolves, so two quick clicks issue
+  concurrent `addSelectedTarget` calls that both read the same pre-write count and
+  both pass — a path past `MAX_TARGETS`, which the Global Constraints forbid. One
+  `acting`/`actingRef` pair now covers both buttons and `Create contact`, checked
+  before the `try` so a refusal cannot clear the flag out from under the write in
+  flight.
+- `created-invisible` was prevented from being retried only by closing the form.
+  That outcome caches nothing, so the row keeps deriving `no-contact` and the same
+  affordance returns on the next render — one click from a second partner the
+  search will never see. A `createdInvisible` latch now withdraws the affordance
+  and the row says why.
+
 **3. Type consistency.** Checked across tasks:
 - `expectInt(value, what)` — defined Task 1, used Task 4. Same signature.
 - `byRecency(a, b)` — defined Task 1, used Task 2 and by `CalendarProposal`'s existing sort.
@@ -3133,5 +3550,8 @@ Two defects were found in this plan's own code during self-review and fixed inli
 - `CreateOrAdoptOutcome` (4 members, Task 4) vs `CreateContactResult` (8 members, Task 5): the hook widens the former into the latter by adding `cached-failed`, `failed`, `abandoned`, `busy`. The three shared `adopted-*`/`created` members carry an identical `contact: OdooContact` payload, so `return outcome` in Task 5 type-checks.
 - `onCreateContact(participant, draft)` — the same two-parameter shape in `UseOdooTargetReturn` (5), `ContactPickerProps` (6) and `CalendarProposalProps` (6).
 - `prefillName(participant)` — defined Task 6, reused in Task 8's candidate seeding.
-- `closeForm()` — introduced Task 8, used by Task 9's submit handler and both effects.
+- `closeForm()` / `closeIfStillOpen(address)` — introduced Task 8 as `useCallback`s above the early returns; used by Cancel, `resolveWithExisting`, Task 9's `submitCreate`, and both of Task 9's effects.
+- `resolveWithExisting(address, chosen)` — Task 8. Renamed from `useExisting`: `react-hooks/rules-of-hooks` treats any `/^use[A-Z0-9]/` identifier as a Hook and errors on calling it from an `onClick`.
+- `acting` / `actingRef` — Task 8, consumed by Task 9. One flag for both writes; the component's own guard, distinct from the hook's `creatingRef`.
+- `createdInvisible` — Task 8 declares and clears it, Task 9 writes it, Task 8's `canCreate` reads it.
 - Testids are consistent across tasks: `calendar-create-<address>`, `calendar-create-form`, `-name`, `-email`, `-company`, `-company-option-<id>`, `-company-none`, `-use-<id>`, `-submit`, `-cancel`, `-result`.
