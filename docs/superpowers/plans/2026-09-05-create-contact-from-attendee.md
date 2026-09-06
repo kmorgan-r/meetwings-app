@@ -27,6 +27,13 @@ Every task's requirements implicitly include these. Values are copied verbatim f
 - **No new `OdooErrorCode` members.** The existing union covers every case.
 - **No new sync fields.** `PARTNER_FIELDS` is unchanged.
 
+**Test files are neither type-checked nor linted in this repo.** `tsconfig.json`
+includes `src` but excludes `src/tests/**/*`, `**/*.test.ts` and `**/*.test.tsx`;
+`eslint.config.js` ignores `src/tests/**`. So a `type-check clean` step after a
+test-only change proves nothing about that test file — it proves the `src` change
+beside it still compiles. Type errors and dead imports in a test are caught by
+running it, or by the editor, or not at all. Write them as if they were gated.
+
 **Verification commands** (this repo's script is `type-check`, NOT `check:types`):
 
 ```bash
@@ -1854,9 +1861,12 @@ function setup(
   state: CalendarProposalState,
   // NOT `unknown` for the handlers. TypeScript unions a spread's left-hand
   // property with an optional right-hand one, so `{ onAddTarget: vi.fn(...),
-  // ...handlerOverrides }` would give both keys `Mock | unknown` = `unknown`,
-  // and spreading that onto <CalendarProposal> fails to type-check - which
-  // means `npm run type-check` could never be clean, on any task.
+  // ...handlerOverrides }` gives both keys `Mock | unknown` = `unknown`, and
+  // every call site loses the prop's real shape.
+  //
+  // This is NOT caught by a gate: tsconfig.json excludes src/tests/**/*, so
+  // `npm run type-check` never sees this file. That is exactly why it is worth
+  // getting right by hand - the editor is the only thing that will tell you.
   over: {
     contacts?: OdooContact[];
     targets?: SelectedTargets;
@@ -2261,10 +2271,12 @@ absence of this affordance."
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `src/tests/CalendarProposal.create.test.tsx`. Do **not** import `inferCompany`
-here — the component calls it internally, nothing in this block references it, and
-`tsconfig.json` sets `noUnusedLocals: true`, so an unused import fails `npm run type-check`
-(see the note at `useOdooTarget.ts:363-366`).
+Append to `src/tests/CalendarProposal.create.test.tsx`. Do **not** import
+`inferCompany` here — the component calls it internally and nothing in this block
+references it. No gate would catch it (`tsconfig.json` excludes `src/tests/**/*`
+and `eslint.config.js` ignores the same path), which is the reason to be careful
+rather than a reason not to be: dead imports in this suite are found by a human or
+not at all.
 
 ```tsx
 function contact(id: number, name: string, over: Partial<OdooContact> = {}): OdooContact {
@@ -2399,6 +2411,9 @@ Change the affordance's `onClick` from Task 6 to seed all three:
 and reset them in Cancel:
 
 ```tsx
+                    // Task 8 replaces this with `onClick={closeForm}` once
+                    // that helper exists - one exit path, not four setters
+                    // copied per call site.
                     onClick={() => {
                       setOpenForm(null);
                       setDraftName("");
@@ -2563,9 +2578,6 @@ describe("Layer 2 - the similarity warning", () => {
     expect(screen.getByTestId("calendar-create-j.doe@acme.example")).toBeInTheDocument();
   });
 
-  // freeSlots is a dep of the pre-check effect and a successful Use click
-  // changes it by definition. Clearing resolvedByHand there would un-resolve
-  // the row on the very next commit.
   // The spec requires the search to run on the SEEDED name (prefillName,
   // including the local-part fallback), not participant.name raw - an attendee
   // with no display name is the population most likely to need Layer 2. An
@@ -2616,6 +2628,9 @@ describe("Layer 2 - the similarity warning", () => {
     });
   });
 
+  // freeSlots is a dep of the pre-check effect and a successful Use click
+  // changes it by definition. Clearing resolvedByHand there would un-resolve
+  // the row on the very next commit.
   it("stays resolved when another target is added by hand", async () => {
     const { rerender } = setup(proposal([row]), { contacts: [jane] });
     await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
@@ -2701,6 +2716,20 @@ In `CalendarProposal.tsx`, beside `draftParentId`:
   const [createdInvisible, setCreatedInvisible] = useState<ReadonlySet<string>>(new Set());
 ```
 
+First extend the React import. `CalendarProposal.tsx:1` currently reads
+`import { useEffect, useMemo, useRef, useState } from "react";` and this step adds
+two `useCallback`s and one `useLayoutEffect`:
+
+```ts
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+```
+
+Unlike the test files, this one **is** type-checked and linted — `tsconfig.json`
+includes `src` and excludes only `src/tests/**/*` and `**/*.test.ts(x)`, and
+`eslint.config.js` ignores `src/tests/**`. So a missing import here really does
+fail `npm run type-check`, and the `rules-of-hooks` naming rule really does apply
+to this file.
+
 **`closeForm` is declared HERE, with the other hooks, above the component's
 early returns** - not beside `confirm`. Task 9 calls it from two effects, and
 those effects are declared above the early returns at `CalendarProposal.tsx:339`
@@ -2729,23 +2758,37 @@ real path - an Odoo instance change with the picker open - not a corner case.
   }, []);
 
   /**
+   * Mirrors `openForm` so a post-await handler can read which row is open NOW
+   * rather than which row was open when it started.
+   *
+   * Same pattern, and the same reason, as `targetsRef` at
+   * useOdooTarget.ts:290-293: the value is needed by a callback that must keep a
+   * stable identity, so it cannot take the state as a dependency.
+   */
+  const openFormRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    openFormRef.current = openForm;
+  });
+
+  /**
    * Closes the form ONLY if the row it belongs to is still the open one.
    *
    * `epochRef` tracks idle resets, not row switches, so a write that resolves
    * after the user opened a DIFFERENT row would otherwise close that row and
-   * discard its draft. The functional updater is what makes the check and the
-   * write atomic with respect to the render that moved `openForm`.
+   * discard its draft.
+   *
+   * The check reads a REF, not a `setOpenForm` updater. Nesting the sibling
+   * setters inside an updater does work in React 19, but an updater must be
+   * pure - it can run more than once for the same commit under StrictMode - and
+   * this component's sibling already carries an explicit comment against
+   * exactly that pattern (ContactPicker.tsx:240-243).
    */
-  const closeIfStillOpen = useCallback((address: string) => {
-    setOpenForm((prev) => {
-      if (prev !== address) return prev;
-      setDraftName("");
-      setDraftParentId(null);
-      setCompanyQuery("");
-      setCandidates([]);
-      return null;
-    });
-  }, []);
+  const closeIfStillOpen = useCallback(
+    (address: string) => {
+      if (openFormRef.current === address) closeForm();
+    },
+    [closeForm]
+  );
 ```
 
 - [ ] **Step 4: Compute the candidates when the form opens**
@@ -2769,7 +2812,13 @@ In the affordance's `onClick`, after seeding the draft:
                     );
 ```
 
-Reset `setCandidates([])` everywhere the form closes.
+**And rewire Cancel through `closeForm`.** Task 6 shipped it as four inline
+setters; now that the helper exists, that copy would silently miss `candidates`
+(and every field added later):
+
+```tsx
+                    onClick={closeForm}
+```
 
 - [ ] **Step 5: Render the warning, above the fields**
 
@@ -2785,10 +2834,10 @@ Reset `setCandidates([])` everywhere the form closes.
                         type="button"
                         data-testid={`calendar-create-use-${c.id}`}
                         className="text-left text-[11px] hover:text-primary disabled:opacity-50"
-                        // Every Use button AND the Create button below share one
-                        // flag: all of them end in a write contending for the
-                        // same five slots.
-                        disabled={acting}
+                        // Every Use button, the Create button below, and
+                        // `Add N to log` all end in a write contending for the
+                        // same five slots, so each disables on both flags.
+                        disabled={acting || writing}
                         onClick={() => void resolveWithExisting(address, c)}
                       >
                         {`Use ${c.name}${c.email === null ? "" : ` · ${c.email}`}`}
@@ -2816,7 +2865,15 @@ called inside a callback", and Task 9's lint gate would fail on it.
   const resolveWithExisting = async (address: string, chosen: OdooContact) => {
     // BEFORE the try, so a refused second click can never reach the finally and
     // release the in-flight write's guard. See actingRef's own comment.
-    if (actingRef.current) return;
+    //
+    // `writingRef` TOO, not just `actingRef`. `confirm` calls the very same
+    // `onAddTarget` against the very same five slots, and the two guards are
+    // separate flags that do not read each other. With four targets already
+    // logged, clicking `Add 1 to log` and then a `Use` button before the loop
+    // lands issues two concurrent `addSelectedTarget` calls that both read
+    // n = 4 < 5 and both insert - six rows. Guarding only against a second
+    // click of this same control closes half the race.
+    if (actingRef.current || writingRef.current) return;
     actingRef.current = true;
     setActing(true);
 
@@ -2850,6 +2907,29 @@ called inside a callback", and Task 9's lint gate would fail on it.
     }
   };
 ```
+
+- [ ] **Step 6a: Close the other half of the cap race**
+
+`confirm` and `resolveWithExisting` both call `onAddTarget` against the same five
+slots, and a flag each is not a guard. Two edits in `CalendarProposal.tsx`:
+
+```ts
+  const confirm = async () => {
+    // `actingRef` too - the other half of the same race. A `Use` click already
+    // in flight is an unresolved `addSelectedTarget` against the same cap.
+    if (writingRef.current || actingRef.current) return;
+```
+
+and the `Add N to log` button gains `acting` alongside its existing `writing`:
+
+```tsx
+          disabled={writing || acting || checkedWritable.length === 0}
+```
+
+Without this, four targets plus one `Add 1 to log` plus one quick `Use` click
+lands six rows — `addSelectedTarget` is a check-then-act with no transaction
+(`odoo-contacts.action.ts:319-341`), so both calls read `n = 4 < 5` and both
+insert.
 
 - [ ] **Step 7: Gate the row's render on the live target**
 
@@ -3181,7 +3261,10 @@ describe("submitting the create form", () => {
   it("disables the button while a create is in flight", async () => {
     let release!: () => void;
     const onCreateContact = vi.fn(
-      () => new Promise((r) => (release = () => r({ kind: "created", contact: created })))
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
     );
     setup(proposal([row]), { onCreateContact });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
@@ -3195,7 +3278,10 @@ describe("submitting the create form", () => {
   it("an idle reset mid-create sets no result and leaves no disabled button", async () => {
     let release!: () => void;
     const onCreateContact = vi.fn(
-      () => new Promise((r) => (release = () => r({ kind: "created", contact: created })))
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
     );
     const { rerender } = setup(proposal([row]), { onCreateContact });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
@@ -3231,21 +3317,25 @@ describe("submitting the create form", () => {
       resId: 200 + i,
       name: `T${i}`,
     }));
+    // BOTH halves in one fixture: a matched row to show the disabled state, and
+    // an unmatched no-contact row to show the affordance is still offered.
+    // `canCreate` never consults `atCap`, which is the point.
     setup(
       {
         kind: "proposal",
         eventId: "e1",
         subject: "Client sync",
-        matched: [{ participant: participant("new@acme.example", "New Person"), contact: created }],
-        unmatched: [],
+        matched: [{ participant: participant("m@acme.example", "Matched"), contact: contact(9, "Matched", { email: "m@acme.example" }) }],
+        unmatched: [row],
       },
       { targets: full, contacts: [created] }
     );
     // The Odoo record has value independent of whether a slot is free, so the
     // affordance does not appear and disappear for a reason unrelated to the
-    // attendee - but the row it produces is disabled like every other one while
-    // the log is full.
-    expect(screen.getByTestId("calendar-proposal-row-7")).toBeDisabled();
+    // attendee...
+    expect(screen.getByTestId("calendar-create-new@acme.example")).toBeInTheDocument();
+    // ...but the rows themselves are disabled while the log is full.
+    expect(screen.getByTestId("calendar-proposal-row-9")).toBeDisabled();
     expect(screen.getByTestId("calendar-proposal-notice")).toHaveTextContent(/log is full/i);
   });
 });
@@ -3498,13 +3588,13 @@ create does not set writingRef."
 | Write path steps 1-8 | 5 |
 | Two tokens, two jobs | 5 |
 | `expectInt` / `firstId` does not move | 1 |
-| Guard ownership table | 5 (hook half), 9 (component half) |
+| Guard ownership table | 5 (hook half), 8 (component half: `acting`/`actingRef`, declared and first used there) |
 | `creatingRef` not `writingRef` | 5 |
 | `instanceToken` not `selectionToken` | 5 |
 | Resetting on every exit | 9 |
 | Closing the form when its row goes away | 9 |
 | Where the result message renders | 9 |
-| At cap | 8 (cap rejection), 9 (test) |
+| At cap | 8 (cap rejection + the `writing`/`acting` cross-guard), 9 (test asserting both halves) |
 | Errors table | 9 |
 | Never logged | Global Constraints; asserted in 9's "never renders server prose" |
 | Testing — all four suites | 2, 3, 4, 5, 6-9 |
