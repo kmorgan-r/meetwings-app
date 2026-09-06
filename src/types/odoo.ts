@@ -181,3 +181,30 @@ export interface DbMeetingLogRow {
 export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
   targets?: MeetingLogTarget[];
 };
+
+/**
+ * What `useOdooTarget.onCreateContact` resolves to.
+ *
+ * Eight members, and the component's message/lifecycle table is TOTAL over
+ * them. It lives here rather than in the hook for the reason
+ * src/types/calendar.ts:95-104 gives: it is shared between src/hooks and
+ * src/pages, and a page importing a type back out of a hook is the edge that
+ * note exists to prevent.
+ */
+export type CreateContactResult =
+  | { kind: "created"; contact: OdooContact }
+  | { kind: "adopted-active"; contact: OdooContact }
+  | { kind: "adopted-archived"; contact: OdooContact }
+  /** Written, but the read-back returned no row - record rules can hide a
+   * record from the API user that created it. NO cache row is fabricated. */
+  | { kind: "created-invisible" }
+  /** Written and read back; only the local cache write failed. */
+  | { kind: "cached-failed" }
+  | { kind: "failed"; code: OdooErrorCode }
+  /** The instance changed underneath the create. Render nothing. */
+  | { kind: "abandoned" }
+  /** A create is already in flight. NOT the same as `abandoned`: the component
+   * resets `acting` on every path out of an attempt, and a refusal that
+   * looked like an abandonment would re-enable the button while the first
+   * create is still running. */
+  | { kind: "busy" };
