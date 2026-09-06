@@ -226,7 +226,7 @@ describe("the company field", () => {
     const many = Array.from({ length: 8 }, (_, i) =>
       contact(100 + i, `Acme Division ${i}`, { isCompany: true })
     );
-    setup(proposal([row]), { contacts: [...many, contact(5, "Acme Person")] });
+    setup(proposal([row]), { contacts: [contact(5, "Acme Person"), ...many] });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
     await userEvent.type(screen.getByTestId("calendar-create-company"), "Acme");
     const options = screen.getAllByTestId(/^calendar-create-company-option-/);
