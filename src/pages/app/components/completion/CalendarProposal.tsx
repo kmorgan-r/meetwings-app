@@ -6,8 +6,11 @@ import { byRecency, MAX_TARGETS } from "@/lib/odoo";
 // src/types/calendar.ts. A page importing a type back out of a hook that
 // depends on that page is the cycle this avoids.
 import type {
+  CalendarParticipant,
   CalendarProposalState,
+  CreateContactResult,
   GraphErrorCode,
+  OdooContact,
   SelectedTarget,
   SelectedTargets,
 } from "@/types";
@@ -108,6 +111,19 @@ export interface CalendarProposalProps {
    * atCap at ContactPicker.tsx:284 and the "Logging to" box stale.
    */
   onAddTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
+  /**
+   * The whole cached contact list, not the proposal's matches.
+   *
+   * Three things here need it and none can use `proposal.matched`: the Company
+   * filter (companies are not attendees), the Layer 2 similarity search (a
+   * candidate is by definition somebody whose email did NOT match), and the
+   * company inference.
+   */
+  contacts: OdooContact[];
+  onCreateContact: (
+    participant: CalendarParticipant,
+    draft: { name: string; parentId: number | null }
+  ) => Promise<CreateContactResult>;
   onPickCandidate: (eventId: string) => void;
   onRetry: () => void;
 }
@@ -116,6 +132,30 @@ function timeRange(startMs: number, endMs: number): string {
   const fmt = (ms: number) =>
     new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return `${fmt(startMs)}–${fmt(endMs)}`;
+}
+
+/**
+ * The Name field's starting value. A starting point the user is expected to
+ * fix, not a guess presented as fact.
+ *
+ * Exported for its own test: the "Last, First" flip is the part most likely to
+ * be wrong, and it is invisible from the outside once it has run.
+ */
+export function prefillName(participant: CalendarParticipant): string {
+  const raw = (participant.name ?? "").trim();
+  if (raw !== "") {
+    const parts = raw.split(",");
+    // A SINGLE comma only. "Doe, Jane, Jr" is not a Last, First name, and
+    // guessing at it produces something the user then has to unmangle.
+    const flipped =
+      parts.length === 2 ? `${parts[1].trim()} ${parts[0].trim()}` : raw;
+    return flipped.replace(/\s+/g, " ").trim();
+  }
+  // No display name at all - the population most likely to be unmatched. The
+  // local part with its separators spaced is a better seed than a blank field,
+  // and it is what gives Layer 2 tokens to work with.
+  const local = participant.address.split("@")[0] ?? "";
+  return local.replace(/[._-]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 export function CalendarProposal({
@@ -128,6 +168,21 @@ export function CalendarProposal({
   const [checked, setChecked] = useState<ReadonlySet<number>>(new Set());
   const [writeResult, setWriteResult] = useState<string | null>(null);
   const [writing, setWriting] = useState(false);
+  /**
+   * The row whose form is open, keyed on the entry's RAW `participant.address`
+   * - the same key the row's React key and data-testid already use. Never an
+   * array index: the re-projection effect rebuilds `unmatched` whenever the
+   * contact cache changes, so an index would silently point at a different
+   * attendee.
+   */
+  const [openForm, setOpenForm] = useState<string | null>(null);
+  /**
+   * Snapshotted ONCE in the open handler, never derived from
+   * `entry.participant` during render: `project()` calls `participantsOf`
+   * fresh on every re-projection, so a reactive prefill would discard the
+   * user's edits on a re-projection they did not cause.
+   */
+  const [draftName, setDraftName] = useState("");
   /**
    * The same fact as `writing`, in a ref, because two different consumers need
    * it at two different times:
@@ -546,17 +601,80 @@ export function CalendarProposal({
         is just archived, and telling the user there is no contact for someone
         who is in their Odoo would send them to create a duplicate.
       */}
-      {proposal?.unmatched.map((entry) => (
-        <p
-          key={entry.participant.address}
-          data-testid={`calendar-unmatched-${entry.participant.address}`}
-          className="text-[11px] text-muted-foreground"
-        >
-          {`${entry.participant.name ?? entry.participant.address} — ${
-            entry.reason === "archived" ? "archived in Odoo" : "no Odoo contact"
-          }`}
-        </p>
-      ))}
+      {proposal?.unmatched.map((entry) => {
+        const address = entry.participant.address;
+        const canCreate = entry.reason === "no-contact";
+        return (
+          <div key={address} className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              {/*
+                The testid and the muted class stay on the element carrying the
+                TEXT. CalendarProposal.states.test.tsx asserts both on exactly
+                this node, and the affordance must not disturb either.
+              */}
+              <p
+                data-testid={`calendar-unmatched-${address}`}
+                className="text-[11px] text-muted-foreground"
+              >
+                {`${entry.participant.name ?? address} — ${
+                  entry.reason === "archived" ? "archived in Odoo" : "no Odoo contact"
+                }`}
+              </p>
+              {canCreate && (
+                <button
+                  type="button"
+                  data-testid={`calendar-create-${address}`}
+                  className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    setOpenForm(address);
+                    setDraftName(prefillName(entry.participant));
+                  }}
+                >
+                  Create in Odoo
+                </button>
+              )}
+            </div>
+            {openForm === address && (
+              <div className="flex flex-col gap-1 pl-2" data-testid="calendar-create-form">
+                <input
+                  type="text"
+                  data-testid="calendar-create-name"
+                  className="text-[11px] border rounded px-1 py-0.5"
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                />
+                {/* READ-ONLY, and not an input: this is the key the row was
+                    matched on and the key the created partner is matched on
+                    next time. */}
+                <p className="text-[11px] text-muted-foreground" data-testid="calendar-create-email">
+                  {address}
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    className="h-6 text-[11px]"
+                    data-testid="calendar-create-submit"
+                    disabled={draftName.trim() === ""}
+                  >
+                    Create contact
+                  </Button>
+                  <button
+                    type="button"
+                    data-testid="calendar-create-cancel"
+                    className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      setOpenForm(null);
+                      setDraftName("");
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
 
       {!atCap && (
         <Button

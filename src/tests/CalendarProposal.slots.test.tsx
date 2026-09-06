@@ -47,7 +47,9 @@ function renderProposal({
         unmatched,
       }}
       targets={targets}
+      contacts={[]}
       onAddTarget={onAddTarget}
+      onCreateContact={vi.fn(async () => ({ kind: "abandoned" }) as const)}
       onPickCandidate={vi.fn()}
       onRetry={vi.fn()}
     />
