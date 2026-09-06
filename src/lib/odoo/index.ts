@@ -1,6 +1,7 @@
 export * from "./client";
 export * from "./contact-ordering";
 export * from "./contacts-sync";
+export * from "./create-contact";
 export * from "./errors";
 export * from "./expect";
 export * from "./many2one";
