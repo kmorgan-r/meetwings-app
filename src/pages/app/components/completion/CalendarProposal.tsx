@@ -12,6 +12,7 @@ import type {
   CreateContactResult,
   GraphErrorCode,
   OdooContact,
+  OdooErrorCode,
   SelectedTarget,
   SelectedTargets,
 } from "@/types";
@@ -103,6 +104,38 @@ const CALENDAR_SETTINGS_REMEDY: Record<
     "The saved calendar connection could not be read from this device's secure storage. Reconnect from the Odoo page's Calendar section.",
 };
 
+/**
+ * The failure copy, keyed on the code. Static, and NEVER server prose - the
+ * same rule CALENDAR_SETTINGS_REMEDY above exists to hold for the error state.
+ * Every code not named here takes the generic arm.
+ */
+const CREATE_FAILURE_COPY: Partial<Record<OdooErrorCode, string>> = {
+  ODOO_FAULT: "Odoo refused to create the contact (ODOO_FAULT). Check your Odoo permissions.",
+  ODOO_UNREACHABLE: "Could not reach Odoo. Try again.",
+};
+
+function createResultText(result: CreateContactResult): string | null {
+  switch (result.kind) {
+    case "created":
+      return "Created in Odoo — tick them below to log this meeting.";
+    case "adopted-active":
+      return "Already in Odoo — added to the list below.";
+    case "adopted-archived":
+      return "This person is already in Odoo but archived. Un-archive them there to log this meeting to them.";
+    case "created-invisible":
+      return "Created in Odoo, but it isn't visible to this connection.";
+    case "cached-failed":
+      return "Created in Odoo. Refresh to see them here.";
+    case "failed":
+      return CREATE_FAILURE_COPY[result.code] ?? `Could not create the contact (${result.code}).`;
+    // The popover already reset underneath, and a refusal is not an outcome the
+    // user asked about. Both render nothing.
+    case "abandoned":
+    case "busy":
+      return null;
+  }
+}
+
 export interface CalendarProposalProps {
   state: CalendarProposalState;
   /** The live multi-target list. Free slots are counted from THIS, not from
@@ -168,6 +201,7 @@ export function CalendarProposal({
   targets,
   onAddTarget,
   contacts,
+  onCreateContact,
   onPickCandidate,
   onRetry,
 }: CalendarProposalProps) {
@@ -374,6 +408,7 @@ export function CalendarProposal({
     // sibling already carries an explicit comment against nesting other
     // setters in one (ContactPicker.tsx:240-243).
     if (isNewProposal) {
+      setCreateResult(null);
       setResolvedByHand(new Map());
       setCreatedInvisible(new Set());
     }
@@ -440,48 +475,6 @@ export function CalendarProposal({
   }, [writing]);
 
   /**
-   * `idle` while this component is still mounted and rendering - NOT "the
-   * popover closed, so this never runs again" as it might look. Radix's
-   * `Popover` unmounts its content on a normal close (no `forceMount` in
-   * src/components/ui/popover.tsx, and `Presence` unmounts without one), and
-   * `<Completion />` unmounts the whole picker subtree on a meeting-log hold
-   * (completion/index.tsx swaps `<ContactPicker />` for `<MeetingLogStrip />`).
-   * This effect exists for the cases that DO keep the component mounted while
-   * idle: an Odoo instance change resets `useCalendarProposal`'s state to idle
-   * while the picker stays open; the brief exit-animation window where Radix's
-   * `Presence` keeps content mounted after `open` has already gone false; and
-   * `config.state === "absent"` while `blockPresent` is still true from an
-   * earlier connected session.
-   *
-   * `writing` is the one that matters most: without this it had no reset path
-   * at all, and a write in flight when the instance changes would leave the
-   * confirm button dead on every later open, for an unrelated later meeting,
-   * with nothing saying why. Bumping `epochRef` here is what lets `confirm`
-   * (below) tell that its own in-flight write has been abandoned.
-   */
-  useEffect(() => {
-    if (state.kind !== "idle") return;
-    epochRef.current += 1;
-    writingRef.current = false;
-    setWriting(false);
-    // `actingRef`/`acting` need the SAME reset, for the same reason: without
-    // it, an instance change while a `Use` click is pending strands both
-    // flags `true` forever - the pending write's own `finally` checks
-    // `epochRef` and skips its release once this bump has happened - and
-    // every later `Use` button and `Add N to log` stays disabled for the
-    // rest of the mount. No unlock-effect analog is needed here: the
-    // batching hazard that motivates deferring `writingRef`'s reset to a
-    // separate effect (below) does not apply, because the pre-check effect's
-    // own guard reads `writingRef` only, never `actingRef`.
-    actingRef.current = false;
-    setActing(false);
-    setChecked(new Set());
-    setWriteResult(null);
-    setResolvedByHand(new Map());
-    setCreatedInvisible(new Set());
-  }, [state.kind]);
-
-  /**
    * Every exit from the form goes through here: Cancel, a landed write, and the
    * two effects in Task 9.
    *
@@ -529,6 +522,101 @@ export function CalendarProposal({
     },
     [closeForm]
   );
+
+  /**
+   * `idle` while this component is still mounted and rendering - NOT "the
+   * popover closed, so this never runs again" as it might look. Radix's
+   * `Popover` unmounts its content on a normal close (no `forceMount` in
+   * src/components/ui/popover.tsx, and `Presence` unmounts without one), and
+   * `<Completion />` unmounts the whole picker subtree on a meeting-log hold
+   * (completion/index.tsx swaps `<ContactPicker />` for `<MeetingLogStrip />`).
+   * This effect exists for the cases that DO keep the component mounted while
+   * idle: an Odoo instance change resets `useCalendarProposal`'s state to idle
+   * while the picker stays open; the brief exit-animation window where Radix's
+   * `Presence` keeps content mounted after `open` has already gone false; and
+   * `config.state === "absent"` while `blockPresent` is still true from an
+   * earlier connected session.
+   *
+   * `writing` is the one that matters most: without this it had no reset path
+   * at all, and a write in flight when the instance changes would leave the
+   * confirm button dead on every later open, for an unrelated later meeting,
+   * with nothing saying why. Bumping `epochRef` here is what lets `confirm`
+   * (below) tell that its own in-flight write has been abandoned.
+   *
+   * Declared AFTER `closeForm` (Task 9): it now also closes any open create
+   * form on the same reset, and a `[state.kind]` dependency array that omitted
+   * `closeForm` would be an exhaustive-deps violation, while listing it above
+   * `closeForm`'s own declaration would be a TDZ `ReferenceError` on render -
+   * see this file's placement note on the row-close effect below.
+   */
+  useEffect(() => {
+    if (state.kind !== "idle") return;
+    epochRef.current += 1;
+    writingRef.current = false;
+    setWriting(false);
+    // `actingRef`/`acting` need the SAME reset, for the same reason: without
+    // it, an instance change while a `Use` click is pending strands both
+    // flags `true` forever - the pending write's own `finally` checks
+    // `epochRef` and skips its release once this bump has happened - and
+    // every later `Use` button and `Add N to log` stays disabled for the
+    // rest of the mount. No unlock-effect analog is needed here: the
+    // batching hazard that motivates deferring `writingRef`'s reset to a
+    // separate effect (below) does not apply, because the pre-check effect's
+    // own guard reads `writingRef` only, never `actingRef`.
+    actingRef.current = false;
+    setActing(false);
+    setChecked(new Set());
+    setWriteResult(null);
+    // NOT beside `setWriteResult` in the pre-check effect above - see that
+    // effect's own comment. Here, on the idle path, there is no such hazard:
+    // this whole effect only runs when `state.kind` becomes "idle", never on
+    // the write-completing re-projection that the pre-check effect must
+    // survive.
+    setCreateResult(null);
+    setResolvedByHand(new Map());
+    setCreatedInvisible(new Set());
+    // A create's form must not survive an instance change any more than a
+    // `Use` click's does - `closeForm` is what Cancel and a landed write
+    // already use for the same purpose.
+    closeForm();
+  }, [state.kind, closeForm]);
+
+  /**
+   * Two ordinary outcomes destroy the entry hosting the open form while
+   * state.kind stays "proposal", so no existing effect cleans up after either:
+   * a successful create moves the attendee to `matched`, and an archived-hit
+   * adoption flips its reason to "archived", which renders no affordance at
+   * all - Task 6's render guard (`canCreate && openForm === address`) hides
+   * the form for that second case but leaves `openForm` itself still holding
+   * the address, so a later reprojection back to "no-contact" would silently
+   * reopen the stale draft.
+   *
+   * The `reason === "no-contact"` half of `stillOpen` below is what covers
+   * BOTH: a row that disappears from `unmatched` entirely (fails `.some()`
+   * outright) and a row that is still present but reclassified (fails the
+   * `reason` half of the same predicate). One effect, one condition - no
+   * second effect is needed for the reclassify-in-place case.
+   */
+  const unmatched = proposal?.unmatched;
+  // WITH THE OTHER HOOKS, after `closeForm`/`closeIfStillOpen` and above the
+  // component's early returns below: an effect declared below a `return` that
+  // already fired never registers, and - the constraint `closeForm` itself
+  // was hoisted for (Task 8 Step 3) - one declared ABOVE these `useCallback`s
+  // but listing `closeForm` in its dependency array would evaluate that
+  // identifier at render time before the `const` initializes it, a TDZ
+  // `ReferenceError` on every render.
+  useEffect(() => {
+    if (openForm === null) return;
+    const stillOpen = (unmatched ?? []).some(
+      (u) => u.participant.address === openForm && u.reason === "no-contact"
+    );
+    if (!stillOpen) closeForm();
+    // `closeForm` IS listed: Task 8 declares it as a useCallback with `[]`, so
+    // its identity is permanently stable and listing it cannot re-run this
+    // effect. No eslint-disable is needed, and none should be added - a
+    // suppression here would hide a genuinely stale closure if closeForm ever
+    // gains a dependency.
+  }, [openForm, unmatched, closeForm]);
 
   const region = (children: React.ReactNode) => (
     <div className={REGION_CLASS} data-testid="calendar-proposal-region">
@@ -760,6 +848,62 @@ export function CalendarProposal({
     }
   };
 
+  const submitCreate = async (address: string, p: CalendarParticipant) => {
+    // BEFORE the try, sharing `actingRef` with resolveWithExisting (Task 8).
+    //
+    // Both halves matter. Sharing the flag is what stops a Create and a Use
+    // click racing for the same slot. Checking it above the `try` is what stops
+    // the refused call from running the `finally` and clearing `acting` while
+    // the FIRST create is still in flight - which would re-enable the button
+    // and defeat the hook's own `busy` refusal one layer up. `confirm` has the
+    // same shape above.
+    if (actingRef.current) return;
+    actingRef.current = true;
+    setActing(true);
+
+    const epoch = epochRef.current;
+    try {
+      const result = await onCreateContact(p, {
+        name: draftName.trim(),
+        parentId: draftParentId,
+      });
+      // The popover reset underneath us - no message, no state.
+      if (epochRef.current !== epoch) return;
+      // Cannot happen while actingRef guards this call, but the hook may refuse
+      // for a reason this component cannot see (a create started from a row
+      // that has since unmounted). Leave the form exactly as it is.
+      if (result.kind === "busy") return;
+
+      // Latch BEFORE the message, so even an interrupted render cannot leave the
+      // affordance live for an address whose partner is already in Odoo.
+      if (result.kind === "created-invisible") {
+        setCreatedInvisible((prev) => new Set(prev).add(address));
+      }
+
+      const text = createResultText(result);
+      setCreateResult(text === null ? null : { address, text });
+      // Everything that reached Odoo closes the form. `failed` is the only
+      // member that leaves it open, because it is the only one where a retry is
+      // both possible and safe - see created-invisible for why retrying a write
+      // the search cannot see would create a SECOND duplicate.
+      //
+      // Address-gated: `epochRef` tracks idle resets, not row switches, so a
+      // slow create resolving after the user opened a different row would
+      // otherwise wipe THAT row's draft.
+      if (result.kind !== "failed") closeIfStillOpen(address);
+    } finally {
+      // On EVERY path, not only via the idle-reset effect: that effect fires
+      // only when state.kind becomes "idle", and an inline failure leaves it at
+      // "proposal" throughout - so relying on it would leave Create contact
+      // permanently disabled on a form the error copy promises stays open for a
+      // retry.
+      if (epochRef.current === epoch) {
+        actingRef.current = false;
+        setActing(false);
+      }
+    }
+  };
+
   return region(
     <>
       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -973,7 +1117,8 @@ export function CalendarProposal({
                     size="sm"
                     className="h-6 text-[11px]"
                     data-testid="calendar-create-submit"
-                    disabled={draftName.trim() === ""}
+                    disabled={acting || writing || draftName.trim() === ""}
+                    onClick={() => void submitCreate(address, entry.participant)}
                   >
                     Create contact
                   </Button>

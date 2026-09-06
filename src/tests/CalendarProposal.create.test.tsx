@@ -519,11 +519,14 @@ describe("Layer 2 - the similarity warning", () => {
     await userEvent.click(screen.getByTestId("calendar-create-use-7"));
     expect(onAddTarget).toHaveBeenCalledTimes(1);
 
-    // Odoo instance changes mid-write.
+    // Odoo instance changes mid-write. Task 9 routes the idle reset through
+    // `closeForm`, same as Cancel and a landed write, so the open form (and
+    // its stale candidate list from the OLD instance) does not survive it.
     rerender({ state: { kind: "idle" } });
     // The picker opens again, later, for a different meeting.
     rerender({ state: proposal([row]) });
 
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
     await userEvent.click(screen.getByTestId("calendar-create-use-7"));
     expect(onAddTarget).toHaveBeenCalledTimes(2);
   });
@@ -543,5 +546,377 @@ describe("Layer 2 - the similarity warning", () => {
       ],
     });
     expect(screen.queryByTestId("calendar-create-j.doe@acme.example")).toBeNull();
+  });
+});
+
+describe("submitting the create form", () => {
+  const row = { participant: participant("new@acme.example", "New Person"), reason: "no-contact" as const };
+  const created = contact(7, "New Person", { email: "new@acme.example" });
+
+  async function submit(result: CreateContactResult, over = {}) {
+    const onCreateContact = vi.fn(async () => result);
+    const harness = setup(proposal([row]), { onCreateContact, ...over });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+    return { ...harness, onCreateContact };
+  }
+
+  it("calls onCreateContact with the participant and the draft, and never onAddTarget", async () => {
+    const { onCreateContact, onAddTarget } = await submit({ kind: "created", contact: created });
+    expect(onCreateContact).toHaveBeenCalledWith(
+      expect.objectContaining({ address: "new@acme.example" }),
+      { name: "New Person", parentId: null }
+    );
+    // Two buttons, two writes, no path where one implies the other.
+    expect(onAddTarget).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["created", { kind: "created", contact: created }, /tick them below/i],
+    ["adopted-active", { kind: "adopted-active", contact: created }, /already in odoo/i],
+    ["adopted-archived", { kind: "adopted-archived", contact: created }, /archived/i],
+    ["created-invisible", { kind: "created-invisible" }, /isn't visible/i],
+    ["cached-failed", { kind: "cached-failed" }, /refresh to see them/i],
+  ])("closes the form and reports %s", async (_label, result, pattern) => {
+    await submit(result);
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(pattern);
+  });
+
+  it("renders nothing at all for an abandoned create", async () => {
+    await submit({ kind: "abandoned" });
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+  });
+
+  // `as const` on the tuples: without it `code` widens to `string`, which is
+  // not assignable to OdooErrorCode and breaks the typed fixture below.
+  it.each([
+    ["ODOO_FAULT", /permissions/i],
+    ["ODOO_UNREACHABLE", /could not reach odoo/i],
+    ["ODOO_INTERNAL", /ODOO_INTERNAL/],
+  ] as const)("keeps the form open with the draft intact after %s", async (code, pattern) => {
+    setup(proposal([row]), {
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "failed", code })),
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Edited Name");
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Edited Name");
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(pattern);
+    // The retry the message promises must actually be clickable.
+    expect(screen.getByTestId("calendar-create-submit")).toBeEnabled();
+  });
+
+  // The reciprocal half of the two-gate invariant, and the only test that pins
+  // it: two buttons, two writes, no path where one implies the other.
+  it("Add N to log does not call onCreateContact", async () => {
+    const created = contact(7, "Matched", { email: "m@acme.example" });
+    const { onCreateContact } = setup(
+      {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [{ participant: participant("m@acme.example", "Matched"), contact: created }],
+        unmatched: [row],
+      },
+      { contacts: [created] }
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-confirm"));
+    expect(onCreateContact).not.toHaveBeenCalled();
+  });
+
+  // `busy` is the one member whose form behaviour is "unchanged". A mutant that
+  // deletes the early return folds it into the closeIfStillOpen path and
+  // silently discards the user's draft.
+  it("leaves the form and the draft alone on a busy refusal", async () => {
+    setup(proposal([row]), {
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "busy" })),
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Half Typed");
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Half Typed");
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+  });
+
+  // The whole point of the createdInvisible latch. Without it the row keeps
+  // deriving no-contact, the affordance returns, and one more click makes a
+  // second partner the search will never see.
+  it("withdraws the create affordance after created-invisible", async () => {
+    await submit({ kind: "created-invisible" });
+    expect(screen.queryByTestId("calendar-create-new@acme.example")).toBeNull();
+    expect(screen.getByTestId("calendar-unmatched-new@acme.example")).toHaveTextContent(
+      /not visible to this connection/i
+    );
+  });
+
+  // epochRef tracks idle resets, not row switches. A create resolving after the
+  // user moved to another row must not wipe THAT row's draft.
+  it("does not close another row's form when a slow create resolves", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    setup(
+      proposal([
+        row,
+        { participant: participant("other@acme.example", "Other Person"), reason: "no-contact" },
+      ]),
+      { onCreateContact }
+    );
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+    await userEvent.click(screen.getByTestId("calendar-create-other@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Other Draft");
+
+    await act(async () => {
+      release();
+    });
+
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Other Draft");
+  });
+
+  it("never renders server prose", async () => {
+    await submit({ kind: "failed", code: "ODOO_FAULT" });
+    const text = screen.getByTestId("calendar-create-result").textContent ?? "";
+    expect(text).not.toMatch(/traceback|psycopg|odoo\.exceptions/i);
+  });
+
+  it("survives the re-projection that removes the row it refers to", async () => {
+    const { rerender } = await submit({ kind: "created", contact: created });
+    // The create moved the attendee into `matched`: `unmatched` shrinks and
+    // `writable` grows, which re-fires the pre-check effect. The message must
+    // NOT be cleared there.
+    rerender({
+      state: {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [{ participant: participant("new@acme.example", "New Person"), contact: created }],
+        unmatched: [],
+      },
+      contacts: [created],
+    });
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(/tick them below/i);
+    // And the new row is present, enabled and UNCHECKED - the intersect-only
+    // reconciliation never adds an id back to `checked`.
+    const box = screen.getByTestId("calendar-proposal-row-7");
+    expect(box).toBeEnabled();
+    expect(box).not.toBeChecked();
+  });
+
+  // The other half of the intersect-only rule: a create widens `writable`,
+  // which re-fires the pre-check effect. A row the user deliberately unchecked
+  // before the create must not be re-ticked by it.
+  it("leaves a row the user unchecked still unchecked after a create", async () => {
+    const other = contact(9, "Already Matched", { email: "am@acme.example" });
+    const withMatch = (unmatched: typeof row[]) => ({
+      kind: "proposal" as const,
+      eventId: "e1",
+      subject: "Client sync",
+      matched: [{ participant: participant("am@acme.example", "Already Matched"), contact: other }],
+      unmatched,
+    });
+    const { rerender } = setup(withMatch([row]), {
+      contacts: [other],
+      onCreateContact: vi.fn(async (): Promise<CreateContactResult> => ({ kind: "created", contact: created })),
+    });
+    // Pre-checked because it fits; the user unticks it.
+    await userEvent.click(screen.getByTestId("calendar-proposal-row-9"));
+    expect(screen.getByTestId("calendar-proposal-row-9")).not.toBeChecked();
+
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    rerender({
+      state: {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [
+          { participant: participant("am@acme.example", "Already Matched"), contact: other },
+          { participant: participant("new@acme.example", "New Person"), contact: created },
+        ],
+        unmatched: [],
+      },
+      contacts: [other, created],
+    });
+    expect(screen.getByTestId("calendar-proposal-row-9")).not.toBeChecked();
+  });
+
+  it("clears the message when a different meeting is proposed", async () => {
+    const { rerender } = await submit({ kind: "created", contact: created });
+    rerender({
+      state: { kind: "proposal", eventId: "e2", subject: "Other", matched: [], unmatched: [] },
+    });
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+  });
+
+  it("closes the form when its row flips to archived underneath it", async () => {
+    const { rerender } = setup(proposal([row]), {});
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+
+    rerender({ state: proposal([{ participant: row.participant, reason: "archived" }]) });
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+  });
+
+  // The render guard (`canCreate && openForm === address`) alone already
+  // hides the form the moment a row's reason flips away from "no-contact" -
+  // the test above passes on that guard alone, even if `openForm` itself were
+  // never cleared. This test is the one that actually pins the STATE reset:
+  // without it, `openForm` keeps naming this address, and a LATER reprojection
+  // back to "no-contact" (un-archived, then re-matched as no-contact again)
+  // would silently reopen the form with whatever stale draft the user typed
+  // before it was hidden - a create the user never asked to reopen, carrying
+  // text they may have abandoned.
+  it("does not silently reopen with a stale draft when a row's reason flips back to no-contact", async () => {
+    const { rerender } = setup(proposal([row]), {});
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Stale Draft");
+
+    rerender({ state: proposal([{ participant: row.participant, reason: "archived" }]) });
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+
+    rerender({ state: proposal([row]) });
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+  });
+
+  it("disables the button while a create is in flight", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    setup(proposal([row]), { onCreateContact });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+    expect(screen.getByTestId("calendar-create-submit")).toBeDisabled();
+    await act(async () => {
+      release();
+    });
+  });
+
+  // Same batched-`act()` technique as the Use-vs-Use race test above (Layer 2
+  // describe block): two separately-awaited `userEvent.click` calls on the
+  // SAME button would let React commit `disabled` between them, and the
+  // button's own attribute would then block the second dispatch regardless of
+  // whether `actingRef` is checked at all - a guard-less handler would still
+  // pass that shape of test. Firing both clicks inside one `act()` defers
+  // React's commit until after both handlers have already run against the
+  // STALE (pre-write) `disabled` value, which is what a genuine
+  // two-clicks-before-any-repaint race looks like. Verified empirically: with
+  // the `actingRef` guard deleted entirely, this exact setup produces 2 calls
+  // to `onCreateContact`; with it restored, 1.
+  it("guards re-entry when Create contact is clicked twice before any render flush", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    setup(proposal([row]), { onCreateContact });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+
+    const submit = screen.getByTestId("calendar-create-submit");
+    await act(async () => {
+      fireEvent.click(submit);
+      fireEvent.click(submit);
+    });
+
+    expect(onCreateContact).toHaveBeenCalledTimes(1);
+    // The first call is STILL in flight. A guard placed INSIDE the `try`
+    // still stops this refused second call's own `onCreateContact`, but its
+    // early `return` reaches the `finally` and clears `actingRef` anyway - so
+    // the button would have committed back to enabled here, and a third,
+    // ordinary click would slip a second `onCreateContact` call past the
+    // guard.
+    expect(submit).toBeDisabled();
+    await userEvent.click(submit);
+    expect(onCreateContact).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
+  it("an idle reset mid-create sets no result and leaves no disabled button", async () => {
+    let release!: () => void;
+    const onCreateContact = vi.fn(
+      () =>
+        new Promise<CreateContactResult>(
+          (r) => (release = () => r({ kind: "created", contact: created }))
+        )
+    );
+    const { rerender } = setup(proposal([row]), { onCreateContact });
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-submit"));
+
+    rerender({ state: { kind: "idle" } });
+    await act(async () => {
+      release();
+    });
+    expect(screen.queryByTestId("calendar-create-result")).toBeNull();
+    expect(screen.getByTestId("calendar-proposal-region").textContent).toBe("");
+  });
+
+  it("a re-projection while the form is open does not overwrite an edited name", async () => {
+    const { rerender } = setup(proposal([row]), {});
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Corrected Name");
+
+    // A fresh participant object, as project() produces on every reprojection.
+    rerender({
+      state: proposal([
+        { participant: participant("new@acme.example", "New Person"), reason: "no-contact" },
+      ]),
+      contacts: [contact(50, "Unrelated", { email: "u@x.test" })],
+    });
+    expect(screen.getByTestId("calendar-create-name")).toHaveValue("Corrected Name");
+  });
+
+  it("still offers create at cap, and the resulting row renders disabled", async () => {
+    const full = Array.from({ length: 5 }, (_, i) => ({
+      model: "res.partner" as const,
+      resId: 200 + i,
+      name: `T${i}`,
+    }));
+    // BOTH halves in one fixture: a matched row to show the disabled state, and
+    // an unmatched no-contact row to show the affordance is still offered.
+    // `canCreate` never consults `atCap`, which is the point.
+    setup(
+      {
+        kind: "proposal",
+        eventId: "e1",
+        subject: "Client sync",
+        matched: [{ participant: participant("m@acme.example", "Matched"), contact: contact(9, "Matched", { email: "m@acme.example" }) }],
+        unmatched: [row],
+      },
+      { targets: full, contacts: [created] }
+    );
+    // The Odoo record has value independent of whether a slot is free, so the
+    // affordance does not appear and disappear for a reason unrelated to the
+    // attendee...
+    expect(screen.getByTestId("calendar-create-new@acme.example")).toBeInTheDocument();
+    // ...but the rows themselves are disabled while the log is full.
+    expect(screen.getByTestId("calendar-proposal-row-9")).toBeDisabled();
+    expect(screen.getByTestId("calendar-proposal-notice")).toHaveTextContent(/log is full/i);
   });
 });
