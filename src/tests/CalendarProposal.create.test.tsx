@@ -226,13 +226,21 @@ describe("the company field", () => {
     const many = Array.from({ length: 8 }, (_, i) =>
       contact(100 + i, `Acme Division ${i}`, { isCompany: true })
     );
-    setup(proposal([row]), { contacts: [contact(5, "Acme Person"), ...many] });
+    setup(proposal([row]), {
+      contacts: [
+        contact(5, "Acme Person"),
+        contact(108, "Zeta Corp", { isCompany: true }),
+        ...many,
+      ],
+    });
     await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
     await userEvent.type(screen.getByTestId("calendar-create-company"), "Acme");
     const options = screen.getAllByTestId(/^calendar-create-company-option-/);
     expect(options).toHaveLength(5);
     // A person matching the query is not a company and must not be offered.
     expect(screen.queryByText("Acme Person")).toBeNull();
+    // A company that does not match the query must not be offered either.
+    expect(screen.queryByText("Zeta Corp")).toBeNull();
   });
 
   it("selecting a row collapses the list back to the chosen name", async () => {
