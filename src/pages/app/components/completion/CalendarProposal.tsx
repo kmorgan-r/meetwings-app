@@ -634,7 +634,7 @@ export function CalendarProposal({
                 </button>
               )}
             </div>
-            {openForm === address && (
+            {canCreate && openForm === address && (
               <div className="flex flex-col gap-1 pl-2" data-testid="calendar-create-form">
                 <input
                   type="text"

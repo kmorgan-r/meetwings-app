@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -142,6 +142,24 @@ describe("the create form", () => {
 
     await userEvent.click(screen.getByTestId("calendar-create-a@acme.example"));
     expect(screen.getByTestId("calendar-create-name")).toHaveValue("A Person");
+  });
+
+  // A reprojection (useCalendarProposal re-running matchAttendees against the
+  // same meeting when the contact cache changes underneath it - a colleague
+  // toggle, an archive picked up by Refresh) can reclassify the SAME address
+  // from no-contact to archived while its form sits open. Archived rows get
+  // nothing - Global Constraint - and that must hold for an ALREADY-OPEN form,
+  // not just for the button that offers to open one.
+  it("closes the form if a reprojection reclassifies the open row as archived", async () => {
+    const p = participant("new@acme.example", "New Person");
+    const { rerender } = setup(proposal([{ participant: p, reason: "no-contact" }]));
+    await userEvent.click(screen.getByTestId("calendar-create-new@acme.example"));
+    expect(screen.getByTestId("calendar-create-form")).toBeInTheDocument();
+
+    rerender({ state: proposal([{ participant: p, reason: "archived" }]) });
+
+    expect(screen.queryByTestId("calendar-create-new@acme.example")).toBeNull();
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
   });
 });
 
