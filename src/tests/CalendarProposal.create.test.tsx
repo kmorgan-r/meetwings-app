@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -259,5 +259,262 @@ describe("the company field", () => {
     await userEvent.clear(screen.getByTestId("calendar-create-company"));
     expect(screen.getByTestId("calendar-create-company")).toHaveValue("");
     expect(screen.getByTestId("calendar-create-company-none")).toBeInTheDocument();
+  });
+});
+
+describe("Layer 2 - the similarity warning", () => {
+  const jane = contact(7, "Jane Doe", { email: "jane@acme.example" });
+  const row = { participant: participant("j.doe@acme.example", "Jane Doe"), reason: "no-contact" as const };
+
+  it("offers a Use button for a similar cached contact", async () => {
+    setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    expect(screen.getByTestId("calendar-create-use-7")).toHaveTextContent("Jane Doe");
+  });
+
+  it("offers nothing when no cached contact is similar", async () => {
+    setup(proposal([row]), { contacts: [contact(8, "Bob Stone", { email: "bob@acme.example" })] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    expect(screen.queryAllByTestId(/^calendar-create-use-/)).toHaveLength(0);
+  });
+
+  it("leaves Create contact enabled below the warning", async () => {
+    setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    // Two people genuinely do share a name; a hard block would make that
+    // unresolvable from this UI.
+    expect(screen.getByTestId("calendar-create-submit")).toBeEnabled();
+  });
+
+  it("adds that contact as a target, creates nothing, and resolves the row", async () => {
+    const { onAddTarget, onCreateContact, rerender } = setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    expect(onAddTarget).toHaveBeenCalledWith({ model: "res.partner", resId: 7, name: "Jane Doe" });
+    expect(onCreateContact).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("calendar-create-form")).toBeNull();
+
+    // The row must stop inviting a create: matchAttendees keys on email and
+    // never reads targets, so it still says no-contact.
+    rerender({ targets: [{ model: "res.partner", resId: 7, name: "Jane Doe" }] });
+    expect(screen.queryByTestId("calendar-create-j.doe@acme.example")).toBeNull();
+    expect(screen.getByTestId("calendar-unmatched-j.doe@acme.example")).toHaveTextContent(
+      /added Jane Doe/i
+    );
+  });
+
+  it("reports a cap rejection and leaves the row unresolved", async () => {
+    const onAddTarget = vi.fn(async () => ({ ok: false, reason: "cap" as const }));
+    setup(proposal([row]), { contacts: [jane], onAddTarget });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    expect(screen.getByTestId("calendar-create-result")).toHaveTextContent(/full/i);
+    // Nothing was added, so nothing is resolved and create stays on offer.
+    expect(screen.getByTestId("calendar-create-j.doe@acme.example")).toBeInTheDocument();
+  });
+
+  it("restores the row when the target is removed again", async () => {
+    const { rerender } = setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    rerender({ targets: [{ model: "res.partner", resId: 7, name: "Jane Doe" }] });
+    expect(screen.queryByTestId("calendar-create-j.doe@acme.example")).toBeNull();
+
+    // Removed from the "Logging to" list. The latch must not outlive the fact.
+    rerender({ targets: [] });
+    expect(screen.getByTestId("calendar-create-j.doe@acme.example")).toBeInTheDocument();
+  });
+
+  // The spec requires the search to run on the SEEDED name (prefillName,
+  // including the local-part fallback), not participant.name raw - an attendee
+  // with no display name is the population most likely to need Layer 2. An
+  // implementation passing `entry.participant.name ?? ""` passes every other
+  // test in this block and fails only this one.
+  it("matches on the local-part fallback when the attendee has no display name", async () => {
+    setup(proposal([{ participant: participant("jane.doe@corp.example", null), reason: "no-contact" }]), {
+      contacts: [contact(7, "Jane Doe", { email: "jd@acme.example" })],
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-jane.doe@corp.example"));
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+  });
+
+  // Computed ONCE at open. A useMemo keyed on draftName would flicker the list
+  // under a user typing in a 112px scroll region, and would pass every other
+  // test here.
+  it("does not recompute the candidate list as the name is edited", async () => {
+    setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+
+    await userEvent.clear(screen.getByTestId("calendar-create-name"));
+    await userEvent.type(screen.getByTestId("calendar-create-name"), "Zzz Qqq");
+    expect(screen.getByTestId("calendar-create-use-7")).toBeInTheDocument();
+  });
+
+  // addSelectedTarget is a non-atomic check-then-act (CalendarProposal.tsx:436-438).
+  // Two Use buttons clicked before the first resolves would both read the same
+  // pre-write count and both pass the cap check.
+  it("refuses a second Use click while the first is in flight", async () => {
+    let release!: () => void;
+    const onAddTarget = vi.fn(
+      () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
+    );
+    setup(proposal([row]), {
+      contacts: [jane, contact(8, "Jane Doe", { email: "jane2@acme.example" })],
+      onAddTarget,
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    expect(screen.getByTestId("calendar-create-use-8")).toBeDisabled();
+    await userEvent.click(screen.getByTestId("calendar-create-use-8"));
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
+  // Regression test for guard PLACEMENT, not just presence. The test above
+  // clicks a DIFFERENT (disabled) button via two separately-awaited
+  // `userEvent.click` calls, and React commits the `disabled` attribute
+  // synchronously after the FIRST dispatch finishes - so by the time the
+  // second dispatch runs, React's own click-suppression for disabled elements
+  // already blocks it, no matter where the guard sits in the handler. That
+  // test cannot tell a guard checked before the `try` from one checked inside
+  // it: both placements leave the count at 1.
+  //
+  // Firing BOTH clicks inside the SAME `act()` callback defers React's commit
+  // until after both handlers have already run against the STALE (pre-write)
+  // `disabled` value, which is what a genuine two-clicks-before-any-repaint
+  // race looks like. Verified empirically: with the guard deleted entirely,
+  // this exact setup produces 2 calls; with it restored, 1. A guard moved
+  // inside the `try` still passes this test's raw count (its own early return
+  // still stops that second call's `onAddTarget`), but the mutation check
+  // below is on `finally` running for a REFUSED call, not on this count.
+  it("guards re-entry even when two clicks land before any render flush", async () => {
+    let release!: () => void;
+    const onAddTarget = vi.fn(
+      () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
+    );
+    setup(proposal([row]), {
+      contacts: [jane, contact(8, "Jane Doe", { email: "jane2@acme.example" })],
+      onAddTarget,
+    });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+
+    const use7 = screen.getByTestId("calendar-create-use-7");
+    const use8 = screen.getByTestId("calendar-create-use-8");
+    await act(async () => {
+      fireEvent.click(use7);
+      fireEvent.click(use8);
+    });
+
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    // The first call is STILL in flight. A guard placed INSIDE the `try`
+    // still stops this refused second call's own `onAddTarget`, but its
+    // early `return` reaches the `finally` and clears the ref anyway - so
+    // the button would have committed back to enabled here, and a third,
+    // ordinary click would slip a second `onAddTarget` call past the cap.
+    expect(use7).toBeDisabled();
+    await userEvent.click(use7);
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
+  // Step 6a's OTHER half of the cap race: `confirm` and `resolveWithExisting`
+  // write against the SAME five slots, and a flag each (without reading the
+  // other's ref) is not a guard. Four targets already logged (freeSlots = 1)
+  // pre-checks the sole writable match, so "Add 1 to log" and a "Use" click
+  // contend for the same last slot. Same batched-`act()` technique as the
+  // Use-vs-Use test above, and for the same reason: two separately-awaited
+  // clicks would let React commit `writing`/`acting` into the DOM between
+  // them, and the second control's own `disabled` attribute would then block
+  // it regardless of whether the guard reads the other ref at all.
+  function crossGuardSetup(onAddTarget: CalendarProposalProps["onAddTarget"]) {
+    const matchedContact = contact(50, "Match Person");
+    const state: CalendarProposalState = {
+      kind: "proposal",
+      eventId: "e1",
+      subject: "Client sync",
+      matched: [
+        { participant: participant("m@acme.example", "Match Person"), contact: matchedContact },
+      ],
+      unmatched: [row],
+    };
+    const fourTargets: SelectedTargets = [1, 2, 3, 4].map((n) => ({
+      model: "res.partner",
+      resId: n,
+      name: `T${n}`,
+    }));
+    return setup(state, { contacts: [matchedContact, jane], targets: fourTargets, onAddTarget });
+  }
+
+  it("refuses a Use click while Add N to log is in flight", async () => {
+    let release!: () => void;
+    const onAddTarget = vi.fn(
+      () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
+    );
+    crossGuardSetup(onAddTarget);
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+
+    const confirmButton = screen.getByTestId("calendar-proposal-confirm");
+    const useButton = screen.getByTestId("calendar-create-use-7");
+    await act(async () => {
+      fireEvent.click(confirmButton);
+      fireEvent.click(useButton);
+    });
+
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
+  it("refuses Add N to log while a Use click is in flight", async () => {
+    let release!: () => void;
+    const onAddTarget = vi.fn(
+      () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
+    );
+    crossGuardSetup(onAddTarget);
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+
+    const confirmButton = screen.getByTestId("calendar-proposal-confirm");
+    const useButton = screen.getByTestId("calendar-create-use-7");
+    await act(async () => {
+      fireEvent.click(useButton);
+      fireEvent.click(confirmButton);
+    });
+
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      release();
+    });
+  });
+
+  // freeSlots is a dep of the pre-check effect and a successful Use click
+  // changes it by definition. Clearing resolvedByHand there would un-resolve
+  // the row on the very next commit.
+  it("stays resolved when another target is added by hand", async () => {
+    const { rerender } = setup(proposal([row]), { contacts: [jane] });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+
+    rerender({
+      targets: [
+        { model: "res.partner", resId: 7, name: "Jane Doe" },
+        { model: "res.partner", resId: 99, name: "Someone Else" },
+      ],
+    });
+    expect(screen.queryByTestId("calendar-create-j.doe@acme.example")).toBeNull();
   });
 });
