@@ -154,7 +154,7 @@ describe("createOrAdoptContact - adopting", () => {
 
 describe("createOrAdoptContact - creating", () => {
   it("creates with type contact and is_company false, then reads back", async () => {
-    const { client, execute } = clientReturning([], 7, [row()]);
+    const { client, execute } = clientReturning([], 7, [row({ name: "Jane From Odoo" })]);
     const out = await createOrAdoptContact({ client, ...args });
     expect(out).toMatchObject({ kind: "created" });
 
@@ -175,9 +175,11 @@ describe("createOrAdoptContact - creating", () => {
     expect(readArgs).toEqual([[["id", "=", 7]]]);
     expect(readKwargs.context).toEqual({ active_test: false });
     expect(readKwargs.fields).toEqual(PARTNER_FIELDS);
-    // Pins that the returned contact came from the read-back row, not from
-    // whatever `create` returned.
-    expect((out as { contact: { id: number } }).contact.id).toBe(7);
+    // The read-back row's name differs from the draft ("Jane Doe") passed to
+    // create. A fabricated contact built from the create id and the draft
+    // would carry "Jane Doe" here instead - this pins that the returned
+    // contact comes from parsePartnerRow(back[0]), not from the create call.
+    expect((out as { contact: { name: string } }).contact.name).toBe("Jane From Odoo");
   });
 
   it("sends parent_id false, not null and not omitted, when no company is chosen", async () => {
