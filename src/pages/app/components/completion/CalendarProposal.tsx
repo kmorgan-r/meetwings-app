@@ -464,6 +464,17 @@ export function CalendarProposal({
     epochRef.current += 1;
     writingRef.current = false;
     setWriting(false);
+    // `actingRef`/`acting` need the SAME reset, for the same reason: without
+    // it, an instance change while a `Use` click is pending strands both
+    // flags `true` forever - the pending write's own `finally` checks
+    // `epochRef` and skips its release once this bump has happened - and
+    // every later `Use` button and `Add N to log` stays disabled for the
+    // rest of the mount. No unlock-effect analog is needed here: the
+    // batching hazard that motivates deferring `writingRef`'s reset to a
+    // separate effect (below) does not apply, because the pre-check effect's
+    // own guard reads `writingRef` only, never `actingRef`.
+    actingRef.current = false;
+    setActing(false);
     setChecked(new Set());
     setWriteResult(null);
     setResolvedByHand(new Map());

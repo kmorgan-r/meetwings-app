@@ -357,7 +357,7 @@ describe("Layer 2 - the similarity warning", () => {
   // addSelectedTarget is a non-atomic check-then-act (CalendarProposal.tsx:436-438).
   // Two Use buttons clicked before the first resolves would both read the same
   // pre-write count and both pass the cap check.
-  it("refuses a second Use click while the first is in flight", async () => {
+  it("disables the sibling Use buttons while a write is in flight", async () => {
     let release!: () => void;
     const onAddTarget = vi.fn(
       () => new Promise<{ ok: boolean }>((r) => (release = () => r({ ok: true })))
@@ -499,6 +499,33 @@ describe("Layer 2 - the similarity warning", () => {
     await act(async () => {
       release();
     });
+  });
+
+  // The idle-reset effect resets `writingRef`/`writing` on an Odoo instance
+  // change (state -> idle) precisely so a write in flight does not leave the
+  // confirm button dead forever - its own doc comment names that exact
+  // failure for `writingRef`. `acting`/`actingRef` need the identical reset:
+  // without it, an instance change while a `Use` click is pending strands
+  // both flags `true` forever, because the pending write's own `finally`
+  // checks `epochRef` and skips its release once the idle transition has
+  // bumped it - permanently disabling every `Use` button and `Add N to log`
+  // for the rest of the mount, silently.
+  it("releases the acting latch when the Odoo instance changes mid-write", async () => {
+    // Never resolves - this write is abandoned by the instance change below,
+    // exactly like a real in-flight `addTarget` call would be.
+    const onAddTarget = vi.fn(() => new Promise<{ ok: boolean }>(() => {}));
+    const { rerender } = setup(proposal([row]), { contacts: [jane], onAddTarget });
+    await userEvent.click(screen.getByTestId("calendar-create-j.doe@acme.example"));
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+    expect(onAddTarget).toHaveBeenCalledTimes(1);
+
+    // Odoo instance changes mid-write.
+    rerender({ state: { kind: "idle" } });
+    // The picker opens again, later, for a different meeting.
+    rerender({ state: proposal([row]) });
+
+    await userEvent.click(screen.getByTestId("calendar-create-use-7"));
+    expect(onAddTarget).toHaveBeenCalledTimes(2);
   });
 
   // freeSlots is a dep of the pre-check effect and a successful Use click
