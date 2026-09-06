@@ -2,7 +2,9 @@ import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { AddToggle, Button, Input, Popover, PopoverContent, PopoverTrigger } from "@/components";
 import { compareContacts, filterContacts, kindLabel, MAX_TARGETS } from "@/lib/odoo";
 import type {
+  CalendarParticipant,
   CalendarProposalState,
+  CreateContactResult,
   OdooContact,
   OdooOpportunity,
   SelectedTarget,
@@ -12,6 +14,16 @@ import { CheckIcon, ChevronDownIcon, StarIcon, UsersIcon } from "lucide-react";
 import { CalendarProposal } from "./CalendarProposal";
 
 export const MAX_RENDERED_ROWS = 100;
+
+/**
+ * Module scope so the not-ready cache does not hand CalendarProposal a fresh
+ * array every render - its company-filter useMemo keys on that prop. The
+ * not-ready branch is unreachable while a proposal is on screen
+ * (useCalendarProposal's `present` requires rows.length > 0), but a memo whose
+ * correctness rests on an invariant two files away breaks silently when that
+ * invariant moves.
+ */
+const NO_CONTACTS: OdooContact[] = [];
 
 /**
  * How long the search box sits still before the lead search goes out.
@@ -135,6 +147,18 @@ export interface ContactPickerProps {
    */
   targets: SelectedTargets;
   onAddTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
+  /**
+   * Creates (or adopts) an Odoo partner for an unmatched calendar attendee.
+   *
+   * Top-level, NOT inside the optional `calendar` object below, for the reason
+   * that object's own comment gives about `targets`/`onAddTarget`: it comes
+   * from useOdooTarget, while `calendar` is memoized in completion/index.tsx
+   * from useCalendarProposal alone.
+   */
+  onCreateContact: (
+    participant: CalendarParticipant,
+    draft: { name: string; parentId: number | null }
+  ) => Promise<CreateContactResult>;
   // Two positional arguments, mirroring useOdooTarget.ts's own
   // removeTarget(model, resId) exactly (verified against source) rather than
   // the single-object shape onAddTarget takes.
@@ -199,6 +223,7 @@ export const ContactPicker = memo(function ContactPicker({
   onOpenSettings,
   targets,
   onAddTarget,
+  onCreateContact,
   onRemoveTarget,
   onClearTargets,
   onExpandContact,
@@ -302,7 +327,7 @@ export const ContactPicker = memo(function ContactPicker({
   // unfiltered cache (not `visible`, which drops rows the search query
   // excludes) - a target's own contact can be scrolled out of the current
   // filter without stopping being a target.
-  const allContacts = cache.kind === "ready" ? cache.contacts : [];
+  const allContacts = cache.kind === "ready" ? cache.contacts : NO_CONTACTS;
   const atCap = targets.length >= MAX_TARGETS;
   const triggerLabel =
     targets.length === 0
@@ -344,7 +369,9 @@ export const ContactPicker = memo(function ContactPicker({
             <CalendarProposal
               state={calendar.state}
               targets={targets}
+              contacts={allContacts}
               onAddTarget={onAddTarget}
+              onCreateContact={onCreateContact}
               onPickCandidate={calendar.onPickCandidate}
               onRetry={calendar.onRetry}
             />

@@ -90,6 +90,7 @@ function defaultProps(over: Partial<ContactPickerProps> = {}): ContactPickerProp
     // straight pass-through.
     targets: [],
     onAddTarget: vi.fn(async () => ({ ok: true })),
+    onCreateContact: vi.fn(async () => ({ kind: "abandoned" }) as const),
     onRemoveTarget: vi.fn(async () => {}),
     onClearTargets: vi.fn(async () => {}),
     onExpandContact: vi.fn(async () => {}),

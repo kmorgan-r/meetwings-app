@@ -17,6 +17,7 @@ import {
 import type { DbMeetingLogRow, MeetingLogTarget, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { OdooError, odooError, toOdooError } from "./errors";
+import { expectInt } from "./expect";
 import {
   attachmentNameFor,
   buildNoteBody,
@@ -88,13 +89,6 @@ function isRetryable(err: OdooError): boolean {
     default:
       return false;
   }
-}
-
-function expectInt(value: XmlRpcValue, what: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw odooError("ODOO_UNEXPECTED_ROW", `Odoo returned a non-integer ${what}`);
-  }
-  return value;
 }
 
 function firstId(value: XmlRpcValue): number | null {

@@ -19,9 +19,11 @@ import {
   removeSelectedTarget,
   setColleague,
   stampLastMeeting,
+  upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import {
   createOdooClient,
+  createOrAdoptContact,
   currentInstance,
   fetchOpportunities,
   odooError,
@@ -29,10 +31,18 @@ import {
   reportOdooError,
   runSync,
   searchLeads,
+  toOdooError,
   LEAD_SEARCH_MIN_CHARS,
 } from "@/lib/odoo";
 import { loadOdooConfig } from "@/lib/storage/odoo-config.storage";
-import type { OdooContact, OdooOpportunity, SelectedTarget, SelectedTargets } from "@/types";
+import type {
+  CalendarParticipant,
+  CreateContactResult,
+  OdooContact,
+  OdooOpportunity,
+  SelectedTarget,
+  SelectedTargets,
+} from "@/types";
 import type {
   ContactPickerProps,
   PickerCacheState,
@@ -162,6 +172,12 @@ export interface UseOdooTargetReturn {
   targetCount: number;
   addTarget: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
   removeTarget: (model: SelectedTarget["model"], resId: number) => Promise<void>;
+  /** Creates (or adopts) a partner for an unmatched calendar attendee. Never
+   * adds a target - that is `addTarget`'s job and a separate confirm gate. */
+  onCreateContact: (
+    participant: CalendarParticipant,
+    draft: { name: string; parentId: number | null }
+  ) => Promise<CreateContactResult>;
   /** Drops every destination at once, database first. Confirmed in the picker. */
   clearAllTargets: () => Promise<void>;
   /** Runs (or joins) the per-contact deal lookup a "Logging to" row expands into. */
@@ -246,6 +262,25 @@ export function useOdooTarget({
    * results the user is about to pick from.
    */
   const searchToken = useRef(0);
+  /**
+   * ITS OWN TOKEN, and not `selectionToken` - the same reasoning as
+   * `searchToken` above.
+   *
+   * The contact cache is scoped to the INSTANCE. `selectionToken` is scoped to
+   * the SELECTION, and is bumped by `onSelect`, `onSelectLead`,
+   * `handleNewChat` and `clearAllTargets` as well as by
+   * `handleInstanceChanged` - none of the first four invalidate a single
+   * cached contact. Guarding the create's cache write on it would mean: the
+   * user clicks Create contact, then picks a different contact in the
+   * single-select part of the same popover while it is in flight, and a
+   * partner SUCCESSFULLY CREATED IN ODOO is silently dropped from the cache
+   * write. The row stays greyed after a write that worked.
+   */
+  const instanceToken = useRef(0);
+  /** One create at a time, across all rows. The component's own `acting` flag
+   * disables its buttons; this refuses re-entry from any caller, including a
+   * row that has since unmounted. */
+  const creatingRef = useRef(false);
   // Remembers the contact behind the current opportunity lookup, so retry can
   // re-run it without asking the caller to hand a whole OdooContact back in.
   const contactRef = useRef<OdooContact | null>(null);
@@ -652,6 +687,7 @@ export function useOdooTarget({
   // lives in `main` - re-resolves and re-syncs.
   const handleInstanceChanged = useCallback(async () => {
     selectionToken.current += 1;
+    instanceToken.current += 1;
     const token = selectionToken.current;
     instanceRef.current = null;
 
@@ -1060,6 +1096,77 @@ export function useOdooTarget({
     [applyTargets, resolveInstance]
   );
 
+  /**
+   * Create (or adopt) an Odoo partner for an unmatched attendee, then land it
+   * in the cache so the proposal re-projects.
+   *
+   * `useCallback` with permanently stable deps, like `addTarget` above:
+   * ContactPicker is React.memo'd and <Completion /> re-renders on every
+   * streamed AI token, so an unstable identity here defeats that memo for the
+   * whole session.
+   */
+  const onCreateContact = useCallback(
+    async (
+      participant: CalendarParticipant,
+      draft: { name: string; parentId: number | null }
+    ): Promise<CreateContactResult> => {
+      // BEFORE the try, so the refusal cannot reach the `finally` and release
+      // the in-flight create's guard. Same shape as `confirm`'s early return
+      // above its own try (CalendarProposal.tsx:405-406 / :422).
+      if (creatingRef.current) return { kind: "busy" };
+      creatingRef.current = true;
+
+      // Captured as the FIRST statements, before resolveInstance/getClient -
+      // both are awaits, and a token read after them captures whatever landed
+      // DURING them, so the later check would compare the new value against
+      // itself and never fire.
+      const myInstance = instanceToken.current;
+      const selection = selectionToken.current;
+
+      try {
+        const instance = await resolveInstance();
+        const client = await getClient();
+        const outcome = await createOrAdoptContact({
+          client,
+          address: participant.address,
+          name: draft.name,
+          parentId: draft.parentId,
+        });
+
+        // A partner id created against the PREVIOUS instance points at nothing
+        // in the new one.
+        if (instanceToken.current !== myInstance) return { kind: "abandoned" };
+
+        // Nothing to cache, and nothing may be fabricated.
+        if (outcome.kind === "created-invisible") return outcome;
+
+        try {
+          await upsertContacts(instance, [outcome.contact], Date.now());
+        } catch (err) {
+          // Two different facts, two surfaces: the toast says the CACHE write
+          // failed (this hook's convention for every other write path), and the
+          // returned member tells the component the ODOO write landed.
+          const report = reportOdooError(err, "cache created contact");
+          toast.error(`${report.code}: ${report.message}`);
+          return { kind: "cached-failed" };
+        }
+
+        // The CAPTURED selection token, per reload's own contract
+        // (useOdooTarget.ts:591-595) - a live read there would make commit's
+        // staleness check a no-op. NOT runSync("refresh"), which claims the
+        // sync lock and can fail ODOO_SYNC_BUSY for an unrelated reason.
+        await reload(selection);
+        return outcome;
+      } catch (err) {
+        if (instanceToken.current !== myInstance) return { kind: "abandoned" };
+        return { kind: "failed", code: toOdooError(err).code };
+      } finally {
+        creatingRef.current = false;
+      }
+    },
+    [getClient, reload, resolveInstance]
+  );
+
   /** Same two fixes as `addTarget` above: try/catch, and `prev`-derived. */
   const removeTarget = useCallback(
     async (model: SelectedTarget["model"], resId: number): Promise<void> => {
@@ -1208,6 +1315,7 @@ export function useOdooTarget({
     // above are plain data rather than "on"-prefixed too.
     targets,
     onAddTarget: addTarget,
+    onCreateContact,
     onRemoveTarget: removeTarget,
     onClearTargets: clearAllTargets,
     onExpandContact: expandContact,
@@ -1223,6 +1331,7 @@ export function useOdooTarget({
     targets,
     targetCount: targets.length,
     addTarget,
+    onCreateContact,
     removeTarget,
     clearAllTargets,
     expandContact,

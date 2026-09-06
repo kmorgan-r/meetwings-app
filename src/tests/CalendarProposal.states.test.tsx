@@ -17,9 +17,10 @@ function renderState(state: CalendarProposalState, over = {}) {
     onPickCandidate: vi.fn(),
     onRetry: vi.fn(),
     onAddTarget: vi.fn(async () => ({ ok: true })),
+    onCreateContact: vi.fn(async () => ({ kind: "abandoned" }) as const),
     ...over,
   };
-  render(<CalendarProposal state={state} targets={[]} {...handlers} />);
+  render(<CalendarProposal state={state} targets={[]} contacts={[]} {...handlers} />);
   return handlers;
 }
 
@@ -94,11 +95,16 @@ describe("unmatched attendees", () => {
     expect(screen.getByTestId("calendar-unmatched-old@acme.example")).toHaveClass(
       "text-muted-foreground"
     );
-    // No add control anywhere in this block: no checkbox at all (an id-0
-    // testid probe is vacuous - no code path ever emits one), and no
-    // create-contact escape hatch either.
+    // No checkbox anywhere in this block: an unmatched attendee is not
+    // selectable until they exist in Odoo.
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
-    expect(screen.queryByRole("button", { name: /create/i })).toBeNull();
+    // The create affordance is offered on the no-contact row and NOT on the
+    // archived one. Offering it for an archived partner manufactures exactly
+    // the duplicate the archived/no-contact split exists to prevent.
+    expect(
+      screen.getByTestId("calendar-create-new@acme.example")
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("calendar-create-old@acme.example")).toBeNull();
     // The fixed-height region is what keeps the popover's footprint from
     // jumping around as content behind it changes; a proposal is the state
     // most likely to grow content, so pin the class here too.
