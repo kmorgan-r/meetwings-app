@@ -97,13 +97,13 @@ Three new units, one moved helper, and four files of wiring.
 
 | Unit | File | Depends on | Job |
 | --- | --- | --- | --- |
-| `createOrAdoptContact` | `src/lib/odoo/create-contact.ts` (new) | `OdooClient`, `parsePartnerRow`, `expectInt`/`firstId` | One Odoo round trip set: find-by-email, create on miss, read back a full partner row. Pure of React and of the database. |
-| `similarContacts`, `inferCompany` | `src/lib/calendar/similar-contacts.ts` (new) | `OdooContact` only | Pure functions over the cached contact list. No I/O. |
-| `expectInt`, `firstId` | `src/lib/odoo/expect.ts` (new) | `odooError` | Moved out of `meeting-log-push.ts`; see below. |
+| `createOrAdoptContact` | `src/lib/odoo/create-contact.ts` (new) | `OdooClient`, `parsePartnerRow`, `expectInt` | One Odoo round trip set: find-by-email, create on miss, read back a full partner row. Pure of React and of the database. |
+| `similarContacts`, `inferCompany` | `src/lib/calendar/similar-contacts.ts` (new) | `OdooContact`, `byRecency` (`@/lib/odoo/contact-ordering`) | Pure functions over the cached contact list. No I/O. The `src/lib/calendar` → `src/lib/odoo` edge is acyclic: `contact-ordering.ts:1` imports only `@/types`. |
+| `expectInt` | `src/lib/odoo/expect.ts` (new) | `odooError` | Moved out of `meeting-log-push.ts`; see below. |
 | `byRecency` | `src/lib/odoo/contact-ordering.ts` (existing) | `OdooContact` only | Moved out of `CalendarProposal.tsx`; see below. |
 | `onCreateContact` | `src/hooks/useOdooTarget.ts` | the above + `upsertContacts` + `reload` | Owns the client, the instance, the Odoo call, the cache write, the re-entry guard and the instance guard. |
-| create form | `CalendarProposal.tsx` | props only | Renders the form, holds its draft state and its own button-disabled state, calls the prop. |
-| prop forwarding | `ContactPicker.tsx` | — | Accepts `onCreateContact` and forwards it into `<CalendarProposal>`, exactly as it already does for `targets`/`onAddTarget`. |
+| create form | `CalendarProposal.tsx` | props only (`onCreateContact` **and the cached contact rows** — see below) | Renders the form, holds its draft state and its own button-disabled state, calls the prop. |
+| prop forwarding | `ContactPicker.tsx` | — | Accepts `onCreateContact` and forwards it, plus the contact rows it already holds, into `<CalendarProposal>` — exactly as it already does for `targets`/`onAddTarget`. |
 
 **Why the callback lives in `useOdooTarget` and not in the component.**
 `useOdooTarget.ts:55` states the rule: the contact list has exactly one home,
@@ -139,6 +139,35 @@ It takes the route `targets` and `onAddTarget` already take:
 4. `ContactPicker` forwards it into `<CalendarProposal>`
    (`ContactPicker.tsx:343-351`).
 
+### The contact rows are a second hop, and they are not optional
+
+Three of the form's mechanisms read the **whole contact cache**, not the
+proposal: the Company filter list, `similarContacts` at form-open, and
+`inferCompany`. `proposal.matched` cannot serve any of them — company partners
+are not attendees, and a Layer 2 candidate is by definition somebody whose email
+did *not* match, so neither is ever in `matched`.
+
+`CalendarProposalProps` has no contacts prop today
+(`CalendarProposal.tsx:99-114` carries only `state`, `targets`, `onAddTarget`,
+`onPickCandidate`, `onRetry`). So it gains one:
+
+`useOdooTarget`'s `cache` → `pickerProps.cache` (`useOdooTarget.ts:1188`) →
+`ContactPicker` → `contacts` on `<CalendarProposal>`.
+
+`ContactPicker` already narrows the cache for its own use at
+`ContactPicker.tsx:305` (`const allContacts = cache.kind === "ready" ?
+cache.contacts : []`). Pass that same binding — one narrowing, one source, no
+second read.
+
+**Hoist the empty case to a module-level constant** (`const NO_CONTACTS:
+readonly OdooContact[] = []`) rather than leaving the inline `[]`. It is a fresh
+array every render, and `CalendarProposal`'s company-filter `useMemo` keys on
+this prop. In practice the not-ready branch is unreachable while a proposal is on
+screen — `useCalendarProposal`'s `present` requires `rows.length > 0`
+(`useCalendarProposal.ts:107`), and `<Completion />` passes `calendar` only when
+`present` — but a memo whose correctness rests on an invariant two files away is
+the kind that breaks silently when that invariant moves.
+
 **It must be a `useCallback` with permanently stable dependencies** —
 `getClient`, `resolveInstance`, `reload`, `applyTargets`, all of which are
 already stable — mirroring `addTarget` at `useOdooTarget.ts:1038-1061`.
@@ -151,8 +180,8 @@ defect on this exact component that a plan review caught once already.
 
 `onAddTarget` declares its result shape (`CalendarProposal.tsx:111`) precisely
 so the component can branch on it. `onCreateContact` needs the same, and needs
-more room, because the component must distinguish six outcomes to pick a
-message and decide whether to close the form:
+more room, because the component must pick a message and decide whether to close
+the form:
 
 ```ts
 type CreateContactResult =
@@ -162,7 +191,8 @@ type CreateContactResult =
   | { kind: "created-invisible" }        // written, read-back returned no row
   | { kind: "cached-failed" }            // written and read back, cache write failed
   | { kind: "failed"; code: OdooErrorCode }
-  | { kind: "abandoned" };               // instance changed; render nothing
+  | { kind: "abandoned" }                // instance changed; render nothing
+  | { kind: "busy" };                    // a create is already in flight
 
 onCreateContact: (
   participant: CalendarParticipant,
@@ -170,10 +200,46 @@ onCreateContact: (
 ) => Promise<CreateContactResult>;
 ```
 
+Eight members, and the table below is total over them — every member has a
+surface and a form-lifecycle answer. `created` is the ordinary success and still
+gets its own line: it is the one outcome where the user has to be told the row
+is now tickable but was *not* ticked for them.
+
+| Member | Message | Form |
+| --- | --- | --- |
+| `created` | `Created in Odoo — tick them below to log this meeting.` | closes |
+| `adopted-active` | `Already in Odoo — added to the list below.` | closes |
+| `adopted-archived` | `This person is already in Odoo but archived. Un-archive them there to log this meeting to them.` | closes |
+| `created-invisible` | `Created in Odoo, but it isn't visible to this connection.` | **closes** |
+| `cached-failed` | `Created in Odoo. Refresh to see them here.` | **closes** |
+| `failed` | per the Errors table | stays open, draft intact |
+| `abandoned` | none | closes, silently |
+| `busy` | none | unchanged |
+
+**`created-invisible` and `cached-failed` close the form, and that is a
+correctness rule rather than a UX preference.** Both mean the Odoo write
+*landed*. Treating them as errors — form open, draft intact, retry offered — is
+harmful for `created-invisible` specifically: the partner exists but record rules
+hide it from this connection, so a retry's Layer 1 `search_read` returns nothing,
+the miss branch fires, and a **second** duplicate partner is created. The
+`ODOO_UNREACHABLE` row's promise that "retry adopts if the first attempt landed"
+holds only when the search can see what landed, which is exactly what this
+outcome says it cannot. If a retry affordance is ever added here it must not
+re-run the create path.
+
 `abandoned` is a distinct member rather than a null return: the component must
 be able to tell "nothing to say, the popover reset underneath you" apart from
 "something failed", and silently rendering nothing for an unrecognised result is
 how a real failure becomes invisible.
+
+`busy` is the re-entry refusal, and it needs its own member because the hook has
+to return *something*. It must **not** be folded into `abandoned`: the component
+resets `creating` on every path out of a create attempt, and a refusal that
+looked like an abandonment would re-enable the button while the first create is
+still running. The refusal returns **before** the `try`/`finally` that owns
+`creatingRef`, so the in-flight create keeps the guard — the same shape as
+`confirm`'s early return at `CalendarProposal.tsx:418`, which sits above its
+`try` at `:435`.
 
 The `email` is not in `draft`. It is read-only and derived from
 `participant.address` (see Fields), so passing it would create a second source
@@ -210,12 +276,25 @@ open forms in a 112px scroll region is not a surface worth designing.
 
 ### Which row's form is open
 
-`CalendarProposal` holds `openForm: string | null` — the **normalized address**
-of the row whose form is open, never an array index. `useCalendarProposal`'s
-re-projection effect (`useCalendarProposal.ts:323-354`) rebuilds `unmatched`
-whenever the contact cache changes, so an index would silently point at a
-different attendee. The address is the same key
-`CalendarProposal.tsx:564` already uses for the row's React key.
+`CalendarProposal` holds `openForm: string | null` — the row's
+`participant.address` **exactly as the entry carries it**, never an array index
+and never a normalized copy. `useCalendarProposal`'s re-projection effect
+(`useCalendarProposal.ts:323-354`) rebuilds `unmatched` whenever the contact
+cache changes, so an index would silently point at a different attendee.
+
+**The raw address, not the normalized one.** `participantsOf` dedupes *on* the
+normalized key but stores the original participant unchanged
+(`match-attendees.ts:29-34`), so the surviving raw addresses are already unique —
+one per normalized key — and they are what `CalendarProposal.tsx:564-565`
+already uses for the row's React key and its `data-testid`. Keying this state on
+a normalized copy would mean normalizing again at the render site, the
+`resolvedByHand` lookup and the row-close effect, in a component that imports no
+normalizer today (`CalendarProposal.tsx:4` imports only `MAX_TARGETS`) — three
+new chances for the two keys to drift apart, buying nothing.
+
+Normalization stays where it already lives: inside `similar-contacts.ts`, which
+compares the attendee's address against cached emails and can import
+`normalizeAddress` like any other `src/lib` module.
 
 ### Draft state is snapshotted at open, not derived
 
@@ -387,7 +466,7 @@ or disable anything:
 ```
 Already in Odoo?
   [ Use Jane Doe · jane@acme.example ]
-  [ Use J. Doe · jdoe@acme-group.example ]
+  [ Use Jane Doe-Smith · jane.doe@acme-group.example ]
 ```
 
 The name it compares is the **same normalised prefill the Name field is seeded
@@ -413,13 +492,36 @@ remain, and the user is invited to create precisely the duplicate this layer
 exists to prevent — the same standard this spec applies to colleagues two
 paragraphs down.
 
-`CalendarProposal` therefore holds `resolvedByHand: ReadonlySet<string>`, keyed
-on normalized address. An address enters it only when `onAddTarget` resolves
-`{ ok: true }` — a cap rejection must not mark anything resolved, because
-nothing was added. A row whose address is in that set renders as
-`Jane Doe — added Jane Doe (Acme)` with **no create affordance**, and it is
-cleared by the idle-reset effect and whenever `proposalEventId` changes, beside
-`checked`.
+`CalendarProposal` therefore holds
+`resolvedByHand: ReadonlyMap<string, OdooContact>`, keyed on the row's raw
+`participant.address`. A **map, not a set**: the row's label has to name the
+contact that resolved it (`Jane Doe — added Jane Doe (Acme)`), and an address
+alone cannot recover that name. Nothing else in the component can either —
+`SelectedTarget` carries no address (`src/types/odoo.ts:88-92`), and the added
+contact is by definition absent from `proposal.matched`, since a different email
+is Layer 2's whole premise. The `Use` button already holds the `OdooContact` it
+was rendered from; store it.
+
+An entry is written only when `onAddTarget` resolves `{ ok: true }` — a cap
+rejection must not mark anything resolved, because nothing was added.
+
+**The "added" row renders only while that target is still present.** Membership
+alone is a latch on a fact that can reverse: the user can remove the target again
+from the "Logging to" list in the same popover (`onRemoveTarget`,
+`useOdooTarget.ts:1211`), after which a membership-only rule would keep claiming
+"added" and keep hiding the create affordance with no way back. So the render
+condition is membership **and** a matching live target —
+`targets.some((t) => t.model === "res.partner" && t.resId === entry.resId)`.
+Removing the target restores the ordinary greyed row and its `Create in Odoo`
+button.
+
+**Clearing it: the `isNewProposal` branch and the idle-reset effect, and nothing
+else.** Not "whenever `proposalEventId` changes", which would be a change to the
+pre-check effect — and that effect also runs on `freeSlots`
+(`CalendarProposal.tsx:280`), which a successful `Use` click changes by
+definition (`freeSlots = MAX_TARGETS - targets.length`, `:184`). Clearing there
+would un-resolve the row on the very next commit and hand back the create
+affordance this mechanism exists to take away.
 
 The click *is* the confirm; there is no second step, because adding an existing
 contact as a target is exactly what the `Add N to log` gate already authorises
@@ -490,8 +592,9 @@ there.
 `onCreateContact(participant, draft)` in `useOdooTarget`:
 
 1. **Before any await, as the first synchronous statements:** capture
-   `instanceToken.current` (see Guards) and take the re-entry guard
-   (`creatingRef`). Both must precede `resolveInstance` and `getClient`, which
+   `instanceToken.current` **and `selectionToken.current`** (see Guards), and
+   take the re-entry guard (`creatingRef`). All three must precede
+   `resolveInstance` and `getClient`, which
    are themselves awaits (`useOdooTarget.ts:368-374`, `:383-388`) — a token read
    after them captures whatever landed *during* them, so the later check would
    compare the new value against itself and never fire. Every other guarded path
@@ -522,8 +625,9 @@ there.
 6. **Re-check `instanceToken`**, then **cache** — `upsertContacts(instance,
    [row], Date.now())`.
 7. **Reload** — call the existing `reload(token)`
-   (`useOdooTarget.ts:535`) with the current `selectionToken.current`;
-   it re-reads `listContacts` into `cache` and never rejects.
+   (`useOdooTarget.ts:535`) with the `selectionToken` value **captured in step
+   1**, not a fresh read; it re-reads `listContacts` into `cache` and never
+   rejects.
    **Not** `runSync("refresh")`: that claims the sync lock, hits Odoo for a
    full incremental pull, and can fail with `ODOO_SYNC_BUSY` for a reason that
    has nothing to do with this write.
@@ -533,11 +637,19 @@ there.
    pre-check effect sees a same-`eventId` proposal, takes the intersect branch,
    and adds nothing to `checked`. The row renders unchecked, as specified.
 
-`reload` takes `selectionToken.current` and not the captured `instanceToken`:
-it is the hook's own existing contract, it uses that token only to decide
-whether its archival-cleanup writes are still current, and passing anything else
-would break an unrelated invariant. The create's own guard is separate and is
-already spent by step 6.
+**Two tokens, two jobs — do not collapse them.** The cache write in step 6 is
+guarded on `instanceToken` (see Guards). `reload` gets a captured
+`selectionToken`, because that is its stated contract: its own doc comment at
+`useOdooTarget.ts:556-560` says the argument is "the snapshot the CALLER
+captured before its own awaits", and spells out the failure mode for the
+alternative — "passing the live `selectionToken.current` instead would make
+commit's own staleness check a no-op and let a stale snapshot clear a selection
+made while this reload was in flight." Every existing caller obeys it (`:621`,
+`:655`, `:1155`).
+
+The `instanceToken` split says *do not guard the cache write on the selection*.
+It does not say stop capturing the selection token — `reload` still needs one,
+and it needs the captured value.
 
 **The watermark is untouched**, deliberately. The next incremental sync will
 re-pull this partner (its `write_date` is above the stored watermark) and the
@@ -545,13 +657,22 @@ guarded upsert in `upsertContacts` will find nothing changed and count zero.
 Advancing the watermark from a single-record write would risk skipping
 concurrent edits to other partners.
 
-### expectInt / firstId
+### expectInt
 
-`create` returns an id and a search returns a list; both need the same
-validation `meeting-log-push.ts` already does privately at `:93` and `:100`.
-Move `expectInt` and `firstId` into a shared `src/lib/odoo/expect.ts` and have
-both callers import them. This is a two-function move in code this change is
+`create` returns an id, and `meeting-log-push.ts` already validates that
+privately at `:93`. Move `expectInt` into a shared `src/lib/odoo/expect.ts` and
+have both callers import it. This is a one-function move in code this change is
 already touching, not a refactor of the push module.
+
+**`firstId` (`meeting-log-push.ts:100`) does NOT move and is NOT used here.**
+Once Layer 1 became a `search_read`, nothing in this feature receives a list of
+bare ids: the create returns an int (`expectInt`), and both the Layer 1 search
+and the read-back return records (`parsePartnerRow`). Applying `firstId` to a
+`search_read` result would be actively duplicate-creating — the first element is
+a record object, not a number, so it returns `null` for every hit and Layer 1
+would never adopt. The array-shape check the search result does need is the one
+`contacts-sync.ts:140-142` already makes, raising `ODOO_UNEXPECTED_ROW` on a
+non-list.
 
 ## Guards and lifecycle
 
@@ -657,11 +778,30 @@ announcing — `Already in Odoo — added to the list below.` would never be see
 
 The create result renders at **region level**, beside `writeResult`
 (`CalendarProposal.tsx:586-590`), and holds the address it refers to so the text
-can name the right person after their row has gone. It is cleared on the same
-triggers as `writeResult`.
+can name the right person after their row has gone.
 
-A successful create (or an adoption) **closes the form**. The error outcomes
-leave it open with the draft intact.
+**It is NOT cleared on the same triggers as `writeResult`, and that difference
+is the whole point.** `writeResult` is cleared inside the pre-check effect
+(`CalendarProposal.tsx:274`), whose deps are `[writableKey, freeSlots,
+proposalEventId]` (`:280`) and whose only bail-out is `if (writingRef.current)
+return` (`:239`). A create deliberately does not set `writingRef` — that is the
+`creatingRef` separation two sections down — so the successful create moves the
+attendee into `matched`, grows `writable`, changes `writableKey`, re-fires that
+effect unguarded, and wipes the message on the very commit that was supposed to
+show it. Moving the message to region level buys nothing if it is then cleared
+by the same re-projection it was moved to survive.
+
+The create result is cleared in exactly two places:
+
+- the pre-check effect's **`isNewProposal` branch only** — a different meeting,
+  so the message is about somebody who is no longer on screen;
+- the idle-reset effect (`CalendarProposal.tsx:322-329`).
+
+Never on a `writableKey` or `freeSlots` change.
+
+Form lifecycle per outcome is in the result table under "The callback's
+signature": everything that reached Odoo closes the form; only `failed` leaves
+it open with the draft intact.
 
 ### At cap
 
@@ -696,6 +836,17 @@ precisely so this region is not the one place that rule gets relaxed.
 
 The generic failure message is `Could not create the contact (<CODE>).`
 
+**This table is about surfaces; the form's lifecycle lives in the result table
+under "The callback's signature", which is total over the union.** The first six
+rows here are all `{ kind: "failed" }` and leave the form open with the draft
+intact. The last three are not failures of the write and do not: "read-back
+returns no row" is `created-invisible`, "instance changed" is `abandoned`,
+"`upsertContacts` fails" is `cached-failed` — and all three **close the form**,
+because in every one of them the partner is in Odoo. The `ODOO_UNREACHABLE`
+row's "retry adopts if the first attempt landed" is a promise about the
+`failed` path only; see `created-invisible` for the case where the search cannot
+see what landed.
+
 **`reload` failing is deliberately not in this table.** It is contractually
 `NEVER REJECTS` (`useOdooTarget.ts:530-535`) and catches everything into its own
 toast (`:589-592`), so the create flow cannot observe it and must not claim to.
@@ -726,9 +877,10 @@ ships. Three specific amendments:
   and still absent on the `archived` row.
 - `:84-96` asserts the row's testid and `text-muted-foreground` class. Keep
   both on the text node (see Affordance) and keep these assertions.
-- `:15-24`'s `renderState` helper supplies a fixed handler set. Adding a
-  required `onCreateContact` to `CalendarProposalProps` breaks type-checking for
-  every `render` in the file until the helper supplies a stub.
+- `:15-24`'s `renderState` helper supplies a fixed handler set and a literal
+  `targets={[]}`. `CalendarProposalProps` gains **two** required props —
+  `onCreateContact` and `contacts` — and type-checking of every `render` in the
+  file fails until the helper supplies both (a stub and `[]`).
 
 **`similar-contacts.test.ts`** (pure, no mocks)
 - two shared tokens match; one shared token does not
@@ -763,6 +915,11 @@ ships. Three specific amendments:
 - a person and a company share the email → the person wins; two people → lowest
   id wins
 - the search carries `=ilike`, `active_test: false`, and **no `limit`**
+- the search is a `search_read` whose hits are adopted from the returned
+  **records** — a mutant that reads the first element as a bare id (the shape
+  `firstId` expects) must fail, because that is the silent no-adopt that creates
+  a duplicate on every hit
+- a non-list search response raises `ODOO_UNEXPECTED_ROW`
 - no company selected → `parent_id: false`, not `null` and not omitted
 - non-integer create result → `ODOO_UNEXPECTED_ROW`
 - `client.execute` throws `ODOO_FAULT` → the code reaches the caller unchanged
@@ -781,8 +938,11 @@ ships. Three specific amendments:
 - an **instance** change mid-create writes no cache row
 - a **selection** change mid-create (`onSelect` on another contact) still writes
   the cache row — the regression the `instanceToken` split exists to prevent
-- a second create while one is in flight is a no-op
+- a second create while one is in flight resolves `busy` and does not release
+  the first create's `creatingRef`
 - `creatingRef` is released after a failure, so a second attempt runs
+- `reload` receives the `selectionToken` value captured before the first await,
+  not a live read taken after it
 - a cache-write failure still reports the Odoo write as succeeded
 
 **`CalendarProposal` component tests**
@@ -797,9 +957,20 @@ ships. Three specific amendments:
 - the create result message survives the re-projection that removes the row it
   refers to
 - a `Use <name>` button calls `onAddTarget` with that contact, no create
-  occurs, and the row stops offering `Create in Odoo`
+  occurs, and the row stops offering `Create in Odoo` and names the contact that
+  resolved it
 - a `Use <name>` button whose `onAddTarget` returns `{ ok: false, reason: "cap" }`
   reports the cap and leaves the row unresolved, still offering create
+- removing that target again (a `targets` prop change) restores the ordinary
+  greyed row and its `Create in Odoo` button — the latch must not outlive the
+  fact it asserts
+- a `freeSlots` change after a `Use` click (another target added by hand) does
+  **not** un-resolve the row: the clear belongs to `isNewProposal` and the idle
+  reset, not to the pre-check effect's other deps
+- a `created-invisible` result closes the form and offers no retry that would
+  re-run the create
+- a second `Create contact` click while one is in flight resolves `busy`, and
+  the first create's in-flight state is not released by it
 - an `ODOO_FAULT` result leaves the form open with the typed draft intact and
   `Create contact` **re-enabled**
 - an idle reset mid-create sets no result state and leaves no disabled button
