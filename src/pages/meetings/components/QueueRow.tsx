@@ -2,7 +2,9 @@ import { memo, useState } from "react";
 import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
 import { Button, Input } from "@/components";
 import { ESCALATE_AFTER_ATTEMPTS, NO_CONTACT_CHOSEN } from "@/lib/odoo/meeting-log";
-import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
+import { getMeetingSummaryByConversation, getEntitiesForSummary } from "@/lib/database";
+import { SummaryContent } from "@/pages/context-memory/components/SummaryContent";
+import type { MeetingLogListRow, MeetingLogTarget, OdooContact, MeetingSummary, KnowledgeEntity } from "@/types";
 
 /**
  * The expanded transcript, as four distinct outcomes rather than one nullable
@@ -232,6 +234,35 @@ function QueueRowInner({
   // and the tick button can both fire again mid-flight without this.
   const [savingName, setSavingName] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [summaryState, setSummaryState] = useState<
+    { loading: true } | { loading: false; summary: MeetingSummary | null; entities: KnowledgeEntity[] } | null
+  >(null);
+
+  const toggleSummary = async () => {
+    if (summaryState !== null) {
+      setSummaryState(null); // collapse
+      return;
+    }
+    if (row.conversation_id === null) return;
+    setSummaryState({ loading: true });
+    try {
+      const summary = await getMeetingSummaryByConversation(row.conversation_id);
+      const entities = summary ? await getEntitiesForSummary(summary.id) : [];
+      setSummaryState({ loading: false, summary, entities });
+    } catch (error) {
+      // getMeetingSummaryByConversation's own try/catch only covers its
+      // SELECT (meeting-context.action.ts:181-190) - the getDatabase() call
+      // just above that try is NOT covered, so a Database.load() failure
+      // propagates here uncaught. Without this catch, summaryState would
+      // stay stuck at { loading: true } forever - a permanent spinner, not a
+      // visible error. Fold it into the same "No summary available" branch a
+      // genuine cache miss already uses, matching how every other summarize
+      // path in this feature treats a failure as "nothing to show" rather
+      // than a crash; the real error is still logged for diagnosis.
+      console.error("Failed to load meeting summary:", error);
+      setSummaryState({ loading: false, summary: null, entities: [] });
+    }
+  };
 
   // Captured for the narrowing: `conversationTitle` non-null implies this is
   // non-null (QueueStrip resolves one from the other), but only the compiler
@@ -524,6 +555,11 @@ function QueueRowInner({
           <Button size="sm" variant="ghost" onClick={() => onToggleTranscript(row)}>
             {transcript ? "Hide transcript" : "Show transcript"}
           </Button>
+          {row.conversation_id !== null && (
+            <Button size="sm" variant="ghost" onClick={toggleSummary}>
+              {summaryState ? "Hide summary" : "Show summary"}
+            </Button>
+          )}
         </div>
       )}
 
@@ -534,6 +570,16 @@ function QueueRowInner({
       )}
 
       {transcript && transcriptBody(transcript, () => onReloadTranscript(row))}
+
+      {summaryState && (
+        summaryState.loading ? (
+          <p className="text-xs text-muted-foreground">Loading summary…</p>
+        ) : summaryState.summary ? (
+          <SummaryContent summary={summaryState.summary} entities={summaryState.entities} />
+        ) : (
+          <p className="text-xs text-muted-foreground">No summary available</p>
+        )
+      )}
     </li>
   );
 }
