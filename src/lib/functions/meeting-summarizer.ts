@@ -1,10 +1,10 @@
-import { Message } from "@/types";
 import {
   SummarizationResult,
   ExtractedEntity,
   CreateMeetingSummaryInput,
   CreateKnowledgeEntityInput,
   TranscriptEntry,
+  SpeakerInfo,
 } from "@/types";
 import {
   createMeetingSummary,
@@ -18,8 +18,6 @@ import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
 import { renderTranscript } from "@/lib/odoo/meeting-log";
 
-// Minimum number of exchanges (user+assistant pairs) required to trigger summarization
-const MIN_EXCHANGES_FOR_SUMMARY = 2;
 
 /**
  * Filters the user's name from a list of participants (case-insensitive).
@@ -92,29 +90,7 @@ Rules:
 - Keep arrays empty [] if nothing relevant was mentioned
 - Do NOT include the user or assistant in participants unless explicitly named`;
 
-/**
- * Formats conversation messages for summarization
- */
-function formatConversationForSummary(messages: Message[]): string {
-  // Callers pass messages in chronological order (oldest-first): the live path
-  // appends to conversationHistory, and the backfill reads them ORDER BY
-  // timestamp ASC. Send them to the model as-is.
-  return messages
-    .map((msg) => {
-      const role = msg.role === "user" ? "User" : "Assistant";
-      return `${role}: ${msg.content}`;
-    })
-    .join("\n\n");
-}
 
-/**
- * Counts the number of complete exchanges (user message + assistant response)
- */
-function countExchanges(messages: Message[]): number {
-  const userMessages = messages.filter((m) => m.role === "user").length;
-  const assistantMessages = messages.filter((m) => m.role === "assistant").length;
-  return Math.min(userMessages, assistantMessages);
-}
 
 /**
  * Scans from an opening-brace index and returns the index of its matching
@@ -245,78 +221,6 @@ export function parseSummarizationResponse(response: string): SummarizationResul
   }
 }
 
-/**
- * Generates a summary for a conversation using AI
- */
-export async function generateConversationSummary(
-  conversationId: string,
-  messages: Message[],
-  providerConfig?: {
-    provider: any;
-    selectedProvider: {
-      provider: string;
-      variables: Record<string, string>;
-    };
-  }
-): Promise<SummarizationResult | null> {
-  const exchangeCount = countExchanges(messages);
-
-  // Check if we have enough exchanges
-  if (exchangeCount < MIN_EXCHANGES_FOR_SUMMARY) {
-    console.log(`Skipping summarization: only ${exchangeCount} exchanges (need ${MIN_EXCHANGES_FOR_SUMMARY})`);
-    return null;
-  }
-
-  // Check if we already have a summary for this conversation
-  const existingSummary = await getMeetingSummaryByConversation(conversationId);
-  if (existingSummary) {
-    console.log(`Summary already exists for conversation ${conversationId}`);
-    return null;
-  }
-
-  const conversationText = formatConversationForSummary(messages);
-  const userMessage = `CONVERSATION:\n${conversationText}\n\nProvide the JSON summary:`;
-
-  try {
-    let fullResponse = "";
-
-    // Use Meetwings API or custom provider
-    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
-
-    if (!useMeetwingsAPI && !providerConfig) {
-      console.log("No AI provider configured for summarization");
-      return null;
-    }
-
-    // Collect the full response
-    for await (const chunk of fetchAIResponse({
-      provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
-      selectedProvider: providerConfig?.selectedProvider || {
-        provider: "",
-        variables: {},
-      },
-      systemPrompt: SUMMARIZATION_PROMPT + getUserIdentityInstruction(),
-      history: [],
-      userMessage,
-      imagesBase64: [],
-    })) {
-      fullResponse += chunk;
-    }
-
-    // Parse the response
-    const result = parseSummarizationResponse(fullResponse);
-
-    if (!result || !result.summary) {
-      console.error("Failed to generate valid summary");
-      return null;
-    }
-
-    return result;
-  } catch (error) {
-    console.error("Error generating conversation summary:", error);
-    return null;
-  }
-}
 
 /**
  * Saves a summarization result to the database
@@ -376,49 +280,35 @@ export async function saveSummarizationResult(
   }
 }
 
-/**
- * Main function to summarize and save a conversation
- * Call this when a conversation ends or switches
- */
-export async function summarizeConversation(
-  conversationId: string,
-  messages: Message[],
-  providerConfig?: {
-    provider: any;
-    selectedProvider: {
-      provider: string;
-      variables: Record<string, string>;
-    };
-  }
-): Promise<boolean> {
-  try {
-    // Generate the summary
-    const result = await generateConversationSummary(
-      conversationId,
-      messages,
-      providerConfig
-    );
-
-    if (!result) {
-      return false;
-    }
-
-    // Save to database
-    const exchangeCount = countExchanges(messages);
-    const summaryId = await saveSummarizationResult(conversationId, result, exchangeCount);
-
-    return summaryId !== null;
-  } catch (error) {
-    console.error("Error in summarizeConversation:", error);
-    return false;
-  }
+export interface SummarizableMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: number;
+  speaker?: SpeakerInfo;
+  audioSource?: "microphone" | "system";
 }
 
 /**
- * Checks if a conversation should be summarized based on exchange count
+ * Filters a stored ChatMessage[] down to the transcript-originated lines and
+ * reshapes them as TranscriptEntry[]. Assistant replies (and any system
+ * messages) are dropped: they carry no speaker/audioSource, would render
+ * unlabeled in renderTranscript, and reintroduce the "typed AI Q&A mixed
+ * into the summary" framing this design drops - see the design spec's Why
+ * section. Every live-transcript-originated ChatMessage is stamped
+ * role: "user" by addMeetingTranscript/addMeetingTranscriptEntries in the
+ * first place.
  */
-export function shouldSummarize(messages: Message[]): boolean {
-  return countExchanges(messages) >= MIN_EXCHANGES_FOR_SUMMARY;
+export function chatMessagesToTranscriptEntries(
+  messages: SummarizableMessage[]
+): TranscriptEntry[] {
+  return messages
+    .filter((m) => m.role === "user")
+    .map((m) => ({
+      original: m.content,
+      timestamp: m.timestamp,
+      speaker: m.speaker,
+      audioSource: m.audioSource,
+    }));
 }
 
 /** The provider shape every caller in this file already threads through. */
@@ -427,32 +317,60 @@ type ProviderConfig = {
   selectedProvider: { provider: string; variables: Record<string, string> };
 };
 
-/**
- * Summarizes a MEETING for the Odoo log.
- *
- * Deliberately not generateConversationSummary: that path enforces
- * MIN_EXCHANGES_FOR_SUMMARY (:263-266), and a short meeting still gets logged;
- * and it returns any EXISTING summary for the conversation (:269-273), when the
- * log wants a summary of THIS meeting.
- *
- * Deliberately not formatConversationForSummary (:96) either - it labels lines
- * User/Assistant from msg.role, which is meaningless for a meeting where both
- * sides are human. renderTranscript uses speaker/audioSource instead.
- *
- * NEVER THROWS. The push module treats a null exactly like a rejection, and
- * both take the fallback-body path: losing a customer record because an AI
- * provider returned 429 is the wrong trade.
- */
-export async function generateMeetingLogSummary(
-  entries: TranscriptEntry[],
-  providerConfig?: ProviderConfig
-): Promise<SummarizationResult | null> {
-  if (entries.length === 0) return null;
+/** Below this, a persisted summary would permanently lock the conversation's
+ * canonical row to a fragment - see the design spec's shared-helper step 4. */
+export const MIN_PERSIST_ENTRIES = 4;
 
+/**
+ * The one place that decides whether a meeting has a summary: look up a
+ * cached one, generate and cache a new one, or decline (never throwing).
+ * Replaces generateConversationSummary and generateMeetingLogSummary.
+ *
+ * `minEntries` gates whether the AI is called AT ALL - the Odoo path passes
+ * 1 (a short meeting still gets a real note), the Context Memory path and
+ * every backfill caller use the default of 4. Persistence is gated
+ * separately, on the FIXED MIN_PERSIST_ENTRIES floor, regardless of what
+ * minEntries was: letting a 1-entry Odoo slice persist would permanently
+ * lock the conversation's canonical `meeting_summaries` row to a fragment,
+ * since step 1's cache-first read means the FIRST slice to persist wins for
+ * the whole conversation.
+ *
+ * NEVER THROWS. A summarization failure must not become a push failure or a
+ * lost meeting - losing a customer record because an AI provider returned
+ * 429 is the wrong trade.
+ */
+export async function ensureMeetingSummary(
+  conversationId: string | null,
+  entries: TranscriptEntry[],
+  providerConfig?: ProviderConfig,
+  minEntries: number = MIN_PERSIST_ENTRIES
+): Promise<SummarizationResult | null> {
   try {
+    if (conversationId) {
+      const existing = await getMeetingSummaryByConversation(conversationId);
+      if (existing) {
+        return {
+          title: existing.title,
+          summary: existing.summary,
+          topics: existing.topics,
+          goals: existing.goals,
+          actionItems: existing.actionItems,
+          nextSteps: existing.nextSteps,
+          decisions: existing.decisions,
+          teamUpdates: existing.teamUpdates,
+          participants: existing.participants,
+          entities: [],
+        };
+      }
+    }
+
+    if (entries.length < minEntries) {
+      return null;
+    }
+
     const useMeetwingsAPI = await shouldUseMeetwingsAPI();
     if (!useMeetwingsAPI && !providerConfig) {
-      console.log("No AI provider configured for meeting log summarization");
+      console.log("No AI provider configured for meeting summarization");
       return null;
     }
 
@@ -471,9 +389,18 @@ export async function generateMeetingLogSummary(
       fullResponse += chunk;
     }
 
-    return parseSummarizationResponse(fullResponse);
+    const result = parseSummarizationResponse(fullResponse);
+    if (!result || !result.summary) {
+      return null;
+    }
+
+    if (conversationId && entries.length >= MIN_PERSIST_ENTRIES) {
+      await saveSummarizationResult(conversationId, result, entries.length);
+    }
+
+    return result;
   } catch (error) {
-    console.error("Error generating meeting log summary:", error);
+    console.error("Error generating meeting summary:", error);
     return null;
   }
 }

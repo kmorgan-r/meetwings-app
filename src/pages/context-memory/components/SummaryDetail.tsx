@@ -7,29 +7,23 @@ import {
   CardDescription,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
   Save,
   X,
   Edit2,
-  Users,
-  CheckCircle,
-  ListTodo,
   Loader2,
   Tag,
   Copy,
   Check,
-  Target,
-  ArrowRight,
-  MessageSquare,
   MessageCircleReplyIcon,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { updateMeetingSummary, getEntitiesForSummary } from "@/lib/database";
 import { meetingTimestamp } from "@/lib/functions/meeting-summary-date";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
+import { SummaryContent } from "./SummaryContent";
 
 interface SummaryDetailProps {
   summary: MeetingSummary | null;
@@ -165,12 +159,16 @@ export const SummaryDetail = ({
     }
 
     markdown += `---\n\n`;
-    markdown += `*${summary.exchangeCount} exchanges*`;
 
+    const footerParts: string[] = [];
+    if (summary.exchangeCount > 0) {
+      footerParts.push(`*${summary.exchangeCount} transcript lines*`);
+    }
     if (summary.durationSeconds) {
       const minutes = Math.floor(summary.durationSeconds / 60);
-      markdown += ` | *Duration: ${minutes} minutes*`;
+      footerParts.push(`*Duration: ${minutes} minutes*`);
     }
+    markdown += footerParts.join(" | ");
 
     try {
       await navigator.clipboard.writeText(markdown);
@@ -298,189 +296,27 @@ export const SummaryDetail = ({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Summary */}
-        <div className="space-y-2">
-          <Label>Summary</Label>
-          {isEditing ? (
+        {isEditing && (
+          <div className="space-y-2">
+            <Label>Summary</Label>
             <Textarea
               value={editedSummary}
               onChange={(e) => setEditedSummary(e.target.value)}
               rows={4}
               className="resize-none"
             />
-          ) : (
-            <p className="text-sm text-muted-foreground bg-accent/30 p-3 rounded-lg">
-              {summary.summary}
+          </div>
+        )}
+
+        <SummaryContent summary={summary} entities={entities} showSummary={!isEditing} />
+
+        {summary.exchangeCount > 0 && (
+          <div className="pt-2 border-t border-border/50">
+            <p className="text-xs text-muted-foreground">
+              {summary.exchangeCount} transcript lines
             </p>
-          )}
-        </div>
-
-        {/* Topics */}
-        {summary.topics.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <Tag className="h-3.5 w-3.5" />
-              Topics
-            </Label>
-            <div className="flex flex-wrap gap-1.5">
-              {summary.topics.map((topic, i) => (
-                <Badge key={i} variant="secondary">
-                  {topic}
-                </Badge>
-              ))}
-            </div>
           </div>
         )}
-
-        {/* Participants */}
-        {summary.participants.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <Users className="h-3.5 w-3.5" />
-              Participants
-            </Label>
-            <div className="flex flex-wrap gap-1.5">
-              {summary.participants.map((person, i) => (
-                <Badge key={i} variant="outline">
-                  {person}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Goals */}
-        {summary.goals && summary.goals.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <Target className="h-3.5 w-3.5" />
-              Goals
-            </Label>
-            <ul className="space-y-1">
-              {summary.goals.map((goal, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-start gap-2"
-                >
-                  <span className="text-muted-foreground/50">-</span>
-                  {goal}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Action Items */}
-        {summary.actionItems.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <ListTodo className="h-3.5 w-3.5" />
-              Action Items
-            </Label>
-            <ul className="space-y-1">
-              {summary.actionItems.map((item, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-start gap-2"
-                >
-                  <span className="text-muted-foreground/50">-</span>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Next Steps */}
-        {summary.nextSteps && summary.nextSteps.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <ArrowRight className="h-3.5 w-3.5" />
-              Next Steps
-            </Label>
-            <ul className="space-y-1">
-              {summary.nextSteps.map((step, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-start gap-2"
-                >
-                  <span className="text-muted-foreground/50">-</span>
-                  {step}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Decisions */}
-        {summary.decisions.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <CheckCircle className="h-3.5 w-3.5" />
-              Decisions
-            </Label>
-            <ul className="space-y-1">
-              {summary.decisions.map((decision, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-start gap-2"
-                >
-                  <span className="text-muted-foreground/50">-</span>
-                  {decision}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Team Updates */}
-        {summary.teamUpdates && summary.teamUpdates.length > 0 && (
-          <div className="space-y-2">
-            <Label className="flex items-center gap-2">
-              <MessageSquare className="h-3.5 w-3.5" />
-              Team Updates
-            </Label>
-            <ul className="space-y-1">
-              {summary.teamUpdates.map((update, i) => (
-                <li
-                  key={i}
-                  className="text-sm text-muted-foreground flex items-start gap-2"
-                >
-                  <span className="text-muted-foreground/50">-</span>
-                  {update}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Extracted Entities */}
-        {entities.length > 0 && (
-          <div className="space-y-2">
-            <Label>Extracted Entities</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {entities.map((entity) => (
-                <Badge
-                  key={entity.id}
-                  variant="outline"
-                  className="text-xs"
-                >
-                  <span className="capitalize text-muted-foreground mr-1">
-                    {entity.entityType}:
-                  </span>
-                  {entity.name}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Metadata */}
-        <div className="pt-2 border-t border-border/50">
-          <p className="text-xs text-muted-foreground">
-            {summary.exchangeCount} exchanges
-          </p>
-        </div>
       </CardContent>
     </Card>
   );

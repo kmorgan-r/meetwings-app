@@ -60,7 +60,7 @@ const config = vi.hoisted(() => ({
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
 const summarizer = vi.hoisted(() => ({
-  generateMeetingLogSummary: vi.fn(async () => null),
+  ensureMeetingSummary: vi.fn(async () => null),
 }));
 vi.mock("@/lib/functions/meeting-summarizer", () => summarizer);
 
@@ -217,7 +217,7 @@ beforeEach(() => {
   action.sweepOrphanTargets.mockResolvedValue(0);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
-  summarizer.generateMeetingLogSummary.mockResolvedValue(null);
+  summarizer.ensureMeetingSummary.mockResolvedValue(null);
   config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
   config.requireOdooConfig.mockResolvedValue(CONFIG);
   vi.spyOn(crypto, "randomUUID").mockReturnValue(

@@ -69,4 +69,22 @@ describe("summary detail", () => {
 
     expect(navigate).toHaveBeenCalledWith("/meetings/view/conv-1");
   });
+
+  it("shows the entry-count footer with transcript-line wording, not 'exchanges'", () => {
+    render(
+      <SummaryDetail summary={SUMMARY} onClose={() => {}} onUpdate={() => {}} />
+    );
+    expect(screen.getByText(/12 transcript lines/)).toBeInTheDocument();
+  });
+
+  it("renders nothing in the footer for a migration-backfilled row (exchangeCount 0)", () => {
+    render(
+      <SummaryDetail
+        summary={{ ...SUMMARY, exchangeCount: 0 }}
+        onClose={() => {}}
+        onUpdate={() => {}}
+      />
+    );
+    expect(screen.queryByText(/transcript lines/)).not.toBeInTheDocument();
+  });
 });

@@ -109,13 +109,15 @@ export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
  * (attemptsBefore > 0) that is FOUR calls, not two - an attachment search
  * that finds nothing falls through to a create, and a message search that
  * finds nothing falls through to a post (client.ts:21, up to 30s each) - so
- * 120s of wire for the first target. `summary_json` can legitimately still be
- * null on a retry (a previous summarize failed), adding this 60s call ahead
- * of it: 180s total for the first claim window, comfortably under
- * STALE_CLAIM_MS (300s), with the re-stamp keeping every LATER target from
- * ever needing to borrow from that same budget. A timed-out summarize
- * resolves null, which pushQueuedRow already handles by taking the fallback
- * body: degrading a note is not comparable to duplicating one.
+ * 120s of wire for the first target. A cached row can legitimately still be
+ * missing from `meeting_summaries` on a retry (a previous summarize failed
+ * before persisting), so `ensureMeetingSummary`'s cache-first read can still
+ * miss and this 60s call still has to fit ahead of it: 180s total for the
+ * first claim window, comfortably under STALE_CLAIM_MS (300s), with the
+ * re-stamp keeping every LATER target from ever needing to borrow from that
+ * same budget. A timed-out summarize resolves null, which pushQueuedRow
+ * already handles by taking the fallback body: degrading a note is not
+ * comparable to duplicating one.
  */
 export const SUMMARIZE_TIMEOUT_MS = 60_000;
 
@@ -222,9 +224,11 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * The attachment's contents. NOT formatConversationForSummary
- * (meeting-summarizer.ts:96), which labels lines User/Assistant from msg.role -
- * meaningless when both sides are human.
+ * The attachment's contents - also the exact transcript formatting
+ * `ensureMeetingSummary` feeds the AI prompt (meeting-summarizer.ts),
+ * imported from here rather than duplicated. Labels lines by speaker
+ * (speakerLabelFor), not by msg.role - a role-based User/Assistant label
+ * would be meaningless when both sides are human.
  */
 export function renderTranscript(entries: TranscriptEntry[]): string {
   return entries

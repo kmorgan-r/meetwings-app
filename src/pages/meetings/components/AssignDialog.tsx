@@ -306,7 +306,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
           getClient(),
           listContacts(instance),
           // Necessary but NOT sufficient: it tests configuration, while
-          // generateMeetingLogSummary returns null identically for a
+          // ensureMeetingSummary returns null identically for a
           // configured-but-FAILING provider. Task 6's `degraded` outcome covers
           // that half.
           shouldUseMeetwingsAPI(),

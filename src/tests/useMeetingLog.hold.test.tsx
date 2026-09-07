@@ -60,7 +60,7 @@ const config = vi.hoisted(() => ({
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
 const summarizer = vi.hoisted(() => ({
-  generateMeetingLogSummary: vi.fn(async () => null),
+  ensureMeetingSummary: vi.fn(async () => null),
 }));
 vi.mock("@/lib/functions/meeting-summarizer", () => summarizer);
 
@@ -216,7 +216,7 @@ beforeEach(() => {
   action.sweepOrphanTargets.mockResolvedValue(0);
   push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
   push.pushQueuedRow.mockResolvedValue(undefined);
-  summarizer.generateMeetingLogSummary.mockResolvedValue(null);
+  summarizer.ensureMeetingSummary.mockResolvedValue(null);
   config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
   config.requireOdooConfig.mockResolvedValue(CONFIG);
   vi.spyOn(crypto, "randomUUID").mockReturnValue(
@@ -240,6 +240,29 @@ describe("the hold", () => {
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());  // 1. enqueue
     await vi.advanceTimersByTimeAsync(HOLD_MS);                              // 2. advance
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1)); // 3. assert
+  });
+
+  it("pushHeldRow's summarize dep forwards conversationId and the sliced entries to ensureMeetingSummary", async () => {
+    action.getQueueRow.mockResolvedValue({ id: "row-1", status: "held", conversation_id: "conv-1" });
+    render();
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
+
+    const deps = push.pushQueuedRow.mock.calls[0][1] as {
+      summarize: (conversationId: string | null, slice: unknown) => unknown;
+    };
+    const slice = { entries: [entry(1000)], startAt: 1000, endAt: 2000 };
+    await deps.summarize("conv-1", slice);
+
+    expect(summarizer.ensureMeetingSummary).toHaveBeenCalledWith(
+      "conv-1",
+      slice.entries,
+      expect.anything(),
+      1
+    );
   });
 
   it("does not push before the hold elapses", async () => {
@@ -284,7 +307,7 @@ describe("undo", () => {
     // only caller of `summarize`, so nothing in this suite could call it. The
     // real no-AI-call-on-undo guarantee is structural - summarization happens
     // inside pushQueuedRow, after the hold.
-    expect(summarizer.generateMeetingLogSummary).not.toHaveBeenCalled();
+    expect(summarizer.ensureMeetingSummary).not.toHaveBeenCalled();
   });
 
   it("surfaces a message when the timer already won the race", async () => {

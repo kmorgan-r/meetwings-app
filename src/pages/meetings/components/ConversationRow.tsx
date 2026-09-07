@@ -1,7 +1,11 @@
 import { memo, useState } from "react";
+import type { MouseEvent } from "react";
 import moment from "moment";
 import { Badge, Card, Button, Input } from "@/components";
 import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
+import { getMeetingSummaryByConversation, getEntitiesForSummary } from "@/lib/database";
+import { SummaryContent } from "@/pages/context-memory/components/SummaryContent";
+import type { MeetingSummary, KnowledgeEntity } from "@/types";
 
 /**
  * The badge's copy, keyed by the status `resolveBadge` picked.
@@ -88,6 +92,29 @@ function ConversationRowInner({
   // and the tick button could otherwise both fire again mid-flight.
   const [savingName, setSavingName] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [summaryState, setSummaryState] = useState<
+    { loading: true } | { loading: false; summary: MeetingSummary | null; entities: KnowledgeEntity[] } | null
+  >(null);
+
+  const toggleSummary = async (e: MouseEvent) => {
+    e.stopPropagation(); // this card's own onClick navigates - mirror the rename button's guard just above
+    if (summaryState !== null) {
+      setSummaryState(null);
+      return;
+    }
+    setSummaryState({ loading: true });
+    try {
+      const summary = await getMeetingSummaryByConversation(id);
+      const entities = summary ? await getEntitiesForSummary(summary.id) : [];
+      setSummaryState({ loading: false, summary, entities });
+    } catch (error) {
+      // Same failure mode as QueueRow's toggleSummary (Step 3.2) - see its
+      // comment: getMeetingSummaryByConversation's getDatabase() call sits
+      // outside its own try/catch, so a connection failure lands here.
+      console.error("Failed to load meeting summary:", error);
+      setSummaryState({ loading: false, summary: null, entities: [] });
+    }
+  };
 
   const saveName = async () => {
     if (savingName) return;
@@ -228,8 +255,23 @@ function ConversationRowInner({
           <Badge variant="outline" className="text-xs">
             {moment(updatedAt).format("hh:mm A")}
           </Badge>
+          <Button size="sm" variant="ghost" onClick={toggleSummary}>
+            {summaryState ? "Hide summary" : "Show summary"}
+          </Button>
         </div>
       </div>
+
+      {summaryState && (
+        <div onClick={(e) => e.stopPropagation()}>
+          {summaryState.loading ? (
+            <p className="text-xs text-muted-foreground">Loading summary…</p>
+          ) : summaryState.summary ? (
+            <SummaryContent summary={summaryState.summary} entities={summaryState.entities} />
+          ) : (
+            <p className="text-xs text-muted-foreground">No summary available</p>
+          )}
+        </div>
+      )}
     </Card>
   );
 }

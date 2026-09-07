@@ -137,7 +137,6 @@ UPDATE meeting_log_queue
 
   setAttachment: `UPDATE meeting_log_queue SET attachment_id = ? WHERE id = ?`,
   setMessage: `UPDATE meeting_log_queue SET message_id = ? WHERE id = ?`,
-  setSummary: `UPDATE meeting_log_queue SET summary_json = ? WHERE id = ?`,
 
   sweepable: `
 SELECT * FROM meeting_log_queue
@@ -302,7 +301,7 @@ UPDATE meeting_log_queue
   // customer's chatter. A row with a sent child falls through to
   // deleteTerminalRow instead, under the honest deleted-after-send copy.
   deleteRow: `
-UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
+UPDATE meeting_log_queue SET status = 'deleted', transcript = ''
  WHERE id = ? AND status IN ('held','pending','unassigned','failed')
    AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
                     WHERE row_id = meeting_log_queue.id AND status = 'sent')`,
@@ -315,8 +314,8 @@ UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json =
   // THE PARENTHESES ARE LOAD-BEARING. `AND` binds tighter than `OR`, so a bare
   // `... AND status IN (...) OR EXISTS (...)` parses as
   // `(id = ? AND status IN (...)) OR EXISTS (...)` - the `id` scope is gone,
-  // and one Delete click sets status='deleted', transcript='',
-  // summary_json=NULL on EVERY queue row that has a sent target, which after
+  // and one Delete click sets status='deleted', transcript=''
+  // on EVERY queue row that has a sent target, which after
   // migration 14's backfill is the user's entire sent history. Never append a
   // bare `OR EXISTS (...)` fragment to this WHERE - rewrite it whole.
   //
@@ -325,7 +324,7 @@ UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json =
   // deliberately refuse today - a stale dashboard's Delete would blank the
   // transcript while the loop keeps posting notes to the remaining targets.
   deleteTerminalRow: `
-UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json = NULL
+UPDATE meeting_log_queue SET status = 'deleted', transcript = ''
  WHERE id = ?
    AND status <> 'sending'
    AND (status IN ('sent','cancelled')
@@ -343,7 +342,7 @@ UPDATE meeting_log_queue SET status = 'deleted', transcript = '', summary_json =
   // more exists, without a second COUNT.
   listActionable: `
 SELECT id, session_key, conversation_id, instance, contact_id, lead_id,
-       transcript_start_at, transcript_end_at, summary_json, attachment_id,
+       transcript_start_at, transcript_end_at, attachment_id,
        message_id, status, attempts, claimed_at, last_error, last_error_code,
        meeting_started_at, created_at, sent_at
   FROM meeting_log_queue
@@ -388,17 +387,17 @@ SELECT COUNT(*) AS n FROM meeting_log_queue
   // Retention. Only the two terminal statuses that can still hold text: the
   // other five may all still be pushed, and a pushed row with a blanked
   // transcript uploads an empty attachment to a customer record. `deleted` is
-  // deliberately absent - the delete action blanks both columns in the same
+  // deliberately absent - the delete action blanks transcript in the same
   // statement that sets the status, so the clause would be dead.
   //
   // Never deletes a row and never touches a timestamp, so the watermark and the
-  // session_key dedup are unaffected. The OR guard keeps it idempotent and its
-  // rowsAffected meaningful - `transcript <> ''` alone would skip a row whose
-  // transcript was already blank but whose digest was not.
+  // session_key dedup are unaffected. The `transcript <> ''` guard keeps it
+  // idempotent and its rowsAffected meaningful - a second call skips rows a
+  // prior call already blanked.
   prune: `
-UPDATE meeting_log_queue SET transcript = '', summary_json = NULL
+UPDATE meeting_log_queue SET transcript = ''
  WHERE status IN ('sent','cancelled')
-   AND (transcript <> '' OR summary_json IS NOT NULL)
+   AND transcript <> ''
    AND created_at < ?`,
 
   // Children of a queue row. Ordering replaces atomicity: these are written
@@ -771,11 +770,6 @@ export async function setAttachmentId(id: string, attachmentId: number): Promise
 export async function setMessageId(id: string, messageId: number): Promise<void> {
   const db = await getDatabase();
   await db.execute(QUEUE_SQL.setMessage, [messageId, id]);
-}
-
-export async function setSummaryJson(id: string, json: string): Promise<void> {
-  const db = await getDatabase();
-  await db.execute(QUEUE_SQL.setSummary, [json, id]);
 }
 
 /**

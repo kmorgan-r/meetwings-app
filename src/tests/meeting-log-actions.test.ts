@@ -78,7 +78,7 @@ const push = vi.hoisted(() => ({
 vi.mock("@/lib/odoo/meeting-log-push", () => push);
 
 const summarizer = vi.hoisted(() => ({
-  generateMeetingLogSummary: vi.fn(async () => ({ title: "T", summary: "S" })),
+  ensureMeetingSummary: vi.fn(async () => ({ title: "T", summary: "S" })),
 }));
 vi.mock("@/lib/functions/meeting-summarizer", () => summarizer);
 
@@ -144,7 +144,7 @@ function dbRow(over: Record<string, unknown> = {}) {
   return {
     id: "r", session_key: "k", conversation_id: null, instance: INSTANCE,
     contact_id: 42, lead_id: null, transcript: "You: hi",
-    transcript_start_at: 1, transcript_end_at: 2, summary_json: null,
+    transcript_start_at: 1, transcript_end_at: 2,
     attachment_id: null, message_id: null, status: "pending", attempts: 1,
     claimed_at: null, last_error: null, last_error_code: null,
     meeting_started_at: 1, created_at: 1, sent_at: null,
@@ -158,7 +158,7 @@ function seedRow(over: Partial<DbMeetingLogRow> = {}): void {
   const row = {
     id: "r1", session_key: "k1", conversation_id: "conv-1", instance: INSTANCE,
     contact_id: 42, lead_id: null, transcript: "You: hello",
-    transcript_start_at: 1000, transcript_end_at: 2000, summary_json: null,
+    transcript_start_at: 1000, transcript_end_at: 2000,
     attachment_id: null, message_id: null, status: "pending", attempts: 0,
     claimed_at: null, last_error: null, last_error_code: null,
     meeting_started_at: 1000, created_at: NOW, sent_at: null,
@@ -284,7 +284,7 @@ beforeEach(async () => {
   config.requireOdooConfig.mockResolvedValue({
     url: "http://h:8069", db: "odoo", login: "a@b.c", apiKey: "k",
   });
-  summarizer.generateMeetingLogSummary.mockResolvedValue({ title: "T", summary: "S" });
+  summarizer.ensureMeetingSummary.mockResolvedValue({ title: "T", summary: "S" });
 });
 
 // `runAction` reads the row THREE times, and every `...Once` chain below must
@@ -447,7 +447,7 @@ describe("retryMeetingLog", () => {
     // tells the user a note is live on a customer's record. This row's id ("r")
     // is never seeded into the real database in this describe, so the new
     // push-partial re-read sees zero targets and correctly does not fire.
-    summarizer.generateMeetingLogSummary.mockResolvedValue(null);
+    summarizer.ensureMeetingSummary.mockResolvedValue(null);
     action.getQueueRow
       .mockResolvedValueOnce(dbRow({ attempts: 1, status: "failed" }))    // 1: pre-CAS
       .mockResolvedValueOnce(dbRow({ attempts: 1, status: "pending" }))   // 2: fresh
@@ -539,11 +539,11 @@ describe("assignMeetingLog", () => {
     await assignMeetingLog("r", [{ model: "res.partner", resId: 42, name: null }], { providerConfig: null });
 
     const deps = push.pushQueuedRow.mock.calls[0][1];
-    const result = await deps.summarize({
+    const result = await deps.summarize(null, {
       entries: [{ original: "hi", timestamp: 1 }], startAt: 1, endAt: 2,
     });
 
-    expect(summarizer.generateMeetingLogSummary).toHaveBeenCalled();
+    expect(summarizer.ensureMeetingSummary).toHaveBeenCalled();
     expect(result).not.toBeNull();
   });
 
@@ -553,9 +553,9 @@ describe("assignMeetingLog", () => {
     // row reaches `sent`, toSent clears last_error, and the page reports
     // unqualified success while a "Summarization failed" note is live on the
     // customer's record.
-    summarizer.generateMeetingLogSummary.mockResolvedValue(null);
+    summarizer.ensureMeetingSummary.mockResolvedValue(null);
     push.pushQueuedRow.mockImplementation(async (_row, deps) => {
-      await deps.summarize({ entries: [{ original: "hi", timestamp: 1 }], startAt: 1, endAt: 2 });
+      await deps.summarize(null, { entries: [{ original: "hi", timestamp: 1 }], startAt: 1, endAt: 2 });
     });
     action.getQueueRow
       .mockResolvedValueOnce(dbRow())                                  // 1: pre-CAS
@@ -968,10 +968,10 @@ describe("boundedSummarize", () => {
     // two attachments and two customer-visible chatter notes. Replacing the
     // Promise.race with a plain await leaves every other case in this file
     // green, and nothing else in the slice covers it.
-    summarizer.generateMeetingLogSummary.mockImplementation(() => new Promise(() => {}));
+    summarizer.ensureMeetingSummary.mockImplementation(() => new Promise(() => {}));
     const { summarize, didSummarize } = boundedSummarize(null);
 
-    const pending = summarize({ entries: [], startAt: 1, endAt: 2 });
+    const pending = summarize(null, { entries: [], startAt: 1, endAt: 2 });
     await vi.advanceTimersByTimeAsync(SUMMARIZE_TIMEOUT_MS);
 
     expect(await pending).toBeNull();
@@ -987,8 +987,27 @@ describe("boundedSummarize", () => {
     // non-zero count means.
     const { summarize } = boundedSummarize(null);
 
-    await summarize({ entries: [], startAt: 1, endAt: 2 });
+    await summarize(null, { entries: [], startAt: 1, endAt: 2 });
 
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("forwards the real conversationId, the slice's entries, and minEntries:1 to ensureMeetingSummary", async () => {
+    // The coverage gap a re-review flagged: every OTHER case in this describe
+    // either passes conversationId as null or never inspects what actually
+    // reached ensureMeetingSummary's argument list. A regression that dropped
+    // conversationId, swapped it with the slice, or silently fell back to the
+    // summarizer's own default minEntries (4, not this path's 1-entry floor)
+    // would leave every other test here green.
+    // A REAL (non-null) providerConfig, not null - expect.anything() below
+    // does not match null/undefined, and the point is to prove this argument
+    // rides through in POSITION 3 untouched, not merely that some value does.
+    const providerConfig = { provider: {}, selectedProvider: { provider: "openai", variables: {} } };
+    const entries = [{ original: "hi", timestamp: 1 }];
+    await boundedSummarize(providerConfig).summarize("conv-1", { entries, startAt: 1, endAt: 2 });
+
+    expect(summarizer.ensureMeetingSummary).toHaveBeenCalledWith(
+      "conv-1", entries, expect.anything(), 1
+    );
   });
 });

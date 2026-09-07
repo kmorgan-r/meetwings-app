@@ -19,7 +19,7 @@ import type { ProviderConfigLike } from "@/lib/odoo/meeting-log-actions";
  *
  * Returns `null` when the Meetwings API is in use. That is CORRECT, not a
  * failure - completion returns `undefined` in exactly that case and
- * generateMeetingLogSummary routes through the Meetwings API instead. Do not
+ * ensureMeetingSummary routes through the Meetwings API instead. Do not
  * "fix" this branch into an error or a warning.
  */
 export function useProviderConfig(): ProviderConfigLike | null {

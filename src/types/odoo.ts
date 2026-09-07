@@ -147,7 +147,6 @@ export interface DbMeetingLogRow {
   transcript: string;
   transcript_start_at: number;
   transcript_end_at: number;
-  summary_json: string | null;
   attachment_id: number | null;
   message_id: number | null;
   status: MeetingLogStatus;

@@ -79,6 +79,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn summary_backfill_migration_is_version_16_and_points_at_its_own_file() {
+        let m = migrations()
+            .into_iter()
+            .find(|m| m.description == "backfill_and_drop_queue_summary_json")
+            .expect("summary backfill migration must be registered");
+        assert_eq!(
+            m.version, 16,
+            "summary backfill migration must be version 16"
+        );
+        assert_eq!(
+            m.sql,
+            include_str!("migrations/meeting-log-queue-v2.sql"),
+            "summary backfill migration must embed migrations/meeting-log-queue-v2.sql"
+        );
+    }
+
     /// Same reasoning again. This one rebuilds a table migration 11 already
     /// created, so registering it at an ALREADY-APPLIED version would not
     /// merely collide on a checksum - the rebuild would never run at all on an

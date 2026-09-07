@@ -10,7 +10,7 @@ import {
   QUEUE_SQL,
   retryQueueRow,
 } from "@/lib/database/meeting-log.action";
-import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import {
   instanceFingerprint,
   requireOdooConfig,
@@ -104,23 +104,29 @@ export interface ActionDeps {
  * STALE_CLAIM_MS.
  *
  * `didSummarize` is exposed so the caller can tell a real summary from the
- * fallback: generateMeetingLogSummary returns null identically for a MISSING
+ * fallback: ensureMeetingSummary returns null identically for a MISSING
  * provider and for a FAILING one, and pushQueuedRow swallows that a second
  * time - so without this the row reaches `sent` with last_error cleared and the
  * page reports unqualified success while a "Summarization failed" note is live
  * on the customer's record.
  */
 export function boundedSummarize(providerConfig: ProviderConfigLike | null): {
-  summarize: (slice: TranscriptSlice) => Promise<SummarizationResult | null>;
+  summarize: (
+    conversationId: string | null,
+    slice: TranscriptSlice
+  ) => Promise<SummarizationResult | null>;
   didSummarize: () => boolean | null;
 } {
   let produced: boolean | null = null;
 
-  const summarize = async (slice: TranscriptSlice): Promise<SummarizationResult | null> => {
+  const summarize = async (
+    conversationId: string | null,
+    slice: TranscriptSlice
+  ): Promise<SummarizationResult | null> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
-        generateMeetingLogSummary(slice.entries, providerConfig as never),
+        ensureMeetingSummary(conversationId, slice.entries, providerConfig as never, 1),
         new Promise<null>((resolve) => {
           timer = setTimeout(() => resolve(null), SUMMARIZE_TIMEOUT_MS);
         }),
@@ -128,12 +134,12 @@ export function boundedSummarize(providerConfig: ProviderConfigLike | null): {
       produced = result !== null;
       return result;
     } catch {
-      // UNREACHABLE TODAY, kept as defence in depth. generateMeetingLogSummary
-      // catches everything and returns null (meeting-summarizer.ts:475-478),
-      // and the timeout leg only ever resolves - so every real failure already
-      // arrives as `null` and sets produced = false above. The actual guard
-      // keeping an AI error out of last_error is the summarizer's own catch
-      // plus meeting-log-push.ts:205-211, NOT this line; do not read it as the
+      // UNREACHABLE TODAY, kept as defence in depth. ensureMeetingSummary
+      // catches everything and returns null, and the timeout leg only ever
+      // resolves - so every real failure already arrives as `null` and sets
+      // produced = false above. The actual guard keeping an AI error out of
+      // last_error is the summarizer's own catch plus meeting-log-push.ts's
+      // try/catch around deps.summarize, NOT this line; do not read it as the
       // redaction boundary.
       produced = false;
       return null;
@@ -234,7 +240,7 @@ async function runAction(
     // whichever target carried a reason. Without a gate here such a row falls
     // through to `degraded` or `ok` - and one network outage produces exactly
     // that pairing, because it kills the Odoo call AND the AI call, and
-    // generateMeetingLogSummary swallows its throw and returns null. The page
+    // ensureMeetingSummary swallows its throw and returns null. The page
     // would then print "Sent - but the note shows the transcript's first
     // lines" directly beside the row's own freshly written last_error, telling
     // the user a note is live on a customer's record when nothing reached Odoo.
