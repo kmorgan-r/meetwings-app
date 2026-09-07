@@ -12,12 +12,13 @@ import {
   getOldestUncompactedSummaries,
   getUncompactedSummaryCount,
   getUnsummarizedConversations,
+  getMeetingSummaryByConversation,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
 import {
   extractJsonObject,
-  summarizeConversation,
-  shouldSummarize,
+  chatMessagesToTranscriptEntries,
+  ensureMeetingSummary,
 } from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { meetingTimestamp } from "./meeting-summary-date";
@@ -89,19 +90,19 @@ export async function summarizePendingConversations(
       continue;
     }
 
-    const messages = conv.messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const entries = chatMessagesToTranscriptEntries(conv.messages);
 
-    // Too short to summarize — a cheap no-AI skip, so it must not count against
-    // the cap. (Already-summarized conversations are excluded at the DB layer by
+    // Too short to summarize — a cheap no-AI skip, so it must not count
+    // against the cap. Checked against the SAME 4-entry floor
+    // ensureMeetingSummary applies internally (its default minEntries), so
+    // this pre-check and the real gate can never disagree. (Already-
+    // summarized conversations are excluded at the DB layer by
     // getUnsummarizedConversations.)
-    if (!shouldSummarize(messages)) {
+    if (entries.length < 4) {
       continue;
     }
 
-    // From here summarizeConversation makes a streaming AI call whether it
+    // From here ensureMeetingSummary makes a streaming AI call whether it
     // succeeds or fails, so count the attempt (not just successes) against the
     // cap before making it.
     if (attempts >= MAX_BACKFILL_PER_CLICK) {
@@ -110,9 +111,22 @@ export async function summarizePendingConversations(
     }
     attempts += 1;
 
-    const ok = await summarizeConversation(conv.id, messages, providerConfig);
-    if (ok) {
-      summarized += 1;
+    const result = await ensureMeetingSummary(conv.id, entries, providerConfig);
+    if (result) {
+      // A truthy result means "generation and persistence both succeeded, OR
+      // this conversation already had a cached summary" - it does NOT
+      // distinguish those from "generation succeeded but the persist write
+      // then threw", because ensureMeetingSummary's own outer try/catch
+      // (Task 1) converts that case to a null return too. Re-check against
+      // what is actually stored, rather than trusting the return value alone -
+      // this counter drives the caller's attempts>0 && summarized===0
+      // failure toast (src/pages/context-memory/index.tsx), and an
+      // over-counted `summarized` here would silently swallow that toast on a
+      // batch where the AI calls succeeded but nothing was actually saved.
+      const persisted = await getMeetingSummaryByConversation(conv.id);
+      if (persisted) {
+        summarized += 1;
+      }
     }
   }
 

@@ -3,7 +3,7 @@ import { useWindowResize, useGlobalShortcuts } from ".";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
-import { fetchSTT, fetchAIResponse, summarizeConversation, shouldSummarize } from "@/lib/functions";
+import { fetchSTT, fetchAIResponse, chatMessagesToTranscriptEntries, ensureMeetingSummary } from "@/lib/functions";
 import {
   applyAIConversationTitle,
   type TitleProviderConfig,
@@ -642,18 +642,17 @@ export function useSystemAudio() {
 
       // Trigger summarization if we have enough exchanges (async, non-blocking)
       if (conversation.id && conversation.messages.length > 0) {
-        // conversation.messages is newest-first here (each exchange is prepended
-        // during capture). summarizeConversation expects chronological
-        // (oldest-first) order like the other callers, so reverse before sending.
-        const messagesToSummarize = [...conversation.messages]
-          .reverse()
-          .map((msg) => ({
-            role: msg.role,
-            content: msg.content,
-          }));
+        // conversation.messages is newest-first here (each exchange is
+        // prepended during capture) - reverse to chronological order before
+        // filtering/mapping to TranscriptEntry[]. This hook's local
+        // ChatMessage (line 54) has no speaker/audioSource fields at all;
+        // chatMessagesToTranscriptEntries handles that (both are optional
+        // on its accepted shape) and still filters out role: "assistant".
+        const entries = chatMessagesToTranscriptEntries(
+          [...conversation.messages].reverse()
+        );
 
-        if (shouldSummarize(messagesToSummarize)) {
-          // Get provider config for summarization
+        if (entries.length >= 4) {
           const provider = allAiProviders.find(
             (p) => p.id === selectedAIProvider.provider
           );
@@ -666,13 +665,9 @@ export function useSystemAudio() {
             : undefined;
 
           // Run summarization async (don't await to avoid blocking UI)
-          summarizeConversation(
-            conversation.id,
-            messagesToSummarize,
-            providerConfig
-          )
-            .then((success) => {
-              if (success) {
+          ensureMeetingSummary(conversation.id, entries, providerConfig)
+            .then((result) => {
+              if (result) {
                 console.log(`Summarized conversation ${conversation.id}`);
               }
             })
