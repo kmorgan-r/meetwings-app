@@ -48,8 +48,14 @@ const storage = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => storage);
 
-const contacts = vi.hoisted(() => ({ listContacts: vi.fn() }));
+const contacts = vi.hoisted(() => ({ listContacts: vi.fn(), upsertContacts: vi.fn() }));
 vi.mock("@/lib/database/odoo-contacts.action", () => contacts);
+
+// AssignDialog's own "+ New contact" dependency, mocked at the leaf for the
+// same reason `client`/`opportunities` below are: this suite asserts on the
+// dialog's OWN outcome copy, not on what a real Odoo create/search does.
+const createContact = vi.hoisted(() => ({ createOrAdoptContact: vi.fn() }));
+vi.mock("@/lib/odoo/create-contact", () => createContact);
 
 // The merged page mounts `useHistory`, which calls getAllConversations through
 // the `@/lib` barrel in a mount effect. Mocked at the LEAF for the reason the
@@ -327,6 +333,7 @@ beforeEach(() => {
   db.getQueueRow.mockResolvedValue(null);
   db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([contact()]);
+  contacts.upsertContacts.mockResolvedValue(1);
   history.getAllConversations.mockResolvedValue([]);
   actions.retryMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.deleteMeetingLog.mockResolvedValue({ kind: "ok" });
@@ -1483,6 +1490,175 @@ describe("AssignDialog", () => {
       await userEvent.click(screen.getByRole("button", { name: new RegExp(`add ${n}`, "i") }));
     }
     expect(screen.getByRole("button", { name: /add F/i })).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("AssignDialog: new contact", () => {
+  function assignDialogProps() {
+    return {
+      row: row({ id: "un", status: "unassigned", contact_id: null }),
+      instance: INSTANCE,
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+    };
+  }
+
+  async function openCreateForm() {
+    render(<AssignDialog {...assignDialogProps()} />);
+    await screen.findByPlaceholderText("Search contacts");
+    await userEvent.click(screen.getByRole("button", { name: "+ New contact" }));
+  }
+
+  it("toggles the form open and closed", async () => {
+    await openCreateForm();
+    // `screen.getByTestId`, not `getByRole("button", { name: "Cancel" })`: the
+    // dialog's own footer already has a "Cancel" button with the same name.
+    const toggle = screen.getByTestId("new-contact-toggle");
+    expect(toggle).toHaveTextContent("Cancel");
+    expect(screen.getByLabelText("New contact name")).toBeInTheDocument();
+
+    await userEvent.click(toggle);
+    expect(screen.queryByLabelText("New contact name")).toBeNull();
+  });
+
+  it("disables Create contact until both name and email are filled", async () => {
+    await openCreateForm();
+    const submit = screen.getByRole("button", { name: "Create contact" });
+    expect(submit).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    expect(submit).toBeDisabled();
+
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    expect(submit).toBeEnabled();
+  });
+
+  it("creates, persists locally, lists and previews the new contact", async () => {
+    const created = contact({ id: 42, name: "Priya Patel", email: "priya@example.com" });
+    createContact.createOrAdoptContact.mockResolvedValue({ kind: "created", contact: created });
+    await openCreateForm();
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+
+    await waitFor(() =>
+      expect(createContact.createOrAdoptContact).toHaveBeenCalledWith(
+        expect.objectContaining({ address: "priya@example.com", name: "Priya Patel", parentId: null })
+      )
+    );
+    expect(contacts.upsertContacts).toHaveBeenCalledWith(INSTANCE, [created], expect.any(Number));
+    expect(
+      await screen.findByText("Created in Odoo and added to this meeting.")
+    ).toBeInTheDocument();
+    // Listed, previewed AND staged as a target in one action - no separate
+    // trip back to the list to click `+ add`.
+    expect(screen.getByRole("button", { name: "Priya Patel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /added Priya Patel/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log this meeting" })).toBeEnabled();
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+    // The form closed - everything that reaches Odoo does.
+    expect(screen.queryByLabelText("New contact name")).toBeNull();
+  });
+
+  it("passes the chosen company as parentId", async () => {
+    contacts.listContacts.mockResolvedValue([contact({ id: 9, name: "Acme Inc", isCompany: true })]);
+    createContact.createOrAdoptContact.mockResolvedValue({
+      kind: "created",
+      contact: contact({ id: 42, name: "Priya Patel" }),
+    });
+    await openCreateForm();
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.type(screen.getByLabelText("New contact company"), "Acme");
+    // `getByTestId`, not `getByRole("button", { name: "Acme Inc" })`: Acme Inc
+    // is itself a contact and so also renders as its own selectable row.
+    await userEvent.click(screen.getByTestId("new-contact-company-9"));
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+
+    await waitFor(() =>
+      expect(createContact.createOrAdoptContact).toHaveBeenCalledWith(
+        expect.objectContaining({ parentId: 9 })
+      )
+    );
+  });
+
+  it("does not preview an archived adoption - it cannot be selected at all", async () => {
+    const archived = contact({ id: 42, name: "Priya Patel", active: false });
+    createContact.createOrAdoptContact.mockResolvedValue({ kind: "adopted-archived", contact: archived });
+    await openCreateForm();
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+
+    expect(
+      await screen.findByText(
+        "This person is already in Odoo but archived. Un-archive them there to log this meeting to them."
+      )
+    ).toBeInTheDocument();
+    expect(opportunities.fetchOpportunities).not.toHaveBeenCalled();
+  });
+
+  it("keeps the form open and the typed fields on a failed create", async () => {
+    createContact.createOrAdoptContact.mockRejectedValue(new Error("boom"));
+    await openCreateForm();
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+
+    expect(
+      await screen.findByText("Could not create the contact (ODOO_INTERNAL).")
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("New contact name")).toHaveValue("Priya Patel");
+    expect(screen.getByRole("button", { name: "Create contact" })).toBeEnabled();
+  });
+
+  it("hands the auto-added contact up through Confirm, same as a manual add", async () => {
+    const created = contact({ id: 42, name: "Priya Patel" });
+    createContact.createOrAdoptContact.mockResolvedValue({ kind: "created", contact: created });
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+    await userEvent.click(screen.getByRole("button", { name: "+ New contact" }));
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+    await screen.findByText("Created in Odoo and added to this meeting.");
+
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+    expect(props.onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [{ model: "res.partner", resId: 42, name: "Priya Patel" }],
+      })
+    );
+  });
+
+  it("does not auto-add when the log is already full, and says so", async () => {
+    const letters = ["A", "B", "C", "D", "E"];
+    contacts.listContacts.mockResolvedValue(letters.map((n, i) => contact({ id: i + 1, name: n })));
+    const created = contact({ id: 42, name: "Priya Patel" });
+    createContact.createOrAdoptContact.mockResolvedValue({ kind: "created", contact: created });
+    await openCreateForm();
+    // Filling the cap does not close the create form - only a submit or
+    // Cancel does - so it is still open right after this loop.
+    for (const n of letters) {
+      await userEvent.click(screen.getByRole("button", { name: new RegExp(`add ${n}`, "i") }));
+    }
+
+    await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
+    await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
+
+    expect(
+      await screen.findByText("Created in Odoo. The log is full, so tick them below once you free a slot.")
+    ).toBeInTheDocument();
+    // Listed and previewed (createOrAdoptContact still ran, and it can still be
+    // previewed), but NOT staged - the cap refused the add.
+    expect(screen.getByRole("button", { name: /add Priya Patel/i })).toBeInTheDocument();
   });
 });
 
