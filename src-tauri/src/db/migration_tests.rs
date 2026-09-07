@@ -85,7 +85,10 @@ mod tests {
             .into_iter()
             .find(|m| m.description == "backfill_and_drop_queue_summary_json")
             .expect("summary backfill migration must be registered");
-        assert_eq!(m.version, 16, "summary backfill migration must be version 16");
+        assert_eq!(
+            m.version, 16,
+            "summary backfill migration must be version 16"
+        );
         assert_eq!(
             m.sql,
             include_str!("migrations/meeting-log-queue-v2.sql"),
