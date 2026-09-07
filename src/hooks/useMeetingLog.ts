@@ -11,7 +11,7 @@ import {
   readMeetingMessages,
   sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
-import { generateMeetingLogSummary } from "@/lib/functions/meeting-summarizer";
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import { createOdooClient } from "@/lib/odoo/client";
 import {
   HOLD_MS,
@@ -195,8 +195,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const blockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const summarize = useCallback(
-    (entries: TranscriptEntry[]) =>
-      generateMeetingLogSummary(entries, providerConfigRef.current),
+    (conversationId: string | null, entries: TranscriptEntry[]) =>
+      ensureMeetingSummary(conversationId, entries, providerConfigRef.current, 1),
     []
   );
 
@@ -216,7 +216,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         client: createOdooClient(config),
         instance: instanceFingerprint(config.url, config.db),
         now: () => Date.now(),
-        summarize: (slice) => summarize(slice.entries),
+        summarize: (conversationId, slice) => summarize(conversationId, slice.entries),
       });
     } catch (err) {
       // pushQueuedRow never throws; this catches the reads around it. The row
@@ -480,7 +480,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   // hole the guard exists to close.
   useEffect(() => {
     if (!isOwner || sweptThisProcess) return;
-    void runMeetingLogSweep((slice) => summarize(slice.entries))
+    void runMeetingLogSweep((conversationId, slice) => summarize(conversationId, slice.entries))
       .then((outcome) => {
         if (outcome.ran) sweptThisProcess = true;
       })

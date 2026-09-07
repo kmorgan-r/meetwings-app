@@ -211,6 +211,26 @@ describe("runMeetingLogSweep", () => {
     expect(calls().filter((c) => c === "authenticate")).toHaveLength(1);
   });
 
+  it("passes each row's own conversation_id to summarize, not the same value twice", async () => {
+    seedRow({ id: "a", session_key: "a", conversation_id: "conv-a" });
+    seedRow({ id: "b", session_key: "b", conversation_id: "conv-b" });
+    seedTargets("a", 42);
+    seedTargets("b", 42);
+    tauriFetch.mockImplementation(async (_url, init) => {
+      const body = String((init as { body: string }).body);
+      if (body.includes("authenticate")) return AUTH();
+      return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
+    });
+
+    const seen: (string | null)[] = [];
+    await runMeetingLogSweep(async (conversationId) => {
+      seen.push(conversationId);
+      return null;
+    });
+
+    expect(seen).toEqual(["conv-a", "conv-b"]);
+  });
+
   it("continues to the next row when one row throws", async () => {
     // Without per-row isolation a propagating failure abandons every later row.
     seedRow({ id: "bad", session_key: "bad", created_at: NOW - 3000 });
