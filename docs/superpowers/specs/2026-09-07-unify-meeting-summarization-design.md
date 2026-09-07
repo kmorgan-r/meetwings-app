@@ -46,14 +46,21 @@ question to the assistant.
 
 ## What this design settles
 
-- **One AI call, one summary per meeting**, sourced from the transcript with
-  real speaker labels (`renderTranscript`), not chat role labels.
+- **One AI call, one PERSISTED summary per meeting** (the design goal, not an
+  absolute guarantee — see Trigger's fire-and-forget race and "Cache scope is
+  per-conversation, not per-slice" for the two narrow, accepted exceptions),
+  sourced from the transcript with real speaker labels (`renderTranscript`),
+  not chat role labels.
 - **`meeting_summaries` is the canonical store** (already exists, already
   Odoo-independent, already has entity extraction, knowledge-profile
   compaction, and title-adoption wired to it). Not a new table.
 - **Generation is decoupled from Odoo entirely.** It runs at meeting end
-  whether or not Odoo is configured, matching Context Memory's current
-  breadth of coverage — not narrowed to only Odoo-assigned meetings.
+  whether or not Odoo is configured — with one carve-out from Context
+  Memory's PREVIOUS breadth, not a widening of it: a conversation reopened
+  from history with no new live activity this session is no longer
+  re-summarized on switch-away (see Trigger); an existing summary is
+  unaffected, and a never-summarized one waits for the knowledge-compactor
+  backfill instead.
 - **Typed AI Q&A during a meeting is not preserved as its own summary.** It's
   dropped; the raw chat is still visible in Chats history if needed.
 - Dashboard expand button reads the same `meeting_summaries` row the Odoo
@@ -109,13 +116,19 @@ WHERE q.summary_json IS NOT NULL
   -- one conversation can own several queue rows (several pushed slices, see
   -- the Trigger section). `meeting_summaries.conversation_id` IS UNIQUE, so
   -- backfilling every matching row would violate it on the second row for a
-  -- repeat conversation. Keep only the newest cached row per conversation —
-  -- the same choice `ensureMeetingSummary`'s cache-first read effectively
-  -- makes going forward (see "Cache scope is per-conversation, not
-  -- per-slice" under Trigger).
-  AND q.created_at = (
-    SELECT MAX(q2.created_at) FROM meeting_log_queue q2
+  -- repeat conversation. Keep only the NEWEST cached row per conversation —
+  -- each pre-migration row was independently summarized from its own slice,
+  -- so newest is the best single proxy for "most complete/final" available
+  -- at migration time. This is DIFFERENT from (not the same as) the
+  -- cache-first read `ensureMeetingSummary` uses going forward, which keeps
+  -- whichever slice persists FIRST, not newest (see "Cache scope is
+  -- per-conversation, not per-slice" under Trigger) — the two are unrelated
+  -- choices for two different problems (backfill data selection vs. runtime
+  -- API-call avoidance), not a shared rule.
+  AND q.rowid = (
+    SELECT q2.rowid FROM meeting_log_queue q2
     WHERE q2.conversation_id = q.conversation_id AND q2.summary_json IS NOT NULL
+    ORDER BY q2.created_at DESC, q2.rowid DESC LIMIT 1
   )
   AND NOT EXISTS (
     SELECT 1 FROM meeting_summaries s WHERE s.conversation_id = q.conversation_id
@@ -165,7 +178,8 @@ block around the `deps.summarize` call) is deleted in the same change — it
 reads/writes a column that no longer exists, and the caching it did at the
 row level is superseded by `ensureMeetingSummary`'s own conversation-keyed
 cache-first read (step 1 below). The replacement call site is a plain,
-unconditional `summary = await deps.summarize(row.conversationId, slice)`
+unconditional `summary = await deps.summarize(row.conversation_id, slice)`
+(snake_case — `DbMeetingLogRow`'s field, not `NewQueueRow`'s camelCase one)
 (see Trigger).
 
 Note for the implementer: this repo's dev DB has a known `_sqlx_migrations`
@@ -187,44 +201,74 @@ export async function ensureMeetingSummary(
 ): Promise<SummarizationResult | null>
 ```
 
+`minEntries` is the fourth POSITIONAL argument (there is no options object) —
+every call site below passes all four, in order, e.g.
+`ensureMeetingSummary(id, entries, providerConfig, 1)`; prose elsewhere in
+this spec says "passes `1`" or "passes `4`" for brevity, always meaning this
+argument.
+
 Behavior:
 1. If `conversationId` is non-null, look up `getMeetingSummaryByConversation`
    first. A hit returns its fields as `SummarizationResult` — no AI call.
 2. On a miss (or `conversationId === null`), gate on `entries.length >=
    minEntries`. **`minEntries` is a parameter, not a constant, because the two
-   callers need different floors.** The Context Memory trigger uses the
-   default (4, an even trade for today's `MIN_EXCHANGES_FOR_SUMMARY = 2`
-   exchanges / 4 messages). The Odoo trigger passes `minEntries: 1`, matching
-   `generateMeetingLogSummary`'s floor today (`entries.length === 0` is the
-   only skip, `meeting-summarizer.ts` — "a short meeting still gets logged").
-   A uniform gate of 4 would silently regress Odoo: a 1-3 line meeting would
-   fall through to `buildNoteBody`'s no-summary branch, whose copy says
-   "Summarization failed" — false for a meeting that was simply short, not one
-   the AI choked on. Below the gate, return `null` without calling the AI.
+   callers need different floors for whether to CALL THE AI at all.** The
+   Context Memory trigger passes `4` (an even trade for today's
+   `MIN_EXCHANGES_FOR_SUMMARY = 2` exchanges / 4 messages). The Odoo trigger
+   passes `1`, matching `generateMeetingLogSummary`'s floor today
+   (`entries.length === 0` is the only skip, `meeting-summarizer.ts` — "a
+   short meeting still gets logged"). A uniform gate of 4 would silently
+   regress Odoo: a 1-3 line meeting would fall through to `buildNoteBody`'s
+   no-summary branch, whose copy says "Summarization failed" — false for a
+   meeting that was simply short, not one the AI choked on. Below the gate,
+   return `null` without calling the AI.
 3. Build the prompt from `renderTranscript(entries)` (speaker-labeled), same
    as today's Odoo path — not `formatConversationForSummary`.
-4. On a successful result: if `conversationId` is non-null, persist via
-   `saveSummarizationResult` (unchanged — this is what drives entity
-   extraction, knowledge-profile compaction, and title-adoption), passing
-   `entries.length` as its `exchangeCount` argument. `exchangeCount` was
-   always a count of `Message[]` user/assistant pairs (`countExchanges`) —
-   with no `Message[]` left in this path, the closest surviving concept is
-   the number of transcript entries that went in, so the column is
-   repurposed to mean "how many transcript lines," not dropped. `SummaryDetail.tsx`'s
-   footer already just prints this number ("N exchanges"); it keeps rendering
-   a real, meaningful count rather than a hardcoded 0. **If the
-   persist itself fails** (`saveSummarizationResult` returns `null` — a DB
-   write error), `ensureMeetingSummary` still returns the generated `result`,
-   not `null`. This is new behavior the two functions being merged never had
-   to define, because generation and persistence used to be two different
+4. On a successful result: **persist only when `entries.length >= 4`** — a
+   SEPARATE, fixed threshold from step 2's `minEntries`, matching Context
+   Memory's own floor regardless of what `minEntries` the caller passed. This
+   is deliberate, not an oversight: `minEntries: 1` controls whether Odoo gets
+   a real AI-written note for a short meeting, but the canonical
+   `meeting_summaries` row is shared with Context Memory and gated by step
+   1's cache — the FIRST slice to persist wins for the whole conversation, so
+   letting a 1-entry Odoo slice persist would permanently lock the
+   conversation's canonical summary to a fragment, and Context Memory's own
+   later, fuller-transcript run would never regenerate it (cache hit). Below
+   4, `ensureMeetingSummary` still returns the generated `result` to its
+   caller (Odoo's note is unaffected — the summary is real, just not durable)
+   but skips `saveSummarizationResult`, `applySummaryTitleToConversation`,
+   and entity extraction entirely for that call. When `conversationId` is
+   null, persistence was already skipped for a different reason (nothing to
+   key it on) — this rule adds a second, independent reason it can be
+   skipped even with a real `conversationId`.
+
+   When persistence DOES run, it calls `saveSummarizationResult` (unchanged —
+   this is what drives entity extraction, knowledge-profile compaction, and
+   title-adoption), passing `entries.length` as its `exchangeCount` argument.
+   `exchangeCount` was always a count of `Message[]` user/assistant pairs
+   (`countExchanges`) — with no `Message[]` left in this path, the closest
+   surviving concept is the number of transcript entries that went in, so the
+   column is repurposed to mean "how many transcript lines," not dropped.
+   `SummaryDetail.tsx`'s metadata footer currently prints this number as "N
+   exchanges"; its label changes to something like "N transcript lines" to
+   match (it stays in `SummaryDetail.tsx`'s own chrome, not the extracted
+   `SummaryContent` piece — see Dashboard expand button — since the dashboard
+   expand is a compact inline view and doesn't need it). For a
+   migration-16-backfilled row (`exchange_count = 0`, see Data model) the
+   footer renders nothing rather than the misleading "0 transcript lines."
+
+   **If the persist itself fails** (`saveSummarizationResult` returns `null`
+   — a DB write error, distinct from being skipped by the 4-entry floor
+   above), `ensureMeetingSummary` still returns the generated `result`, not
+   `null`. This is new behavior the two functions being merged never had to
+   define, because generation and persistence used to be two different
    functions on two different call paths: today a persist failure only ever
    happened on the Context Memory path, silently, with no other consumer
    waiting on the result. Now the SAME call can feed the Odoo note, and a
    generated-but-unpersisted result must still reach `buildNoteBody` — the
    alternative (returning `null`) would make a working AI call look like a
    summarization failure and trigger the transcript-excerpt fallback body for
-   a note that has a perfectly good summary sitting in memory. If
-   `conversationId` is null, return the result without persisting (unchanged).
+   a note that has a perfectly good summary sitting in memory.
 5. Never throws — same contract `generateMeetingLogSummary` documents today
    (`meeting-summarizer.ts:437-440`): a summarization failure must not become
    a push failure or a lost meeting.
@@ -247,15 +291,21 @@ completion handler, converting `conversation.messages` the same way). Both
 only have `ChatMessage[]` in hand — DB-loaded history, not a live
 `TranscriptEntry[]` — because both summarize AFTER the fact, not from an
 in-memory `meetingTranscript` that was never persisted. Both need a small
-adapter, `ChatMessage[] → TranscriptEntry[]`, mapping `content → original`,
-plus `timestamp`, `speaker`, and `audioSource` straight across — `ChatMessage`
-already carries all three (`src/types/completion.ts:46-60`), because
-`addMeetingTranscript`/`addMeetingTranscriptEntries` stamped them there from
-the same `TranscriptEntry` in the first place (see Why). Neither caller has
-a live "meeting" concept, so both call `ensureMeetingSummary` with
-`minEntries: 4` (Context Memory's floor, not Odoo's) — a short, mostly-empty
-old conversation should stay silently unsummarized on backfill, exactly as
-`shouldSummarize` already gates it today.
+adapter, `ChatMessage[] → TranscriptEntry[]`, and it must FILTER, not just
+map: `conv.messages`/`conversation.messages` include `role: "assistant"`
+replies, which have no `speaker`/`audioSource` and would render unlabeled
+next to speaker-labeled human lines in `renderTranscript` — exactly the
+"typed AI Q&A mixed into the summary" framing this whole design drops (see
+What this design settles). The adapter keeps only `role === "user"` messages
+(every live-transcript-originated `ChatMessage` is stamped `role: "user"` by
+`addMeetingTranscript`/`addMeetingTranscriptEntries` in the first place — see
+Why), then maps `content → original` plus `timestamp`, `speaker`, and
+`audioSource` straight across — `ChatMessage` already carries all three
+(`src/types/completion.ts:46-60`). Neither caller has a live "meeting"
+concept, so both call `ensureMeetingSummary` with `4` as `minEntries` (the
+Context Memory floor, not Odoo's `1`) — counted AFTER the `role === "user"`
+filter, not the raw message count, so a conversation with 4 user turns and no
+assistant replies still gates correctly on its real (filtered) entry count.
 
 ## Trigger
 
@@ -290,13 +340,50 @@ where `ensureConversationId` mints a fresh id inside
 had none yet, to the length immediately BEFORE that call's own entry/entries
 are appended (so the entry that started the conversation is included in its
 own summary — the exact index arithmetic is an implementation detail for the
-plan). `summarizeCurrentConversation` then passes
-`meetingTranscript.slice(conversationTranscriptStartRef.current)` to
+plan).
+
+**The read has to happen SYNCHRONOUSLY, before `summarizeCurrentConversation`'s
+own first `await` — this is not a style preference, it is the difference
+between the fix working and never firing at all.** Both call sites invoke
+`summarizeCurrentConversation()` fire-and-forget and then IMMEDIATELY continue
+running their own remaining synchronous statements — including the line that
+advances `currentConversationIdRef`/`conversationTranscriptStartRef` to the
+NEW conversation (`loadConversation`/`startNewConversation`, just below the
+call). Calling an async function runs its body synchronously up to its first
+`await`; anything after that first `await` runs as a later microtask, AFTER
+the caller's own remaining synchronous code has already finished — including
+the ref advance. So if the slice is computed anywhere past
+`summarizeCurrentConversation`'s existing first `await`
+(`await shouldUseMeetwingsAPI()`), `conversationTranscriptStartRef.current`
+has ALREADY been moved to the new conversation's start by the time it's read,
+and the slice is empty on every single switch — not a rare race, a
+deterministic no-op. The fix: read the ref and materialize
+`meetingTranscript.slice(conversationTranscriptStartRef.current)` as the
+VERY FIRST statement(s) of `summarizeCurrentConversation`, before any
+`await` — including before the existing `!state.currentConversationId` guard
+if that guard itself moves below an `await` in the rewrite. (A narrower,
+accepted edge case: `await flushUnsavedMeetingTranscript()` runs BEFORE
+`summarizeCurrentConversation()` is even called, at both call sites — if a
+STILL-LIVE transcription pipeline pushes a new entry into `meetingTranscript`
+during that flush's own await window, mid-switch, it's captured by whichever
+conversation is still "current" at that moment, same as it would be under
+today's code; this is not made worse by this change and is not addressed
+further here.)
+
+`summarizeCurrentConversation` then passes the materialized slice to
 `ensureMeetingSummary`, not `meetingTranscript` itself. Its `useCallback`
 dependency array (`:1394-1399`) must swap `state.conversationHistory` for
 `meetingTranscript` (today's array lists `conversationHistory` specifically
 because the body reads it) — leaving the old array while changing the body's
-data source is a stale-closure bug the callback would silently carry.
+data source is a stale-closure bug the callback would silently carry. The
+body's own inline guard (`:1360`,
+`if (!state.currentConversationId || state.conversationHistory.length < 4) return`)
+splits in two: the length half is dropped (superseded by
+`ensureMeetingSummary`'s own `minEntries` gate), but the
+`!state.currentConversationId` half STAYS — without it, a conversation that
+hasn't been assigned an id yet calls `ensureMeetingSummary(null, ...)`, which
+per step 4 generates without persisting: a real AI call spent on a result
+nobody will ever read.
 
 One consequence worth stating explicitly: a conversation reopened from Chats
 history with no NEW live transcript activity this session now slices to
@@ -323,15 +410,16 @@ one of its call sites: `PushDeps.summarize` is typed
 - `PushDeps.summarize` widens to
   `(conversationId: string | null, slice: TranscriptSlice) => Promise<SummarizationResult | null>`.
 - `pushQueuedRow`'s call site changes from `deps.summarize(slice)` to
-  `deps.summarize(row.conversationId, slice)`, replacing the deleted
+  `deps.summarize(row.conversation_id, slice)` (`DbMeetingLogRow`'s field is
+  snake_case, unlike `NewQueueRow`'s), replacing the deleted
   `row.summary_json`/`setSummaryJson` cache block entirely (see Data model).
 - `useMeetingLog.ts`'s `summarize` `useCallback` (`:197-201`) widens to
   `(conversationId: string | null, entries: TranscriptEntry[]) =>
   ensureMeetingSummary(conversationId, entries, providerConfigRef.current, 1)`
-  — `minEntries: 1`, matching the Odoo floor the shared helper section
+  — `1` as `minEntries`, matching the Odoo floor the shared helper section
   describes.
 - Both current call sites of `summarize` update to match: `pushHeldRow`
-  (`:203-217`) already has `row` in scope and passes `row.conversationId`
+  (`:203-217`) already has `row` in scope and passes `row.conversation_id`
   directly; the single closure built at `:483` and handed into
   `runMeetingLogSweep` is defined ONCE, before that function's own per-row
   loop runs, so it must accept `conversationId` as an argument rather than
@@ -343,16 +431,24 @@ one of its call sites: `PushDeps.summarize` is typed
 cache (the shared helper's step 1) is keyed on `conversationId` alone, but one
 conversation can generate more than one `meeting_log_queue` row over time —
 `sessionKeyFor` keys each row on `conversationId:startAt`, not
-`conversationId` alone. Under the cache-first read, only the first slice's
-push ever calls the AI; a later slice for the SAME conversation hits the
-cache and posts the FIRST slice's summary text to Odoo, describing the wrong
-part of the meeting. This is accepted as a deliberate, bounded limitation:
-reworking the Odoo watermark/dedup logic to key summaries per-slice is out of
-scope (see Out of scope), and a conversation producing a second queue row is
-the exception, not the common case. No code change is needed in
-`buildNoteBody` for this — a cache hit still returns a normal
-`SummarizationResult`, not `null`, so the note it produces reads like any
-other successful summary, not like the "Summarization failed" fallback.
+`conversationId` alone. Under the cache-first read, the FIRST slice whose
+summary actually PERSISTS (step 4's `entries.length >= 4` gate) wins the
+cache for the whole conversation; a later slice for the SAME conversation
+then hits the cache and posts that earlier slice's summary text to Odoo,
+describing the wrong part of the meeting. Step 4's persist floor already
+narrows how often this triggers — a short first slice (1-3 entries) now
+generates a real note but does NOT persist, so a substantial second slice
+still gets its own real summary rather than inheriting a fragment — but it
+does not eliminate the case where the FIRST slice itself is already
+substantial (4+ entries): that one persists, and any later slice for the same
+conversation is a guaranteed cache hit regardless of its own content. This
+residual is accepted as a deliberate, bounded limitation: reworking the Odoo
+watermark/dedup logic to key summaries per-slice is out of scope (see Out of
+scope), and a conversation producing a second queue row at all is the
+exception, not the common case. No code change is needed in `buildNoteBody`
+for this — a cache hit still returns a normal `SummarizationResult`, not
+`null`, so the note it produces reads like any other successful summary, not
+like the "Summarization failed" fallback.
 
 Because `summarizeCurrentConversation` fires fire-and-forget
 (`useCompletion.ts:1379-1393`, never awaited) and an AI call takes real time,
@@ -370,24 +466,32 @@ separate functions already had today.
 
 No design change — `createOrUpdateKnowledgeEntity` /`createEntityMention`
 (`meeting-context.action.ts:409`, `:550`) stay wired exactly where they are,
-inside the save step `ensureMeetingSummary` now shares. The only behavioral
-change is coverage: entities now get extracted for every summarized meeting,
-including ones where the user never typed a chat question — previously those
-were invisible to Context Memory entirely.
+inside the save step `ensureMeetingSummary` now shares, and only run when
+that step's persist threshold is met. Coverage moves in both directions, not
+only up: meetings where the user never typed a chat question now get entity
+extraction for the first time (previously invisible to Context Memory
+entirely), but two narrower gaps open elsewhere and are accepted, not fixed,
+by this design — migration 16's backfilled rows (see Data model) never ran
+extraction and have no `entities` blob to draw from, and a historical
+conversation reopened with no new live activity gets none until the
+knowledge-compactor backfill reaches it (see Trigger).
 
 ## Dashboard expand button
 
-`QueueRow.tsx` / `ConversationRow.tsx` (`src/pages/meetings/components/`)
-already carry `conversation_id` per row (`MeetingLogListRow`'s
-`conversation_id: string | null`, inherited from `DbMeetingLogRow`). Add an
-expand affordance that, on open, calls
-`getMeetingSummaryByConversation(conversationId)` and renders the result
-inline — but only when `conversation_id` is non-null. A null
-`conversation_id` (the same rare recovery-path gap Error handling documents
-below) hides the expand affordance entirely rather than offering a toggle
-that can only ever show "No summary available," mirroring how
-`SummaryDetail.tsx`'s own "open conversation" button is already disabled on
-`!summary.conversationId`.
+`QueueRow.tsx` and `ConversationRow.tsx` (`src/pages/meetings/components/`)
+each need a different rule for when the expand affordance shows, because they
+carry the conversation id differently. `QueueRow` gets it from
+`row.conversation_id`, which is `string | null` (`MeetingLogListRow`,
+inherited from `DbMeetingLogRow`) — a null value (the same rare
+recovery-path gap Error handling documents below) hides the expand
+affordance entirely rather than offering a toggle that can only ever show
+"No summary available," mirroring how `SummaryDetail.tsx`'s own "open
+conversation" button is already disabled on `!summary.conversationId`.
+`ConversationRow` has no `row` object at all (see below) — its `id` prop IS
+the conversation id directly, primitive and never null, so its expand
+affordance always shows. Both call
+`getMeetingSummaryByConversation(conversationId)` on open and render the
+result inline.
 
 **Expand/fetch state is row-local, not parent-owned — deliberately, so
 neither row component's memoization contract needs to change.** `QueueRow` is
@@ -397,14 +501,22 @@ enumerates every rendered prop, including its existing
 `onToggleTranscript`); any NEW parent-owned prop has to be added there or the
 memo silently swallows its updates — a bug class the file's own comment
 already warns about. `ConversationRow` goes further: it deliberately accepts
-ONLY primitives so it can rely on `memo`'s default shallow compare with no
-custom comparator at all (`ConversationRow.tsx:54-68`); a fetched summary
-object passed down as a prop would break that contract outright. Keeping the
-expand toggle, the fetch, the loading/error state, and the rendered
-`SummaryContent` entirely inside each row's OWN `useState`/`useEffect` — fired
-on click, never threaded down as a prop — sidesteps both constraints:
-`QueueRow`'s comparator and `ConversationRow`'s primitives-only prop list stay
-exactly as they are today.
+ONLY primitives (`id`, `title`, `messageCount`, `updatedAt`, `badgeStatus`,
+`badgeCount`, `whoLabel`, plus four stable callbacks — no `row` object) so it
+can rely on `memo`'s default shallow compare with no custom comparator at all
+(`ConversationRow.tsx:54-68`); a fetched summary object passed down as a prop
+would break that contract outright. Keeping the expand toggle, the fetch, and
+the rendered `SummaryContent` entirely inside each row's OWN
+`useState`/`useEffect` — fired on click, never threaded down as a prop —
+sidesteps both constraints: `QueueRow`'s comparator and `ConversationRow`'s
+primitives-only prop list stay exactly as they are today. There is no
+separate loading-vs-error split in that local state:
+`getMeetingSummaryByConversation` already swallows every DB failure and
+returns `null` (`meeting-context.action.ts:186-189`, `catch { ...; return
+null; }`), so a row can never distinguish "no summary yet" from "the read
+failed" — both render the same "No summary available" state below, and a row
+only needs `loading | { summary: MeetingSummary | null }`, not a third error
+branch nothing can ever put it in.
 
 Extract a small presentational `SummaryContent` component from the guts of
 `SummaryDetail.tsx` (title/summary/topics/decisions/action items/next
@@ -438,23 +550,47 @@ for short or `unassigned`/`held` meetings, not a failure.
 
 - `meeting-summarizer.ts`: new tests for `ensureMeetingSummary` — cache hit
   (no AI call), cache miss + gate below `minEntries` (no AI call, returns
-  null; cover both the default gate of 4 and the Odoo-path gate of 1 — a
-  2-entry transcript must skip under the former and generate under the
-  latter), cache miss + gate met (AI call, persists, entity extraction
-  fires), `conversationId === null` (AI call, no persist), AI failure
-  (returns null, never throws), **and generate-succeeds-but-persist-fails**
-  (`saveSummarizationResult` returns null — `ensureMeetingSummary` must still
-  return the generated `result`, not `null`, per the shared helper's step 4).
+  null; cover both `minEntries: 4` and `minEntries: 1` — a 2-entry transcript
+  must skip under the former and generate under the latter), cache miss +
+  `minEntries: 1` + `entries.length` in `[1, 4)` (AI call happens, a real
+  result is RETURNED, but `saveSummarizationResult`/entity extraction do NOT
+  run — the step 4 persist floor, distinct from the `minEntries` gate above
+  it), cache miss + `entries.length >= 4` (AI call, persists, entity
+  extraction fires), `conversationId === null` (AI call, no persist), AI
+  failure (returns null, never throws), **and
+  generate-succeeds-but-persist-fails** (`saveSummarizationResult` returns
+  null — `ensureMeetingSummary` must still return the generated `result`,
+  not `null`).
+- `useCompletion.ts`: a test for `summarizeCurrentConversation`'s
+  per-conversation slicing — seed `meetingTranscript` with entries from TWO
+  different conversations in one session (mirroring how the array is never
+  cleared between them), switch from the first to the second, and assert only
+  the SECOND conversation's own entries reach `ensureMeetingSummary` — this is
+  the test that would catch both the "summarizes everything since session
+  start" bug and the synchronous-read-before-any-await ordering hazard
+  described in Trigger (an incorrectly-async implementation would send an
+  empty slice instead of the wrong one, so assert the call actually fires
+  with non-empty, conversation-2-only entries, not just that it fires).
+- `knowledge-compactor.ts` / `useSystemAudio.ts`: a test for the
+  `ChatMessage[] → TranscriptEntry[]` adapter proving `role: "assistant"`
+  messages are filtered out before the entry count is checked against
+  `minEntries: 4` — a conversation with 4 user turns and 4 assistant replies
+  (8 raw messages) must still gate on 4, not 8, and the assistant replies must
+  never reach `renderTranscript`.
 - `odoo-meeting-log-push.test.ts`: update the `summarize` dependency's shape
   in test fakes to match the new `(conversationId, slice)` signature and
   "look up or generate," not "always generate" — existing assertions on
   `subtype_xmlid`/`body_is_html` etc. are unaffected. Add a test that no
   longer reads/writes `row.summary_json` (the deleted cache block), and a
   sweep-path test (not just a single held-row push) proving the correct
-  per-row `conversationId` reaches `ensureMeetingSummary` for each of several
+  per-row `conversation_id` reaches `ensureMeetingSummary` for each of several
   rows in one sweep — the bug this signature change exists to fix would
   otherwise pass a single-row test and fail silently on real multi-row
   sweeps.
+- `listActionable` smoke test: after migration 16 runs, assert the query that
+  backs the meetings dashboard still executes and returns rows — this is the
+  query the Data model section calls out as breaking outright if the
+  `summary_json` column reference there is missed.
 - Migration test: seed a `meeting_log_queue` row with `summary_json` and no
   matching `meeting_summaries` row, run the migration, assert the row lands in
   `meeting_summaries` and the column is gone. Two more migration test cases,
@@ -463,11 +599,14 @@ for short or `unassigned`/`held` meetings, not a failure.
   NULL` — assert it is skipped, not backfilled, and the migration still
   completes; (b) a `meeting_log_queue` row with `summary_json` set whose
   `conversation_id` ALREADY has a `meeting_summaries` row — assert no second
-  row is inserted (the `NOT EXISTS` guard) — and a fourth case, (c) TWO
+  row is inserted (the `NOT EXISTS` guard) — and two more, (c) TWO
   `meeting_log_queue` rows sharing one `conversation_id`, both with
-  `summary_json` set — assert exactly one `meeting_summaries` row results,
-  from the newer of the two (the `MAX(created_at)` guard added to fix the
-  `UNIQUE` violation described in Data model).
+  `summary_json` set and DIFFERENT `created_at` values — assert exactly one
+  `meeting_summaries` row results, from the newer of the two; and (d) the
+  SAME two-row setup but with IDENTICAL `created_at` values — assert it still
+  produces exactly one row (the `rowid` tiebreak, not `created_at` alone, is
+  what keeps this case from reintroducing the `UNIQUE` violation described in
+  Data model).
 - New render test for the dashboard expand: renders summary content when
   present, "no summary" state when absent, doesn't fetch until expanded, and
   renders no expand affordance at all when `conversation_id` is null.
