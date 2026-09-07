@@ -87,6 +87,7 @@ import {
   getTranscriptWatermark,
   insertQueueRow,
   listActionableRows,
+  listConversationBadgeRows,
   listTargets,
   markSent,
   pruneTranscripts,
@@ -1296,6 +1297,52 @@ describe("listActionableRows", () => {
     const rows = await listActionableRows(INSTANCE);
 
     expect(rows.map((r) => r.id)).toEqual(["u-new", "u-mid", "u-old"]);
+  });
+});
+
+describe("listConversationBadgeRows", () => {
+  it("excludes a row with no conversation", async () => {
+    seed({ id: "r", conversation_id: null });
+    expect(await listConversationBadgeRows()).toHaveLength(0);
+  });
+
+  it("includes a sent row, unlike listActionableRows", async () => {
+    seed({ id: "r", conversation_id: "c1", status: "sent" });
+    const [row] = await listConversationBadgeRows();
+    expect(row).toMatchObject({ conversationId: "c1", status: "sent" });
+  });
+
+  it("includes an other-instance row - classification is the caller's job", async () => {
+    seed({ id: "r", conversation_id: "c1", status: "failed", instance: OTHER });
+    expect(await listConversationBadgeRows()).toHaveLength(1);
+  });
+
+  it("attaches targets to every row with one extra query, not N+1", async () => {
+    const spy = spyOnSelect();
+    seed({ id: "r1", session_key: "r1", conversation_id: "c1", status: "sent" });
+    seed({ id: "r2", session_key: "r2", conversation_id: "c2", status: "sent" });
+    seedTargets("r1", [{ resId: 1, name: "Jane Doe" }]);
+    seedTargets("r2", [{ resId: 2, name: "John Smith" }]);
+
+    const rows = await listConversationBadgeRows();
+
+    expect(rows.map((r) => r.targets.map((t) => t.name))).toEqual([["Jane Doe"], ["John Smith"]]);
+    expect(spy.calls.filter((s) => s.includes("meeting_log_targets"))).toHaveLength(1);
+  });
+
+  it("carries contact_id/lead_id for a pre-target-table row", async () => {
+    seed({ id: "r", conversation_id: "c1", status: "sent", contact_id: 7, lead_id: null });
+    const [row] = await listConversationBadgeRows();
+    expect(row).toMatchObject({ contact_id: 7, lead_id: null, targets: [] });
+  });
+
+  it("orders rows newest-first, so 'first at a rank' is 'most recent at that rank'", async () => {
+    seed({ id: "old", session_key: "o", conversation_id: "c1", status: "sent", created_at: NOW });
+    seed({ id: "new", session_key: "n", conversation_id: "c1", status: "sent", created_at: NOW + 10 });
+
+    const rows = await listConversationBadgeRows();
+
+    expect(rows.map((r) => r.id)).toEqual(["new", "old"]);
   });
 });
 

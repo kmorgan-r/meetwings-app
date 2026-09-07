@@ -367,10 +367,15 @@ const BADGE_RANK = ["failed", "unassigned", "sending", "pending", "held", "sent"
  * pushQueuedRow's instance check would refuse the very action a badge implies
  * is available.
  */
-export function resolveBadge(
-  rows: ReadonlyArray<{ status: string; instance: string }>,
+/**
+ * The eligibility + worst-status-wins core shared by `resolveBadge` and
+ * `resolveBadgeRow` below, so the two can never disagree about which rows a
+ * conversation's badge is drawn from.
+ */
+function worstEligible<T extends { status: string; instance: string }>(
+  rows: readonly T[],
   currentInstance: string
-): { status: (typeof BADGE_RANK)[number]; count: number } | null {
+): { worst: (typeof BADGE_RANK)[number]; atWorst: T[] } | null {
   const eligible = rows.filter((r) =>
     r.instance === currentInstance
       ? (BADGE_RANK as readonly string[]).includes(r.status)
@@ -380,6 +385,15 @@ export function resolveBadge(
 
   const worst = BADGE_RANK.find((s) => eligible.some((r) => r.status === s));
   if (!worst) return null;
+  return { worst, atWorst: eligible.filter((r) => r.status === worst) };
+}
+
+export function resolveBadge(
+  rows: ReadonlyArray<{ status: string; instance: string }>,
+  currentInstance: string
+): { status: (typeof BADGE_RANK)[number]; count: number } | null {
+  const result = worstEligible(rows, currentInstance);
+  if (!result) return null;
   // Counts the rows IN `worst`, not every eligible row. The two are rendered
   // as one phrase - "Odoo send failed (4)" - so counting all four of a
   // conversation's one failed, one sent, one pending and one held row claims
@@ -391,7 +405,26 @@ export function resolveBadge(
   // teaching this module about it to recover a parenthetical would put a
   // third grouping beside `groupOf` and this rank. A mild undercount on a
   // transient waiting state beats an overcount on a failure.
-  return { status: worst, count: eligible.filter((r) => r.status === worst).length };
+  return { status: result.worst, count: result.atWorst.length };
+}
+
+/**
+ * The single row that names WHO a conversation's badge is about: the first
+ * row at the badge's own worst-status rank.
+ *
+ * Callers must pass rows already sorted `created_at DESC` (as
+ * `listConversationBadgeRows` does) - "first at the worst rank" is then "most
+ * recently created at that rank", the same row a user re-reading their own
+ * history would expect the label to describe. Returns the same shape it was
+ * given, so a caller can attach any extra fields (targets, contact_id,
+ * lead_id, ...) `resolveBadge` itself never needs.
+ */
+export function resolveBadgeRow<T extends { status: string; instance: string }>(
+  rows: readonly T[],
+  currentInstance: string
+): T | null {
+  const result = worstEligible(rows, currentInstance);
+  return result ? result.atWorst[0] : null;
 }
 
 /** Pure so retention is testable without a clock. */

@@ -33,6 +33,7 @@ describe("ConversationList", () => {
         conversations={[matching, nonMatching]}
         search="quarterly"
         badges={new Map()}
+        whoNames={new Map()}
         onOpen={vi.fn()}
         onStartRename={vi.fn()}
         onCommitRename={vi.fn()}
@@ -57,6 +58,7 @@ describe("ConversationList", () => {
         conversations={[matching, beingRenamed]}
         search="zzz-no-match"
         badges={new Map()}
+        whoNames={new Map()}
         onOpen={vi.fn()}
         onStartRename={vi.fn()}
         onCommitRename={vi.fn()}
@@ -83,6 +85,7 @@ describe("ConversationList", () => {
         conversations={[beingRenamed]}
         search="zzz-no-match"
         badges={new Map()}
+        whoNames={new Map()}
         onOpen={vi.fn()}
         onStartRename={vi.fn()}
         onCommitRename={vi.fn()}
@@ -106,6 +109,7 @@ describe("ConversationList", () => {
         conversations={[matching, nonMatching]}
         search="quarterly"
         badges={new Map()}
+        whoNames={new Map()}
         onOpen={vi.fn()}
         onStartRename={vi.fn()}
         onCommitRename={vi.fn()}
@@ -129,6 +133,7 @@ describe("ConversationList", () => {
         conversations={[beingRenamed, sameDay]}
         search="zzz-no-match"
         badges={new Map()}
+        whoNames={new Map()}
         onOpen={vi.fn()}
         onStartRename={vi.fn()}
         onCommitRename={vi.fn()}
@@ -141,5 +146,93 @@ describe("ConversationList", () => {
     expect(screen.getByRole("textbox")).toHaveValue("Supplier onboarding");
     expect(document.querySelector('[data-conversation-id="c3"]')).toBeNull();
     expect(screen.queryByText("Budget sign-off")).toBeNull();
+  });
+
+  it("matches on who the meeting was with, not just the title", () => {
+    // Neither title mentions "jane" - only whoNames does. A title-only filter
+    // would drop this conversation even though it is exactly the meeting
+    // being searched for.
+    const withJane = conversation({ id: "c1", title: "Quarterly review", updatedAt: OLDER_DATE });
+    const withoutJane = conversation({ id: "c2", title: "Supplier onboarding", updatedAt: OLDER_DATE });
+
+    render(
+      <ConversationList
+        conversations={[withJane, withoutJane]}
+        search="jane"
+        badges={new Map()}
+        whoNames={new Map([["c1", "Jane Doe"]])}
+        onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        renamingId={null}
+      />
+    );
+
+    expect(screen.getByText("Quarterly review")).toBeInTheDocument();
+    expect(screen.queryByText("Supplier onboarding")).toBeNull();
+  });
+
+  it("matches a who-name search case-insensitively", () => {
+    const withJane = conversation({ id: "c1", title: "Quarterly review", updatedAt: OLDER_DATE });
+
+    render(
+      <ConversationList
+        conversations={[withJane]}
+        search="JANE"
+        badges={new Map()}
+        whoNames={new Map([["c1", "Jane Doe"]])}
+        onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        renamingId={null}
+      />
+    );
+
+    expect(screen.getByText("Quarterly review")).toBeInTheDocument();
+  });
+
+  it("appends the who label to the badge, not in place of it", () => {
+    const withJane = conversation({ id: "c1", title: "Quarterly review", updatedAt: OLDER_DATE });
+
+    render(
+      <ConversationList
+        conversations={[withJane]}
+        search=""
+        badges={new Map([["c1", { status: "sent", count: 1 }]])}
+        whoNames={new Map([["c1", "Jane Doe"]])}
+        onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        renamingId={null}
+      />
+    );
+
+    const badge = document.querySelector('[data-badge-status="sent"]');
+    expect(badge).not.toBeNull();
+    expect(badge!.textContent).toBe("Sent to Odoo · Jane Doe");
+  });
+
+  it("renders no who label when the badge has none", () => {
+    const withoutWho = conversation({ id: "c1", title: "Quarterly review", updatedAt: OLDER_DATE });
+
+    render(
+      <ConversationList
+        conversations={[withoutWho]}
+        search=""
+        badges={new Map([["c1", { status: "unassigned", count: 1 }]])}
+        whoNames={new Map()}
+        onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        renamingId={null}
+      />
+    );
+
+    const badge = document.querySelector('[data-badge-status="unassigned"]');
+    expect(badge!.textContent).toBe("Needs a contact");
   });
 });

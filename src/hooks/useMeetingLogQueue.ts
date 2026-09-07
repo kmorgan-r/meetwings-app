@@ -37,8 +37,8 @@ import {
   loadOdooConfigState,
 } from "@/lib/storage/odoo-config.storage";
 import type {
+  ConversationBadgeRow,
   MeetingLogListRow,
-  MeetingLogStatus,
   MeetingLogTarget,
   OdooContact,
 } from "@/types";
@@ -315,24 +315,32 @@ function targetOutcomeCopy(outcome: TargetActionOutcome, action: "retry" | "remo
  * picker only offered opportunities; now that it offers leads too, that word
  * would be a guess printed beside a customer's name.
  */
-export function targetNameOf(row: MeetingLogListRow, contacts: Map<number, OdooContact>): string {
+export function targetNameOf(
+  row: Pick<MeetingLogListRow, "targets" | "contact_id" | "lead_id">,
+  contacts: Map<number, OdooContact>
+): string {
   const targets = row.targets ?? [];
   if (targets.length > 0) {
     const names = targets.map((t) => targetNameOfSingle(t, contacts));
     return names.length === 1 ? names[0] : `${names[0]} + ${names.length - 1} more`;
   }
+  // `?? null`: this same chain now also runs over `ConversationBadgeRow`
+  // (the meetings page's "who was this with" label), whose fields are always
+  // present at runtime, but a test double built from a partial object
+  // literal can still omit them - and that must degrade to "No contact
+  // chosen", not to a literal "Contact #undefined".
+  const contactId = row.contact_id ?? null;
+  const leadId = row.lead_id ?? null;
   // A row can have a crm.lead and NO contact: a lead picked out of the search
   // has no res.partner behind it. Reading that as "No contact chosen" would
   // offer to assign a meeting that is already correctly targeted, and the id
   // is all there is to name it by - the queue stores no lead name.
-  if (row.contact_id === null) {
-    return row.lead_id === null
-      ? "No contact chosen"
-      : `Lead or opportunity #${row.lead_id}`;
+  if (contactId === null) {
+    return leadId === null ? "No contact chosen" : `Lead or opportunity #${leadId}`;
   }
-  const cached = contacts.get(row.contact_id);
-  const base = cached ? cached.name : `Contact #${row.contact_id}`;
-  return row.lead_id === null ? base : `${base} (lead or opportunity)`;
+  const cached = contacts.get(contactId);
+  const base = cached ? cached.name : `Contact #${contactId}`;
+  return leadId === null ? base : `${base} (lead or opportunity)`;
 }
 
 type ConfigState = "loading" | "absent" | "incomplete" | "complete";
@@ -343,11 +351,10 @@ export function useMeetingLogQueue() {
   const [rows, setRows] = useState<MeetingLogListRow[]>([]);
   const [contacts, setContacts] = useState<Map<number, OdooContact>>(new Map());
   // Raw, ungrouped - one entry per queue row that names a conversation, from
-  // EVERY instance. Grouping by conversationId and resolving a badge per
-  // group (resolveBadge, @/lib/odoo/meeting-log) is the consuming page's job.
-  const [badgeRows, setBadgeRows] = useState<
-    Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
-  >([]);
+  // EVERY instance. Grouping by conversationId and resolving a badge (and its
+  // "who" row) per group (resolveBadge/resolveBadgeRow, @/lib/odoo/meeting-log)
+  // is the consuming page's job.
+  const [badgeRows, setBadgeRows] = useState<ConversationBadgeRow[]>([]);
   const [stranded, setStranded] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Set<string>>(new Set());

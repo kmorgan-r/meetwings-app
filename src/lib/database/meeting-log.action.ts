@@ -1,4 +1,5 @@
 import type {
+  ConversationBadgeRow,
   DbMeetingLogRow,
   MeetingLogListRow,
   MeetingLogStatus,
@@ -362,10 +363,16 @@ SELECT id, session_key, conversation_id, instance, contact_id, lead_id,
   // Filtering here would hide a `sent` row a PREVIOUS Odoo configuration
   // pushed successfully, which is exactly the history the badge exists to
   // show.
+  // `id` and `created_at` are new alongside the original three columns - the
+  // "who was this with" label needs a specific ROW to resolve targets from,
+  // and ORDER BY created_at DESC is what lets the caller pick "the most
+  // recent row at the reported status" just by taking the first match, with
+  // no second sort.
   listConversationBadges: `
-SELECT conversation_id, status, instance
+SELECT id, conversation_id, status, instance, contact_id, lead_id, created_at
   FROM meeting_log_queue
- WHERE conversation_id IS NOT NULL`,
+ WHERE conversation_id IS NOT NULL
+ ORDER BY created_at DESC`,
 
   transcriptOf: `SELECT transcript FROM meeting_log_queue WHERE id = ?`,
 
@@ -1047,24 +1054,43 @@ export async function listActionableRows(instance: string): Promise<MeetingLogLi
 }
 
 /**
- * Every queue row that names a conversation, for the meetings page's badges.
+ * Every queue row that names a conversation, for the meetings page's badges
+ * AND its "who was this meeting with" label.
  *
  * Deliberately NOT listActionableRows: that one is scoped to the actionable
  * statuses and so can never report 'sent', which is most of what a badge says.
  * No instance filter, matching listActionable - classification is the caller's
- * job via resolveBadge.
+ * job via resolveBadge/resolveBadgeRow.
+ *
+ * Targets are batch-fetched and joined in memory, exactly like
+ * listActionableRows above - one extra query for the whole page, not N+1.
  */
-export async function listConversationBadgeRows(): Promise<
-  Array<{ conversationId: string; status: MeetingLogStatus; instance: string }>
-> {
+export async function listConversationBadgeRows(): Promise<ConversationBadgeRow[]> {
   const db = await getDatabase();
-  const rows = await db.select<Record<string, unknown>[]>(
+  const parents = await db.select<Record<string, unknown>[]>(
     QUEUE_SQL.listConversationBadges
   );
-  return rows.map((r) => ({
-    conversationId: r.conversation_id as string,
-    status: r.status as MeetingLogStatus,
-    instance: r.instance as string,
+
+  const ids = parents.map((p) => p.id as string);
+  const targetRows = ids.length
+    ? await db.select<Record<string, unknown>[]>(
+        `${QUEUE_SQL.targetsByRowsBase}${ids.map(() => "?").join(",")}) ORDER BY created_at, id`,
+        ids,
+      )
+    : [];
+  const byRow = new Map<string, MeetingLogTarget[]>();
+  for (const t of targetRows.map(toMeetingLogTarget)) {
+    (byRow.get(t.rowId) ?? byRow.set(t.rowId, []).get(t.rowId)!).push(t);
+  }
+
+  return parents.map((p) => ({
+    id: p.id as string,
+    conversationId: p.conversation_id as string,
+    status: p.status as MeetingLogStatus,
+    instance: p.instance as string,
+    contact_id: (p.contact_id as number | null) ?? null,
+    lead_id: (p.lead_id as number | null) ?? null,
+    targets: byRow.get(p.id as string) ?? [],
   }));
 }
 

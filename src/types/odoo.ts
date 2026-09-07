@@ -183,6 +183,24 @@ export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
 };
 
 /**
+ * What `listConversationBadgeRows` returns: every queue row that names a
+ * conversation, across every instance and every status - `resolveBadge`
+ * decides per group which of them is badge-worthy - plus enough of
+ * `MeetingLogListRow`'s own shape (`targets`, `contact_id`, `lead_id`) for
+ * `targetNameOf` to resolve WHO the badge is about, using the identical
+ * fallback chain the queue strip already renders every target through.
+ */
+export interface ConversationBadgeRow {
+  id: string;
+  conversationId: string;
+  status: MeetingLogStatus;
+  instance: string;
+  contact_id: number | null;
+  lead_id: number | null;
+  targets: MeetingLogTarget[];
+}
+
+/**
  * What `useOdooTarget.onCreateContact` resolves to.
  *
  * Eight members, and the component's message/lifecycle table is TOTAL over

@@ -33,6 +33,11 @@ export interface ConversationRowProps {
    */
   badgeStatus: string | null;
   badgeCount: number;
+  /** Who the meeting was with, resolved off the badge's own representative
+   * row (see the page's `whoNames` doc comment) - `null` when there is no
+   * badge, or the badge's row names no real contact. Rendered only alongside
+   * a badge: a name with no status to attach to would float unexplained. */
+  whoLabel: string | null;
   onOpen: (id: string) => void;
   /** Whether THIS row is the one the page has open for an inline rename. */
   isRenaming: boolean;
@@ -68,6 +73,7 @@ function ConversationRowInner({
   updatedAt,
   badgeStatus,
   badgeCount,
+  whoLabel,
   onOpen,
   isRenaming,
   onStartRename,
@@ -213,6 +219,7 @@ function ConversationRowInner({
             <Badge data-badge-status={badgeStatus} variant="outline" className="text-xs">
               {BADGE_COPY[badgeStatus] ?? badgeStatus}
               {badgeCount > 1 ? ` (${badgeCount})` : ""}
+              {whoLabel !== null ? ` · ${whoLabel}` : ""}
             </Badge>
           )}
           <Badge variant="outline" className="text-xs">

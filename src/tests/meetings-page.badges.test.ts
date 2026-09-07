@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveBadge } from "@/lib/odoo/meeting-log";
+import { resolveBadge, resolveBadgeRow } from "@/lib/odoo/meeting-log";
 
 const row = (status: string, instance = "odoo-a") => ({ conversationId: "c1", status, instance } as any);
 
@@ -43,5 +43,33 @@ describe("resolveBadge", () => {
     // Both are meetings the user deliberately removed. Surfacing either as state
     // would resurrect a decision they already made.
     expect(resolveBadge([row(status)], "odoo-a")).toBeNull();
+  });
+});
+
+describe("resolveBadgeRow", () => {
+  const namedRow = (status: string, name: string, instance = "odoo-a") =>
+    ({ conversationId: "c1", status, instance, name } as any);
+
+  it("returns null when resolveBadge itself would", () => {
+    expect(resolveBadgeRow([row("failed", "odoo-old")], "odoo-a")).toBeNull();
+  });
+
+  it("picks the row at the worst-status rank, not just the first row", () => {
+    const result = resolveBadgeRow(
+      [namedRow("sent", "Jane"), namedRow("failed", "John"), namedRow("held", "Ann")],
+      "odoo-a"
+    );
+    expect(result).toMatchObject({ status: "failed", name: "John" });
+  });
+
+  it("picks the FIRST row at that rank when several tie", () => {
+    // Callers pass rows sorted created_at DESC, so "first" is "most recent" -
+    // this only proves the function itself takes the first, not that it
+    // re-sorts.
+    const result = resolveBadgeRow(
+      [namedRow("sent", "Newer"), namedRow("sent", "Older")],
+      "odoo-a"
+    );
+    expect(result).toMatchObject({ name: "Newer" });
   });
 });
