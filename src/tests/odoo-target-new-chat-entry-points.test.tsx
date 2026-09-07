@@ -80,8 +80,7 @@ vi.mock("@/lib", () => ({
 }));
 
 vi.mock("@/lib/functions/meeting-summarizer", () => ({
-  summarizeConversation: vi.fn(),
-  shouldSummarize: vi.fn(() => false),
+  ensureMeetingSummary: vi.fn(async () => null),
 }));
 
 // `vi.hoisted`, not a bare `const` - see src/tests/useMeetingAutoRecord.lifecycle.test.tsx:12-15

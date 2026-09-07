@@ -29,10 +29,7 @@ import {
   setActiveConversationId,
   clearActiveConversationId,
 } from "@/lib";
-import {
-  summarizeConversation,
-  shouldSummarize,
-} from "@/lib/functions/meeting-summarizer";
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import {
   applyAIConversationTitle,
   type TitleProviderConfig,
@@ -195,6 +192,15 @@ export const useCompletion = () => {
   const currentRequestIdRef = useRef<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   const conversationHistoryRef = useRef<ChatMessage[]>([]);
+
+  // Index into meetingTranscript at which the CURRENT conversation's own
+  // live activity begins. meetingTranscript is a session-wide buffer, never
+  // cleared per conversation (see meeting-log.ts's doc comment on the same
+  // fact) - this ref is what lets summarizeCurrentConversation slice out
+  // only the entries that belong to the conversation actually being left,
+  // mirroring the watermark useMeetingLog.ts's Odoo trigger already needs
+  // for the identical reason.
+  const conversationTranscriptStartRef = useRef(0);
 
   // Track meeting transcript length and what has been auto-saved so we can
   // periodically persist transcripts to chat history without stale closures.
@@ -611,6 +617,12 @@ export const useCompletion = () => {
     const timestamp = Date.now();
     if (!transcript.trim()) return timestamp;
 
+    // A brand-new conversation starts with THIS entry - captured before the
+    // push below so conversationTranscriptStartRef points at it, not past it.
+    if (!currentConversationIdRef.current) {
+      conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+    }
+
     // Add to meeting transcript array with TranscriptEntry structure
     const entry: TranscriptEntry = {
       original: transcript,
@@ -656,6 +668,12 @@ export const useCompletion = () => {
       // Filter out empty entries
       const validEntries = entries.filter((e) => e.original.trim());
       if (validEntries.length === 0) return;
+
+      // A brand-new conversation starts with THIS entry - captured before the
+      // push below so conversationTranscriptStartRef points at it, not past it.
+      if (!currentConversationIdRef.current) {
+        conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+      }
 
       // Add all entries to meeting transcript
       setMeetingTranscript((prev) => [...prev, ...validEntries]);
@@ -746,6 +764,13 @@ export const useCompletion = () => {
         },
       };
 
+      // A brand-new conversation starts with THIS entry - same guard as
+      // addMeetingTranscript, needed here too because system audio can be
+      // the first speaker in a meeting.
+      if (!currentConversationIdRef.current) {
+        conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+      }
+
       // Just append - timestamps are monotonically increasing
       setMeetingTranscript((prev) => [...prev, entry]);
 
@@ -793,6 +818,7 @@ export const useCompletion = () => {
     // leaving it set would permanently exclude this meeting from "Update
     // Knowledge" once cleared.
     clearActiveConversationId();
+    conversationTranscriptStartRef.current = 0;
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
@@ -1355,45 +1381,45 @@ export const useCompletion = () => {
   // are now imported from lib/database/chat-history.action.ts
 
   // Helper function to summarize the current conversation before switching
-  const summarizeCurrentConversation = useCallback(async () => {
-    // Need at least 2 exchanges (4 messages: 2 user + 2 assistant)
-    if (!state.currentConversationId || state.conversationHistory.length < 4) {
+  const summarizeCurrentConversation = useCallback(() => {
+    // MUST be the very first thing this function does, before any await.
+    // loadConversation/startNewConversation call this function fire-and-
+    // forget and then IMMEDIATELY run their own remaining synchronous
+    // statements - including the line that advances
+    // conversationTranscriptStartRef to the NEW conversation. Calling an
+    // async function runs its body synchronously up to its first await;
+    // anything after that await runs as a later microtask, AFTER the
+    // caller's synchronous code has already finished. Reading the ref here,
+    // before any await, guarantees this read happens before the caller's
+    // own advance - moving this below an await makes the slice empty on
+    // EVERY switch, deterministically, not as a rare race.
+    if (!state.currentConversationId) {
       return;
     }
+    const slice = meetingTranscript.slice(conversationTranscriptStartRef.current);
 
-    // Convert ChatMessage[] to Message[] format
-    const messages = state.conversationHistory.map(msg => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    void (async () => {
+      const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+      const provider = allAiProviders.find(p => p.id === selectedAIProvider.provider);
 
-    // Check if should summarize (has enough exchanges)
-    if (!shouldSummarize(messages)) {
-      return;
-    }
-
-    // Get provider config for AI summarization
-    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
-    const provider = allAiProviders.find(p => p.id === selectedAIProvider.provider);
-
-    // Trigger summarization asynchronously (don't await - non-blocking)
-    summarizeConversation(
-      state.currentConversationId,
-      messages,
-      useMeetwingsAPI ? undefined : provider ? {
-        provider,
-        selectedProvider: selectedAIProvider,
-      } : undefined
-    ).then(success => {
-      if (success) {
-        console.log("[Context Memory] Conversation summarized successfully");
-      }
-    }).catch(error => {
-      console.error("[Context Memory] Failed to summarize conversation:", error);
-    });
+      ensureMeetingSummary(
+        state.currentConversationId,
+        slice,
+        useMeetwingsAPI ? undefined : provider ? {
+          provider,
+          selectedProvider: selectedAIProvider,
+        } : undefined
+      ).then(result => {
+        if (result) {
+          console.log("[Context Memory] Conversation summarized successfully");
+        }
+      }).catch(error => {
+        console.error("[Context Memory] Failed to summarize conversation:", error);
+      });
+    })();
   }, [
     state.currentConversationId,
-    state.conversationHistory,
+    meetingTranscript,
     allAiProviders,
     selectedAIProvider
   ]);
@@ -1411,6 +1437,7 @@ export const useCompletion = () => {
 
     // The loaded conversation is now the in-progress one.
     setActiveConversationId(conversation.id);
+    conversationTranscriptStartRef.current = meetingTranscript.length;
     currentConversationIdRef.current = conversation.id;
     conversationHistoryRef.current = conversation.messages; // Update ref immediately
     // Reset autosave watermark relative to any existing meeting transcript so
@@ -1446,6 +1473,7 @@ export const useCompletion = () => {
 
     // No in-progress conversation until the first exchange is saved.
     clearActiveConversationId();
+    conversationTranscriptStartRef.current = meetingTranscript.length;
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
@@ -1469,7 +1497,7 @@ export const useCompletion = () => {
     // scoped to a conversation and must not survive into the next one; see
     // useOdooTarget's listener for "newConversationStarted".
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
-  }, [summarizeCurrentConversation, flushUnsavedMeetingTranscript]);
+  }, [summarizeCurrentConversation, meetingTranscript.length, flushUnsavedMeetingTranscript]);
 
   const saveCurrentConversation = useCallback(
     async (

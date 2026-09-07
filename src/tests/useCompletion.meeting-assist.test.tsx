@@ -19,6 +19,7 @@ import {
 // would short-circuit regardless of what the hook does. This module is not
 // mocked, so both the test and the hook resolve the same real constant.
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 
 vi.mock("sonner", () => ({
   toast: { error: vi.fn(), success: vi.fn(), info: vi.fn(), warning: vi.fn() },
@@ -98,8 +99,7 @@ vi.mock("@/lib", () => {
 });
 
 vi.mock("@/lib/functions/meeting-summarizer", () => ({
-  summarizeConversation: vi.fn(),
-  shouldSummarize: vi.fn(() => false),
+  ensureMeetingSummary: vi.fn(async () => null),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
