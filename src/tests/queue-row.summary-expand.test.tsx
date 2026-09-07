@@ -99,4 +99,12 @@ describe("QueueRow summary expand", () => {
     render(<QueueRow {...baseProps({ conversation_id: null })} />);
     expect(screen.queryByRole("button", { name: /summary/i })).not.toBeInTheDocument();
   });
+
+  it("falls back to 'No summary available' when the read throws", async () => {
+    getMeetingSummaryByConversation.mockRejectedValueOnce(new Error("db unavailable"));
+    render(<QueueRow {...baseProps({ conversation_id: "c1" })} />);
+    await userEvent.click(screen.getByRole("button", { name: /summary/i }));
+    await waitFor(() => expect(screen.getByText("No summary available")).toBeInTheDocument());
+    expect(screen.queryByText("Loading summary…")).not.toBeInTheDocument();
+  });
 });

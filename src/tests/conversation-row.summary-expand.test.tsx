@@ -58,4 +58,29 @@ describe("ConversationRow summary expand", () => {
     await waitFor(() => expect(screen.getByText("The meeting summary.")).toBeInTheDocument());
     expect(getMeetingSummaryByConversation).toHaveBeenCalledWith("conv-1");
   });
+
+  it("does not navigate when toggling the summary or clicking inside its content", async () => {
+    const onOpen = vi.fn();
+    getMeetingSummaryByConversation.mockResolvedValue(SUMMARY);
+    render(<ConversationRow {...baseProps({ id: "conv-1", onOpen })} />);
+
+    // The toggle button's own stopPropagation: clicking it must not navigate.
+    await userEvent.click(screen.getByRole("button", { name: /summary/i }));
+    await waitFor(() => expect(screen.getByText("The meeting summary.")).toBeInTheDocument());
+    expect(onOpen).not.toHaveBeenCalled();
+
+    // The wrapper <div>'s own, separate stopPropagation: a click that lands
+    // on the rendered summary content (not the toggle button) must also not
+    // bubble up to the Card's navigating onClick.
+    await userEvent.click(screen.getByText("The meeting summary."));
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("falls back to 'No summary available' when the read throws", async () => {
+    getMeetingSummaryByConversation.mockRejectedValueOnce(new Error("db unavailable"));
+    render(<ConversationRow {...baseProps({ id: "conv-1" })} />);
+    await userEvent.click(screen.getByRole("button", { name: /summary/i }));
+    await waitFor(() => expect(screen.getByText("No summary available")).toBeInTheDocument());
+    expect(screen.queryByText("Loading summary…")).not.toBeInTheDocument();
+  });
 });
