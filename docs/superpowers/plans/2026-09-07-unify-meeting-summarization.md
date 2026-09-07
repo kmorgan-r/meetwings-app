@@ -832,14 +832,9 @@ describe("migration 16 backfill", () => {
 });
 ```
 
-- [ ] **Step 8: Run the tests**
+- [ ] **Step 8: Remove `summary_json` from the TypeScript types and the `QUEUE_SQL` strings**
 
-Unlike Task 1's TDD order, Step 1 already wrote the migration SQL before this test file existed — there is no meaningful red phase here, the SQL and the test were both written from the same spec. Just run them:
-
-Run: `npx vitest run src/tests/migration-16.test.ts`
-Expected: PASS (all nine cases).
-
-- [ ] **Step 9: Remove `summary_json` from the TypeScript types and the `QUEUE_SQL` strings**
+Done BEFORE running the migration tests below — the `"listActionable's own SQL still runs after the column is dropped"` case (Step 7 above) imports the REAL `QUEUE_SQL.listActionable` string, which still names `summary_json` until this step runs. Running the tests first would hit a genuine `no such column: summary_json` against the already-migrated sql.js database that case builds, for a reason that has nothing to do with the migration SQL itself.
 
 In `src/types/odoo.ts`, remove line 150 (`summary_json: string | null;`) from `DbMeetingLogRow`.
 
@@ -851,6 +846,13 @@ In `src/lib/database/meeting-log.action.ts`:
 - In `listActionable`, remove `summary_json,` from the explicit SELECT column list (between `transcript_end_at,` and `attachment_id,`).
 - Delete the `setSummaryJson` exported function (was at `:776-779`).
 - Search the file for any other `summary_json` occurrence (`grep -n summary_json src/lib/database/meeting-log.action.ts`) and confirm none remain.
+
+- [ ] **Step 9: Run the migration tests**
+
+Unlike Task 1's TDD order, Step 1 already wrote the migration SQL before this test file existed — there is no meaningful red phase here, the SQL and the test were both written from the same spec. Now that Step 8 above has also removed `summary_json` from `QUEUE_SQL.listActionable`, all nine cases (including the one that imports that string directly) run against a consistent, fully-migrated picture:
+
+Run: `npx vitest run src/tests/migration-16.test.ts`
+Expected: PASS (all nine cases).
 
 - [ ] **Step 10: Fix every broken test fixture and test that references `summary_json`**
 
@@ -1048,7 +1050,7 @@ const summarizer = vi.hoisted(() => ({
     });
 ```
 
-The two direct `boundedSummarize` unit tests in `describe("boundedSummarize", ...)` call the returned closure directly — widen both (`:972`, `:988`):
+The two direct `boundedSummarize` unit tests in `describe("boundedSummarize", ...)` call the returned closure directly — widen both (`:974`, `:990`):
 
 ```ts
     const pending = summarize(null, { entries: [], startAt: 1, endAt: 2 });
@@ -1096,7 +1098,7 @@ In `src/lib/odoo/meeting-log-push.ts`:
 
 - [ ] **Step 4: Rewire `boundedSummarize` in `meeting-log-actions.ts` — the third caller**
 
-Left alone, `boundedSummarize`'s returned `summarize` closure stays one-argument even after Step 3 widens the interface it is assigned to (`PushDeps.summarize`, passed in at `runAction`'s `pushQueuedRow(fresh, { client, instance, now, summarize })` call, `:207-213`) — a real type error (`string | null` is not assignable to `TranscriptSlice` at parameter 0), not a silent bug, but still a hard compile failure blocking this whole task.
+Left alone, `boundedSummarize`'s returned `summarize` closure stays one-argument even after Step 3 widens the interface it is assigned to (`PushDeps.summarize`, passed in at `runAction`'s `pushQueuedRow(fresh, { client, instance, now, summarize })` call, `:211-216`) — a real type error (`string | null` is not assignable to `TranscriptSlice` at parameter 0), not a silent bug, but still a hard compile failure blocking this whole task.
 
 In `src/lib/odoo/meeting-log-actions.ts`:
 
@@ -1153,7 +1155,7 @@ export function boundedSummarize(providerConfig: ProviderConfigLike | null): {
 
 `minEntries: 1` matches the Odoo path's existing floor (a short meeting still gets a real note) — `ensureMeetingSummary` persists separately at its own fixed 4-entry floor regardless, so this does not change when a summary gets written to `meeting_summaries`, only whether the AI gets called at all. `providerConfig as never` is unchanged from the old call — `ProviderConfigLike` and `ensureMeetingSummary`'s `ProviderConfig` describe the same runtime shape without being the same declared type.
 
-3. Update the two doc comments that name the old function: the "Two jobs" comment above `boundedSummarize` (`:107`, "fallback: generateMeetingLogSummary returns null identically...") and the inline comment inside `runAction` (`:237`, "generateMeetingLogSummary swallows its throw and returns null") — both become `ensureMeetingSummary`.
+3. Update the two doc comments that name the old function: the "Two jobs" comment above `boundedSummarize` (`:108`, "fallback: generateMeetingLogSummary returns null identically...") and the inline comment inside `runAction` (`:237`, "generateMeetingLogSummary swallows its throw and returns null") — both become `ensureMeetingSummary`.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -2283,7 +2285,7 @@ In `src/pages/context-memory/components/SummaryDetail.tsx`:
 
 1. Add the import: `import { SummaryContent } from "./SummaryContent";`
 
-2. Replace the WHOLE `CardContent` body (currently `:301-482` — the Summary block at `:301-316` through the closing of the extraction range at `:483`) with:
+2. Replace the WHOLE `CardContent` body (currently `:301-483` — the Summary block at `:301-316` through the closing of the extraction range, right before `</CardContent>` at `:484`) with:
 
 ```tsx
         {isEditing && (
@@ -2309,9 +2311,9 @@ In `src/pages/context-memory/components/SummaryDetail.tsx`:
         )}
 ```
 
-This is why `showSummary` exists at all: Topics/Participants/Goals/etc. must stay visible while editing (today's actual behavior — the `isEditing` conditional in the current code wraps ONLY the summary text block, `:304-315`, never the sections after it), so `SummaryDetail.tsx` cannot simply swap `Textarea` for `<SummaryContent>` wholesale — it renders BOTH, telling `SummaryContent` to skip its own read-only summary paragraph while the Textarea is showing the same content in editable form directly above it. The exchange-count footer moves here too (was `:479-482`, inside the old extraction range) — per the spec, it is `SummaryDetail.tsx`'s own chrome, not part of the reusable piece, since the dashboard expand (Task 8) is a compact view that doesn't show it.
+This is why `showSummary` exists at all: Topics/Participants/Goals/etc. must stay visible while editing (today's actual behavior — the `isEditing` conditional in the current code wraps ONLY the summary text block, `:304-315`, never the sections after it), so `SummaryDetail.tsx` cannot simply swap `Textarea` for `<SummaryContent>` wholesale — it renders BOTH, telling `SummaryContent` to skip its own read-only summary paragraph while the Textarea is showing the same content in editable form directly above it. The exchange-count footer moves here too (was `:479-483`, inside the old extraction range) — per the spec, it is `SummaryDetail.tsx`'s own chrome, not part of the reusable piece, since the dashboard expand (Task 8) is a compact view that doesn't show it.
 
-3. Remove the now-unused lucide icon imports from `SummaryDetail.tsx` that only the extracted JSX used: `Users, CheckCircle, ListTodo, Target, ArrowRight, MessageSquare`. Do NOT remove `Tag` — it is used TWICE in this file, once inside the extracted Topics block (which moves to `SummaryContent.tsx` and gets its own `Tag` import there, already in Step 3's code) and once in the EMPTY-STATE icon at `:189` (`<Tag className="h-10 w-10 text-muted-foreground mb-3" />`), which stays in `SummaryDetail.tsx` and still needs it. Keep `Save, X, Edit2, Loader2, Copy, Check, MessageCircleReplyIcon` as before.
+3. Remove the now-unused lucide icon imports from `SummaryDetail.tsx` that only the extracted JSX used: `Users, CheckCircle, ListTodo, Target, ArrowRight, MessageSquare`. Also remove the `Badge` import (`@/components/ui/badge`) — every `<Badge` usage in this file (topics, participants, extracted entities) was inside the extracted range; `tsconfig.json`'s `noUnusedLocals: true` fails `npm run type-check` on an unused import, not just lint. Do NOT remove `Tag` — it is used TWICE in this file, once inside the extracted Topics block (which moves to `SummaryContent.tsx` and gets its own `Tag` import there, already in Step 3's code) and once in the EMPTY-STATE icon at `:189` (`<Tag className="h-10 w-10 text-muted-foreground mb-3" />`), which stays in `SummaryDetail.tsx` and still needs it. Keep `Save, X, Edit2, Loader2, Copy, Check, MessageCircleReplyIcon` as before.
 
 4. Add these two cases to `src/tests/summary-detail.conversation-link.test.tsx` (reusing its existing `SUMMARY` fixture, which already has `exchangeCount: 12`), covering the footer now that it lives here instead of in `SummaryContent`:
 
