@@ -7,7 +7,6 @@ import {
   reclaimStaleSending,
   recordErrorOnUnsent,
   selectSweepable,
-  setSummaryJson,
 } from "@/lib/database/meeting-log.action";
 import { stampLastMeeting } from "@/lib/database/odoo-contacts.action";
 import {
@@ -62,7 +61,10 @@ export interface PushDeps {
    */
   now: () => number;
   /** Wrapped in its own try/catch here; may reject freely. */
-  summarize: (slice: TranscriptSlice) => Promise<SummarizationResult | null>;
+  summarize: (
+    conversationId: string | null,
+    slice: TranscriptSlice
+  ) => Promise<SummarizationResult | null>;
 }
 
 /** HTTP statuses worth retrying. Everything else 4xx is a deterministic refusal. */
@@ -209,34 +211,13 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
 
     // ---- Summarize. Its own try/catch, walled off from last_error. --------
     let summary: SummarizationResult | null = null;
-    if (row.summary_json) {
-      try {
-        summary = JSON.parse(row.summary_json) as SummarizationResult;
-      } catch {
-        summary = null; // a corrupt blob takes the fallback body, not a failure
-      }
-    } else {
-      try {
-        summary = await deps.summarize(slice);
-      } catch {
-        // An AI-provider error NEVER reaches last_error: the redactor holds
-        // [apiKey, login] only and has no needle for an AI key, and
-        // fetchAIResponse re-wraps failures with the provider's own message.
-        summary = null;
-      }
-      if (summary) {
-        try {
-          await setSummaryJson(row.id, JSON.stringify(summary));
-        } catch (err) {
-          // A DB write that runs AFTER the claim but BEFORE the first wire
-          // call. Left in the main try, a transient SQLITE_BUSY here would map
-          // to ODOO_INTERNAL and permanently `fail` a row that never touched
-          // Odoo - exactly what the pre-wire/post-wire split forbids. The
-          // stored summary is only a retry optimisation: losing it costs one
-          // extra AI call, not the meeting.
-          console.error("[Odoo] could not cache the meeting summary:", err);
-        }
-      }
+    try {
+      summary = await deps.summarize(row.conversation_id, slice);
+    } catch {
+      // An AI-provider error NEVER reaches last_error: the redactor holds
+      // [apiKey, login] only and has no needle for an AI key, and
+      // fetchAIResponse re-wraps failures with the provider's own message.
+      summary = null;
     }
 
     // One attachment name, built ONCE for the whole row and reused across

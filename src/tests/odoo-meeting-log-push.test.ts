@@ -197,7 +197,7 @@ function makeDeps(over: Record<string, unknown> = {}) {
     client: createOdooClient(CONFIG),
     instance: INSTANCE,
     now: () => NOW,
-    summarize: vi.fn(async () => summary()),
+    summarize: vi.fn(async (_conversationId: string | null) => summary()),
     ...over,
   } as Parameters<typeof pushQueuedRow>[1];
 }
@@ -316,35 +316,6 @@ describe("the happy path", () => {
     expect(String(tauriFetch.mock.calls[1][1].body)).toContain("-row-1.md");
   });
 
-  it("persists summary_json before the first write so a retry re-posts the same body", async () => {
-    seedRow();
-    seedTargets("row-1", [{ resId: 42 }]);
-    const row = await readRow("row-1");
-    tauriFetch
-      .mockResolvedValueOnce(AUTH())
-      .mockResolvedValueOnce(intResponse(555))
-      .mockResolvedValueOnce(intResponse(999));
-    const d = makeDeps();
-    await pushQueuedRow(row, d);
-    expect(await getQueueRow("row-1")).toMatchObject({ summary_json: expect.stringContaining("Kickoff") });
-
-    // A second push over the stored summary makes no second AI call.
-    //
-    // The DB row must be reset, not just the in-memory copy: after the first
-    // push it is `sent`, so spreading `status: "pending"` onto a local object
-    // only makes the CAS fail and the function return before the summary
-    // branch - which would make this assertion pass against an implementation
-    // that re-summarizes every time. The target's own message_id/status reset
-    // the same way, so the second push has a pending target to re-attempt.
-    db.run("UPDATE meeting_log_queue SET status='pending' WHERE id='row-1'");
-    db.run("UPDATE meeting_log_targets SET status='pending', message_id=NULL WHERE row_id='row-1'");
-    const stored = await readRow("row-1");
-    (d.summarize as ReturnType<typeof vi.fn>).mockClear();
-    tauriFetch.mockResolvedValueOnce(arrayResponse([])).mockResolvedValueOnce(intResponse(999));
-    await pushQueuedRow(stored, d);
-    expect(d.summarize).not.toHaveBeenCalled();
-  });
-
   it("puts the AI summary in the note body instead of the fallback", async () => {
     // Regression: `deps.summarize` used to be handed a slice with
     // `entries: []` regardless of the row's actual transcript, so any real
@@ -362,7 +333,9 @@ describe("the happy path", () => {
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     const d = makeDeps({
-      summarize: vi.fn(async () => summary({ summary: "They agreed to start the pilot." })),
+      summarize: vi.fn(async (_conversationId: string | null) =>
+        summary({ summary: "They agreed to start the pilot." })
+      ),
     });
     await pushQueuedRow(row, d);
 
@@ -372,8 +345,47 @@ describe("the happy path", () => {
 
     // The slice handed to the summarizer must carry the actual transcript,
     // not an empty placeholder.
-    const passedSlice = (d.summarize as ReturnType<typeof vi.fn>).mock.calls[0][0] as { entries: unknown[] };
+    const passedSlice = (d.summarize as ReturnType<typeof vi.fn>).mock.calls[0][1] as { entries: unknown[] };
     expect(passedSlice.entries.length).toBeGreaterThan(0);
+  });
+
+  it("passes the row's own conversation_id to summarize, not undefined", async () => {
+    const summarize = vi.fn(async (_conversationId: string | null) => summary());
+    const row = seedRow({ conversation_id: "conv-42" });
+    seedTargets(row.id, [{ resId: 42 }]);
+    await pushQueuedRow(row, makeDeps({ summarize }));
+    expect(summarize.mock.calls[0][0]).toBe("conv-42");
+  });
+
+  it("no longer branches on row.summary_json", async () => {
+    // DbMeetingLogRow has no summary_json field after Task 2 - this test
+    // exists to prove pushQueuedRow's OWN row-level cache block (the
+    // if (row.summary_json) {...} else { deps.summarize(...) } this task
+    // deletes in Step 3) is actually gone, not merely that the type compiles.
+    const summarize = vi.fn(async (_conversationId: string | null) => summary({ summary: "generated" }));
+    const row = seedRow({ conversation_id: "conv-1" });
+    seedTargets(row.id, [{ resId: 42 }]);
+    await pushQueuedRow(row, makeDeps({ summarize }));
+    expect(summarize).toHaveBeenCalledTimes(1); // always calls summarize now - no row-level short-circuit
+  });
+
+  it("reaches the correct conversation_id for EACH row in a multi-row sweep", async () => {
+    // The bug this signature change exists to fix: a closure built once,
+    // before any row is known, cannot see a per-row conversationId. A
+    // single-row test cannot distinguish "correct" from "always undefined"
+    // if there's only ever one row to compare against.
+    const seen: (string | null)[] = [];
+    const summarize = vi.fn(async (conversationId: string | null) => {
+      seen.push(conversationId);
+      return summary();
+    });
+    const rowA = seedRow({ id: "row-a", session_key: "a", conversation_id: "conv-a" });
+    const rowB = seedRow({ id: "row-b", session_key: "b", conversation_id: "conv-b" });
+    seedTargets(rowA.id, [{ resId: 42 }]);
+    seedTargets(rowB.id, [{ resId: 43 }]);
+    await pushQueuedRow(rowA, makeDeps({ summarize }));
+    await pushQueuedRow(rowB, makeDeps({ summarize }));
+    expect(seen).toEqual(["conv-a", "conv-b"]);
   });
 });
 
@@ -664,7 +676,9 @@ describe("summarization is walled off from the push", () => {
       .mockResolvedValueOnce(AUTH())
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
-    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async () => { throw new Error("429"); }) }));
+    await pushQueuedRow(row, makeDeps({
+      summarize: vi.fn(async (_conversationId: string | null) => { throw new Error("429"); }),
+    }));
     expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent" });
   });
@@ -678,7 +692,7 @@ describe("summarization is walled off from the push", () => {
       .mockResolvedValueOnce(AUTH())
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
-    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async () => null) }));
+    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async (_conversationId: string | null) => null) }));
     expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent" });
   });
@@ -700,7 +714,7 @@ describe("summarization is walled off from the push", () => {
       .mockResolvedValueOnce(AUTH())
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
-    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async () => null) }));
+    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async (_conversationId: string | null) => null) }));
     const body = String(tauriFetch.mock.calls[2][1].body);
     expect(body).toContain("line-0");
     expect(body).not.toContain("line-11");
@@ -713,7 +727,9 @@ describe("summarization is walled off from the push", () => {
       .mockResolvedValueOnce(AUTH())
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
-    await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async () => summary({ summary: "" })) }));
+    await pushQueuedRow(row, makeDeps({
+      summarize: vi.fn(async (_conversationId: string | null) => summary({ summary: "" })),
+    }));
     expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
   });
 
@@ -730,7 +746,9 @@ describe("summarization is walled off from the push", () => {
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({
-      summarize: vi.fn(async () => { throw new Error("openai key sk-ai-123 rejected"); }),
+      summarize: vi.fn(async (_conversationId: string | null) => {
+        throw new Error("openai key sk-ai-123 rejected");
+      }),
     }));
     const stored = await getQueueRow("row-1");
     expect(stored?.last_error).toBeNull();
