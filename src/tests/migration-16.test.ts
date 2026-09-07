@@ -73,6 +73,35 @@ describe("migration 16 backfill", () => {
     expect(rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-1'")).toHaveLength(1);
   });
 
+  it("falls back to an older VALID row when the newest row for a conversation has malformed JSON", async () => {
+    // Exercises the subquery's own json_valid()/summary-key guards, not just
+    // the outer WHERE's. Without those guards duplicated into the subquery,
+    // q.rowid = (SELECT ... ORDER BY created_at DESC ... LIMIT 1) would pick
+    // the newest row (bad-json) regardless of validity, and the outer WHERE's
+    // AND json_valid(q.summary_json) would then exclude that row entirely -
+    // losing the conversation's backfill even though an older, perfectly
+    // usable row exists.
+    const db = await seedPre16([
+      { id: "older", conversationId: "conv-1", summaryJson: JSON.stringify({ title: "Valid Older", summary: "the real content" }), createdAt: 100 },
+      { id: "newer", conversationId: "conv-1", summaryJson: "not json at all", createdAt: 200 },
+    ]);
+    applyMigration16(db);
+    const summaries = rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-1'");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ title: "Valid Older", summary: "the real content" });
+  });
+
+  it("falls back to an older VALID row when the newest row for a conversation has no summary key", async () => {
+    const db = await seedPre16([
+      { id: "older", conversationId: "conv-1", summaryJson: JSON.stringify({ title: "Valid Older", summary: "the real content" }), createdAt: 100 },
+      { id: "newer", conversationId: "conv-1", summaryJson: JSON.stringify({ title: "Has title, no summary" }), createdAt: 200 },
+    ]);
+    applyMigration16(db);
+    const summaries = rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-1'");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({ title: "Valid Older", summary: "the real content" });
+  });
+
   it("backfills the meeting window from the queue row, not NULL", async () => {
     const db = await seedPre16([
       { id: "r1", conversationId: "conv-1", summaryJson: JSON.stringify({ summary: "s" }) },
