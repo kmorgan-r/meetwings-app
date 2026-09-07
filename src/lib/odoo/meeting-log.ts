@@ -54,6 +54,29 @@ export function isClaimStale(
 export const ESCALATE_AFTER_ATTEMPTS = 5;
 
 /**
+ * The one string for "this row/name has no contact behind it" - shared by
+ * QueueRow.tsx's `statusLine` (a row's whole-status text) and
+ * useMeetingLogQueue.ts's `targetNameOf` (a single name's resolved text), two
+ * unrelated call sites that both need the exact same words so a row's status
+ * line and its resolved target name never say the same thing two different
+ * ways. Lives here, not in either of those files, because
+ * useMeetingLogQueue.ts already imports from QueueRow.tsx (`targetNameOfSingle`)
+ * - a constant exported from either one back to the other would be a cycle.
+ */
+export const NO_CONTACT_CHOSEN = "No contact chosen";
+
+/**
+ * `name === NO_CONTACT_CHOSEN` alone can't tell a real target named that
+ * (impossible - it's not a contact name a user can enter, only ever this
+ * placeholder) apart from the placeholder, so equality is exactly right -
+ * this helper exists only so callers don't hardcode the literal a second
+ * time and drift from it if it's ever reworded.
+ */
+export function isNoContactChosen(name: string): boolean {
+  return name === NO_CONTACT_CHOSEN;
+}
+
+/**
  * How many Odoo records one meeting can be logged to.
  *
  * Enforced by REJECTING the write in odoo-contacts.action.ts's

@@ -21,7 +21,7 @@ import {
 } from "@/lib/database/meeting-log.action";
 import { listContacts } from "@/lib/database/odoo-contacts.action";
 import { reportOdooError } from "@/lib/odoo/errors";
-import { groupOf, type QueueGroup } from "@/lib/odoo/meeting-log";
+import { groupOf, NO_CONTACT_CHOSEN, type QueueGroup } from "@/lib/odoo/meeting-log";
 import {
   assignMeetingLog,
   deleteMeetingLog,
@@ -336,7 +336,7 @@ export function targetNameOf(
   // offer to assign a meeting that is already correctly targeted, and the id
   // is all there is to name it by - the queue stores no lead name.
   if (contactId === null) {
-    return leadId === null ? "No contact chosen" : `Lead or opportunity #${leadId}`;
+    return leadId === null ? NO_CONTACT_CHOSEN : `Lead or opportunity #${leadId}`;
   }
   const cached = contacts.get(contactId);
   const base = cached ? cached.name : `Contact #${contactId}`;

@@ -11,7 +11,7 @@ import { MessageCircleIcon, Search } from "lucide-react";
 import { useHistory } from "@/hooks/useHistory";
 import { targetNameOf, useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
 import { PageLayout } from "@/layouts";
-import { resolveBadge, resolveBadgeRow } from "@/lib/odoo/meeting-log";
+import { isNoContactChosen, resolveBadge, resolveBadgeRow } from "@/lib/odoo/meeting-log";
 import { renameConversationManually } from "@/lib/database/chat-history.action";
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 import { safeLocalStorage } from "@/lib/storage/helper";
@@ -84,7 +84,7 @@ export default function Meetings() {
         const name = targetNameOf(source, queue.contacts);
         // The generic placeholder is not a name - showing it beside the badge
         // would say nothing "Needs a contact" doesn't already say.
-        if (name !== "No contact chosen") who.set(conversationId, name);
+        if (!isNoContactChosen(name)) who.set(conversationId, name);
       }
     }
     return { badges: resolved, whoNames: who };
