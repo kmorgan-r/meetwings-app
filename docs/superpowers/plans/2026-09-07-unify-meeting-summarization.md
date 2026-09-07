@@ -114,6 +114,13 @@ const ENTRIES: TranscriptEntry[] = [
   { original: "line four", timestamp: 4000 },
 ];
 
+const ENTRIES_LABELLED: TranscriptEntry[] = [
+  { original: "we should ship on Friday", timestamp: 1000, audioSource: "microphone" },
+  { original: "agreed", timestamp: 2000, audioSource: "system" },
+  { original: "third line to clear minEntries", timestamp: 3000, audioSource: "microphone" },
+  { original: "fourth line to clear minEntries", timestamp: 4000, audioSource: "system" },
+];
+
 function stream(chunks: string[]) {
   return async function* () {
     for (const c of chunks) yield c;
@@ -219,6 +226,34 @@ describe("ensureMeetingSummary", () => {
     expect(await ensureMeetingSummary("conv-1", ENTRIES)).toBeNull();
     expect(fetchAIResponse).not.toHaveBeenCalled();
   });
+
+  it("sends a SPEAKER-labelled transcript (You/Guest from audioSource), not User/Assistant roles", async () => {
+    // renderTranscript labels lines via speakerLabelFor's audioSource mapping
+    // (microphone -> You, system -> Guest) - formatConversationForSummary's
+    // msg.role labelling is gone, and this asserts the real replacement path.
+    fetchAIResponse.mockImplementation(stream(['{"summary":"s"}']));
+    await ensureMeetingSummary("conv-1", ENTRIES_LABELLED);
+    const userMessage = fetchAIResponse.mock.calls[0][0].userMessage as string;
+    expect(userMessage).toContain("You: we should ship on Friday");
+    expect(userMessage).toContain("Guest: agreed");
+    expect(userMessage).not.toContain("Assistant:");
+  });
+
+  it("returns null rather than throwing on unparseable JSON", async () => {
+    fetchAIResponse.mockImplementation(stream(["not json at all"]));
+    expect(await ensureMeetingSummary("conv-1", ENTRIES)).toBeNull();
+  });
+
+  it("threads a custom provider through when the Meetwings API is off", async () => {
+    shouldUseMeetwingsAPI.mockResolvedValue(false);
+    fetchAIResponse.mockImplementation(stream(['{"summary":"s"}']));
+    const providerConfig = {
+      provider: { id: "openai" },
+      selectedProvider: { provider: "openai", variables: {} },
+    };
+    await ensureMeetingSummary("conv-1", ENTRIES, providerConfig as never);
+    expect(fetchAIResponse.mock.calls[0][0].provider).toEqual({ id: "openai" });
+  });
 });
 
 describe("chatMessagesToTranscriptEntries", () => {
@@ -272,7 +307,7 @@ In `src/lib/functions/meeting-summarizer.ts`:
 
 1. Add `SpeakerInfo` to the existing `@/types` import (it already imports `SummarizationResult, ExtractedEntity, CreateMeetingSummaryInput, CreateKnowledgeEntityInput, TranscriptEntry` from `"@/types"` — add `SpeakerInfo` to that list).
 
-2. Delete `MIN_EXCHANGES_FOR_SUMMARY`, `formatConversationForSummary`, `countExchanges`, `generateConversationSummary`, `summarizeConversation`, and `shouldSummarize` in their entirety. Delete the `Message` import from `"@/types"` at the top (line 1) — nothing left in this file uses it once these are gone.
+2. Delete `MIN_EXCHANGES_FOR_SUMMARY`, `formatConversationForSummary`, `countExchanges`, `generateConversationSummary`, `summarizeConversation`, `shouldSummarize`, and `generateMeetingLogSummary` in their entirety, along with `generateMeetingLogSummary`'s own `ProviderConfig` type declaration (currently the doc comment `/** The provider shape every caller in this file already threads through. */` plus `type ProviderConfig = {...}` immediately above it) — step 4 below declares the one and only `ProviderConfig` for this file, and leaving the old one in place would be a duplicate identifier. Delete the `Message` import from `"@/types"` at the top (line 1) — nothing left in this file uses it once these are gone.
 
 3. Keep `filterUserFromParticipants`, `getUserIdentityInstruction`, `SUMMARIZATION_PROMPT`, `matchBalancedBrace`, `extractJsonObject`, `parseSummarizationResponse`, `saveSummarizationResult` exactly as they are.
 
@@ -405,7 +440,7 @@ export async function ensureMeetingSummary(
 }
 ```
 
-5. `generateMeetingLogSummary` is deleted (replaced by `ensureMeetingSummary`). Its old doc comment explaining why it's "deliberately not `generateConversationSummary`" is no longer needed — there's only one function now.
+5. `generateMeetingLogSummary` and its doc comment are already gone per step 2 above — the doc comment's rationale ("deliberately not `generateConversationSummary`") is moot now that there's only one function.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -415,7 +450,7 @@ Expected: PASS (all cases).
 - [ ] **Step 5: Run the existing suite for this file to check nothing else broke**
 
 Run: `npx vitest run src/tests/meeting-log-summary.test.ts src/tests/meeting-summarizer.title-sync.test.ts`
-Expected: `meeting-log-summary.test.ts` FAILS — it imports `generateMeetingLogSummary`, which no longer exists. Delete this file entirely; its cases are superseded by `ensure-meeting-summary.test.ts` (the "sends a SPEAKER-labelled transcript" and "returns null for an empty transcript" cases are covered by `chatMessagesToTranscriptEntries`'s filter test and the `minEntries` gate test respectively — `renderTranscript` itself is untouched and still tested at its own call site). `meeting-summarizer.title-sync.test.ts` should still PASS unmodified (`saveSummarizationResult` is untouched).
+Expected: `meeting-log-summary.test.ts` FAILS — it imports `generateMeetingLogSummary`, which no longer exists. Delete this file entirely; its cases are superseded by `ensure-meeting-summary.test.ts`'s own new tests: "sends a SPEAKER-labelled transcript" is now covered directly (not just implied by `chatMessagesToTranscriptEntries`'s filter test), "returns null for an empty transcript" is covered by the `minEntries` gate test (`renderTranscript` itself is untouched and still tested at its own call site), and the two cases that had no replacement in the first draft of this plan — "returns null rather than throwing on unparseable JSON" and "threads a custom provider through when the Meetwings API is off" — are carried over verbatim in Step 1 above. `meeting-summarizer.title-sync.test.ts` should still PASS unmodified (`saveSummarizationResult` is untouched).
 
 Run: `rm src/tests/meeting-log-summary.test.ts && npx vitest run src/tests/meeting-summarizer.title-sync.test.ts`
 Expected: PASS.
@@ -444,7 +479,7 @@ git commit -m "feat(meeting-summary): add ensureMeetingSummary, the shared cache
 - Modify: `src-tauri/src/db/migration_tests.rs`
 - Modify: `src/types/odoo.ts`
 - Modify: `src/lib/database/meeting-log.action.ts`
-- Modify: `src/tests/meeting-log.action.test.ts`, `src/tests/meeting-log-actions.test.ts`, `src/tests/meeting-log-page.test.tsx`, `src/tests/meetings-page.test.tsx`, `src/tests/odoo-meeting-log-sweep.test.ts`, `src/tests/odoo-meeting-log-push.test.ts` (its `seedRow` fixture's INSERT is built dynamically from `Object.keys()`, so its `summary_json: null` default must go too — see Step 12)
+- Modify: `src/tests/meeting-log.action.test.ts`, `src/tests/meeting-log-actions.test.ts`, `src/tests/meeting-log-page.test.tsx`, `src/tests/meetings-page.test.tsx`, `src/tests/odoo-meeting-log-sweep.test.ts`, `src/tests/odoo-meeting-log-push.test.ts` (its `seedRow` fixture's INSERT is built dynamically from `Object.keys()`, so its `summary_json: null` default must go too — see Step 10)
 
 **Interfaces:**
 - Produces: `meeting_log_queue` no longer has a `summary_json` column; `meeting_summaries` (unchanged shape) gains backfilled rows for every pre-existing queue row that had a cached summary.
@@ -478,15 +513,34 @@ SELECT
 FROM meeting_log_queue q
 WHERE q.summary_json IS NOT NULL
   AND q.conversation_id IS NOT NULL
+  -- q.summary_json is AI-generated text written via setSummaryJson with no
+  -- schema validation at write time. json_extract() RAISES on malformed JSON,
+  -- and this migration runs inside sqlx's one transaction per file - any
+  -- error here rolls back the WHOLE migration and it is never recorded as
+  -- applied, permanently breaking Database.load() for that user on every
+  -- future launch. json_valid() excludes malformed rows before json_extract
+  -- ever runs on them (SQLite only evaluates the SELECT list for rows that
+  -- already passed WHERE).
+  AND json_valid(q.summary_json)
+  -- meeting_summaries.summary is NOT NULL. Valid JSON with no "summary" key
+  -- (or an explicit null) makes json_extract(...,'$.summary') return NULL,
+  -- which would fail that NOT NULL constraint and abort the migration exactly
+  -- as above - guard it the same way.
+  AND json_extract(q.summary_json, '$.summary') IS NOT NULL
   -- session_key, not conversation_id, is what's UNIQUE on this table - one
   -- conversation can own several queue rows. meeting_summaries.conversation_id
   -- IS UNIQUE, so backfilling every matching row would violate it on the
   -- second row for a repeat conversation. Keep only the newest cached row
   -- per conversation (rowid tiebreak so two rows with an identical
-  -- created_at still resolve to exactly one).
+  -- created_at still resolve to exactly one) - considering only rows that
+  -- pass the same two guards, so a malformed or summary-less newest row never
+  -- shadows a usable older one.
   AND q.rowid = (
     SELECT q2.rowid FROM meeting_log_queue q2
-    WHERE q2.conversation_id = q.conversation_id AND q2.summary_json IS NOT NULL
+    WHERE q2.conversation_id = q.conversation_id
+      AND q2.summary_json IS NOT NULL
+      AND json_valid(q2.summary_json)
+      AND json_extract(q2.summary_json, '$.summary') IS NOT NULL
     ORDER BY q2.created_at DESC, q2.rowid DESC LIMIT 1
   )
   AND NOT EXISTS (
@@ -545,7 +599,7 @@ import path from "node:path";
 import { MIGRATIONS, readMigration } from "./migration-14";
 
 const WASM_BINARY = path.resolve(__dirname, "../../../node_modules/sql.js/dist/sql-wasm.wasm");
-const INSTANCE = "http://h:8069|odoo";
+export const INSTANCE = "http://h:8069|odoo";
 
 // Every migration through 15, in registration order, so the pre-16 database
 // this helper builds matches what a real app has on disk before v16 runs.
@@ -650,7 +704,7 @@ Create `src/tests/migration-16.test.ts`:
 
 ```ts
 import { describe, expect, it } from "vitest";
-import { applyMigration16, rows, seedPre16, seedPre16WithExistingSummary } from "./helpers/migration-16";
+import { applyMigration16, INSTANCE, rows, seedPre16, seedPre16WithExistingSummary } from "./helpers/migration-16";
 
 describe("migration 16 backfill", () => {
   it("backfills a queue row with a cached summary into meeting_summaries", async () => {
@@ -734,44 +788,58 @@ describe("migration 16 backfill", () => {
     expect(row.meeting_ended_at).toBe(2);
   });
 
+  it("a queue row with malformed JSON does not abort the migration, and is not backfilled", async () => {
+    const db = await seedPre16([
+      { id: "bad", conversationId: "conv-bad", summaryJson: "not json at all" },
+      { id: "good", conversationId: "conv-good", summaryJson: JSON.stringify({ summary: "s" }) },
+    ]);
+    expect(() => applyMigration16(db)).not.toThrow();
+    expect(rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-bad'")).toHaveLength(0);
+    expect(rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-good'")).toHaveLength(1);
+  });
+
+  it("a queue row with valid JSON but no summary key does not abort the migration, and is not backfilled", async () => {
+    const db = await seedPre16([
+      { id: "nosum", conversationId: "conv-nosum", summaryJson: JSON.stringify({ title: "Has title, no summary" }) },
+    ]);
+    expect(() => applyMigration16(db)).not.toThrow();
+    expect(rows(db, "SELECT * FROM meeting_summaries WHERE conversation_id = 'conv-nosum'")).toHaveLength(0);
+
+    const cols = rows(db, "PRAGMA table_info(meeting_log_queue)").map((c) => c.name);
+    expect(cols).not.toContain("summary_json");
+  });
+
   it("listActionable's own SQL still runs after the column is dropped", async () => {
-    // The literal QUEUE_SQL.listActionable string, post-fix (summary_json
-    // removed from its SELECT list) - copied here rather than imported, so
-    // this test fails loudly if that column is ever left in by mistake
-    // (an import would just re-run whatever's actually in the file, even a
-    // broken version of it).
+    // Imports the REAL QUEUE_SQL.listActionable string rather than a
+    // hand-copied one, so a future SELECT/ORDER BY change can never drift out
+    // of sync with what this test exercises. meeting-log.action.ts's only
+    // load-time import chain (./config -> @tauri-apps/plugin-sql) has no
+    // side effects at module scope - Database.load() only runs inside
+    // getDatabase(), which this test never calls - so a plain static import
+    // of QUEUE_SQL is safe under vitest's node environment, unmocked.
+    const { QUEUE_SQL } = await import("@/lib/database/meeting-log.action");
     const db = await seedPre16([
       { id: "r1", conversationId: "conv-1", summaryJson: JSON.stringify({ summary: "s" }) },
     ]);
     applyMigration16(db);
-    expect(() =>
-      rows(
-        db,
-        `SELECT id, session_key, conversation_id, instance, contact_id, lead_id,
-                transcript_start_at, transcript_end_at, attachment_id,
-                message_id, status, attempts, claimed_at, last_error, last_error_code,
-                meeting_started_at, created_at, sent_at
-           FROM meeting_log_queue
-          WHERE status IN ('held','pending','sending','unassigned','failed')
-          ORDER BY created_at DESC
-          LIMIT 201`
-      )
-    ).not.toThrow();
+    expect(() => {
+      const stmt = db.prepare(QUEUE_SQL.listActionable);
+      stmt.bind([INSTANCE, 3]); // ?1 = instance (matches every seeded row), ?2 = attempts threshold
+      while (stmt.step()) stmt.getAsObject();
+      stmt.free();
+    }).not.toThrow();
   });
 });
 ```
 
-- [ ] **Step 8: Run the tests to verify they fail**
+- [ ] **Step 8: Run the tests**
+
+Unlike Task 1's TDD order, Step 1 already wrote the migration SQL before this test file existed — there is no meaningful red phase here, the SQL and the test were both written from the same spec. Just run them:
 
 Run: `npx vitest run src/tests/migration-16.test.ts`
-Expected: FAIL — `meeting-log-queue-v2.sql` may already exist from Step 1, but `insertPreQueueRow`'s hardcoded column list will fail until the pre-16 schema (`freshDbThrough15`) is actually reachable; more likely failure is `applyMigration16` succeeding but the test's own assumptions not yet matching until Step 1's file is in place — if Steps 1-2 already landed, skip ahead; this step exists for whoever runs the plan out of order.
+Expected: PASS (all nine cases).
 
-- [ ] **Step 9: Run the tests to verify they pass**
-
-Run: `npx vitest run src/tests/migration-16.test.ts`
-Expected: PASS (all six cases).
-
-- [ ] **Step 10: Remove `summary_json` from the TypeScript types and the `QUEUE_SQL` strings**
+- [ ] **Step 9: Remove `summary_json` from the TypeScript types and the `QUEUE_SQL` strings**
 
 In `src/types/odoo.ts`, remove line 150 (`summary_json: string | null;`) from `DbMeetingLogRow`.
 
@@ -784,11 +852,7 @@ In `src/lib/database/meeting-log.action.ts`:
 - Delete the `setSummaryJson` exported function (was at `:776-779`).
 - Search the file for any other `summary_json` occurrence (`grep -n summary_json src/lib/database/meeting-log.action.ts`) and confirm none remain.
 
-- [ ] **Step 11: Fix `pushQueuedRow`'s import of `setSummaryJson` (compile-only fix, full rewrite is Task 3)**
-
-In `src/lib/odoo/meeting-log-push.ts`, remove `setSummaryJson` from the `@/lib/database/meeting-log.action` import list. Leave the rest of the file as-is — Task 3 rewrites its body. This step exists only so `npm run type-check` doesn't fail on a now-nonexistent import between this task and Task 3 if they're reviewed/merged separately.
-
-- [ ] **Step 12: Fix every broken test fixture and test that references `summary_json`**
+- [ ] **Step 10: Fix every broken test fixture and test that references `summary_json`**
 
 In `src/tests/meeting-log.action.test.ts`:
 - Line 133 (`seed()`'s default row): remove `summary_json: null,`.
@@ -861,26 +925,28 @@ In `src/tests/odoo-meeting-log-sweep.test.ts` (line 90): remove `summary_json: n
 
 In `src/tests/odoo-meeting-log-push.test.ts` (line 122): remove `summary_json: null,` from `seedRow`'s default object literal. This one is not merely a stale fixture value — `seedRow` builds its `INSERT INTO meeting_log_queue (...)` column list from `Object.keys(row)` dynamically, so leaving the key in place means every single test in this file (the whole `pushQueuedRow` suite) fails at `seedRow`'s own `db.run(...)` call with a real SQLite error (`table meeting_log_queue has no column named summary_json`) the moment migration 16's `ALTER TABLE ... DROP COLUMN` lands — not a type error, a runtime one, and this file is excluded from `npm run type-check` (see Task 8's note on `tsconfig.json`'s test-file exclusion) so nothing catches it before the test run itself.
 
-- [ ] **Step 13: Run the full affected test suite**
+- [ ] **Step 11: Run the full affected test suite**
 
 Run: `npx vitest run src/tests/meeting-log.action.test.ts src/tests/meeting-log-actions.test.ts src/tests/meeting-log-page.test.tsx src/tests/meetings-page.test.tsx src/tests/odoo-meeting-log-sweep.test.ts src/tests/odoo-meeting-log-push.test.ts src/tests/migration-16.test.ts`
-Expected: PASS, EXCEPT `odoo-meeting-log-push.test.ts` and `odoo-meeting-log-sweep.test.ts` may still show failures tied to `PushDeps.summarize`'s old signature (the `if (row.summary_json) {...}` cache branch in `meeting-log-push.ts` still references a field that no longer exists on `DbMeetingLogRow`, which is a compile-time type error surfaced at Vitest's transform step, not a runtime one) — those are Task 3's to fix, not this task's. Confirm any failures here are ONLY that one class, never a `no such column: summary_json` SQLite error — that specific error means the `seedRow` fixture edit above did not land.
+Expected: PASS, EXCEPT `odoo-meeting-log-push.test.ts` and `odoo-meeting-log-sweep.test.ts` may still show failures tied to `PushDeps.summarize`'s old signature — `meeting-log-push.ts` still imports the now-deleted `setSummaryJson` and still reads `row.summary_json`, a field `DbMeetingLogRow` no longer has. This task deliberately leaves that file untouched (a half-fix here would strand it in a worse, contradictory state); Task 3 rewrites it in full. Confirm any failures here are ONLY that class, never a `no such column: summary_json` SQLite error — that specific error means the `seedRow` fixture edit above did not land.
 
-- [ ] **Step 14: Type-check and lint**
+- [ ] **Step 12: Type-check and lint**
 
 Run: `npm run type-check && npm run lint`
-Expected: no NEW errors from this task's files (`src/types/odoo.ts`, `src/lib/database/meeting-log.action.ts`). Errors in `src/lib/odoo/meeting-log-push.ts` or `src/hooks/useMeetingLog.ts` from `PushDeps.summarize`'s still-old signature are Task 3/4's to fix.
+Expected: no NEW errors from this task's own files (`src/types/odoo.ts`, `src/lib/database/meeting-log.action.ts`). `npm run type-check` WILL newly fail on `src/lib/odoo/meeting-log-push.ts` (`Property 'summary_json' does not exist on type 'DbMeetingLogRow'`, and `Module has no exported member 'setSummaryJson'`) and on `src/hooks/useMeetingLog.ts` (`PushDeps.summarize`'s old signature) — both are real, expected, and Task 3/4's to fix, not this task's. Test files are excluded from `type-check` entirely (see Global Constraints), so this command never reports the test-fixture class of error; that class is caught only by actually running the suite in Step 11.
 
-- [ ] **Step 15: Commit**
+- [ ] **Step 13: Commit**
 
 ```bash
 git add src-tauri/src/db/migrations/meeting-log-queue-v2.sql src-tauri/src/db/main.rs \
   src-tauri/src/db/migration_tests.rs src/types/odoo.ts src/lib/database/meeting-log.action.ts \
-  src/lib/odoo/meeting-log-push.ts src/tests/helpers/migration-16.ts src/tests/migration-16.test.ts \
+  src/tests/helpers/migration-16.ts src/tests/migration-16.test.ts \
   src/tests/meeting-log.action.test.ts src/tests/meeting-log-actions.test.ts \
   src/tests/meeting-log-page.test.tsx src/tests/meetings-page.test.tsx \
   src/tests/odoo-meeting-log-sweep.test.ts src/tests/odoo-meeting-log-push.test.ts
-git commit -m "feat(db): migration 16 - backfill meeting_log_queue.summary_json into meeting_summaries, drop the column"
+git commit -m "feat(db): migration 16 - backfill meeting_log_queue.summary_json into meeting_summaries, drop the column
+
+meeting-log-push.ts is deliberately untouched here - Task 3 rewires it in full."
 ```
 
 ---
@@ -889,11 +955,13 @@ git commit -m "feat(db): migration 16 - backfill meeting_log_queue.summary_json 
 
 **Files:**
 - Modify: `src/lib/odoo/meeting-log-push.ts`
+- Modify: `src/lib/odoo/meeting-log-actions.ts` — `boundedSummarize`'s returned `summarize` closure is a THIRD, independent caller of the old one-argument shape, entirely separate from `meeting-log-push.ts`. It is what `runAction` hands to `pushQueuedRow` as `PushDeps.summarize` (see Step 4 below).
 - Modify: `src/tests/odoo-meeting-log-push.test.ts`
+- Modify: `src/tests/meeting-log-actions.test.ts`
 
 **Interfaces:**
 - Consumes: `ensureMeetingSummary` (Task 1).
-- Produces: `PushDeps.summarize: (conversationId: string | null, slice: TranscriptSlice) => Promise<SummarizationResult | null>` (was `(slice: TranscriptSlice) => ...`) — Task 4's `useMeetingLog.ts` change depends on this new shape.
+- Produces: `PushDeps.summarize: (conversationId: string | null, slice: TranscriptSlice) => Promise<SummarizationResult | null>` (was `(slice: TranscriptSlice) => ...`) — Task 4's `useMeetingLog.ts` change depends on this new shape. `boundedSummarize`'s returned `summarize` widens the same way, so it stays assignable to `PushDeps.summarize`.
 
 - [ ] **Step 1: Update the failing/changed tests first**
 
@@ -940,10 +1008,60 @@ In `src/tests/odoo-meeting-log-push.test.ts`, every existing test builds its dep
   });
 ```
 
+Two more fixes to this same file — pre-existing tests that break under the new signature, not new cases:
+
+- The slice-capture in `"puts the AI summary in the note body instead of the fallback"` now points at `conversationId` (index 0) instead of the slice (index 1) — reindex it:
+
+```ts
+    const passedSlice = (d.summarize as ReturnType<typeof vi.fn>).mock.calls[0][1] as { entries: unknown[] };
+```
+
+- DELETE `"persists summary_json before the first write so a retry re-posts the same body"` in full. Its premise no longer holds either way: `summary_json` is gone (Task 2), `pushQueuedRow`'s own row-level cache branch is gone (Step 3 below), and its own second assertion (`expect(d.summarize).not.toHaveBeenCalled()` on a repeat push) now asserts the OPPOSITE of the real behavior — `deps.summarize` is unconditionally called on every push (see this task's new "no longer branches on row.summary_json" case above). What this test's first half verified — that the AI summary reaches the note body — is already covered by the very next test, "puts the AI summary in the note body instead of the fallback"; conversation-level caching (a repeat call for the SAME conversation returning the cached row without a second AI call) is `ensureMeetingSummary`'s own contract, already tested in Task 1's `ensure-meeting-summary.test.ts` ("returns the cached summary's real fields on a cache hit, without calling the AI").
+
+`src/tests/meeting-log-actions.test.ts` also mocks the old export name and calls `summarize`/`deps.summarize` with the old one-argument shape, in six places — update all of them:
+
+1. Rename the mock factory's export (`:81`):
+
+```ts
+const summarizer = vi.hoisted(() => ({
+  ensureMeetingSummary: vi.fn(async () => ({ title: "T", summary: "S" })),
+}));
+```
+
+2. Rename every `summarizer.generateMeetingLogSummary` reference to `summarizer.ensureMeetingSummary` (`:287`, `:450`, `:546`, `:556`, `:971` — five call sites; `grep -n generateMeetingLogSummary src/tests/meeting-log-actions.test.ts` afterward to confirm none remain).
+
+3. Widen the two direct call sites that invoke `deps.summarize`/`summarize` with the old one-argument shape. `dbRow()`'s default `conversation_id` is `null`, so `null` is the accurate first argument in both:
+
+`"INVOKES the summarize dep it hands to the push"` (`:541-547`):
+
+```ts
+    const result = await deps.summarize(null, {
+      entries: [{ original: "hi", timestamp: 1 }], startAt: 1, endAt: 2,
+    });
+```
+
+`"reports degraded when the summarize resolved null"` (`:556-558`):
+
+```ts
+    push.pushQueuedRow.mockImplementation(async (_row, deps) => {
+      await deps.summarize(null, { entries: [{ original: "hi", timestamp: 1 }], startAt: 1, endAt: 2 });
+    });
+```
+
+The two direct `boundedSummarize` unit tests in `describe("boundedSummarize", ...)` call the returned closure directly — widen both (`:972`, `:988`):
+
+```ts
+    const pending = summarize(null, { entries: [], startAt: 1, endAt: 2 });
+```
+
+```ts
+    await summarize(null, { entries: [], startAt: 1, endAt: 2 });
+```
+
 - [ ] **Step 2: Run to verify these new/changed tests fail**
 
-Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts`
-Expected: FAIL — `PushDeps.summarize`'s current type takes one argument, and `pushQueuedRow`'s current body still branches on the now-nonexistent `row.summary_json` field (a compile error from Task 2's type removal, if that lands first) or an unused-second-arg mismatch.
+Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts src/tests/meeting-log-actions.test.ts`
+Expected: FAIL on both files — `PushDeps.summarize`'s current type takes one argument, `pushQueuedRow`'s current body still branches on the now-nonexistent `row.summary_json` field (a compile error from Task 2's type removal, if that lands first), `boundedSummarize`'s closure still takes one argument, and `meeting-log-actions.test.ts` still mocks the deleted `generateMeetingLogSummary` export name.
 
 - [ ] **Step 3: Widen `PushDeps.summarize` and rewrite `pushQueuedRow`'s summarize block**
 
@@ -976,21 +1094,83 @@ In `src/lib/odoo/meeting-log-push.ts`:
 
 3. Remove the `attemptsBefore`-adjacent comment block that explained the old row-level cache rationale (the "Built ONCE, before the summarize branch..." comment above the `slice` construction can stay — it still describes the slice itself correctly; only the cache-check paragraph beneath it, describing `row.summary_json`, is removed along with the code it described).
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [ ] **Step 4: Rewire `boundedSummarize` in `meeting-log-actions.ts` — the third caller**
 
-Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts`
+Left alone, `boundedSummarize`'s returned `summarize` closure stays one-argument even after Step 3 widens the interface it is assigned to (`PushDeps.summarize`, passed in at `runAction`'s `pushQueuedRow(fresh, { client, instance, now, summarize })` call, `:207-213`) — a real type error (`string | null` is not assignable to `TranscriptSlice` at parameter 0), not a silent bug, but still a hard compile failure blocking this whole task.
+
+In `src/lib/odoo/meeting-log-actions.ts`:
+
+1. Change the import (`:13`):
+
+```ts
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+```
+
+2. Rewrite `boundedSummarize` in full:
+
+```ts
+export function boundedSummarize(providerConfig: ProviderConfigLike | null): {
+  summarize: (
+    conversationId: string | null,
+    slice: TranscriptSlice
+  ) => Promise<SummarizationResult | null>;
+  didSummarize: () => boolean | null;
+} {
+  let produced: boolean | null = null;
+
+  const summarize = async (
+    conversationId: string | null,
+    slice: TranscriptSlice
+  ): Promise<SummarizationResult | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        ensureMeetingSummary(conversationId, slice.entries, providerConfig as never, 1),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), SUMMARIZE_TIMEOUT_MS);
+        }),
+      ]);
+      produced = result !== null;
+      return result;
+    } catch {
+      // UNREACHABLE TODAY, kept as defence in depth. ensureMeetingSummary
+      // catches everything and returns null, and the timeout leg only ever
+      // resolves - so every real failure already arrives as `null` and sets
+      // produced = false above. The actual guard keeping an AI error out of
+      // last_error is the summarizer's own catch plus meeting-log-push.ts's
+      // try/catch around deps.summarize, NOT this line; do not read it as the
+      // redaction boundary.
+      produced = false;
+      return null;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  return { summarize, didSummarize: () => produced };
+}
+```
+
+`minEntries: 1` matches the Odoo path's existing floor (a short meeting still gets a real note) — `ensureMeetingSummary` persists separately at its own fixed 4-entry floor regardless, so this does not change when a summary gets written to `meeting_summaries`, only whether the AI gets called at all. `providerConfig as never` is unchanged from the old call — `ProviderConfigLike` and `ensureMeetingSummary`'s `ProviderConfig` describe the same runtime shape without being the same declared type.
+
+3. Update the two doc comments that name the old function: the "Two jobs" comment above `boundedSummarize` (`:107`, "fallback: generateMeetingLogSummary returns null identically...") and the inline comment inside `runAction` (`:237`, "generateMeetingLogSummary swallows its throw and returns null") — both become `ensureMeetingSummary`.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts src/tests/meeting-log-actions.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Type-check and lint**
+- [ ] **Step 6: Type-check and lint**
 
 Run: `npm run type-check && npm run lint`
-Expected: no new errors in `meeting-log-push.ts`. `useMeetingLog.ts` will still show a type error (its `summarize` callback doesn't match the new `PushDeps.summarize` shape yet) — that's Task 4's.
+Expected: no new errors in `meeting-log-push.ts` or `meeting-log-actions.ts`. `useMeetingLog.ts` will still show a type error (its `summarize` callback doesn't match the new `PushDeps.summarize` shape yet) — that's Task 4's.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib/odoo/meeting-log-push.ts src/tests/odoo-meeting-log-push.test.ts
-git commit -m "feat(odoo): thread conversation_id through PushDeps.summarize, drop the row-level summary cache"
+git add src/lib/odoo/meeting-log-push.ts src/lib/odoo/meeting-log-actions.ts \
+  src/tests/odoo-meeting-log-push.test.ts src/tests/meeting-log-actions.test.ts
+git commit -m "feat(odoo): thread conversation_id through PushDeps.summarize and boundedSummarize, drop the row-level summary cache"
 ```
 
 ---
@@ -999,6 +1179,7 @@ git commit -m "feat(odoo): thread conversation_id through PushDeps.summarize, dr
 
 **Files:**
 - Modify: `src/hooks/useMeetingLog.ts`
+- Modify: `src/tests/useMeetingLog.enqueue.test.tsx`, `src/tests/useMeetingLog.hold.test.tsx` — both mock `@/lib/functions/meeting-summarizer` with a factory naming only the old `generateMeetingLogSummary` export. Once `useMeetingLog.ts` imports `ensureMeetingSummary` by name, that named import resolves against an incomplete mock and Vitest throws `No "ensureMeetingSummary" export is defined on the mock` at module load — both suites die entirely, not just the assertions that touch it.
 
 **Interfaces:**
 - Consumes: `ensureMeetingSummary` (Task 1), `PushDeps.summarize`'s new shape (Task 3).
@@ -1070,17 +1251,62 @@ Expected: PASS with no errors in `useMeetingLog.ts` or `meeting-log-push.ts`.
 - [ ] **Step 4: Run the sweep test suite**
 
 Run: `npx vitest run src/tests/odoo-meeting-log-sweep.test.ts`
-Expected: PASS (this file already had its `summary_json` fixture fixed in Task 2).
+Expected: PASS (this file already had its `summary_json` fixture fixed in Task 2). Note this test exercises `runMeetingLogSweep` itself (in `meeting-log-push.ts`), directly — it proves that function's own per-row dispatch is correct, but it does NOT render `useMeetingLog`'s hook, so it says nothing about whether THIS task's own closures (Step 1.3, 1.4) forward their arguments correctly. Step 5 below closes that gap.
 
-- [ ] **Step 6: Lint**
+- [ ] **Step 5: Fix the two hook suites' stale mock, and add a real test of `pushHeldRow`'s own closure**
+
+1. In both `src/tests/useMeetingLog.enqueue.test.tsx` and `src/tests/useMeetingLog.hold.test.tsx`, rename the mock factory's export:
+
+```ts
+const summarizer = vi.hoisted(() => ({
+  ensureMeetingSummary: vi.fn(async () => null),
+}));
+```
+
+Then rename every `summarizer.generateMeetingLogSummary` reference to `summarizer.ensureMeetingSummary`: `useMeetingLog.enqueue.test.tsx:220` (its `beforeEach`), and `useMeetingLog.hold.test.tsx:219` (its `beforeEach`) and `:287` (the "cancels the row, pushes nothing and makes no AI call" assertion). `grep -n generateMeetingLogSummary src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx` afterward to confirm none remain.
+
+2. Add this test to `useMeetingLog.hold.test.tsx`'s `describe("the hold", ...)` block, alongside "pushes exactly once after the hold elapses": it captures the ACTUAL closure `pushHeldRow` builds (Step 1.3 above) via the mocked `pushQueuedRow`'s own call arguments, then invokes that closure directly — the one thing Step 4's sweep test structurally cannot reach, since it never renders this hook at all.
+
+```ts
+  it("pushHeldRow's summarize dep forwards conversationId and the sliced entries to ensureMeetingSummary", async () => {
+    action.getQueueRow.mockResolvedValue({ id: "row-1", status: "held", conversation_id: "conv-1" });
+    render();
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
+
+    const deps = push.pushQueuedRow.mock.calls[0][1] as {
+      summarize: (conversationId: string | null, slice: unknown) => unknown;
+    };
+    const slice = { entries: [entry(1000)], startAt: 1000, endAt: 2000 };
+    await deps.summarize("conv-1", slice);
+
+    expect(summarizer.ensureMeetingSummary).toHaveBeenCalledWith(
+      "conv-1",
+      slice.entries,
+      expect.anything(),
+      1
+    );
+  });
+```
+
+- [ ] **Step 6: Run both hook suites**
+
+Run: `npx vitest run src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx`
+Expected: PASS (both suites load again now that the mock export name matches, and the new case passes).
+
+- [ ] **Step 7: Lint**
 
 Run: `npm run lint`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add src/hooks/useMeetingLog.ts src/tests/odoo-meeting-log-sweep.test.ts
+git add src/hooks/useMeetingLog.ts src/tests/odoo-meeting-log-sweep.test.ts \
+  src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx
 git commit -m "feat(odoo): rewire useMeetingLog's summarize wiring onto ensureMeetingSummary"
 ```
 
@@ -1090,7 +1316,8 @@ git commit -m "feat(odoo): rewire useMeetingLog's summarize wiring onto ensureMe
 
 **Files:**
 - Modify: `src/hooks/useCompletion.ts`
-- Test: `src/tests/summarize-current-conversation.slice.test.ts`
+- Modify: `src/tests/useCompletion.meeting-assist.test.tsx`, `src/tests/odoo-target-new-chat-entry-points.test.tsx` — both mock `@/lib/functions/meeting-summarizer` with the old `{ summarizeConversation, shouldSummarize }` shape; once this task's Step 5 lands, that mock no longer matches what `useCompletion.ts` imports.
+- Test: `src/tests/summarize-current-conversation.slice.test.tsx` (`.tsx`, not `.ts` — its `strictModeWrapper` helper below returns JSX).
 
 **Interfaces:**
 - Consumes: `ensureMeetingSummary` (Task 1).
@@ -1119,9 +1346,28 @@ vi.mock("@/lib/functions/meeting-summarizer", () => ({
 
 and add `ensureMeetingSummary` to that file's existing top-of-file import block (alongside `appendMessagesToConversation`, `fetchAIResponse`, etc. — actually `ensureMeetingSummary` lives in `@/lib/functions/meeting-summarizer`, a different module than the `@/lib` barrel those are imported from; add a separate import: `import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";`).
 
+`src/tests/odoo-target-new-chat-entry-points.test.tsx` mocks the identical old shape at `:82-85`:
+
+```ts
+vi.mock("@/lib/functions/meeting-summarizer", () => ({
+  summarizeConversation: vi.fn(),
+  shouldSummarize: vi.fn(() => false),
+}));
+```
+
+Change it the same way:
+
+```ts
+vi.mock("@/lib/functions/meeting-summarizer", () => ({
+  ensureMeetingSummary: vi.fn(async () => null),
+}));
+```
+
+This file never imports the named export directly (it only exercises `useCompletion` through its public surface), so no companion import line is needed here — unlike `useCompletion.meeting-assist.test.tsx` above.
+
 - [ ] **Step 2: Write the failing test**
 
-Create `src/tests/summarize-current-conversation.slice.test.ts`, reusing this repo's existing `useCompletion` harness verbatim (the mock blocks below are copied from `useCompletion.meeting-assist.test.tsx`, which already establishes this exact pattern):
+Create `src/tests/summarize-current-conversation.slice.test.tsx` (`.tsx`, not `.ts` — `strictModeWrapper` below returns JSX, and a `.ts` file cannot contain a JSX literal), reusing this repo's existing `useCompletion` harness verbatim (the mock blocks below are copied from `useCompletion.meeting-assist.test.tsx`, which already establishes this exact pattern):
 
 ```ts
 import { PropsWithChildren, StrictMode } from "react";
@@ -1231,12 +1477,20 @@ This is the test that catches BOTH failure modes at once: a raw (unsliced) `meet
 
 - [ ] **Step 3: Run to verify it fails**
 
-Run: `npx vitest run src/tests/summarize-current-conversation.slice.test.ts`
+Run: `npx vitest run src/tests/summarize-current-conversation.slice.test.tsx`
 Expected: FAIL — `summarizeCurrentConversation` doesn't call `ensureMeetingSummary` yet (still calls the now-deleted `summarizeConversation`), so the import itself fails to compile, or `ensureMeetingSummary` is never called.
 
 - [ ] **Step 4: Add `conversationTranscriptStartRef` and set it at every conversation-start point**
 
 In `src/hooks/useCompletion.ts`:
+
+0. Update the top-of-file import (currently `:32-35`):
+
+```ts
+import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+```
+
+(replacing the existing `import { summarizeConversation, shouldSummarize } from "@/lib/functions/meeting-summarizer";` block — Step 5 below rewrites every call site that used those two names, so this file must stop importing them in the same task, not leave a dangling reference to a deleted export.)
 
 1. Near the other refs (around `:196-201`, alongside `currentConversationIdRef`, `conversationHistoryRef`, `meetingTranscriptLengthRef`), add:
 
@@ -1274,6 +1528,20 @@ In `src/hooks/useCompletion.ts`:
 
 (the rest of the function is unchanged). Apply the identical guard to `addMeetingTranscriptEntries` (around `:652-691`), before its own `setMeetingTranscript((prev) => [...prev, ...validEntries])` call.
 
+Apply the SAME guard to `addSystemAudioTranscript` (`:732-776`), before its own `setMeetingTranscript((prev) => [...prev, entry])` call (`:750`) — it mints a new conversation id exactly like the two functions above (`ensureConversationId(currentConversationIdRef)` at `:753`), so a meeting whose first speaker arrives over system audio rather than the microphone needs the identical boundary set, or the slice for that conversation silently starts at the PREVIOUS conversation's boundary instead of its own:
+
+```ts
+      // A brand-new conversation starts with THIS entry - same guard as
+      // addMeetingTranscript, needed here too because system audio can be
+      // the first speaker in a meeting.
+      if (!currentConversationIdRef.current) {
+        conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+      }
+
+      // Just append - timestamps are monotonically increasing
+      setMeetingTranscript((prev) => [...prev, entry]);
+```
+
 3. In `loadConversation` (around `:1401-1428`), right where `currentConversationIdRef.current = conversation.id;` is set (immediately BEFORE that line, so both refs advance together in the same synchronous statement group):
 
 ```ts
@@ -1287,6 +1555,23 @@ In `src/hooks/useCompletion.ts`:
     conversationTranscriptStartRef.current = meetingTranscript.length;
     currentConversationIdRef.current = null;
 ```
+
+Add `meetingTranscript.length` to this `useCallback`'s own dependency array (currently `[summarizeCurrentConversation, flushUnsavedMeetingTranscript]`, at the function's closing `}, [...])`) — matching `loadConversation`'s array, which already lists it:
+
+```ts
+  }, [summarizeCurrentConversation, meetingTranscript.length, flushUnsavedMeetingTranscript]);
+```
+
+Not a live bug today — `summarizeCurrentConversation` is itself already a dependency, and Step 5 below gives IT a `meetingTranscript` dependency, so `startNewConversation` is transitively recreated on every transcript change regardless. Add it anyway: `eslint-plugin-react-hooks`'s exhaustive-deps rule will flag the now-newly-read `meetingTranscript.length` as used-but-missing, and leaving it out relies on a transitive relationship a future, unrelated change to `summarizeCurrentConversation`'s own deps could silently break.
+
+5. In `clearMeetingTranscript` (`:778-823`), right where `currentConversationIdRef.current = null;` is set (`:796`), add the same reset — `0`, not `meetingTranscript.length`, since this function is itself the one setting `meetingTranscript` to `[]` two lines above:
+
+```ts
+    conversationTranscriptStartRef.current = 0;
+    currentConversationIdRef.current = null;
+```
+
+This path already self-heals without the explicit reset — `meetingTranscriptLengthRef.current` re-syncs to `0` via the `useLayoutEffect` at `:506-508` before any subsequent call can read it, and every subsequent conversation-start guard reads THAT ref, not this one directly. Add it anyway, for the same reason as `startNewConversation`'s deps entry above: an explicit reset keeps `conversationTranscriptStartRef`'s invariant ("always equals the boundary of the conversation `currentConversationIdRef` currently names") true by construction here too, rather than true only because of a timing relationship that lives in a different function.
 
 - [ ] **Step 5: Rewrite `summarizeCurrentConversation`, reading the ref FIRST**
 
@@ -1341,7 +1626,7 @@ Note the shape change: the OUTER function is no longer `async` itself — it doe
 
 - [ ] **Step 6: Run the test to verify it passes**
 
-Run: `npx vitest run src/tests/summarize-current-conversation.slice.test.ts`
+Run: `npx vitest run src/tests/summarize-current-conversation.slice.test.tsx`
 Expected: PASS.
 
 - [ ] **Step 7: Run the full `useCompletion` test suite**
@@ -1351,6 +1636,8 @@ Run: `npx vitest run` scoped to every existing test file that exercises `useComp
 ```bash
 grep -rl "useCompletion\|loadConversation\|startNewConversation\|addMeetingTranscript" src/tests --include="*.test.ts*" -l
 ```
+
+This pattern already matches `odoo-target-new-chat-entry-points.test.tsx` (it exercises `startNewConversation`), so Step 1's fix to that file gets verified here too — no separate run step needed for it.
 
 Run each returned file with `npx vitest run <file>`.
 Expected: PASS. Pay particular attention to any test asserting `summarizeCurrentConversation`'s OLD behavior (gating on `conversationHistory.length`, or calling the now-deleted `summarizeConversation`/`shouldSummarize`) — update those to the new contract (gates on `!state.currentConversationId` only; the length gate moved inside `ensureMeetingSummary`).
@@ -1364,7 +1651,8 @@ Expected: no new errors.
 
 ```bash
 git add src/hooks/useCompletion.ts src/tests/useCompletion.meeting-assist.test.tsx \
-  src/tests/summarize-current-conversation.slice.test.ts
+  src/tests/odoo-target-new-chat-entry-points.test.tsx \
+  src/tests/summarize-current-conversation.slice.test.tsx
 git commit -m "fix(context-memory): scope summarizeCurrentConversation to the leaving conversation's own transcript slice"
 ```
 
@@ -1392,6 +1680,18 @@ import {
   ensureMeetingSummary,
 } from "./meeting-summarizer";
 ```
+
+Keep `extractJsonObject` — the existing top-of-file import (currently `import { extractJsonObject, summarizeConversation, shouldSummarize } from "./meeting-summarizer";`) is what this replaces, and `extractJsonObject` is still used at `:288`, inside the unrelated `parseCompactionResponse` (`JSON.parse(extractJsonObject(response))`) — nothing else in this task touches that function. Only `summarizeConversation`/`shouldSummarize` are actually going away:
+
+```ts
+import {
+  extractJsonObject,
+  chatMessagesToTranscriptEntries,
+  ensureMeetingSummary,
+} from "./meeting-summarizer";
+```
+
+Also add `getMeetingSummaryByConversation` to the existing `@/lib/database` import a few lines above (currently `getKnowledgeProfile, updateKnowledgeProfile, getOldestUncompactedSummaries, getUncompactedSummaryCount, getUnsummarizedConversations`) — Step 1.2 below needs it and it is not yet imported into this file.
 
 2. Inside `summarizePendingConversations`'s loop (around `:87-116`), replace:
 
@@ -1449,11 +1749,24 @@ with:
 
     const result = await ensureMeetingSummary(conv.id, entries, providerConfig);
     if (result) {
-      summarized += 1;
+      // A truthy result means "generation and persistence both succeeded, OR
+      // this conversation already had a cached summary" - it does NOT
+      // distinguish those from "generation succeeded but the persist write
+      // then threw", because ensureMeetingSummary's own outer try/catch
+      // (Task 1) converts that case to a null return too. Re-check against
+      // what is actually stored, rather than trusting the return value alone -
+      // this counter drives the caller's attempts>0 && summarized===0
+      // failure toast (src/pages/context-memory/index.tsx), and an
+      // over-counted `summarized` here would silently swallow that toast on a
+      // batch where the AI calls succeeded but nothing was actually saved.
+      const persisted = await getMeetingSummaryByConversation(conv.id);
+      if (persisted) {
+        summarized += 1;
+      }
     }
 ```
 
-3. Remove the now-unused `shouldSummarize`/`summarizeConversation` import.
+3. Remove the now-unused `shouldSummarize`/`summarizeConversation` import (already dropped in Step 1.1's replacement import block above).
 
 - [ ] **Step 2: Rewire `useSystemAudio.ts`**
 
@@ -1567,7 +1880,13 @@ const {
 } = vi.hoisted(() => ({
   getUnsummarizedConversations: vi.fn(),
   createMeetingSummary: vi.fn(async () => ({ id: "s1" })),
-  getMeetingSummaryByConversation: vi.fn(async () => null),
+  // Call-aware, not a flat resolved value: ensureMeetingSummary's OWN
+  // internal cache check (Task 1) calls this once per conversation BEFORE
+  // generating, and Step 1.2's re-check above calls it a second time AFTER a
+  // truthy result - the first call must stay a cache MISS (null) or the AI
+  // path this test exists to exercise never runs at all, and the second call
+  // must return a row or `summarized` stays 0 even on a real success.
+  getMeetingSummaryByConversation: vi.fn(),
 }));
 vi.mock("@/lib/database", () => ({
   getKnowledgeProfile: vi.fn(),
@@ -1629,6 +1948,10 @@ beforeEach(() => {
   fetchAIResponse.mockReset();
   getUnsummarizedConversations.mockReset();
   createMeetingSummary.mockClear();
+  getMeetingSummaryByConversation.mockReset();
+  getMeetingSummaryByConversation
+    .mockResolvedValueOnce(null) // ensureMeetingSummary's own cache check
+    .mockResolvedValue({ id: "s1", conversationId: "conv-1" }); // this task's re-check, and any further calls
 });
 
 describe("summarizePendingConversations", () => {
@@ -1712,7 +2035,7 @@ git commit -m "feat(context-memory): route the Update-Knowledge backfill and sys
 - Test: `src/tests/summary-content.render.test.tsx`
 
 **Interfaces:**
-- Produces: `SummaryContent({ summary, entities }: { summary: MeetingSummary; entities: KnowledgeEntity[] }): JSX.Element` — pure presentational, no fetching, no edit state. Consumed by both `SummaryDetail.tsx` (Task 7) and the dashboard expand (Task 8).
+- Produces: `SummaryContent({ summary, entities, showSummary }: { summary: MeetingSummary; entities: KnowledgeEntity[]; showSummary?: boolean }): JSX.Element` — pure presentational, no fetching, no edit state (`showSummary`, default `true`, only toggles whether its OWN read-only summary-text block renders; it carries no editing logic of its own). Consumed by both `SummaryDetail.tsx` (Task 7) and the dashboard expand (Task 8). Per the spec ("the dashboard expand is a compact inline view and doesn't need it"), the exchange-count footer stays OUT of this component entirely — it is `SummaryDetail.tsx`'s own chrome, not part of the shared piece.
 
 - [ ] **Step 1: Write the failing render test**
 
@@ -1734,7 +2057,14 @@ const SUMMARY: MeetingSummary = {
 };
 
 const ENTITIES: KnowledgeEntity[] = [
-  { id: "e1", entityType: "person", name: "Ada", description: null, firstSeen: 1, lastSeen: 1, mentionCount: 1 },
+  // Deliberately NOT "Ada" — SUMMARY.participants already contains "Ada",
+  // and the entity badge renders as a SEPARATE "organization:" span plus a
+  // bare "Ada" text node inside the same Badge, which risks getByText("Ada")
+  // resolving ambiguously against the participant badge depending on how
+  // Testing Library's text matcher normalizes split text nodes. A distinct
+  // fixture value sidesteps the ambiguity outright rather than relying on
+  // matcher internals.
+  { id: "e1", entityType: "organization", name: "Acme Corp", description: null, firstSeen: 1, lastSeen: 1, mentionCount: 1 },
 ];
 
 describe("SummaryContent", () => {
@@ -1749,6 +2079,7 @@ describe("SummaryContent", () => {
     expect(screen.getByText("Ada joined the team")).toBeInTheDocument();
     expect(screen.getByText("Ada")).toBeInTheDocument();
     expect(screen.getByText("Bo")).toBeInTheDocument();
+    expect(screen.getByText(/Acme Corp/)).toBeInTheDocument();
   });
 
   it("omits a section entirely when its array is empty, rather than rendering an empty heading", () => {
@@ -1756,14 +2087,19 @@ describe("SummaryContent", () => {
     expect(screen.queryByText("Goals")).not.toBeInTheDocument();
   });
 
-  it("shows the entry-count footer with transcript-line wording, not 'exchanges'", () => {
-    render(<SummaryContent summary={SUMMARY} entities={[]} />);
-    expect(screen.getByText(/6 transcript lines/)).toBeInTheDocument();
+  it("omits its own summary text when showSummary is false, without touching any other section", () => {
+    // SummaryDetail.tsx passes showSummary={false} while isEditing, so it can
+    // render its OWN Textarea for the summary without this component's
+    // read-only paragraph duplicating the same text underneath it.
+    render(<SummaryContent summary={SUMMARY} entities={[]} showSummary={false} />);
+    expect(screen.queryByText("We discussed the roadmap.")).not.toBeInTheDocument();
+    expect(screen.getByText("roadmap")).toBeInTheDocument();
   });
 
-  it("renders nothing in the footer for a migration-backfilled row (exchangeCount 0)", () => {
-    render(<SummaryContent summary={{ ...SUMMARY, exchangeCount: 0 }} entities={[]} />);
+  it("does not render an exchange-count footer at all — that stays in SummaryDetail.tsx's own chrome", () => {
+    render(<SummaryContent summary={SUMMARY} entities={[]} />);
     expect(screen.queryByText(/transcript lines/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/exchanges/)).not.toBeInTheDocument();
   });
 });
 ```
@@ -1788,17 +2124,23 @@ import type { MeetingSummary, KnowledgeEntity } from "@/types";
 export interface SummaryContentProps {
   summary: MeetingSummary;
   entities: KnowledgeEntity[];
+  /** Default true. SummaryDetail.tsx passes false while isEditing, since it
+   * renders its own Textarea for the summary text in that state and would
+   * otherwise duplicate it directly below. */
+  showSummary?: boolean;
 }
 
-export const SummaryContent = ({ summary, entities }: SummaryContentProps) => {
+export const SummaryContent = ({ summary, entities, showSummary = true }: SummaryContentProps) => {
   return (
     <div className="space-y-4">
-      <div className="space-y-2">
-        <Label>Summary</Label>
-        <p className="text-sm text-muted-foreground bg-accent/30 p-3 rounded-lg">
-          {summary.summary}
-        </p>
-      </div>
+      {showSummary && (
+        <div className="space-y-2">
+          <Label>Summary</Label>
+          <p className="text-sm text-muted-foreground bg-accent/30 p-3 rounded-lg">
+            {summary.summary}
+          </p>
+        </div>
+      )}
 
       {summary.topics.length > 0 && (
         <div className="space-y-2">
@@ -1928,30 +2270,75 @@ export const SummaryContent = ({ summary, entities }: SummaryContentProps) => {
           </div>
         </div>
       )}
-
-      {summary.exchangeCount > 0 && (
-        <div className="pt-2 border-t border-border/50">
-          <p className="text-xs text-muted-foreground">
-            {summary.exchangeCount} transcript lines
-          </p>
-        </div>
-      )}
     </div>
   );
 };
 ```
 
+No exchange-count footer here — per the spec, that block stays in `SummaryDetail.tsx`'s own chrome (Step 4 below), since "the dashboard expand is a compact inline view and doesn't need it."
+
 - [ ] **Step 4: Update `SummaryDetail.tsx` to render it**
 
 In `src/pages/context-memory/components/SummaryDetail.tsx`:
+
 1. Add the import: `import { SummaryContent } from "./SummaryContent";`
-2. Replace the whole extracted JSX block (Topics through Metadata) with `<SummaryContent summary={summary} entities={entities} />`, keeping everything ABOVE it (the editable Summary textarea/`isEditing` block) and the `CardHeader` chrome unchanged. The `isEditing` textarea stays in `SummaryDetail.tsx` itself — `SummaryContent` always renders `summary.summary` as read-only text, since the dashboard expand (Task 8) never edits.
-3. Remove the now-unused lucide icon imports from `SummaryDetail.tsx` that only the extracted JSX used (`Users, CheckCircle, ListTodo, Tag, Target, ArrowRight, MessageSquare` — keep `Save, X, Edit2, Loader2, Copy, Check, MessageCircleReplyIcon`, which the chrome that stayed still uses).
+
+2. Replace the WHOLE `CardContent` body (currently `:301-482` — the Summary block at `:301-316` through the closing of the extraction range at `:483`) with:
+
+```tsx
+        {isEditing && (
+          <div className="space-y-2">
+            <Label>Summary</Label>
+            <Textarea
+              value={editedSummary}
+              onChange={(e) => setEditedSummary(e.target.value)}
+              rows={4}
+              className="resize-none"
+            />
+          </div>
+        )}
+
+        <SummaryContent summary={summary} entities={entities} showSummary={!isEditing} />
+
+        {summary.exchangeCount > 0 && (
+          <div className="pt-2 border-t border-border/50">
+            <p className="text-xs text-muted-foreground">
+              {summary.exchangeCount} transcript lines
+            </p>
+          </div>
+        )}
+```
+
+This is why `showSummary` exists at all: Topics/Participants/Goals/etc. must stay visible while editing (today's actual behavior — the `isEditing` conditional in the current code wraps ONLY the summary text block, `:304-315`, never the sections after it), so `SummaryDetail.tsx` cannot simply swap `Textarea` for `<SummaryContent>` wholesale — it renders BOTH, telling `SummaryContent` to skip its own read-only summary paragraph while the Textarea is showing the same content in editable form directly above it. The exchange-count footer moves here too (was `:479-482`, inside the old extraction range) — per the spec, it is `SummaryDetail.tsx`'s own chrome, not part of the reusable piece, since the dashboard expand (Task 8) is a compact view that doesn't show it.
+
+3. Remove the now-unused lucide icon imports from `SummaryDetail.tsx` that only the extracted JSX used: `Users, CheckCircle, ListTodo, Target, ArrowRight, MessageSquare`. Do NOT remove `Tag` — it is used TWICE in this file, once inside the extracted Topics block (which moves to `SummaryContent.tsx` and gets its own `Tag` import there, already in Step 3's code) and once in the EMPTY-STATE icon at `:189` (`<Tag className="h-10 w-10 text-muted-foreground mb-3" />`), which stays in `SummaryDetail.tsx` and still needs it. Keep `Save, X, Edit2, Loader2, Copy, Check, MessageCircleReplyIcon` as before.
+
+4. Add these two cases to `src/tests/summary-detail.conversation-link.test.tsx` (reusing its existing `SUMMARY` fixture, which already has `exchangeCount: 12`), covering the footer now that it lives here instead of in `SummaryContent`:
+
+```tsx
+  it("shows the entry-count footer with transcript-line wording, not 'exchanges'", () => {
+    render(
+      <SummaryDetail summary={SUMMARY} onClose={() => {}} onUpdate={() => {}} />
+    );
+    expect(screen.getByText(/12 transcript lines/)).toBeInTheDocument();
+  });
+
+  it("renders nothing in the footer for a migration-backfilled row (exchangeCount 0)", () => {
+    render(
+      <SummaryDetail
+        summary={{ ...SUMMARY, exchangeCount: 0 }}
+        onClose={() => {}}
+        onUpdate={() => {}}
+      />
+    );
+    expect(screen.queryByText(/transcript lines/)).not.toBeInTheDocument();
+  });
+```
 
 - [ ] **Step 5: Run the tests**
 
 Run: `npx vitest run src/tests/summary-content.render.test.tsx src/tests/summary-detail.conversation-link.test.tsx`
-Expected: PASS. (`summary-detail.conversation-link.test.tsx` is the existing regression test for `SummaryDetail.tsx`'s "open conversation" button — unaffected by this extraction, but run it to confirm the refactor didn't break the chrome that stayed.)
+Expected: PASS. (`summary-detail.conversation-link.test.tsx` now also carries the two footer cases moved out of `summary-content.render.test.tsx` in Step 4.4 above.)
 
 - [ ] **Step 6: Type-check and lint**
 
@@ -1963,7 +2350,8 @@ Expected: PASS.
 ```bash
 git add src/pages/context-memory/components/SummaryContent.tsx \
   src/pages/context-memory/components/SummaryDetail.tsx \
-  src/tests/summary-content.render.test.tsx
+  src/tests/summary-content.render.test.tsx \
+  src/tests/summary-detail.conversation-link.test.tsx
 git commit -m "refactor(context-memory): extract SummaryContent from SummaryDetail for reuse in the dashboard expand"
 ```
 
@@ -2116,9 +2504,23 @@ In `src/pages/meetings/components/QueueRow.tsx`:
     }
     if (row.conversation_id === null) return;
     setSummaryState({ loading: true });
-    const summary = await getMeetingSummaryByConversation(row.conversation_id);
-    const entities = summary ? await getEntitiesForSummary(summary.id) : [];
-    setSummaryState({ loading: false, summary, entities });
+    try {
+      const summary = await getMeetingSummaryByConversation(row.conversation_id);
+      const entities = summary ? await getEntitiesForSummary(summary.id) : [];
+      setSummaryState({ loading: false, summary, entities });
+    } catch (error) {
+      // getMeetingSummaryByConversation's own try/catch only covers its
+      // SELECT (meeting-context.action.ts:181-190) - the getDatabase() call
+      // just above that try is NOT covered, so a Database.load() failure
+      // propagates here uncaught. Without this catch, summaryState would
+      // stay stuck at { loading: true } forever - a permanent spinner, not a
+      // visible error. Fold it into the same "No summary available" branch a
+      // genuine cache miss already uses, matching how every other summarize
+      // path in this feature treats a failure as "nothing to show" rather
+      // than a crash; the real error is still logged for diagnosis.
+      console.error("Failed to load meeting summary:", error);
+      setSummaryState({ loading: false, summary: null, entities: [] });
+    }
   };
 ```
 
@@ -2228,27 +2630,63 @@ Expected: FAIL.
 
 - [ ] **Step 7: Add the expand affordance to `ConversationRow.tsx`**
 
-In `src/pages/meetings/components/ConversationRow.tsx`, apply the same pattern as `QueueRow` (Step 3), keyed on the `id` prop instead of `row.conversation_id`, with no null-guard (`id` is never null here):
+In `src/pages/meetings/components/ConversationRow.tsx`, apply the same pattern as `QueueRow` (Step 3), keyed on the `id` prop instead of `row.conversation_id`, with no null-guard (`id` is never null here).
+
+1. Add imports: `import { getMeetingSummaryByConversation, getEntitiesForSummary } from "@/lib/database";`, `import { SummaryContent } from "@/pages/context-memory/components/SummaryContent";`, `import type { MeetingSummary, KnowledgeEntity } from "@/types";`, and — this file has no `React` namespace import (only `import { memo, useState } from "react";`), so `toggleSummary`'s event parameter needs its own named import, not `React.MouseEvent` — `import type { MouseEvent } from "react";`.
+
+2. Add the state and handler, alongside the existing `useState` calls near the top of `ConversationRowInner`:
 
 ```ts
   const [summaryState, setSummaryState] = useState<
     { loading: true } | { loading: false; summary: MeetingSummary | null; entities: KnowledgeEntity[] } | null
   >(null);
 
-  const toggleSummary = async (e: React.MouseEvent) => {
+  const toggleSummary = async (e: MouseEvent) => {
     e.stopPropagation(); // this card's own onClick navigates - mirror the rename button's guard just above
     if (summaryState !== null) {
       setSummaryState(null);
       return;
     }
     setSummaryState({ loading: true });
-    const summary = await getMeetingSummaryByConversation(id);
-    const entities = summary ? await getEntitiesForSummary(summary.id) : [];
-    setSummaryState({ loading: false, summary, entities });
+    try {
+      const summary = await getMeetingSummaryByConversation(id);
+      const entities = summary ? await getEntitiesForSummary(summary.id) : [];
+      setSummaryState({ loading: false, summary, entities });
+    } catch (error) {
+      // Same failure mode as QueueRow's toggleSummary (Step 3.2) - see its
+      // comment: getMeetingSummaryByConversation's getDatabase() call sits
+      // outside its own try/catch, so a connection failure lands here.
+      console.error("Failed to load meeting summary:", error);
+      setSummaryState({ loading: false, summary: null, entities: [] });
+    }
   };
 ```
 
-Add the toggle button beside the existing badges (inside the `<div className="flex items-center gap-1">` at `:217-232`) and the expanded `SummaryContent`/loading/empty block below the `Card`'s existing content, following the exact same three-way render as `QueueRow`'s Step 3.4. Add the same imports (`getMeetingSummaryByConversation, getEntitiesForSummary` from `@/lib/database`; `SummaryContent`; `MeetingSummary, KnowledgeEntity` types).
+3. Add the toggle button beside the existing badges, inside the `<div className="flex items-center gap-1">` at `:217-232` (after the two existing `<Badge>`s):
+
+```tsx
+          <Button size="sm" variant="ghost" onClick={toggleSummary}>
+            {summaryState ? "Hide summary" : "Show summary"}
+          </Button>
+```
+
+4. Add the expanded content as a new sibling inside `<Card>`, after the existing outer `<div className="flex items-center justify-between">...</div>` block and before `</Card>`. This block MUST have its own `stopPropagation` wrapper — `QueueRow.tsx` has no card-level navigating `onClick` so its equivalent block (Step 3.4) does not need one, but `ConversationRow`'s whole `<Card>` navigates on click (`:120-123`), exactly like every other interactive child in this file (the rename input, the save/cancel buttons, the error `<p>`, all at `:135`/`:160-161`/`:174-175`/`:211`) — without this guard, clicking anywhere inside the expanded summary (a topic badge, the summary text itself) would bubble up and navigate away from the row instead of letting the user read it:
+
+```tsx
+      {summaryState && (
+        <div onClick={(e) => e.stopPropagation()}>
+          {summaryState.loading ? (
+            <p className="text-xs text-muted-foreground">Loading summary…</p>
+          ) : summaryState.summary ? (
+            <SummaryContent summary={summaryState.summary} entities={summaryState.entities} />
+          ) : (
+            <p className="text-xs text-muted-foreground">No summary available</p>
+          )}
+        </div>
+      )}
+```
+
+**Deviation from the spec, noted deliberately so it is not "fixed" back later:** the spec states `getMeetingSummaryByConversation` "already swallows every DB failure" (citing `meeting-context.action.ts:186-189`) and uses that to justify a loading/summary-only state with no error branch. Reading the real function (`:176-191`) shows `const db = await getDatabase();` sits BEFORE its `try` block, at `:179` — a `getDatabase()` failure is NOT caught by that function and propagates to its caller. The `try/catch` added in both `toggleSummary`s above does not add a third UI state (the spec's `loading | { summary: MeetingSummary | null }` shape is unchanged, matching its own design) — it only makes an already-anticipated failure mode ("no summary yet") the landing state for a failure mode the spec's own premise missed ("the read errored"), instead of an infinite spinner.
 
 - [ ] **Step 8: Run to verify the `ConversationRow` tests pass**
 
