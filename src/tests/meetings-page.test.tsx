@@ -151,7 +151,6 @@ function row(over: Partial<MeetingLogListRow> = {}): MeetingLogListRow {
     lead_id: null,
     transcript_start_at: MEETING_AT,
     transcript_end_at: MEETING_AT + 60_000,
-    summary_json: null,
     attachment_id: null,
     message_id: null,
     status: "failed",

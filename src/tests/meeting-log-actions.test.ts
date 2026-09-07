@@ -144,7 +144,7 @@ function dbRow(over: Record<string, unknown> = {}) {
   return {
     id: "r", session_key: "k", conversation_id: null, instance: INSTANCE,
     contact_id: 42, lead_id: null, transcript: "You: hi",
-    transcript_start_at: 1, transcript_end_at: 2, summary_json: null,
+    transcript_start_at: 1, transcript_end_at: 2,
     attachment_id: null, message_id: null, status: "pending", attempts: 1,
     claimed_at: null, last_error: null, last_error_code: null,
     meeting_started_at: 1, created_at: 1, sent_at: null,
@@ -158,7 +158,7 @@ function seedRow(over: Partial<DbMeetingLogRow> = {}): void {
   const row = {
     id: "r1", session_key: "k1", conversation_id: "conv-1", instance: INSTANCE,
     contact_id: 42, lead_id: null, transcript: "You: hello",
-    transcript_start_at: 1000, transcript_end_at: 2000, summary_json: null,
+    transcript_start_at: 1000, transcript_end_at: 2000,
     attachment_id: null, message_id: null, status: "pending", attempts: 0,
     claimed_at: null, last_error: null, last_error_code: null,
     meeting_started_at: 1000, created_at: NOW, sent_at: null,

@@ -130,7 +130,7 @@ function seed(over: Record<string, unknown>) {
   const row = {
     id: "seed", session_key: "seed", conversation_id: null, instance: INSTANCE,
     contact_id: 1, lead_id: null, transcript: "t", transcript_start_at: 1,
-    transcript_end_at: 2, summary_json: null, attachment_id: null, message_id: null,
+    transcript_end_at: 2, attachment_id: null, message_id: null,
     status: "pending", attempts: 0, claimed_at: null, last_error: null,
     last_error_code: null, meeting_started_at: 1, created_at: NOW, sent_at: null,
     ...over,
@@ -1058,25 +1058,18 @@ describe("deriveRowStatus", () => {
 });
 
 describe("deleteQueueRow", () => {
-  it("blanks transcript AND summary_json while every timestamp survives", async () => {
+  it("blanks transcript while every timestamp survives", async () => {
     seed({
       id: "r", status: "failed", transcript: "You: secrets",
-      summary_json: '{"title":"Q3 renewal","participants":["Ada"]}',
       transcript_start_at: 1000, transcript_end_at: 2000,
       session_key: "conv:1000", created_at: 1234, contact_id: 42, lead_id: 7,
     });
 
     expect(await deleteQueueRow("r")).toBe(true);
 
-    // summary_json is not optional to clear: it holds title, summary,
-    // decisions, action items, next steps, participants and entities - the
-    // meeting's content in condensed form, including named people. Blanking
-    // the transcript and keeping the digest defeats the promise the confirm
-    // step made.
     expect(await getQueueRow("r")).toMatchObject({
       status: "deleted",
       transcript: "",
-      summary_json: null,
       transcript_start_at: 1000,
       transcript_end_at: 2000,
       session_key: "conv:1000",
@@ -1109,12 +1102,11 @@ describe("deleteQueueRow", () => {
     "deleteTerminalQueueRow removes a %s row, blanking it the same way",
     async (status) => {
       seed({
-        id: "r", status, transcript: "You: secrets",
-        summary_json: '{"title":"Q3 renewal"}', created_at: 1234,
+        id: "r", status, transcript: "You: secrets", created_at: 1234,
       });
       expect(await deleteTerminalQueueRow("r")).toBe(true);
       expect(await getQueueRow("r")).toMatchObject({
-        status: "deleted", transcript: "", summary_json: null, created_at: 1234,
+        status: "deleted", transcript: "", created_at: 1234,
       });
     }
   );
@@ -1413,14 +1405,14 @@ describe("countActionableQueued", () => {
 describe("pruneTranscripts", () => {
   const OLD = NOW - RETENTION_MS - 1;
 
-  it("blanks transcript and summary on sent and cancelled rows past the cutoff", async () => {
-    seed({ id: "s", session_key: "s", status: "sent", transcript: "text", summary_json: "{}", created_at: OLD });
-    seed({ id: "c", session_key: "c", status: "cancelled", transcript: "text", summary_json: "{}", created_at: OLD });
+  it("blanks transcript on sent and cancelled rows past the cutoff", async () => {
+    seed({ id: "s", session_key: "s", status: "sent", transcript: "text", created_at: OLD });
+    seed({ id: "c", session_key: "c", status: "cancelled", transcript: "text", created_at: OLD });
 
     expect(await pruneTranscripts(NOW)).toBe(2);
 
-    expect(await getQueueRow("s")).toMatchObject({ transcript: "", summary_json: null });
-    expect(await getQueueRow("c")).toMatchObject({ transcript: "", summary_json: null });
+    expect(await getQueueRow("s")).toMatchObject({ transcript: "" });
+    expect(await getQueueRow("c")).toMatchObject({ transcript: "" });
   });
 
   it.each(["failed", "unassigned", "pending", "held", "sending"])(
@@ -1433,23 +1425,6 @@ describe("pruneTranscripts", () => {
       expect(await getQueueRow("r")).toMatchObject({ transcript: "text" });
     }
   );
-
-  it("blanks a past-cutoff row whose transcript is ALREADY blank but summary_json is not", async () => {
-    // The predicate is `(transcript <> '' OR summary_json IS NOT NULL)`. Every
-    // other case here has both columns non-empty together, so a mutant
-    // dropping the OR arm entirely (leaving only `transcript <> ''`) survives
-    // them all. That mutant would strand the AI digest - title, summary,
-    // decisions, action items, participants, named people - on a row the user
-    // believes was pruned.
-    seed({
-      id: "digest-only", session_key: "digest-only", status: "sent",
-      transcript: "", summary_json: '{"title":"Q3 renewal"}', created_at: OLD,
-    });
-
-    expect(await pruneTranscripts(NOW)).toBe(1);
-
-    expect(await getQueueRow("digest-only")).toMatchObject({ summary_json: null });
-  });
 
   it("leaves a past-cutoff DELETED row alone", async () => {
     // The deliberate negative. `deleted` is absent from the predicate because
@@ -1467,7 +1442,7 @@ describe("pruneTranscripts", () => {
 
   it("is idempotent and never touches a timestamp", async () => {
     seed({
-      id: "s", session_key: "s", status: "sent", transcript: "text", summary_json: null,
+      id: "s", session_key: "s", status: "sent", transcript: "text",
       created_at: OLD, transcript_start_at: 11, transcript_end_at: 22, sent_at: 33,
     });
 

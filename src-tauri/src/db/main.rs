@@ -109,5 +109,11 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/conversation-title-source.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 16,
+            description: "backfill_and_drop_queue_summary_json",
+            sql: include_str!("migrations/meeting-log-queue-v2.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
