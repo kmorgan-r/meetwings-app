@@ -20,7 +20,7 @@ const ENTITIES: KnowledgeEntity[] = [
   // Testing Library's text matcher normalizes split text nodes. A distinct
   // fixture value sidesteps the ambiguity outright rather than relying on
   // matcher internals.
-  { id: "e1", entityType: "organization", name: "Acme Corp", description: null, firstSeen: 1, lastSeen: 1, mentionCount: 1 },
+  { id: "e1", entityType: "company", name: "Acme Corp", description: null, firstSeen: 1, lastSeen: 1, mentionCount: 1 },
 ];
 
 describe("SummaryContent", () => {

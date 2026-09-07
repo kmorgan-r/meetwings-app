@@ -109,7 +109,7 @@ describe("summarizePendingConversations", () => {
   it("skips a conversation whose FILTERED count is below 4, without counting it as an attempt", async () => {
     const short: ChatConversation = {
       ...MIXED_CONVERSATION,
-      // 3 user + 5 assistant = 8 raw messages, but only 3 pass the filter.
+      // 3 user + 4 assistant = 7 raw messages, but only 3 pass the filter.
       messages: [
         ...MIXED_CONVERSATION.messages.slice(0, 6),
         { id: "m9", role: "assistant", content: "a5", timestamp: 9 },

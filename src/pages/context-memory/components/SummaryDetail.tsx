@@ -159,12 +159,16 @@ export const SummaryDetail = ({
     }
 
     markdown += `---\n\n`;
-    markdown += `*${summary.exchangeCount} exchanges*`;
 
+    const footerParts: string[] = [];
+    if (summary.exchangeCount > 0) {
+      footerParts.push(`*${summary.exchangeCount} transcript lines*`);
+    }
     if (summary.durationSeconds) {
       const minutes = Math.floor(summary.durationSeconds / 60);
-      markdown += ` | *Duration: ${minutes} minutes*`;
+      footerParts.push(`*Duration: ${minutes} minutes*`);
     }
+    markdown += footerParts.join(" | ");
 
     try {
       await navigator.clipboard.writeText(markdown);

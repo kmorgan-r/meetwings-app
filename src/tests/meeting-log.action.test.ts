@@ -1428,8 +1428,9 @@ describe("pruneTranscripts", () => {
 
   it("leaves a past-cutoff DELETED row alone", async () => {
     // The deliberate negative. `deleted` is absent from the predicate because
-    // the delete action blanks both columns in the same statement that sets the
-    // status, so the clause would be dead. Delete, not retention, blanks those.
+    // the delete action blanks the transcript column in the same statement
+    // that sets the status, so the clause would be dead. Delete, not
+    // retention, blanks it.
     seed({ id: "d", session_key: "d", status: "deleted", transcript: "leftover", created_at: OLD });
     expect(await pruneTranscripts(NOW)).toBe(0);
     expect(await getQueueRow("d")).toMatchObject({ transcript: "leftover" });

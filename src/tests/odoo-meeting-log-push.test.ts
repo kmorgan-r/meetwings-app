@@ -325,7 +325,7 @@ describe("the happy path", () => {
     // this one only asserted the fallback text was present, which it always
     // was; nothing asserted a summary should have replaced it instead. This
     // is both real callers' common path (a freshly enqueued row has no
-    // summary_json yet), not an edge case.
+    // cached summary in `meeting_summaries` yet), not an edge case.
     const row = seedRow({ transcript: "You: hello\nGuest: hi there" });
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch

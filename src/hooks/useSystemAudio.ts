@@ -3,7 +3,7 @@ import { useWindowResize, useGlobalShortcuts } from ".";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
-import { fetchSTT, fetchAIResponse, chatMessagesToTranscriptEntries, ensureMeetingSummary } from "@/lib/functions";
+import { fetchSTT, fetchAIResponse, chatMessagesToTranscriptEntries, ensureMeetingSummary, MIN_PERSIST_ENTRIES } from "@/lib/functions";
 import {
   applyAIConversationTitle,
   type TitleProviderConfig,
@@ -652,7 +652,7 @@ export function useSystemAudio() {
           [...conversation.messages].reverse()
         );
 
-        if (entries.length >= 4) {
+        if (entries.length >= MIN_PERSIST_ENTRIES) {
           const provider = allAiProviders.find(
             (p) => p.id === selectedAIProvider.provider
           );

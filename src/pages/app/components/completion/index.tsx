@@ -100,7 +100,7 @@ export const Completion = ({
   // The AI provider, built exactly as useCompletion.ts:1313-1324 does it.
   //
   // NOT optional in practice: fetchAIResponse needs { provider,
-  // selectedProvider }, and generateMeetingLogSummary returns null without one
+  // selectedProvider }, and ensureMeetingSummary returns null without one
   // whenever the Meetwings API is off - so every BYO-provider user would get
   // the "Summarization failed" fallback body on EVERY meeting, silently.
   // `useApp` here is the CONTEXT one, not the unrelated hook of the same name

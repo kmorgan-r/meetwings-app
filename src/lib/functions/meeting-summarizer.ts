@@ -319,7 +319,7 @@ type ProviderConfig = {
 
 /** Below this, a persisted summary would permanently lock the conversation's
  * canonical row to a fragment - see the design spec's shared-helper step 4. */
-const MIN_PERSIST_ENTRIES = 4;
+export const MIN_PERSIST_ENTRIES = 4;
 
 /**
  * The one place that decides whether a meeting has a summary: look up a
@@ -343,7 +343,7 @@ export async function ensureMeetingSummary(
   conversationId: string | null,
   entries: TranscriptEntry[],
   providerConfig?: ProviderConfig,
-  minEntries: number = 4
+  minEntries: number = MIN_PERSIST_ENTRIES
 ): Promise<SummarizationResult | null> {
   try {
     if (conversationId) {
@@ -404,6 +404,3 @@ export async function ensureMeetingSummary(
     return null;
   }
 }
-
-
-

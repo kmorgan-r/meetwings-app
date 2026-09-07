@@ -630,9 +630,9 @@ export function useMeetingLogQueue() {
         () =>
           retryMeetingLog(row.id, {
             // Read from the ref the leaf ProviderConfigReader writes. `null`
-            // here would send every retry of a `failed` row - whose
-            // summary_json is null by construction - down the fallback-body
-            // path.
+            // here would send every retry of a `failed` row - which has no
+            // cached row in `meeting_summaries` yet by construction - down
+            // the fallback-body path.
             providerConfig: providerConfigRef.current,
             // The only way to observe the CAS: runAction owns it internally and
             // resolves only after both re-reads, so without this the row
@@ -701,9 +701,10 @@ export function useMeetingLogQueue() {
         () =>
           assignMeetingLog(row.id, payload.targets, {
             providerConfig: payload.providerConfig,
-            // `summary_json` is null on an unassigned row, so this push makes
-            // the AI call - up to 210s for a reassign. Without this hook the
-            // row renders its pre-click status for all of it.
+            // An unassigned row has no cached row in `meeting_summaries` yet,
+            // so this push makes the AI call - up to 210s for a reassign.
+            // Without this hook the row renders its pre-click status for all
+            // of it.
             onCommitted: () => void loaderRef.current(),
           }),
         SENT_COPY,

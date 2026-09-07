@@ -19,6 +19,7 @@ import {
   extractJsonObject,
   chatMessagesToTranscriptEntries,
   ensureMeetingSummary,
+  MIN_PERSIST_ENTRIES,
 } from "./meeting-summarizer";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 import { meetingTimestamp } from "./meeting-summary-date";
@@ -93,12 +94,12 @@ export async function summarizePendingConversations(
     const entries = chatMessagesToTranscriptEntries(conv.messages);
 
     // Too short to summarize — a cheap no-AI skip, so it must not count
-    // against the cap. Checked against the SAME 4-entry floor
+    // against the cap. Checked against the SAME MIN_PERSIST_ENTRIES floor
     // ensureMeetingSummary applies internally (its default minEntries), so
     // this pre-check and the real gate can never disagree. (Already-
     // summarized conversations are excluded at the DB layer by
     // getUnsummarizedConversations.)
-    if (entries.length < 4) {
+    if (entries.length < MIN_PERSIST_ENTRIES) {
       continue;
     }
 
@@ -116,9 +117,12 @@ export async function summarizePendingConversations(
       // A truthy result means "generation and persistence both succeeded, OR
       // this conversation already had a cached summary" - it does NOT
       // distinguish those from "generation succeeded but the persist write
-      // then threw", because ensureMeetingSummary's own outer try/catch
-      // (Task 1) converts that case to a null return too. Re-check against
-      // what is actually stored, rather than trusting the return value alone -
+      // then failed", because saveSummarizationResult (inside
+      // ensureMeetingSummary) catches its OWN errors and returns null on a
+      // persist failure without ever throwing - so ensureMeetingSummary's
+      // outer try/catch is never reached for that case, and the helper still
+      // returns the truthy generated result. Re-check against what is
+      // actually stored, rather than trusting the return value alone -
       // this counter drives the caller's attempts>0 && summarized===0
       // failure toast (src/pages/context-memory/index.tsx), and an
       // over-counted `summarized` here would silently swallow that toast on a
