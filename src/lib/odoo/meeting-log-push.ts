@@ -298,6 +298,14 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
       return expectInt(
         await deps.client.execute(target.model, "message_post", [[target.resId]], {
           body: getBody(),
+          // Odoo 17's message_post escapes a plain-str body by default
+          // (mail_thread.py: 'body': escape(body) -- "escape if text, keep if
+          // markup") and wraps the escaped result in one outer <p>. body_is_html
+          // is the RPC-only escape hatch documented right on the method: it
+          // makes Odoo wrap our string in Markup(...) first, so escape() is a
+          // no-op and our own escapeHtml()'d tags render instead of showing up
+          // as literal "&lt;b&gt;" text in the chatter.
+          body_is_html: true,
           attachment_ids: [attachmentId],
           // Pinned, not left to Odoo's default. The default IS an internal
           // note today, but nothing enforces that across Odoo versions or
