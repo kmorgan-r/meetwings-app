@@ -991,4 +991,23 @@ describe("boundedSummarize", () => {
 
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("forwards the real conversationId, the slice's entries, and minEntries:1 to ensureMeetingSummary", async () => {
+    // The coverage gap a re-review flagged: every OTHER case in this describe
+    // either passes conversationId as null or never inspects what actually
+    // reached ensureMeetingSummary's argument list. A regression that dropped
+    // conversationId, swapped it with the slice, or silently fell back to the
+    // summarizer's own default minEntries (4, not this path's 1-entry floor)
+    // would leave every other test here green.
+    // A REAL (non-null) providerConfig, not null - expect.anything() below
+    // does not match null/undefined, and the point is to prove this argument
+    // rides through in POSITION 3 untouched, not merely that some value does.
+    const providerConfig = { provider: {}, selectedProvider: { provider: "openai", variables: {} } };
+    const entries = [{ original: "hi", timestamp: 1 }];
+    await boundedSummarize(providerConfig).summarize("conv-1", { entries, startAt: 1, endAt: 2 });
+
+    expect(summarizer.ensureMeetingSummary).toHaveBeenCalledWith(
+      "conv-1", entries, expect.anything(), 1
+    );
+  });
 });
