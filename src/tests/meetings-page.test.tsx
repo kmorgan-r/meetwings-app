@@ -403,6 +403,50 @@ describe("the meetings page", () => {
     expect(badge.textContent).toContain("2");
     expect(conversationCard("c2")!.querySelector("[data-badge-status]")).toBeNull();
   });
+
+  it("shows who a badged conversation's meeting was with", async () => {
+    // The real wiring index.tsx's `whoNames` useMemo exists for: a full-shaped
+    // `ConversationBadgeRow` (the `id`/`contact_id`/`lead_id`/`targets` fields
+    // the two fixtures above omit) resolved through `targetNameOf` and the
+    // contacts this page's own `useMeetingLogQueue` loaded - not a second,
+    // hand-rolled name lookup.
+    contacts.listContacts.mockResolvedValue([
+      {
+        id: 7,
+        name: "Ada Lovelace",
+        email: "ada@example.com",
+        phone: null,
+        companyName: null,
+        parentId: null,
+        isCompany: false,
+        active: true,
+        writeDate: "2024-01-01",
+        isColleague: false,
+        lastMeetingAt: null,
+      },
+    ]);
+    db.listConversationBadgeRows.mockResolvedValue([
+      {
+        id: "b1",
+        conversationId: "c1",
+        status: "sent",
+        instance: INSTANCE,
+        contact_id: 7,
+        lead_id: null,
+        targets: [],
+      },
+    ]);
+    await renderPage();
+
+    const badge = await waitFor(() => {
+      const el = conversationCard("c1")!.querySelector("[data-badge-status]");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    expect(badge.textContent).toContain("· Ada Lovelace");
+    // c2 has no badge row at all, so it must show no "who" suffix either.
+    expect(conversationCard("c2")!.querySelector("[data-badge-status]")).toBeNull();
+  });
 });
 
 describe("renaming a conversation from the list", () => {

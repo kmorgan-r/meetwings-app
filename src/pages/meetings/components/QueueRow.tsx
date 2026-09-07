@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
 import { Button, Input } from "@/components";
-import { ESCALATE_AFTER_ATTEMPTS } from "@/lib/odoo/meeting-log";
+import { ESCALATE_AFTER_ATTEMPTS, NO_CONTACT_CHOSEN } from "@/lib/odoo/meeting-log";
 import type { MeetingLogListRow, MeetingLogTarget, OdooContact } from "@/types";
 
 /**
@@ -159,7 +159,7 @@ function statusLine(
     case "failed":
       return "Could not be sent";
     case "unassigned":
-      return "No contact chosen";
+      return NO_CONTACT_CHOSEN;
     case "held":
       return "Waiting - you can still undo this in the main window";
     case "pending":

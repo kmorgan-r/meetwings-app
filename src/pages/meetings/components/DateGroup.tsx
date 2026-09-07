@@ -7,6 +7,7 @@ export interface DateGroupProps {
   dateKey: string;
   conversations: ChatConversation[];
   badges: ReadonlyMap<string, { status: string; count: number }>;
+  whoNames: ReadonlyMap<string, string>;
   onOpen: (id: string) => void;
   /** The conversation open for an inline rename, or `null`. See `ConversationList`'s doc comment. */
   renamingId: string | null;
@@ -26,6 +27,7 @@ export function DateGroup({
   dateKey,
   conversations,
   badges,
+  whoNames,
   onOpen,
   renamingId,
   onStartRename,
@@ -42,6 +44,7 @@ export function DateGroup({
           // Flattened HERE, so a row never receives the map or the badge object
           // - both get a new identity on every reload.
           const badge = badges.get(doc.id) ?? null;
+          const whoLabel = whoNames.get(doc.id) ?? null;
           return (
             <ConversationRow
               key={doc.id}
@@ -51,6 +54,7 @@ export function DateGroup({
               updatedAt={doc.updatedAt}
               badgeStatus={badge?.status ?? null}
               badgeCount={badge?.count ?? 0}
+              whoLabel={whoLabel}
               onOpen={onOpen}
               isRenaming={doc.id === renamingId}
               onStartRename={onStartRename}

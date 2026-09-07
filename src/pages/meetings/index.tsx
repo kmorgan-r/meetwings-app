@@ -9,12 +9,13 @@ import { MessageCircleIcon, Search } from "lucide-react";
 // Either one would drag the whole chat-completion graph into this page's test
 // suites, which mock only the leaves the queue needs.
 import { useHistory } from "@/hooks/useHistory";
-import { useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
+import { targetNameOf, useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
 import { PageLayout } from "@/layouts";
-import { resolveBadge } from "@/lib/odoo/meeting-log";
+import { isNoContactChosen, resolveBadge, resolveBadgeRow } from "@/lib/odoo/meeting-log";
 import { renameConversationManually } from "@/lib/database/chat-history.action";
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 import { safeLocalStorage } from "@/lib/storage/helper";
+import type { ConversationBadgeRow } from "@/types";
 import { AssignDialog } from "./components/AssignDialog";
 import { ConversationList } from "./components/ConversationList";
 import { ProviderConfigReader } from "./components/ProviderConfigReader";
@@ -49,17 +50,25 @@ export default function Meetings() {
   const navigate = useNavigate();
 
   /**
-   * One badge per conversation, from the raw rows the hook read.
+   * One badge - and one "who was this with" name - per conversation, from the
+   * raw rows the hook read.
    *
    * Gated on a complete config: `instance` is "" until then, and every stored
    * row would count as another database's - which `resolveBadge` badges when it
-   * says `sent`. A half-configured page must show no badges at all.
+   * says `sent`. A half-configured page must show no badges (and no names) at
+   * all.
+   *
+   * ONE pass, ONE grouping, for both maps: `resolveBadge` and `resolveBadgeRow`
+   * are built off the same `worstEligible` core and so can never disagree about
+   * which rows a conversation's badge is drawn from - computing `whoNames` from
+   * a second, separately-grouped pass would risk exactly that drift.
    */
-  const badges = useMemo(() => {
+  const { badges, whoNames } = useMemo(() => {
     const resolved = new Map<string, { status: string; count: number }>();
-    if (queue.configState !== "complete") return resolved;
+    const who = new Map<string, string>();
+    if (queue.configState !== "complete") return { badges: resolved, whoNames: who };
 
-    const byConversation = new Map<string, Array<{ status: string; instance: string }>>();
+    const byConversation = new Map<string, ConversationBadgeRow[]>();
     for (const row of queue.badgeRows) {
       const bucket = byConversation.get(row.conversationId);
       if (bucket) bucket.push(row);
@@ -67,10 +76,19 @@ export default function Meetings() {
     }
     for (const [conversationId, rows] of byConversation) {
       const badge = resolveBadge(rows, queue.instance);
-      if (badge) resolved.set(conversationId, badge);
+      if (!badge) continue;
+      resolved.set(conversationId, badge);
+
+      const source = resolveBadgeRow(rows, queue.instance);
+      if (source) {
+        const name = targetNameOf(source, queue.contacts);
+        // The generic placeholder is not a name - showing it beside the badge
+        // would say nothing "Needs a contact" doesn't already say.
+        if (!isNoContactChosen(name)) who.set(conversationId, name);
+      }
     }
-    return resolved;
-  }, [queue.badgeRows, queue.instance, queue.configState]);
+    return { badges: resolved, whoNames: who };
+  }, [queue.badgeRows, queue.contacts, queue.instance, queue.configState]);
 
   /**
    * Conversation id -> title, for the strip's rows.
@@ -346,6 +364,7 @@ export default function Meetings() {
             conversations={conversations.conversations}
             search={search}
             badges={badges}
+            whoNames={whoNames}
             onOpen={handleOpenConversation}
             renamingId={renamingId}
             onStartRename={handleStartRename}

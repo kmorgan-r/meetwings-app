@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AddToggle,
   Button,
@@ -11,9 +11,10 @@ import {
   Input,
 } from "@/components";
 import { shouldUseMeetwingsAPI } from "@/lib";
-import { listContacts } from "@/lib/database/odoo-contacts.action";
+import { listContacts, upsertContacts } from "@/lib/database/odoo-contacts.action";
 import { createOdooClient, type OdooClient } from "@/lib/odoo/client";
 import { compareContacts, filterContacts } from "@/lib/odoo/contact-ordering";
+import { createOrAdoptContact, type CreateOrAdoptOutcome } from "@/lib/odoo/create-contact";
 import { reportOdooError } from "@/lib/odoo/errors";
 import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import type { ProviderConfigLike } from "@/lib/odoo/meeting-log-actions";
@@ -22,6 +23,7 @@ import { requireOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type {
   MeetingLogListRow,
   OdooContact,
+  OdooErrorCode,
   OdooOpportunity,
   SelectedTarget,
   SelectedTargets,
@@ -134,6 +136,67 @@ function joinWithAnd(items: string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 }
 
+/** The Company filter's render cap - the same five CalendarProposal.tsx uses
+ * for its own version of this control, restated rather than imported (see
+ * MAX_CONTACT_ROWS above for why). */
+const MAX_COMPANY_ROWS = 5;
+
+/**
+ * What `submitCreate` below can produce. `CreateOrAdoptOutcome` plus the two
+ * failure shapes `createOrAdoptContact` cannot itself return: a thrown Odoo
+ * error, and a successful Odoo write whose local cache write
+ * (`upsertContacts`) failed. Deliberately NOT `@/types`' `CreateContactResult`
+ * - that type's `abandoned`/`busy` members exist for `useOdooTarget`'s
+ * instance-token/epoch tracking, which this dialog does not have (it is
+ * mounted only while open, per this file's own top-of-file comment) - a
+ * `creatingRef` guard against a second submit is all a create here needs.
+ */
+type CreateResult =
+  | CreateOrAdoptOutcome
+  | { kind: "cached-failed" }
+  | { kind: "failed"; code: OdooErrorCode };
+
+/**
+ * Static copy keyed by code, never server prose - the same rule
+ * CalendarProposal.tsx's own CREATE_FAILURE_COPY exists for.
+ */
+const CREATE_FAILURE_COPY: Partial<Record<OdooErrorCode, string>> = {
+  ODOO_FAULT: "Odoo refused to create the contact (ODOO_FAULT). Check your Odoo permissions.",
+  ODOO_UNREACHABLE: "Could not reach Odoo. Try again.",
+};
+
+/**
+ * `autoAdded` is `null` for the two outcomes `submitCreate` never attempts an
+ * add for (an archived adoption, and `created-invisible` - neither has a
+ * selectable, active contact behind it) and for `failed` (no contact was ever
+ * created). It is `true`/`false` for every other outcome: the contact IS
+ * active, and `submitCreate` always calls `addTarget` for it - `false` means
+ * only that the cap was full, exactly like the "· limit reached" copy the
+ * "Logging to" heading already uses elsewhere in this dialog.
+ */
+function createResultText(result: CreateResult, autoAdded: boolean | null): string {
+  switch (result.kind) {
+    case "created":
+      return autoAdded
+        ? "Created in Odoo and added to this meeting."
+        : "Created in Odoo. The log is full, so tick them below once you free a slot.";
+    case "adopted-active":
+      return autoAdded
+        ? "Already in Odoo — added to this meeting."
+        : "Already in Odoo. The log is full, so tick them below once you free a slot.";
+    case "adopted-archived":
+      return "This person is already in Odoo but archived. Un-archive them there to log this meeting to them.";
+    case "created-invisible":
+      return "Created in Odoo, but it isn't visible to this connection.";
+    case "cached-failed":
+      return autoAdded
+        ? "Created and added to this meeting, but could not be cached locally. Refresh to see them here."
+        : "Created in Odoo, but could not be cached locally. Refresh to see them here.";
+    case "failed":
+      return CREATE_FAILURE_COPY[result.code] ?? `Could not create the contact (${result.code}).`;
+  }
+}
+
 export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialogProps) {
   // Consumed INSIDE the dialog, never in the page shell: AppProvider rebuilds
   // its value every render and calls loadData() on cross-window `storage`
@@ -153,6 +216,43 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   const [isLookingUp, setIsLookingUp] = useState(false);
   /** Task 14: the staged multi-target list. Nothing here is persisted until Confirm. */
   const [targets, setTargets] = useState<SelectedTargets>([]);
+  /**
+   * Mirrors `targets`, read by `submitCreate` below instead of `addTarget`'s
+   * own resolved promise.
+   *
+   * `addTarget`'s cap check runs INSIDE its `setTargets` updater, and reading
+   * its returned `{ ok, reason }` synchronously right after the call relies on
+   * React's eager-state optimisation actually firing - which it does for a
+   * click landing directly in a DOM event, but NOT for a call made several
+   * `await`s deep inside `submitCreate` (verified: the updater there runs
+   * AFTER the promise has already resolved with the stale default `{ ok: true
+   * }`). The underlying `targets` state still ends up correctly capped either
+   * way - only the informational "was it added" text would be wrong. This ref,
+   * synced every render via the `useLayoutEffect` below, is what lets
+   * `submitCreate` ask "is there room" using the latest COMMITTED count
+   * instead.
+   */
+  const targetsRef = useRef<SelectedTargets>(targets);
+  useLayoutEffect(() => {
+    targetsRef.current = targets;
+  });
+
+  /** Whether the "+ New contact" form is open. */
+  const [creatingContact, setCreatingContact] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftEmail, setDraftEmail] = useState("");
+  /** The chosen company's id, or `null` for "no company" - same shape as
+   * CalendarProposal.tsx's own `draftParentId`. */
+  const [draftParentId, setDraftParentId] = useState<number | null>(null);
+  const [companyQuery, setCompanyQuery] = useState("");
+  /** The last create's outcome text. Survives the form closing (it renders
+   * outside it, like CalendarProposal.tsx's own `createResult`) and is
+   * cleared only when a new attempt starts. */
+  const [createResult, setCreateResult] = useState<string | null>(null);
+  const [isCreatingContact, setIsCreatingContact] = useState(false);
+  /** The synchronous half of the same guard - `isCreatingContact` is state and
+   * cannot refuse a second click landing before React re-renders `disabled`. */
+  const creatingContactRef = useRef(false);
 
   const clientRef = useRef<Promise<OdooClient> | null>(null);
   const selectionToken = useRef(0);
@@ -270,6 +370,35 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
     [getClient]
   );
 
+  /** Company filter options for the "+ New contact" form - the same shape
+   * CalendarProposal.tsx's own `companyOptions` uses. */
+  const companyOptions = useMemo(() => {
+    const needle = companyQuery.trim().toLocaleLowerCase();
+    const companies = contacts.filter((c) => c.isCompany);
+    const matched =
+      needle === ""
+        ? companies
+        : companies.filter((c) => c.name.toLocaleLowerCase().includes(needle));
+    return matched.slice(0, MAX_COMPANY_ROWS);
+  }, [contacts, companyQuery]);
+
+  const openCreateForm = useCallback(() => {
+    setCreatingContact(true);
+    setCreateResult(null);
+    setDraftName("");
+    setDraftEmail("");
+    setDraftParentId(null);
+    setCompanyQuery("");
+  }, []);
+
+  const closeCreateForm = useCallback(() => {
+    setCreatingContact(false);
+    setDraftName("");
+    setDraftEmail("");
+    setDraftParentId(null);
+    setCompanyQuery("");
+  }, []);
+
   const visible = useMemo(
     // `filterContacts` returns a COPY, which is what makes the in-place sort
     // safe here; sorting its argument would reorder the cache during render.
@@ -314,6 +443,100 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
     },
     []
   );
+
+  /**
+   * Creates (or adopts) an Odoo partner from what was typed, with no
+   * calendar attendee behind it - this dialog reassigns PAST meetings, which
+   * have no live attendee list to match against.
+   *
+   * Persists the write locally via `upsertContacts` before touching this
+   * dialog's own `contacts` state, mirroring `useOdooTarget.onCreateContact`
+   * (its own doc comment gives the full reasoning): without that write, the
+   * new contact would vanish from every OTHER surface reading the synced
+   * cache the moment this dialog closes.
+   *
+   * ALSO stages the new contact as a target via `addTarget` - not just a
+   * preview - so a user who just typed someone's name and email is not then
+   * sent hunting for the same row in the list to click `+ add` on. Declared
+   * here, after `addTarget`/`removeTarget`, rather than beside
+   * `openCreateForm`/`closeCreateForm` above: it closes over `addTarget`,
+   * which does not exist yet at that point in the component.
+   */
+  const submitCreate = useCallback(async () => {
+    // BEFORE the try, so a refused second click can never reach the finally
+    // and release the in-flight create's guard - the same shape
+    // CalendarProposal.tsx's own `submitCreate`/`resolveWithExisting` use.
+    if (creatingContactRef.current) return;
+    creatingContactRef.current = true;
+    setIsCreatingContact(true);
+
+    try {
+      const client = await getClient();
+      const outcome = await createOrAdoptContact({
+        client,
+        address: draftEmail.trim(),
+        name: draftName.trim(),
+        parentId: draftParentId,
+      });
+
+      let result: CreateResult = outcome;
+      // `null` until an add is actually attempted below - see
+      // `createResultText`'s own doc comment for what each value means.
+      let autoAdded: boolean | null = null;
+      if (outcome.kind !== "created-invisible") {
+        try {
+          await upsertContacts(instance, [outcome.contact], Date.now());
+        } catch (err) {
+          reportOdooError(err, "cache created contact");
+          result = { kind: "cached-failed" };
+        }
+        setContacts((prev) => {
+          const idx = prev.findIndex((c) => c.id === outcome.contact.id);
+          return idx === -1 ? [...prev, outcome.contact] : prev.map((c, i) => (i === idx ? outcome.contact : c));
+        });
+        // Archived contacts cannot be previewed OR added - see the
+        // `disabled={!c.active}` on both the select button and the AddToggle
+        // below, which this must not bypass.
+        if (outcome.contact.active) {
+          selectContact(outcome.contact);
+          // `targetsRef.current`, not `addTarget`'s own resolved value - see
+          // that ref's own doc comment for why this call site cannot trust it.
+          if (targetsRef.current.length < MAX_TARGETS) {
+            await addTarget({
+              model: "res.partner",
+              resId: outcome.contact.id,
+              name: outcome.contact.name,
+            });
+            autoAdded = true;
+          } else {
+            autoAdded = false;
+          }
+        }
+      }
+
+      setCreateResult(createResultText(result, autoAdded));
+      // Every path reaching here already reached Odoo, so the form always
+      // closes - a thrown failure (the `catch` below) is the only case that
+      // leaves it open, by simply never reaching this line.
+      closeCreateForm();
+    } catch (err) {
+      setCreateResult(
+        createResultText({ kind: "failed", code: reportOdooError(err, "create a contact").code }, null)
+      );
+    } finally {
+      creatingContactRef.current = false;
+      setIsCreatingContact(false);
+    }
+  }, [
+    getClient,
+    draftEmail,
+    draftName,
+    draftParentId,
+    instance,
+    selectContact,
+    addTarget,
+    closeCreateForm,
+  ]);
 
   const destinationSentence =
     targets.length === 0
@@ -379,13 +602,87 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
 
         {preflight.state === "ready" && (
           <div className="flex flex-col gap-2">
-            <Input
-              type="text"
-              aria-label="Search contacts"
-              placeholder="Search contacts"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+            <div className="flex items-center gap-2">
+              <Input
+                type="text"
+                aria-label="Search contacts"
+                placeholder="Search contacts"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                data-testid="new-contact-toggle"
+                onClick={() => (creatingContact ? closeCreateForm() : openCreateForm())}
+              >
+                {creatingContact ? "Cancel" : "+ New contact"}
+              </Button>
+            </div>
+
+            {creatingContact && (
+              <div className="flex flex-col gap-1 rounded-md border p-2" data-testid="new-contact-form">
+                <Input
+                  type="text"
+                  aria-label="New contact name"
+                  placeholder="Name"
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                />
+                <Input
+                  type="email"
+                  aria-label="New contact email"
+                  placeholder="Email"
+                  value={draftEmail}
+                  onChange={(e) => setDraftEmail(e.target.value)}
+                />
+                <Input
+                  type="text"
+                  aria-label="New contact company"
+                  placeholder="Company (optional)"
+                  value={companyQuery}
+                  onChange={(e) => {
+                    setCompanyQuery(e.target.value);
+                    // Typing invalidates the selection - the field must never
+                    // show one company's name while carrying another's id.
+                    setDraftParentId(null);
+                  }}
+                />
+                {draftParentId === null &&
+                  companyQuery.trim() !== "" &&
+                  companyOptions.map((company) => (
+                    <button
+                      key={company.id}
+                      type="button"
+                      data-testid={`new-contact-company-${company.id}`}
+                      className="text-left text-xs hover:text-primary"
+                      onClick={() => {
+                        setDraftParentId(company.id);
+                        setCompanyQuery(company.name);
+                      }}
+                    >
+                      {company.name}
+                    </button>
+                  ))}
+                <Button
+                  size="sm"
+                  className="self-start"
+                  data-testid="new-contact-submit"
+                  disabled={isCreatingContact || draftName.trim() === "" || draftEmail.trim() === ""}
+                  onClick={() => void submitCreate()}
+                >
+                  Create contact
+                </Button>
+              </div>
+            )}
+
+            {createResult !== null && (
+              <p className="text-xs" data-testid="new-contact-result">
+                {createResult}
+              </p>
+            )}
 
             <div className="flex max-h-56 flex-col gap-1 overflow-y-auto">
               {visible.length === 0 ? (

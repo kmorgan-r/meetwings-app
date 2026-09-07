@@ -7,6 +7,9 @@ export interface ConversationListProps {
   conversations: ChatConversation[];
   search: string;
   badges: ReadonlyMap<string, { status: string; count: number }>;
+  /** Conversation id -> who the meeting was with, for the badge label AND the
+   * search box below - see the page's own `whoNames` doc comment. */
+  whoNames: ReadonlyMap<string, string>;
   onOpen: (id: string) => void;
   /**
    * The conversation currently open for an inline rename, or `null`.
@@ -44,10 +47,11 @@ interface DateBucket {
  * `getAllConversations` returned with every message attached, to redraw a
  * clock only the queue strip needs. `React.memo`'s default shallow compare is
  * enough: `conversations`, `search` and `renamingId` are primitives or the
- * page's own state, `badges` is the page's queue-derived map (rebuilt on
- * `reload`, not on the tick), and `onOpen`, `onStartRename`, `onCommitRename`
- * and `onCancelRename` are page-level `useCallback`s with an empty
- * dependency array.
+ * page's own state, `badges` and `whoNames` are the page's queue-derived maps
+ * (rebuilt together, on `reload`, not on the tick - see the page's own
+ * `badges`/`whoNames` doc comment), and `onOpen`, `onStartRename`,
+ * `onCommitRename` and `onCancelRename` are page-level `useCallback`s with an
+ * empty dependency array.
  *
  * Known cost this does NOT address: `getAllConversations` attaches every
  * message to every conversation, and this component still receives that full
@@ -59,6 +63,7 @@ function ConversationListInner({
   conversations,
   search,
   badges,
+  whoNames,
   onOpen,
   renamingId,
   onStartRename,
@@ -78,6 +83,9 @@ function ConversationListInner({
       const kept =
         term.length === 0 ||
         doc.title.toLowerCase().includes(term) ||
+        // Who the meeting was with is searchable too - a title search alone
+        // cannot find a meeting by the person in it.
+        (whoNames.get(doc.id)?.toLowerCase().includes(term) ?? false) ||
         // The row mid-rename survives the filter with no title match at all -
         // see the `renamingId` doc comment above.
         doc.id === renamingId;
@@ -92,7 +100,7 @@ function ConversationListInner({
     return [...byDate.entries()]
       .sort(([a], [b]) => moment(b).diff(moment(a)))
       .map(([dateKey, docs]) => ({ dateKey, conversations: docs }));
-  }, [conversations, search, renamingId]);
+  }, [conversations, search, renamingId, whoNames]);
 
   return (
     <>
@@ -102,6 +110,7 @@ function ConversationListInner({
           dateKey={dateKey}
           conversations={docs}
           badges={badges}
+          whoNames={whoNames}
           onOpen={onOpen}
           renamingId={renamingId}
           onStartRename={onStartRename}
