@@ -25,15 +25,8 @@ export const ContentProtectionToggle = ({
         <div className="flex items-center space-x-3">
           <div>
             <Label className="text-sm font-medium">
-              {customizable.contentProtection.isEnabled
-                ? "Disable Screen Capture Protection"
-                : "Enable Screen Capture Protection"}
+              Screen capture protection
             </Label>
-            <p className="text-xs text-muted-foreground mt-1">
-              {customizable.contentProtection.isEnabled
-                ? "Meetwings windows appear black in screenshots and recordings"
-                : "Meetwings windows are visible to capture tools and screen shares"}
-            </p>
           </div>
         </div>
         <Switch
