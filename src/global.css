@@ -186,6 +186,17 @@ html {
   overscroll-behavior: none;
 }
 
+/* The minimized overlay: Radix portals popovers to document.body, outside
+   every React wrapper, so hiding the wrapper alone leaves an expanded
+   popover on screen. The overlay-minimize store owns this attribute; the
+   MutationObserver in useWindow.ts filters on data-state, so writing it
+   does not retrigger the observer. Popovers deliberately stay OPEN in state
+   (unlike the isHidden path, which closes them) — the restore sequence
+   re-derives the window height from the current popover state. */
+body[data-overlay-minimized="true"] [data-radix-popper-content-wrapper] {
+  display: none !important;
+}
+
 body {
   position: fixed;
   width: 100%;

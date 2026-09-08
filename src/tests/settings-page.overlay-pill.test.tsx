@@ -147,3 +147,137 @@ describe("OverlayPillStyleSelect writes storage and announces the change", () =>
     expect(JSON.parse(stored["customizable"]).overlayPill.style).toBe("icon-only");
   });
 });
+
+describe("main window listens for overlay-pill-style-changed", () => {
+  const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<void>>();
+  let listeners = new Map<string, Array<(e: { payload: unknown }) => void>>();
+
+  beforeEach(() => {
+    vi.resetModules();
+    listeners = new Map();
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(undefined);
+  });
+
+  it("re-invokes minimize_overlay with the new style's dims ONLY when minimized", async () => {
+    vi.doMock("@tauri-apps/api/core", () => ({
+      invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
+    }));
+    vi.doMock("@tauri-apps/api/event", () => ({
+      emit: vi.fn().mockResolvedValue(undefined),
+      listen: (event: string, handler: (e: { payload: unknown }) => void) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event)!.push(handler);
+        return Promise.resolve(() => {});
+      },
+    }));
+    vi.doMock("@/contexts", () => ({
+      useApp: () => ({
+        customizable: {
+          cursor: { type: "default" },
+          overlayPill: { style: "status-count" },
+        },
+        setOverlayPillStyle: vi.fn(),
+      }),
+    }));
+    vi.doMock("@/lib", () => ({ getPlatform: () => "windows" }));
+    vi.doMock("@/layouts", () => ({ ErrorLayout: () => null }));
+    vi.doMock("@/components", () => ({
+      Card: ({ children }: any) => <div>{children}</div>,
+      Updater: () => null,
+      DragButton: () => null,
+      CustomCursor: () => null,
+      Button: ({ children, onClick, title }: any) => (
+        <button onClick={onClick} title={title}>
+          {children}
+        </button>
+      ),
+      WingIcon: () => null,
+    }));
+    vi.doMock("@/pages/app/components", () => ({
+      SystemAudio: () => null,
+      Completion: () => null,
+      AudioVisualizer: () => null,
+      StatusIndicator: () => null,
+      MinimizedPill: () => null,
+    }));
+    vi.doMock("@/hooks", () => ({
+      useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
+      useSetupStatus: () => ({
+        isComplete: true,
+        isLoading: false,
+        aiConfigured: true,
+        sttConfigured: true,
+      }),
+      useMeetingDetection: () => ({}),
+    }));
+    vi.doMock("react-error-boundary", () => ({
+      ErrorBoundary: ({ children }: any) => <>{children}</>,
+    }));
+    vi.doMock("lucide-react", () => ({
+      AlertCircle: () => null,
+      Minimize2: () => null,
+    }));
+
+    const { setMinimized } = await import("@/lib/overlay-minimize.store");
+    const { default: App } = await import("@/pages/app");
+
+    const { unmount } = render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    // NOT minimized: the event must be a geometry no-op.
+    listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
+      cb({ payload: { style: "icon-only" } })
+    );
+    await vi.waitFor(() => {
+      // The listener still synced the context state (a pure no-op here), but
+      // NO geometry invoke may fire.
+      expect(invokeMock).not.toHaveBeenCalledWith(
+        "minimize_overlay",
+        expect.anything()
+      );
+    });
+
+    // Minimized: the SAME event re-invokes minimize_overlay as a restyle with
+    // the new style's dimensions.
+    setMinimized(true);
+    listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
+      cb({ payload: { style: "icon-only" } })
+    );
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        width: 52,
+        height: 52,
+        restyle: true,
+      });
+    });
+
+    // The remaining two style->dimension mappings (the spec requires all
+    // three; icon-only ran above):
+    listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
+      cb({ payload: { style: "status-last-line" } })
+    );
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        width: 320,
+        height: 48,
+        restyle: true,
+      });
+    });
+    listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
+      cb({ payload: { style: "status-count" } })
+    );
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        width: 148,
+        height: 40,
+        restyle: true,
+      });
+    });
+
+    unmount();
+  });
+});
