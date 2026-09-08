@@ -54,6 +54,12 @@ const App = () => {
   // inside an un-minimized window. One paint of the pill in a still-600px
   // window beats one paint of the full bar in a pill-sized one.
   const handleMinimize = async () => {
+    // Re-entrancy guard, matching the pattern everywhere else in this feature
+    // (the style listener, resizeWindow's gate): a second call while already
+    // minimized would send another `restyle: false` invoke, and Rust would
+    // re-snapshot the window's own pill geometry as the "pre-minimize" rect —
+    // corrupting the restore target.
+    if (getMinimized()) return;
     const dims = PILL_DIMENSIONS[pillStyle];
     setMinimized(true);
     try {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 // The minimize handler ordering assertions live here rather than in the gate
@@ -158,6 +159,40 @@ describe("minimize button (gate ordering, per the spec)", () => {
 
     resolveInvoke();
     await waitFor(() => expect(getMinimized()).toBe(true));
+  });
+
+  // Re-entrancy guard (review-bot bug, run 34284949023): two invocations
+  // landing back-to-back BEFORE React re-renders the button out of the tree
+  // (the fast-double-click race) must invoke minimize_overlay ONCE — a second
+  // `restyle: false` call would make Rust re-snapshot the pill's own corner
+  // geometry as the "pre-minimize" rect, corrupting the restore target. Two
+  // synchronous fireEvent clicks land in one React batch, which is exactly
+  // that pre-re-render window; userEvent's awaits would let the re-render
+  // remove the button first and make the test vacuous.
+  it("guards re-entrancy: a second call while minimized does not re-invoke minimize_overlay", async () => {
+    mockAppPage();
+    mockHooks(false);
+    const { default: App } = await import("@/pages/app");
+    const { getMinimized } = await import("@/lib/overlay-minimize.store");
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByTitle("Minimize"));
+    fireEvent.click(screen.getByTitle("Minimize"));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        width: 148,
+        height: 40,
+        restyle: false,
+      });
+    });
+    expect(getMinimized()).toBe(true);
   });
 
   it("rolls the flag back when minimize_overlay rejects", async () => {
