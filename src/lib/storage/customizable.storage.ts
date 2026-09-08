@@ -12,6 +12,9 @@ export interface CustomizableState {
   autostart: {
     isEnabled: boolean;
   };
+  contentProtection: {
+    isEnabled: boolean;
+  };
   cursor: {
     type: CursorType;
   };
@@ -21,6 +24,7 @@ export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
   appIcon: { isVisible: true },
   alwaysOnTop: { isEnabled: false },
   autostart: { isEnabled: true },
+  contentProtection: { isEnabled: true },
   cursor: { type: "invisible" },
 };
 
@@ -41,6 +45,9 @@ export const getCustomizableState = (): CustomizableState => {
       alwaysOnTop:
         parsedState.alwaysOnTop || DEFAULT_CUSTOMIZABLE_STATE.alwaysOnTop,
       autostart: parsedState.autostart || DEFAULT_CUSTOMIZABLE_STATE.autostart,
+      contentProtection:
+        parsedState.contentProtection ||
+        DEFAULT_CUSTOMIZABLE_STATE.contentProtection,
       cursor: parsedState.cursor || DEFAULT_CUSTOMIZABLE_STATE.cursor,
     };
   } catch (error) {
@@ -88,6 +95,18 @@ export const updateAlwaysOnTop = (isEnabled: boolean): CustomizableState => {
 export const updateCursorType = (type: CursorType): CustomizableState => {
   const currentState = getCustomizableState();
   const newState = { ...currentState, cursor: { type } };
+  setCustomizableState(newState);
+  return newState;
+};
+
+/**
+ * Update content protection (hide window contents from screenshots/recording)
+ */
+export const updateContentProtection = (
+  isEnabled: boolean
+): CustomizableState => {
+  const currentState = getCustomizableState();
+  const newState = { ...currentState, contentProtection: { isEnabled } };
   setCustomizableState(newState);
   return newState;
 };

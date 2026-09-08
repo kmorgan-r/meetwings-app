@@ -28,6 +28,7 @@ import {
   updateAppIconVisibility,
   updateAlwaysOnTop,
   updateAutostart,
+  updateContentProtection,
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
@@ -420,6 +421,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           invoke("set_always_on_top", {
             enabled: customizable.alwaysOnTop.isEnabled,
           }),
+          invoke("set_content_protection", {
+            enabled: customizable.contentProtection.isEnabled,
+          }),
         ]);
       } catch (error) {
         console.error("Failed to apply customizable settings:", error);
@@ -693,6 +697,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const toggleContentProtection = async (isEnabled: boolean) => {
+    const newState = updateContentProtection(isEnabled);
+    setCustomizable(newState);
+    try {
+      await invoke("set_content_protection", { enabled: isEnabled });
+      loadData();
+    } catch (error) {
+      console.error("Failed to toggle content protection:", error);
+    }
+  };
+
   const toggleAutostart = async (isEnabled: boolean) => {
     const newState = updateAutostart(isEnabled);
     setCustomizable(newState);
@@ -774,6 +789,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     toggleAppIconVisibility,
     toggleAlwaysOnTop,
     toggleAutostart,
+    toggleContentProtection,
     loadData,
     isInitialized,
     meetwingsApiEnabled,

@@ -31,6 +31,7 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
     AlwaysOnTopToggle: Stub,
     AppIconToggle: Stub,
     AutostartToggle: Stub,
+    ContentProtectionToggle: Stub,
   };
 });
 

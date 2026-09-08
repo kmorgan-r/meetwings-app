@@ -1,9 +1,49 @@
+use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use tauri::LogicalPosition;
 use tauri::{App, AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 // The offset from the top of the screen to the window
 const TOP_OFFSET: i32 = 54;
+
+/// Whether app windows should be excluded from screen capture
+/// (SetWindowDisplayAffinity on Windows, NSWindow sharing on macOS).
+/// The frontend pushes the user's stored setting here on startup and on
+/// every change; windows created later - the dashboard - read it at build
+/// time, so the global shortcut path (no frontend involvement) stays in
+/// sync too.
+pub struct ContentProtectionState {
+    pub enabled: Mutex<bool>,
+}
+
+impl Default for ContentProtectionState {
+    fn default() -> Self {
+        // First install: protection ON.
+        Self {
+            enabled: Mutex::new(true),
+        }
+    }
+}
+
+/// Apply the flag to every app window that exists right now. Capture
+/// overlays are deliberately excluded - they ARE the capture UI.
+fn apply_content_protection<R: Runtime>(app: &AppHandle<R>, enabled: bool) {
+    for label in ["main", "dashboard"] {
+        if let Some(window) = app.get_webview_window(label) {
+            if let Err(e) = window.set_content_protected(enabled) {
+                eprintln!("Failed to set content protection on {}: {}", label, e);
+            }
+        }
+    }
+}
+
+#[tauri::command]
+pub fn set_content_protection(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let state = app.state::<ContentProtectionState>();
+    *state.enabled.lock().unwrap() = enabled;
+    apply_content_protection(&app, enabled);
+    Ok(())
+}
 
 /// Sets up the main window with custom positioning
 pub fn setup_main_window(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
@@ -178,7 +218,6 @@ pub fn create_dashboard_window<R: Runtime>(
         .min_inner_size(800.0, 600.0)
         .hidden_title(true)
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .content_protected(true)
         .visible(true)
         .traffic_light_position(LogicalPosition::new(14.0, 18.0));
 
@@ -189,8 +228,21 @@ pub fn create_dashboard_window<R: Runtime>(
         .decorations(true)
         .inner_size(800.0, 600.0)
         .min_inner_size(800.0, 600.0)
-        .content_protected(true)
         .visible(true);
 
-    base_builder.build()
+    let dashboard_window = base_builder.build()?;
+
+    // Follow the user's stored setting rather than hardcoding it: on Windows
+    // a protected window blacks out in every capture tool (Snipping Tool,
+    // OBS, Print Screen), which users read as the window vanishing.
+    let enabled = *app
+        .state::<ContentProtectionState>()
+        .enabled
+        .lock()
+        .unwrap();
+    if let Err(e) = dashboard_window.set_content_protected(enabled) {
+        eprintln!("Failed to set dashboard content protection: {}", e);
+    }
+
+    Ok(dashboard_window)
 }
