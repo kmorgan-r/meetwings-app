@@ -143,16 +143,16 @@ const App = () => {
               <div className="flex flex-1 items-center gap-3 px-2">
                 <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
                 <div className="flex flex-col min-w-0">
-                  <span className="text-sm font-medium">
+                  <span className="text-sm font-medium text-foreground">
                     Setup Required
                   </span>
                   <span className="text-xs text-muted-foreground truncate">
                     {!aiConfigured && !sttConfigured
                       ? "Configure & verify AI + Speech providers"
                       : !aiConfigured
-                      ? "Configure AI provider"
+                      ? "Configure & verify AI provider"
                       : !sttConfigured
-                      ? "Configure Speech-to-Text provider"
+                      ? "Configure & verify Speech-to-Text"
                       : "Verify your API connections"}
                   </span>
                 </div>
