@@ -847,7 +847,7 @@ In `src/hooks/useWindow.ts`, replace lines 1-83 (keep `useWindowFocus` below unt
 ```ts
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 
 import { getMinimized } from "@/lib/overlay-minimize.store";
 
@@ -1205,12 +1205,6 @@ Add to `src/pages/settings/components/index.ts` (alphabetical, after `MeetingAut
 export * from "./OverlayPillStyleSelect";
 ```
 
-Add to the app components barrel `src/pages/app/components/index.ts` (the page's `./components` import resolves here — the pill MUST be registered so Task 7 can import it through the barrel, which is also what lets the test suites stub it by mocking the barrel):
-
-```ts
-export * from "./MinimizedPill";
-```
-
 In `src/pages/settings/index.tsx`, add to the import list and place the component after `<ContentProtectionToggle />`:
 
 ```tsx
@@ -1255,6 +1249,7 @@ git commit -m "feat(settings): pill style selector for the minimized overlay"
 
 **Files:**
 - Create: `src/pages/app/components/MinimizedPill.tsx`
+- Modify: `src/pages/app/components/index.ts` (barrel — register the pill; Task 7 imports it through here)
 - Test: `src/tests/minimized-pill.test.tsx` (create)
 
 **Interfaces:**
@@ -1415,6 +1410,12 @@ Expected: FAIL — component does not exist.
 
 - [ ] **Step 3: Implement the pill**
 
+Create `src/pages/app/components/MinimizedPill.tsx` (full code below), then register it in the app components barrel `src/pages/app/components/index.ts` (the pill must exist first — this is Task 6, not earlier, precisely so the barrel never re-exports a nonexistent module):
+
+```ts
+export * from "./MinimizedPill";
+```
+
 Create `src/pages/app/components/MinimizedPill.tsx`:
 
 ```tsx
@@ -1510,7 +1511,7 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run src/tests/minimized-pill.test.tsx`
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 Run: `npm run check:types`
 Expected: PASS.
@@ -1969,6 +1970,9 @@ const App = () => {
   // what keeps Rust from re-snapshotting the pill's own corner geometry as
   // the "pre-minimize" rect.
   useEffect(() => {
+    // The .catch is attached HERE, before the cleanup return, and resolves to
+    // a no-op unlisten — an unhandled rejection would fail the suite, and a
+    // .catch placed after the return statement would be dead code.
     const unlistenPromise = listen<{ style: OverlayPillStyle }>(
       "overlay-pill-style-changed",
       (event) => {
@@ -1985,7 +1989,10 @@ const App = () => {
           });
         }
       }
-    );
+    ).catch((error) => {
+      console.error("Failed to listen for pill style changes:", error);
+      return () => {};
+    });
 
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
@@ -1998,10 +2005,6 @@ const App = () => {
     // (setOverlayPillStyle via closure over the render it was created in is
     // fine: it writes through setCustomizable, which is identity-stable, and
     // the storage writer; it never reads stale React state), so [] is safe.
-    // An unhandled rejection would fail the suite; surface it.
-    unlistenPromise.catch((error) => {
-      console.error("Failed to listen for pill style changes:", error);
-    });
   }, []);
 
   return (
