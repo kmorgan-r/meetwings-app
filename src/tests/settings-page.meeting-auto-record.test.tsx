@@ -67,8 +67,8 @@ describe("settings page auto-record gate", () => {
 // (after that case's own vi.resetModules()), not hoisted to file scope.
 const mockAppRenderDeps = () => {
   vi.doMock("@/contexts", () => ({
-    // App reads customizable.cursor.type at render, so the stub must hold shape.
-    useApp: () => ({ customizable: { cursor: { type: "default" } } }),
+    // App reads customizable.cursor.type and customizable.overlayPill.style at render, so the stub must hold shape.
+    useApp: () => ({ customizable: { cursor: { type: "default" }, overlayPill: { style: "status-count" } } }),
   }));
   vi.doMock("@/lib", () => ({ getPlatform: () => "windows" }));
   vi.doMock("@/layouts", () => ({ ErrorLayout: () => null }));
@@ -90,7 +90,8 @@ const mockAppRenderDeps = () => {
   vi.doMock("react-error-boundary", () => ({
     ErrorBoundary: ({ children }: any) => <>{children}</>,
   }));
-  vi.doMock("lucide-react", () => ({ AlertCircle: () => null }));
+  // App imports AlertCircle and Minimize2 (minimize-to-pill button); stub both.
+  vi.doMock("lucide-react", () => ({ AlertCircle: () => null, Minimize2: () => null }));
 };
 
 // F29 - the hook mount site. Without this, deleting the useMeetingDetection()
