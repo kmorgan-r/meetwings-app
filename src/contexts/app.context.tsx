@@ -32,7 +32,9 @@ import {
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
+  OverlayPillStyle,
   updateCursorType,
+  updateOverlayPillStyle,
   getUserIdentity,
   setUserIdentity as saveUserIdentity,
 } from "@/lib/storage";
@@ -732,6 +734,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     loadData();
   };
 
+  const setOverlayPillStyle = (style: OverlayPillStyle) => {
+    setCustomizable((prev) => ({ ...prev, overlayPill: { style } }));
+    updateOverlayPillStyle(style);
+  };
+
   const setMeetwingsApiEnabled = (enabled: boolean) => {
     setMeetwingsApiEnabledState(enabled);
     safeLocalStorage.setItem(STORAGE_KEYS.MEETWINGS_API_ENABLED, String(enabled));
@@ -800,6 +807,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     selectedAudioDevices,
     setSelectedAudioDevices,
     setCursorType,
+    setOverlayPillStyle,
     sttLanguage,
     setSttLanguage,
     sttTranslationEnabled,

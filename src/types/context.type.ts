@@ -1,6 +1,10 @@
 import { Dispatch, SetStateAction } from "react";
 import { ScreenshotConfig, TYPE_PROVIDER, UserIdentity } from "@/types";
-import { CursorType, CustomizableState } from "@/lib/storage";
+import {
+  CursorType,
+  CustomizableState,
+  OverlayPillStyle,
+} from "@/lib/storage";
 
 export type IContextType = {
   systemPrompt: string;
@@ -59,6 +63,7 @@ export type IContextType = {
     }>
   >;
   setCursorType: (type: CursorType) => void;
+  setOverlayPillStyle: (style: OverlayPillStyle) => void;
   // STT Language setting
   sttLanguage: string;
   setSttLanguage: (language: string) => void;
