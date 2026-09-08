@@ -10,6 +10,7 @@ import {
 } from "@/hooks";
 import { useApp } from "@/contexts";
 import { shouldUseMeetwingsAPI } from "@/lib";
+import { setPillData } from "@/lib/overlay-minimize.store";
 import { Screenshot } from "./Screenshot";
 import { Files } from "./Files";
 import { Audio } from "./Audio";
@@ -167,6 +168,28 @@ export const Completion = ({
   useLayoutEffect(() => {
     if (meetingLog.holding) completion.setIsContactPickerOpen(false);
   }, [meetingLog.holding, completion.setIsContactPickerOpen]);
+
+  // The minimized pill's data feed. The pill is a SIBLING of the Card (see the
+  // spec's "Hide, do not swap"), so this data cannot flow through props or
+  // context — it is pushed up into the module store the resize gate reads.
+  // Three scalars, one-way, written from one place; the transcript itself is
+  // never duplicated into the store. Keyed on the transcript AND the status
+  // inputs: capture can start/stop while minimized (the dashboard can flip it
+  // cross-window), which changes no transcript entry but must still update
+  // the pill's status dot.
+  useEffect(() => {
+    const lastEntry =
+      completion.meetingTranscript[completion.meetingTranscript.length - 1];
+    setPillData({
+      segmentCount: completion.meetingTranscript.length,
+      lastLine: lastEntry?.original ?? "",
+      status: systemAudio.error
+        ? "error"
+        : systemAudio.capturing
+          ? "capturing"
+          : "idle",
+    });
+  }, [completion.meetingTranscript, systemAudio.error, systemAudio.capturing]);
 
   // Use meeting-aware quick action handler when in Meeting Assist Mode
   const handleQuickAction = (action: string) => {
