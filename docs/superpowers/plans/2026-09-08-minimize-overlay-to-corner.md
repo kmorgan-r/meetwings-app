@@ -460,18 +460,23 @@ pub fn restore_overlay(app: AppHandle, window: WebviewWindow) -> Result<(), Stri
     let state = app.state::<OverlayMinimizeState>();
     let saved = *state.saved.lock().unwrap();
 
-    let scale = window
-        .scale_factor()
-        .map_err(|e| format!("Failed to read scale factor: {}", e))?;
-    let monitor = window
-        .current_monitor()
-        .map_err(|e| format!("Failed to read current monitor: {}", e))?
-        .or_else(|| window.primary_monitor().ok().flatten())
-        .ok_or_else(|| "No monitor available".to_string())?;
-
+    // The scale/monitor reads live INSIDE the None arm: they are only needed
+    // for the fallback, and a transient monitor read error must not reject
+    // the restore of a known-good snapshot — that would leave the user stuck
+    // minimized with every retry failing identically.
     let (x, y, width, height) = match saved {
         Some(rect) => rect,
-        None => fallback_restore_rect(monitor.work_area(), scale),
+        None => {
+            let scale = window
+                .scale_factor()
+                .map_err(|e| format!("Failed to read scale factor: {}", e))?;
+            let monitor = window
+                .current_monitor()
+                .map_err(|e| format!("Failed to read current monitor: {}", e))?
+                .or_else(|| window.primary_monitor().ok().flatten())
+                .ok_or_else(|| "No monitor available".to_string())?;
+            fallback_restore_rect(monitor.work_area(), scale)
+        }
     };
 
     window
@@ -753,15 +758,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // The gate reads the flag directly from the store module; mocking the module
 // keeps these tests pure unit tests of the gate, independent of the store's
 // own (separately tested) behavior.
-const getMinimizedMock = vi.fn<[], boolean>();
+const getMinimizedMock = vi.fn<() => boolean>();
 vi.mock("@/lib/overlay-minimize.store", () => ({
-  getMinimized: (...args: []) => getMinimizedMock(...args),
+  getMinimized: () => getMinimizedMock(),
 }));
 
 const invokeMock = vi.fn<(args: Record<string, unknown>) => Promise<void>>();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args: Record<string, unknown>) =>
     invokeMock({ cmd, ...args }),
+}));
+
+// resizeWindow calls getCurrentWebviewWindow() BEFORE the invoke; under
+// happy-dom there is no __TAURI_INTERNALS__, so the real module throws inside
+// the try block and the invoke is never reached. Without this mock the three
+// positive-path tests fail even against a correct implementation.
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main" }),
 }));
 
 import { isAnyPopoverOpen, resizeWindow } from "@/hooks/useWindow";
@@ -935,7 +948,7 @@ export const useWindowResize = () => {
 };
 ```
 
-(The `useCallback` import is now unused — remove `useCallback` from the react import on line 3; keep `useEffect`.)
+(Keep the react import unchanged — `useWindowFocus`, which stays untouched at the bottom of this file, still uses `useCallback` for `handleFocusChange` (line 94), so removing it breaks compilation.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1020,6 +1033,16 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
   };
 });
 
+// The real selector calls useApp() — without a contexts mock (or an
+// AppProvider wrap) `customizable` is undefined and it crashes on
+// `customizable.overlayPill.style` before the assertion can run.
+vi.mock("@/contexts", () => ({
+  useApp: () => ({
+    customizable: { overlayPill: { style: "status-count" } },
+    setOverlayPillStyle: vi.fn(),
+  }),
+}));
+
 import Settings from "@/pages/settings";
 
 describe("settings page renders the overlay pill style selector", () => {
@@ -1039,14 +1062,29 @@ describe("OverlayPillStyleSelect writes storage and announces the change", () =>
   const setOverlayPillStyle = vi.fn();
   let currentStyle = "status-count";
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.resetModules();
     stored = {};
     setOverlayPillStyle.mockClear();
-    // Route the context setter at the real storage writer so the test asserts
-    // a real round-trip, not a mock calling a mock.
+    // The storage module writes through the GLOBAL localStorage (the
+    // @/lib safeLocalStorage mock above does not intercept it), and setup.ts
+    // leaves that as bare vi.fn()s — wire them to the `stored` map so the
+    // round-trip is real, exactly like customizable.storage.test.ts does.
+    vi.mocked(localStorage.getItem).mockImplementation(
+      (k: string) => stored[k] ?? null
+    );
+    vi.mocked(localStorage.setItem).mockImplementation(
+      (k: string, v: string) => {
+        stored[k] = v;
+      }
+    );
+    // ESM: no `require`. Capture the real writer through a dynamic import so
+    // the context-setter mock routes at it — a real round-trip, not a mock
+    // calling a mock.
+    const { updateOverlayPillStyle } = await import(
+      "@/lib/storage/customizable.storage"
+    );
     setOverlayPillStyle.mockImplementation((style: string) => {
-      const { updateOverlayPillStyle } = require("@/lib/storage/customizable.storage");
       updateOverlayPillStyle(style as never);
       currentStyle = style;
     });
@@ -1167,6 +1205,12 @@ Add to `src/pages/settings/components/index.ts` (alphabetical, after `MeetingAut
 export * from "./OverlayPillStyleSelect";
 ```
 
+Add to the app components barrel `src/pages/app/components/index.ts` (the page's `./components` import resolves here — the pill MUST be registered so Task 7 can import it through the barrel, which is also what lets the test suites stub it by mocking the barrel):
+
+```ts
+export * from "./MinimizedPill";
+```
+
 In `src/pages/settings/index.tsx`, add to the import list and place the component after `<ContentProtectionToggle />`:
 
 ```tsx
@@ -1230,6 +1274,13 @@ import { MemoryRouter } from "react-router-dom";
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<void>>();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
+}));
+// The restore sequence ends with resizeWindow(isAnyPopoverOpen()), which calls
+// getCurrentWebviewWindow() before its invoke; without this mock that throws
+// (no __TAURI_INTERNALS__ under happy-dom) and set_window_height never fires —
+// the stale-rect regression below asserts on exactly that invoke.
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main" }),
 }));
 
 import { MinimizedPill } from "@/pages/app/components/MinimizedPill";
@@ -1320,6 +1371,39 @@ describe("MinimizedPill", () => {
     });
     expect(consoleError).toHaveBeenCalled();
     consoleError.mockRestore();
+  });
+
+  // The spec's stale-rect regression, pinned under useWindow.minimize-gate
+  // but exercised here because it needs the pill's real click handler: a
+  // popover that opens WHILE minimized must leave the restored window at
+  // 600, not the minimize-time 54 — resizeWindow(isAnyPopoverOpen()) must
+  // re-derive the height from the CURRENT popover state.
+  it("restore re-derives the height: popover open while minimized ends at 600, not 54", async () => {
+    render(
+      <MemoryRouter>
+        <MinimizedPill style="status-count" />
+      </MemoryRouter>
+    );
+
+    // A transcript segment arrives while minimized: the Radix portal appears
+    // in the DOM (CSS-hidden in production, present to isAnyPopoverOpen()).
+    const portal = document.createElement("div");
+    portal.setAttribute("data-radix-popper-content-wrapper", "");
+    document.body.appendChild(portal);
+
+    await userEvent.click(screen.getByRole("button", { name: /expand/i }));
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_window_height", {
+        window: expect.objectContaining({ label: "main" }),
+        height: 600,
+      });
+    });
+    const collapsed = invokeMock.mock.calls.filter(
+      ([cmd, args]) => cmd === "set_window_height" && (args as { height: number }).height === 54
+    );
+    expect(collapsed).toEqual([]);
+    portal.remove();
   });
 });
 ```
@@ -1426,7 +1510,7 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run src/tests/minimized-pill.test.tsx`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 Run: `npm run check:types`
 Expected: PASS.
@@ -1438,7 +1522,7 @@ git add src/pages/app/components/MinimizedPill.tsx src/pages/app/components/inde
 git commit -m "feat(overlay): MinimizedPill component with three style variants"
 ```
 
-(Check `src/pages/app/components/index.ts` — if it is a barrel that lists components individually, add `export * from "./MinimizedPill";`. If it re-exports with a glob pattern, nothing to add.)
+(`src/pages/app/components/index.ts` is a real barrel — Step 3 added `export * from "./MinimizedPill";` to it. The barrel registration is load-bearing for Task 7: the app page imports the pill through `./components` precisely so the test suites can stub it by mocking the barrel.)
 
 ---
 
@@ -1476,6 +1560,13 @@ const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promis
 const mockAppPage = () => {
   vi.doMock("@tauri-apps/api/core", () => ({
     invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
+  }));
+  // The app page now calls listen("overlay-pill-style-changed", ...) on mount;
+  // the real listen() rejects under happy-dom, and Vitest fails the run on
+  // the resulting unhandled rejection.
+  vi.doMock("@tauri-apps/api/event", () => ({
+    listen: () => Promise.resolve(() => {}),
+    emit: vi.fn().mockResolvedValue(undefined),
   }));
   vi.doMock("@/contexts", () => ({
     useApp: () => ({
@@ -1748,7 +1839,8 @@ describe("main window listens for overlay-pill-style-changed", () => {
       });
     });
 
-    // All three style->dimension mappings:
+    // The remaining two style->dimension mappings (the spec requires all
+    // three; icon-only ran above):
     listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
       cb({ payload: { style: "status-last-line" } })
     );
@@ -1756,6 +1848,16 @@ describe("main window listens for overlay-pill-style-changed", () => {
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
         width: 320,
         height: 48,
+        restyle: true,
+      });
+    });
+    listeners.get("overlay-pill-style-changed")!.forEach((cb) =>
+      cb({ payload: { style: "status-count" } })
+    );
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        width: 148,
+        height: 40,
         restyle: true,
       });
     });
@@ -1796,8 +1898,8 @@ import {
   Completion,
   AudioVisualizer,
   StatusIndicator,
+  MinimizedPill,
 } from "./components";
-import { MinimizedPill } from "./components/MinimizedPill";
 import { useApp, useSetupStatus, useMeetingDetection } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
@@ -1888,7 +1990,19 @@ const App = () => {
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [setOverlayPillStyle]);
+    // [] deps, matching the useApp.ts listener precedent: setOverlayPillStyle
+    // is an unmemoized provider function (new identity every provider render,
+    // like setCursorType at src/contexts/app.context.tsx:728), so depending on
+    // it would tear down and re-register the listener — with a gap — on every
+    // provider render. The callback only touches stable bindings
+    // (setOverlayPillStyle via closure over the render it was created in is
+    // fine: it writes through setCustomizable, which is identity-stable, and
+    // the storage writer; it never reads stale React state), so [] is safe.
+    // An unhandled rejection would fail the suite; surface it.
+    unlistenPromise.catch((error) => {
+      console.error("Failed to listen for pill style changes:", error);
+    });
+  }, []);
 
   return (
     <ErrorBoundary
@@ -1909,8 +2023,12 @@ const App = () => {
             subtree (and useCompletion's 2400-line hook with it) stays
             mounted, or minimize would destroy the meeting transcript and
             re-run every mount effect on restore. isHidden is the OUTER
-            wrapper, so hiding the app hides the pill too. */}
-        <div className={minimized ? "hidden" : ""}>
+            wrapper, so hiding the app hides the pill too. The wrapper needs
+            w-full: it is an auto-width flex item of the outer justify-center
+            container, and without it the Card's w-full would resolve against
+            a shrink-to-fit parent — a content-sized bar instead of the
+            full-window one. */}
+        <div className={minimized ? "hidden" : "w-full"}>
           <Card className="w-full flex flex-row items-center gap-2 p-2">
             {/* Setup Required Message (suppressed until setup status settles) */}
             {!setupLoading && !setupComplete && (
@@ -2065,8 +2183,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import { useEffect } from "react";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<void>>();
+// Mounted via useEffect inside the useCompletion stub, NOT the hook body: the
+// hook body runs on every RENDER (minimize/restore re-renders App through
+// useSyncExternalStore), so a body-placed spy counts re-renders and the
+// "mount effects did not re-run" assertion can never pass. An effect with []
+// deps fires once per MOUNT — which is exactly the probe the spec asks for.
 const completionMountSpy = vi.fn();
 // The stub's transcript persists in module state: a remount would fire the
 // mount spy again (the probe), and re-running the hook would re-seed state —
@@ -2138,7 +2262,9 @@ const mockEverything = () => {
       }),
       useMeetingDetection: () => ({}),
       useCompletion: () => {
-        completionMountSpy();
+        useEffect(() => {
+          completionMountSpy();
+        }, []);
         return {
           meetingTranscript: transcriptSeed,
           meetingAssistMode: true,
@@ -2407,7 +2533,7 @@ Run: `npm run tauri dev`
 - "Settings" (storage key, type, context, selector placement) → Tasks 1 + 5.
 - "Cross-window propagation" (emit, main listener, restyle invoke) → Tasks 5 + 7.
 - Edge cases 1-8 → covered: 1 (Task 7 tests + nesting), 2/3 (Task 2 `current_monitor` + `work_area`), 4 (Task 2 physical px, no `set_window_height` reuse), 5 (accepted, no code), 6 (Task 2 `fallback_restore_rect` + tests), 7 (in-memory `Default`, Task 2 test), 8 (no change needed — `main` already in the list).
-- Testing section: every named test file exists — `customizable.storage.test.ts` (T1), `overlay-minimize.store.test.ts` (T3), `useWindow.minimize-gate.test.ts` (T4+T7 ordering), `minimized-pill.test.tsx` (T6), `overlay-minimize-keeps-mounted.test.tsx` (T8), `settings-page.overlay-pill.test.tsx` (T5+T7), `hidden-and-minimized.test.tsx` (T7), Rust `#[test]`s on `bottom_right_position` + fallback + default state (T2), manual gate (T8 Step 6).
+- Testing section: every named test file exists — `customizable.storage.test.ts` (T1), `overlay-minimize.store.test.ts` (T3), `useWindow.minimize-gate.test.ts` (T4 gate unit tests + T7 ordering), `minimized-pill.test.tsx` (T6 variants + the stale-rect regression — the popover-open-while-minimized case needs the pill's real click handler, which is why it lives here rather than in the gate unit file), `overlay-minimize-keeps-mounted.test.tsx` (T8), `settings-page.overlay-pill.test.tsx` (T5+T7 incl. the main-window listener with all three style mappings), `hidden-and-minimized.test.tsx` (T7), Rust `#[test]`s on `bottom_right_position` + fallback + default state (T2), manual gate (T8 Step 6).
 
 **Placeholder scan:** none — every code step contains the actual code, every run step contains the exact command and expected result.
 
