@@ -206,35 +206,17 @@ pub fn move_window(app: tauri::AppHandle, direction: String, step: i32) -> Resul
 pub fn create_dashboard_window<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WebviewWindow<R>, tauri::Error> {
-    let base_builder =
-        WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::App("/meetings".into()));
-
-    #[cfg(target_os = "macos")]
-    let base_builder = base_builder
-        .title("Meetwings - Dashboard")
-        .center()
-        .decorations(true)
-        .inner_size(1200.0, 800.0)
-        .min_inner_size(800.0, 600.0)
-        .hidden_title(true)
-        .title_bar_style(tauri::TitleBarStyle::Overlay)
-        .visible(true)
-        .traffic_light_position(LogicalPosition::new(14.0, 18.0));
-
-    #[cfg(not(target_os = "macos"))]
-    let base_builder = base_builder
-        .title("Meetwings - Dashboard")
-        .center()
-        .decorations(true)
-        .inner_size(800.0, 600.0)
-        .min_inner_size(800.0, 600.0)
-        .visible(true);
-
+    // Follow the user's stored setting rather than hardcoding it: on Windows
+    // a protected window blacks out in every capture tool (Snipping Tool,
+    // OBS, Print Screen), which users read as the window vanishing.
     let enabled = *app
         .state::<ContentProtectionState>()
         .enabled
         .lock()
         .unwrap();
+
+    let base_builder =
+        WebviewWindowBuilder::new(app, "dashboard", tauri::WebviewUrl::App("/meetings".into()));
 
     #[cfg(target_os = "macos")]
     let base_builder = base_builder
@@ -260,6 +242,4 @@ pub fn create_dashboard_window<R: Runtime>(
         .visible(true);
 
     base_builder.build()
-
-    Ok(dashboard_window)
 }
