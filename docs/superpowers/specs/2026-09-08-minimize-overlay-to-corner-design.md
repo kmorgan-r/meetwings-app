@@ -71,25 +71,29 @@ Registered with `.manage()` in `src-tauri/src/lib.rs` alongside
 
 Two commands, both added to the `invoke_handler` list:
 
-- **`minimize_overlay(window, width: u32, height: u32)`** - if `saved`
-  is already `Some`, this is a restyle of an already-minimized pill: it
-  resizes and repositions with the new dimensions and returns WITHOUT
-  touching `saved` (see "Cross-window propagation"). Otherwise it reads
-  `outer_position()` and `outer_size()` - both must succeed before
-  anything is committed - stores them in `saved`, converts the logical
-  pill dimensions to physical via `window.scale_factor()`, sets the
-  size, then sets the position. Resize must happen before positioning
-  because the corner x coordinate depends on the new width. An
-  unconditional snapshot would let the restyle path overwrite the
-  pre-minimize rect with the pill's own corner geometry, and restore
-  would then "restore" the overlay to the bottom-right corner at pill
-  size - permanently breaking the "restore to pre-minimize position"
-  promise in a flow this spec itself specifies.
+- **`minimize_overlay(window, width: u32, height: u32, restyle: bool)`** -
+  when `restyle` is true this is a restyle of an already-minimized
+  pill: it resizes and repositions with the new dimensions and returns
+  WITHOUT touching `saved` (see "Cross-window propagation"). Otherwise
+  it reads `outer_position()` and `outer_size()` - both must succeed
+  before anything is committed - stores them in `saved`, converts the
+  logical pill dimensions to physical via `window.scale_factor()`, sets
+  the size, then sets the position. Resize must happen before positioning
+  because the corner x coordinate depends on the new width. The restyle
+  distinction MUST be a parameter, not derived from `saved` being
+  `Some`: restore deliberately keeps `saved` (see below), so after one
+  minimize/restore cycle `saved` is permanently `Some`, and a Rust-side
+  "already saved means restyle" rule would silently turn every later
+  genuine minimize into a restyle that never re-snapshots - restore
+  would then return the overlay to the FIRST cycle's pre-minimize rect,
+  not the current one. The frontend, which owns `getMinimized()`, is
+  the only side that knows which invoke is which.
 - **`restore_overlay(window)`** - takes the saved rect and applies size then
   position. `saved` is deliberately NOT cleared by restore: restoring is
   idempotent (a double-click on the pill must not fall through to the
-  fallback on the second invoke), and the next `minimize_overlay` takes a
-  fresh snapshot anyway. If `saved` is `None`, falls back to a 600x54
+  fallback on the second invoke), and the next genuine minimize
+  (a `restyle: false` invoke) takes a fresh snapshot anyway. If
+  `saved` is `None`, falls back to a 600x54
   logical size plus top-center placement - computed with the same
   `current_monitor()` sensitivity as the pill itself, NOT via
   `position_window_top_center`, whose `primary_monitor()` would teleport a
@@ -121,6 +125,15 @@ Margin from the work-area edges: 16 physical px.
 it returns `Err`, the frontend catch leaves the overlay un-minimized (see
 "Components"), and nothing is committed.
 
+A geometry-write failure needs the same care, one step later: if `set_size`
+or `set_position` fails AFTER `saved` was committed and one write landed,
+`minimize_overlay` re-applies the saved rect before returning `Err` - a
+half-pill-sized window with the frontend flag rolled back would render the
+full `Card` inside a pill-sized window, the exact hazard the restore-catch
+rationale in "Components" names. If the rollback write itself fails, the
+error still propagates and the frontend catch surfaces it; the window may be
+mis-sized but `saved` remains accurate, so the next restore self-heals.
+
 ### Frontend state: `src/lib/overlay-minimize.store.ts`
 
 A module-level flag with a listener set, exposing `getMinimized()`,
@@ -139,16 +152,27 @@ The stored-reference invariant is part of the store's contract.
 
 ### The gate: `src/hooks/useWindow.ts`
 
+The resize body is hoisted to a module-level exported function (the
+pill needs to call it without mounting a second observer - see "Restore
+must re-derive the height"), and the gate line lives inside it:
+
 ```ts
-const resizeWindow = useCallback(async (expanded: boolean) => {
+// module scope in useWindow.ts
+export const resizeWindow = async (expanded: boolean) => {
   if (getMinimized()) return;
   // ...existing body unchanged
-}, []);
+};
+
+// the existing hook becomes a thin wrapper; its callers are unchanged
+export const useWindowResize = () => ({ resizeWindow });
 ```
 
 One line, at the single choke point. It must gate both `expanded` values:
 `resizeWindow(false)` is the stomp, and `resizeWindow(true)` would silently
-un-minimize the window when a popover opens.
+un-minimize the window when a popover opens. The gate must sit in the
+module function, not the hook wrapper - the pill calls the module function
+directly, and a gate left in a hook-scoped `useCallback` body would let
+that call bypass it.
 
 #### Restore must re-derive the height, not replay the snapshot
 
@@ -222,7 +246,7 @@ called at `src/pages/app/components/completion/index.tsx:28`, inside the
 `Completion` component, inside the `Card`. Rendering the pill *in place of*
 that subtree would unmount the hook and destroy `meetingTranscript`, the
 current conversation, and the popover's open state and scroll position mid
-meeting - and would re-run every effect in a 2300-line hook on restore.
+meeting - and would re-run every effect in a 2400-line hook on restore.
 `useWindow.ts`'s owner (`useCompletion.ts:176`) would unmount with it.
 
 So minimizing is a visibility change, like the existing `isHidden` path in
