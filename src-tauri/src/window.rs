@@ -2,8 +2,8 @@ use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use tauri::LogicalPosition;
 use tauri::{
-    App, AppHandle, Manager, PhysicalRect, Position, PhysicalPosition, PhysicalSize, Runtime,
-    Size, WebviewWindow, WebviewWindowBuilder,
+    App, AppHandle, Manager, PhysicalPosition, PhysicalRect, PhysicalSize, Position, Runtime, Size,
+    WebviewWindow, WebviewWindowBuilder,
 };
 
 // The offset from the top of the screen to the window
@@ -247,7 +247,8 @@ pub fn minimize_overlay(
                 // `saved` still holds the truth and the next restore
                 // self-heals.
                 let _ = window.set_size(Size::Physical(PhysicalSize::new(saved.2, saved.3)));
-                let _ = window.set_position(Position::Physical(PhysicalPosition::new(saved.0, saved.1)));
+                let _ = window
+                    .set_position(Position::Physical(PhysicalPosition::new(saved.0, saved.1)));
                 return Err(e);
             }
         }
@@ -432,7 +433,10 @@ mod tests {
     fn bottom_right_plain_work_area() {
         let area = rect(0, 0, 1920, 1080);
         // 148x40 pill, 16px margin.
-        assert_eq!(bottom_right_position(&area, 148, 40, 16), (1920 - 148 - 16, 1080 - 40 - 16));
+        assert_eq!(
+            bottom_right_position(&area, 148, 40, 16),
+            (1920 - 148 - 16, 1080 - 40 - 16)
+        );
     }
 
     // Taskbar inset: the work area is smaller than the monitor, and the pill
@@ -440,7 +444,10 @@ mod tests {
     #[test]
     fn bottom_right_taskbar_inset() {
         let area = rect(0, 0, 1920, 1040); // 1080 screen, 40px taskbar
-        assert_eq!(bottom_right_position(&area, 148, 40, 16), (1920 - 148 - 16, 1040 - 40 - 16));
+        assert_eq!(
+            bottom_right_position(&area, 148, 40, 16),
+            (1920 - 148 - 16, 1040 - 40 - 16)
+        );
     }
 
     // A monitor left of the primary has a negative origin; the arithmetic must
@@ -448,7 +455,10 @@ mod tests {
     #[test]
     fn bottom_right_negative_origin() {
         let area = rect(-1920, 0, 1920, 1080);
-        assert_eq!(bottom_right_position(&area, 148, 40, 16), (-1920 + 1920 - 148 - 16, 1080 - 40 - 16));
+        assert_eq!(
+            bottom_right_position(&area, 148, 40, 16),
+            (-1920 + 1920 - 148 - 16, 1080 - 40 - 16)
+        );
     }
 
     // The restore fallback: 600x54 LOGICAL at top center, converted through the
@@ -465,7 +475,10 @@ mod tests {
         let area = rect(0, 0, 2560, 1440);
         // 1.5x: 600 logical = 900 physical, 54 logical = 81 physical.
         let (x, y, w, h) = fallback_restore_rect(&area, 1.5);
-        assert_eq!((x, y, w, h), ((2560 - 900) / 2, (54.0 * 1.5) as i32, 900, 81));
+        assert_eq!(
+            (x, y, w, h),
+            ((2560 - 900) / 2, (54.0 * 1.5) as i32, 900, 81)
+        );
     }
 
     // Restart clears the in-memory state: restore after restart must hit the
@@ -473,6 +486,6 @@ mod tests {
     #[test]
     fn default_state_has_no_saved_rect() {
         let state = OverlayMinimizeState::default();
-        assert!(*state.saved.lock().unwrap() == None);
+        assert!(state.saved.lock().unwrap().is_none());
     }
 }
