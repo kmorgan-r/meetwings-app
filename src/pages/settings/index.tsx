@@ -4,6 +4,7 @@ import {
   AlwaysOnTopToggle,
   AppIconToggle,
   AutostartToggle,
+  ContentProtectionToggle,
   MeetingAutoRecordToggle,
 } from "./components";
 import { PageLayout } from "@/layouts";
@@ -23,6 +24,9 @@ const Settings = () => {
 
       {/* Always On Top Toggle */}
       <AlwaysOnTopToggle />
+
+      {/* Screen Capture Protection Toggle */}
+      <ContentProtectionToggle />
 
       {/* AI Conversation Titles Toggle */}
       <AITitlesToggle />
