@@ -71,14 +71,29 @@ Registered with `.manage()` in `src-tauri/src/lib.rs` alongside
 
 Two commands, both added to the `invoke_handler` list:
 
-- **`minimize_overlay(window, width: u32, height: u32)`** - reads
-  `outer_position()` and `outer_size()` and stores them in `saved`, converts
-  the logical pill dimensions to physical via `window.scale_factor()`, sets
-  the size, then sets the position. Resize must happen before positioning
-  because the corner x coordinate depends on the new width.
+- **`minimize_overlay(window, width: u32, height: u32)`** - if `saved`
+  is already `Some`, this is a restyle of an already-minimized pill: it
+  resizes and repositions with the new dimensions and returns WITHOUT
+  touching `saved` (see "Cross-window propagation"). Otherwise it reads
+  `outer_position()` and `outer_size()` - both must succeed before
+  anything is committed - stores them in `saved`, converts the logical
+  pill dimensions to physical via `window.scale_factor()`, sets the
+  size, then sets the position. Resize must happen before positioning
+  because the corner x coordinate depends on the new width. An
+  unconditional snapshot would let the restyle path overwrite the
+  pre-minimize rect with the pill's own corner geometry, and restore
+  would then "restore" the overlay to the bottom-right corner at pill
+  size - permanently breaking the "restore to pre-minimize position"
+  promise in a flow this spec itself specifies.
 - **`restore_overlay(window)`** - takes the saved rect and applies size then
-  position. If `saved` is `None`, falls back to a 600x54 logical size plus
-  `position_window_top_center(&window, TOP_OFFSET)`.
+  position. `saved` is deliberately NOT cleared by restore: restoring is
+  idempotent (a double-click on the pill must not fall through to the
+  fallback on the second invoke), and the next `minimize_overlay` takes a
+  fresh snapshot anyway. If `saved` is `None`, falls back to a 600x54
+  logical size plus top-center placement - computed with the same
+  `current_monitor()` sensitivity as the pill itself, NOT via
+  `position_window_top_center`, whose `primary_monitor()` would teleport a
+  second-monitor user's overlay to the primary screen on the fallback path.
 
 Corner math is extracted as a free function so it can be unit tested without
 a live window:
@@ -101,6 +116,11 @@ available in tauri 2.8.2 (`tauri/src/window/mod.rs:98`).
 
 Margin from the work-area edges: 16 physical px.
 
+`current_monitor()` returns `Option` and can be `None` (monitor disconnect).
+`minimize_overlay` falls back to `primary_monitor()`; if that is `None` too,
+it returns `Err`, the frontend catch leaves the overlay un-minimized (see
+"Components"), and nothing is committed.
+
 ### Frontend state: `src/lib/overlay-minimize.store.ts`
 
 A module-level flag with a listener set, exposing `getMinimized()`,
@@ -109,6 +129,13 @@ A module-level flag with a listener set, exposing `getMinimized()`,
 It lives outside React because the `MutationObserver` callback in
 `useWindow.ts` has no render scope and cannot read a hook or a context. React
 consumers read it through `useSyncExternalStore(subscribe, getMinimized)`.
+
+`getMinimized()` returns a boolean, which has no snapshot-stability hazard.
+The pill-data getter (see "Pill data source") does not have that luxury:
+its `useSyncExternalStore` snapshot must return the stored object
+reference, replaced only by the writer - a getter that assembles a fresh
+object per call never compares equal and loops React 19's snapshot check.
+The stored-reference invariant is part of the store's contract.
 
 ### The gate: `src/hooks/useWindow.ts`
 
@@ -142,11 +169,33 @@ gate, then `resizeWindow(isAnyPopoverOpen())`. `isAnyPopoverOpen` is already
 module-level in `useWindow.ts` and needs exporting. The final height then
 reflects the current popover state rather than the state at minimize time.
 
+The third step needs an owner, and the obvious one is a trap: the pill is a
+sibling of the `Card`, so it has no `resizeWindow` - and calling
+`useWindowResize()` inside the pill would mount a SECOND
+`MutationObserver` plus a second pair of document drag listeners
+alongside the instance `useCompletion` already owns. Instead, the
+`resizeWindow` body moves to a module-level exported function in
+`useWindow.ts` (it closes over nothing but `isAnyPopoverOpen`, the store
+gate, and Tauri APIs), `useWindowResize` becomes a thin wrapper returning
+it, and the pill's click handler imports and calls it directly. The gate
+ordering matters on both flows and is pinned: the pill click awaits
+`restore_overlay()` BEFORE `setMinimized(false)`, so the gate stays
+closed while the window is still pill-sized; the minimize button is the
+mirror image (see "Components").
+
 ### Components
 
 **`src/pages/app/components/MinimizedPill.tsx`** - renders the variant named
 by the current setting. The whole pill surface is the expand click target;
-clicking invokes `restore_overlay` and calls `setMinimized(false)`.
+clicking runs the full restore sequence in order, and the order is
+load-bearing: `await invoke("restore_overlay")` FIRST (the gate is still
+closed while the window is pill-sized, so no `resizeWindow` can race the
+geometry), then `setMinimized(false)` to clear the gate, then the
+module-level `resizeWindow(isAnyPopoverOpen())` from `useWindow.ts`. The
+invoke is wrapped in try/catch matching the `useWindow.ts` convention: on
+rejection the flag is NOT cleared, the pill stays, and the error is logged -
+clearing the flag after a failed restore would render the full `Card`
+inside a pill-sized window.
 
 The pill carries no `data-tauri-drag-region`. A drag region covering the
 click target makes the expand click unreliable, and dragging remains an
@@ -154,9 +203,17 @@ expanded-overlay affordance via the existing `DragButton`.
 
 **`src/pages/app/index.tsx`** - subscribes to the store; when minimized it
 hides the existing `Card` tree and renders `MinimizedPill` as a sibling. A
-minimize button is added to the overlay bar next to `DragButton`; it invokes
-`minimize_overlay` with the dimensions of the current style, then
-`setMinimized(true)`.
+minimize button is added to the overlay bar next to `DragButton`. Its
+handler is the mirror image of the pill's: `setMinimized(true)`
+SYNCHRONOUSLY first - closing the gate before the async invoke closes the
+window in which a transcript arrival could fire the `MutationObserver`'s
+`resizeWindow(false)` and race the pill geometry - then
+`await invoke("minimize_overlay", ...)` with the dimensions of the current
+style, and in the catch, `setMinimized(false)` to roll the flag back so a
+failed minimize cannot leave a pill rendered inside an un-minimized window.
+Setting the flag before the invoke is harmless: the pill renders from
+React state, and one paint of the pill in a still-600px window beats one
+paint of the full bar in a pill-sized one.
 
 #### Hide, do not swap
 
@@ -194,6 +251,17 @@ expanded popover on screen. The store therefore also sets
 `isHidden`; the CSS rule is the cleaner equivalent. Writing that attribute
 does not retrigger the `MutationObserver` loop, whose `attributeFilter` is
 `["data-state"]`.
+
+The two paths deliberately take OPPOSITE policies toward
+popover-open-while-hidden, and this is stated so it cannot read as an
+omission: `isHidden` forcibly closes the popover (it means "the app is
+invisible, leave nothing running"); minimize only hides it, because the
+stale-rect fix above depends on the popover being able to open while
+minimized - `resizeWindow(isAnyPopoverOpen())` at restore must see it. The
+`onOpenChange` side effects are benign here: `Input.tsx`'s `reset()` fires
+only on close-with-no-content, the same as when expanded, and the popover
+being CSS-hidden does not affect Radix's open state bookkeeping. The
+manual gate below covers a popover opening while minimized.
 
 #### Pill data source
 
@@ -249,7 +317,11 @@ The selector emits `overlay-pill-style-changed` with the new style, the same
 pattern `src/pages/settings/components/MeetingAutoRecordToggle.tsx:126` uses
 for `meeting-detection-setting-changed`. The `main` window listens and
 updates. If it is minimized at the time, it re-invokes `minimize_overlay`
-with the new style's dimensions so the pill resizes in place.
+with the new style's dimensions so the pill resizes in place. This restyle
+invoke is exactly the case `minimize_overlay`'s conditional snapshot exists
+for: at restyle time the window IS the pill, so the command must not
+re-snapshot `outer_position()`/`outer_size()` - it would save the pill's own
+corner geometry as the "pre-minimize" rect.
 
 ## Edge cases
 
@@ -288,19 +360,39 @@ Vitest, matching the existing files under `src/tests/`:
 - `useWindow.minimize-gate.test.ts` - `resizeWindow(true)` and
   `resizeWindow(false)` both no-op while minimized, and both resume once it
   is cleared. Plus the stale-rect regression: minimize, open a popover while
-  minimized, restore, and assert the window ends at 600 rather than 54.
+  minimized, restore, and assert the window ends at 600 rather than 54. Plus
+  the ordering assertions: the minimize handler closes the gate before its
+  invoke (a `resizeWindow` fired during the await is swallowed), and the
+  restore handler does not clear the gate until its invoke resolves.
 - `minimized-pill.test.tsx` - all three variants render; clicking invokes
-  `restore_overlay`.
+  `restore_overlay` and only clears the flag once it resolves.
 - `overlay-minimize-keeps-mounted.test.tsx` - the regression that motivates
   the whole "hide, do not swap" section: render the overlay with a non-empty
   `meetingTranscript`, minimize, restore, and assert the transcript is still
-  there and `useCompletion`'s mount effects did not re-run.
+  there and `useCompletion`'s mount effects did not re-run. "Did not re-run"
+  needs a concrete probe, not an eyeball: mock `@tauri-apps/api/core`,
+  `@tauri-apps/api/webviewWindow`, `@tauri-apps/api/event`, and the sql/http
+  plugins (the overlay mounts a 2400-line hook pulling all of them), then
+  assert a mount-only side effect - e.g. the initial conversation DB load's
+  invoke - is called exactly once across the minimize/restore cycle.
+- `hidden-and-minimized.test.tsx` - pin edge case 1: with `isHidden` true
+  and minimized true, the pill is invisible and not clickable; toggling
+  `isHidden` back false brings the pill back clickable. No geometry invoke
+  happens on either hide or unhide.
 - `settings-page.overlay-pill.test.tsx` - the selector renders, writes
-  storage, and emits `overlay-pill-style-changed`.
+  storage, and emits `overlay-pill-style-changed`. Plus the `main`-window
+  side of the same flow: with `listen("overlay-pill-style-changed")` mocked,
+  minimized=true → `minimize_overlay` re-invoked with the new style's
+  dimensions (all three style→dimension mappings); minimized=false → the
+  event is a no-op, no geometry invoke.
 
 Rust `#[test]` on `bottom_right_position`: a plain work area, one with a
 taskbar inset, and one with a negative origin (a monitor positioned to the
-left of the primary).
+left of the primary). Plus tests for the restore fallback: the fallback
+rect (600x54 logical at top center of the given monitor's work area) is
+extracted into a free function next to `bottom_right_position` and tested,
+and `OverlayMinimizeState::default()` asserts `saved` starts `None` - the
+guaranteed post-restart state that drives the fallback path.
 
 **Manual gate.** `npm run tauri dev`, start capture, minimize. Arriving
 transcript segments are exactly the continuous DOM mutation that drives the
