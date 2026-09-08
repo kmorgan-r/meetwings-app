@@ -2,34 +2,52 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect } from "react";
 
-// Helper function to check if any popover is open in the DOM
-const isAnyPopoverOpen = (): boolean => {
+import { getMinimized } from "@/lib/overlay-minimize.store";
+
+// Helper function to check if any popover is open in the DOM. Exported: the
+// restore sequence re-derives the window height from the CURRENT popover
+// state (see the spec's "Restore must re-derive the height").
+export const isAnyPopoverOpen = (): boolean => {
   const popoverContents = document.querySelectorAll(
     "[data-radix-popper-content-wrapper]"
   );
   return popoverContents.length > 0;
 };
 
-export const useWindowResize = () => {
-  const resizeWindow = useCallback(async (expanded: boolean) => {
-    try {
-      const window = getCurrentWebviewWindow();
+// Module-level, not a hook: the minimized pill calls this directly after
+// restoring, and it must not require a useWindowResize() mount (which would
+// register a SECOND MutationObserver + document drag listeners alongside
+// the instance useCompletion already owns). The gate below is the whole
+// feature: arriving transcript segments fire the MutationObserver
+// continuously, and without this early-return the pill is yanked back to a
+// 600px bar within milliseconds of being minimized. Both expanded values are
+// gated - resizeWindow(false) is the stomp, and resizeWindow(true) would
+// silently un-minimize the window when a popover opens.
+export const resizeWindow = async (expanded: boolean): Promise<void> => {
+  if (getMinimized()) return;
+  try {
+    const window = getCurrentWebviewWindow();
 
-      if (!expanded && isAnyPopoverOpen()) {
-        return;
-      }
-
-      const newHeight = expanded ? 600 : 54;
-
-      await invoke("set_window_height", {
-        window,
-        height: newHeight,
-      });
-    } catch (error) {
-      console.error("Failed to resize window:", error);
+    if (!expanded && isAnyPopoverOpen()) {
+      return;
     }
-  }, []);
 
+    const newHeight = expanded ? 600 : 54;
+
+    await invoke("set_window_height", {
+      window,
+      height: newHeight,
+    });
+  } catch (error) {
+    console.error("Failed to resize window:", error);
+  }
+};
+
+// Thin wrapper: every existing caller (useCompletion, useSystemAudio,
+// updater) keeps its `const { resizeWindow } = useWindowResize()` line and
+// its effect deps unchanged. resizeWindow's identity is now permanently
+// stable, which also makes those deps exact.
+export const useWindowResize = () => {
   // Setup drag handling and popover monitoring
   useEffect(() => {
     let isDragging = false;
@@ -77,7 +95,7 @@ export const useWindowResize = () => {
       document.removeEventListener("mouseup", handleMouseUp);
       observer.disconnect();
     };
-  }, [resizeWindow]);
+  }, []);
 
   return { resizeWindow };
 };
