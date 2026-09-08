@@ -32,6 +32,9 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
     AppIconToggle: Stub,
     AutostartToggle: Stub,
     ContentProtectionToggle: Stub,
+    // The real selector calls useApp, which throws outside an AppProvider -
+    // same reason the other siblings above are stubbed.
+    OverlayPillStyleSelect: Stub,
   };
 });
 

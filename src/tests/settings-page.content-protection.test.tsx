@@ -20,6 +20,9 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
     AppIconToggle: Stub,
     AutostartToggle: Stub,
     MeetingAutoRecordToggle: Stub,
+    // The real selector calls useApp, which throws outside an AppProvider -
+    // same reason Theme and the other siblings above are stubbed.
+    OverlayPillStyleSelect: Stub,
     ContentProtectionToggle: () => (
       <div aria-label="Toggle screen capture protection" />
     ),

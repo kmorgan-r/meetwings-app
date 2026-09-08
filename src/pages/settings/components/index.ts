@@ -4,4 +4,5 @@ export * from "./AppIconToggle";
 export * from "./AutostartToggle";
 export * from "./ContentProtectionToggle";
 export * from "./MeetingAutoRecordToggle";
+export * from "./OverlayPillStyleSelect";
 export * from "./Theme";
