@@ -123,6 +123,25 @@ One line, at the single choke point. It must gate both `expanded` values:
 `resizeWindow(false)` is the stomp, and `resizeWindow(true)` would silently
 un-minimize the window when a popover opens.
 
+#### Restore must re-derive the height, not replay the snapshot
+
+The saved rect is a snapshot taken at minimize time, and the gate means the
+window's height stops tracking reality while minimized. If the first
+transcript segment arrives *after* minimizing, the popover opens, the gated
+`resizeWindow(true)` is dropped, and replaying the snapshot restores a 600x54
+bar with a 600x600 popover clipped inside it.
+
+Nothing self-heals this. The `useCompletion.ts:1960` effect is driven purely
+by boolean flags (`isPopoverOpen`, `micOpen`, `messageHistoryOpen`,
+`isFilesPopoverOpen`, `isContactPickerOpen`) that do not change on restore, so
+it will not re-fire; `useOdooTarget.ts:200` confirms it is the sole
+`resizeWindow(true)` caller. The `MutationObserver` only ever calls `(false)`.
+
+So restore is: `restore_overlay()`, then `setMinimized(false)` to clear the
+gate, then `resizeWindow(isAnyPopoverOpen())`. `isAnyPopoverOpen` is already
+module-level in `useWindow.ts` and needs exporting. The final height then
+reflects the current popover state rather than the state at minimize time.
+
 ### Components
 
 **`src/pages/app/components/MinimizedPill.tsx`** - renders the variant named
@@ -134,9 +153,64 @@ click target makes the expand click unreliable, and dragging remains an
 expanded-overlay affordance via the existing `DragButton`.
 
 **`src/pages/app/index.tsx`** - subscribes to the store; when minimized it
-renders `MinimizedPill` in place of the `Card` body. A minimize button is
-added to the overlay bar next to `DragButton`; it invokes `minimize_overlay`
-with the dimensions of the current style, then `setMinimized(true)`.
+hides the existing `Card` tree and renders `MinimizedPill` as a sibling. A
+minimize button is added to the overlay bar next to `DragButton`; it invokes
+`minimize_overlay` with the dimensions of the current style, then
+`setMinimized(true)`.
+
+#### Hide, do not swap
+
+The overlay content must stay mounted while minimized. `useCompletion()` is
+called at `src/pages/app/components/completion/index.tsx:28`, inside the
+`Completion` component, inside the `Card`. Rendering the pill *in place of*
+that subtree would unmount the hook and destroy `meetingTranscript`, the
+current conversation, and the popover's open state and scroll position mid
+meeting - and would re-run every effect in a 2300-line hook on restore.
+`useWindow.ts`'s owner (`useCompletion.ts:176`) would unmount with it.
+
+So minimizing is a visibility change, like the existing `isHidden` path in
+`src/pages/app/index.tsx:47-49`. The layout in `app/index.tsx` becomes three
+nested levels, and the nesting is what keeps the two states from colliding:
+
+```
+<div className={isHidden ? "hidden pointer-events-none" : ""}>   // unchanged
+  <div className={minimized ? "hidden" : ""}>
+    <Card>...</Card>                                             // stays mounted
+  </div>
+  {minimized && <MinimizedPill />}
+</div>
+```
+
+`isHidden` is the outer wrapper, so hiding the app hides the pill too, which
+is what the shortcut means. The minimized wrapper is inner, so it hides the
+`Card` without touching the pill. Nothing unmounts either way.
+
+The Radix portal needs one extra rule. `PopoverContent` is portaled to
+`document.body`, outside both wrappers, so hiding the wrapper leaves an
+expanded popover on screen. The store therefore also sets
+`data-overlay-minimized` on `document.body`, and `src/global.css` hides
+`[data-radix-popper-content-wrapper]` while it is present.
+`src/hooks/useApp.ts:66-85` already fights this same portal imperatively for
+`isHidden`; the CSS rule is the cleaner equivalent. Writing that attribute
+does not retrigger the `MutationObserver` loop, whose `attributeFilter` is
+`["data-state"]`.
+
+#### Pill data source
+
+The pill's `status-count` variant needs the segment count and
+`status-last-line` needs the latest transcript line. Both live in
+`meetingTranscript` inside `useCompletion`, which `app/index.tsx` cannot see -
+it receives only `systemAudio`.
+
+Since the layout above requires the pill to be a sibling of the `Card` rather
+than a descendant of it, the data is pushed up instead: `Completion`
+(`completion/index.tsx`, which already holds `completion`) writes
+`{ segmentCount, lastLine, status }` into the same module store the gate
+reads, in an effect keyed on `meetingTranscript`. `MinimizedPill` reads it
+through `useSyncExternalStore`.
+
+Three scalars, one-way, written from one place. The transcript itself is not
+duplicated into the store.
 
 ### Pill styles
 
@@ -183,7 +257,9 @@ with the new style's dimensions so the pill resizes in place.
    `toggle-window-visibility` shortcut) only adds `hidden pointer-events-none`
    to a wrapper div; it never touches window geometry. The two states are
    orthogonal and need no ordering logic. Hiding while minimized leaves a
-   148x40 invisible window in the corner; unhiding brings the pill back.
+   148x40 invisible window in the corner; unhiding brings the pill back. The
+   nesting in "Hide, do not swap" is what produces this: `isHidden` wraps the
+   pill, the minimized wrapper does not.
 2. **Multi-monitor.** `current_monitor()` keeps the pill on whichever screen
    the overlay was already on.
 3. **Taskbar.** `work_area()` keeps the pill clear of the Windows taskbar.
@@ -207,12 +283,18 @@ Vitest, matching the existing files under `src/tests/`:
 
 - `customizable.storage.test.ts` - extend with the `overlayPill` default and
   the fallback for state stored before the key existed.
-- `overlay-minimize.store.test.ts` - get, set, subscribe, unsubscribe.
+- `overlay-minimize.store.test.ts` - get, set, subscribe, unsubscribe, and
+  the pill-data writer.
 - `useWindow.minimize-gate.test.ts` - `resizeWindow(true)` and
   `resizeWindow(false)` both no-op while minimized, and both resume once it
-  is cleared.
+  is cleared. Plus the stale-rect regression: minimize, open a popover while
+  minimized, restore, and assert the window ends at 600 rather than 54.
 - `minimized-pill.test.tsx` - all three variants render; clicking invokes
   `restore_overlay`.
+- `overlay-minimize-keeps-mounted.test.tsx` - the regression that motivates
+  the whole "hide, do not swap" section: render the overlay with a non-empty
+  `meetingTranscript`, minimize, restore, and assert the transcript is still
+  there and `useCompletion`'s mount effects did not re-run.
 - `settings-page.overlay-pill.test.tsx` - the selector renders, writes
   storage, and emits `overlay-pill-style-changed`.
 
