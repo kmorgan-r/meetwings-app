@@ -230,19 +230,36 @@ pub fn create_dashboard_window<R: Runtime>(
         .min_inner_size(800.0, 600.0)
         .visible(true);
 
-    let dashboard_window = base_builder.build()?;
-
-    // Follow the user's stored setting rather than hardcoding it: on Windows
-    // a protected window blacks out in every capture tool (Snipping Tool,
-    // OBS, Print Screen), which users read as the window vanishing.
     let enabled = *app
         .state::<ContentProtectionState>()
         .enabled
         .lock()
         .unwrap();
-    if let Err(e) = dashboard_window.set_content_protected(enabled) {
-        eprintln!("Failed to set dashboard content protection: {}", e);
-    }
+
+    #[cfg(target_os = "macos")]
+    let base_builder = base_builder
+        .title("Meetwings - Dashboard")
+        .center()
+        .decorations(true)
+        .inner_size(1200.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .hidden_title(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .content_protected(enabled)
+        .visible(true)
+        .traffic_light_position(LogicalPosition::new(14.0, 18.0));
+
+    #[cfg(not(target_os = "macos"))]
+    let base_builder = base_builder
+        .title("Meetwings - Dashboard")
+        .center()
+        .decorations(true)
+        .inner_size(800.0, 600.0)
+        .min_inner_size(800.0, 600.0)
+        .content_protected(enabled)
+        .visible(true);
+
+    base_builder.build()
 
     Ok(dashboard_window)
 }
