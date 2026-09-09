@@ -161,6 +161,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         flushUnsavedMeetingTranscript,
       }),
       useQuickActions: () => ({}),
+      usePillRecordAction: vi.fn(),
       useMeetingAutoRecord,
       // <Completion /> also mounts useOdooTarget (index.tsx:43) and spreads
       // odoo.pickerProps into the real (unmocked) ContactPicker, so this
@@ -226,6 +227,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         customizable: { cursor: { type: "default" } },
         allAiProviders: [{ id: "openai" }],
         selectedAIProvider: { provider: "openai", variables: {} },
+        selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
     vi.doMock("@/lib", () => ({
@@ -322,6 +324,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         flushUnsavedMeetingTranscript: vi.fn(),
       }),
       useQuickActions: () => ({}),
+      usePillRecordAction: vi.fn(),
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
@@ -371,6 +374,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         customizable: { cursor: { type: "default" } },
         allAiProviders: [{ id: "openai" }],
         selectedAIProvider: { provider: "openai", variables: {} },
+        selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
     vi.doMock("@/lib", () => ({
@@ -467,6 +471,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         setIsContactPickerOpen,
       }),
       useQuickActions: () => ({}),
+      usePillRecordAction: vi.fn(),
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
@@ -523,6 +528,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         customizable: { cursor: { type: "default" } },
         allAiProviders: [{ id: "openai" }],
         selectedAIProvider: { provider: "openai", variables: {} },
+        selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
     vi.doMock("@/lib", () => ({

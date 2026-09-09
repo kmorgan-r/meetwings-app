@@ -10,20 +10,27 @@ export const PILL_DIMENSIONS: Record<
   OverlayPillStyle,
   { width: number; height: number }
 > = {
-  "status-count": { width: 148, height: 40 },
-  "icon-only": { width: 52, height: 52 },
-  "status-last-line": { width: 320, height: 48 },
+  "status-count": { width: 180, height: 40 },
+  "icon-only": { width: 84, height: 52 },
+  "status-last-line": { width: 352, height: 48 },
 };
 
 /**
- * The three scalars the minimized pill displays. Written ONLY by
- * <Completion /> (see the spec's "Pill data source"); read by MinimizedPill
- * through useSyncExternalStore.
+ * The scalars the minimized pill displays. Written ONLY by <Completion />
+ * (see the spec's "Pill data source"); read by MinimizedPill through
+ * useSyncExternalStore.
+ *
+ * `status` mirrors the system-audio capture (the headphones button), while
+ * `recording` mirrors the meeting session (`meetingAssistMode && enableVAD`).
+ * Two different subsystems, so the record button reads `recording` and never
+ * infers it from `status` - an errored capture would otherwise mask a healthy
+ * meeting.
  */
 export interface OverlayPillData {
   segmentCount: number;
   lastLine: string;
   status: "capturing" | "error" | "idle";
+  recording: boolean;
 }
 
 let minimized = false;
@@ -61,6 +68,7 @@ const INITIAL_PILL_DATA: OverlayPillData = {
   segmentCount: 0,
   lastLine: "",
   status: "idle",
+  recording: false,
 };
 
 let pillData: OverlayPillData = INITIAL_PILL_DATA;
@@ -83,5 +91,39 @@ export const subscribeToPillData = (listener: () => void): (() => void) => {
   pillDataListeners.add(listener);
   return () => {
     pillDataListeners.delete(listener);
+  };
+};
+/**
+ * The pill's outbound half. The pill is a SIBLING of the Card, so it cannot
+ * reach useCompletion's setters through props or context - the same constraint
+ * that put the pill's data in this module. This is the one action it needs:
+ * start or stop a meeting recording without expanding first.
+ *
+ * `null` is the unregistered state and MUST stay distinguishable from a no-op
+ * function: the pill hides the button on null rather than rendering one that
+ * does nothing. usePillRecordAction registers null when no speech provider can
+ * serve a recording, and on unmount.
+ */
+export interface OverlayPillActions {
+  toggleRecording: (() => void) | null;
+}
+
+const INITIAL_PILL_ACTIONS: OverlayPillActions = { toggleRecording: null };
+
+let pillActions: OverlayPillActions = INITIAL_PILL_ACTIONS;
+const pillActionsListeners = new Set<() => void>();
+
+/** Same reference contract as getPillData - see its comment. */
+export const getPillActions = (): OverlayPillActions => pillActions;
+
+export const setPillActions = (actions: OverlayPillActions): void => {
+  pillActions = actions;
+  pillActionsListeners.forEach((listener) => listener());
+};
+
+export const subscribeToPillActions = (listener: () => void): (() => void) => {
+  pillActionsListeners.add(listener);
+  return () => {
+    pillActionsListeners.delete(listener);
   };
 };

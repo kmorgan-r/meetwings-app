@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getPillActions,
   getPillData,
   getMinimized,
   PILL_DIMENSIONS,
+  setPillActions,
   setPillData,
   setMinimized,
+  subscribeToPillActions,
   subscribeToPillData,
   subscribeToMinimized,
 } from "@/lib/overlay-minimize.store";
@@ -13,7 +16,8 @@ import {
 describe("overlay-minimize store", () => {
   beforeEach(() => {
     setMinimized(false);
-    setPillData({ segmentCount: 0, lastLine: "", status: "idle" });
+    setPillData({ segmentCount: 0, lastLine: "", status: "idle", recording: false });
+    setPillActions({ toggleRecording: null });
     vi.clearAllMocks();
   });
 
@@ -58,7 +62,12 @@ describe("overlay-minimize store", () => {
     const listener = vi.fn();
     subscribeToPillData(listener);
 
-    const next = { segmentCount: 3, lastLine: "hello", status: "capturing" };
+    const next = {
+      segmentCount: 3,
+      lastLine: "hello",
+      status: "capturing" as const,
+      recording: true,
+    };
     setPillData(next);
 
     expect(getPillData()).toBe(next); // SAME reference — useSyncExternalStore contract
@@ -66,8 +75,35 @@ describe("overlay-minimize store", () => {
   });
 
   it("exports the spec's pill dimensions for all three styles", () => {
-    expect(PILL_DIMENSIONS["status-count"]).toEqual({ width: 148, height: 40 });
-    expect(PILL_DIMENSIONS["icon-only"]).toEqual({ width: 52, height: 52 });
-    expect(PILL_DIMENSIONS["status-last-line"]).toEqual({ width: 320, height: 48 });
+    expect(PILL_DIMENSIONS["status-count"]).toEqual({ width: 180, height: 40 });
+    expect(PILL_DIMENSIONS["icon-only"]).toEqual({ width: 84, height: 52 });
+    expect(PILL_DIMENSIONS["status-last-line"]).toEqual({ width: 352, height: 48 });
+  });
+
+  it("pill actions: start out unregistered", () => {
+    expect(getPillActions().toggleRecording).toBeNull();
+  });
+
+  it("pill actions: writer replaces the stored reference and notifies subscribers", () => {
+    const listener = vi.fn();
+    subscribeToPillActions(listener);
+
+    const next = { toggleRecording: vi.fn() };
+    setPillActions(next);
+
+    expect(getPillActions()).toBe(next); // SAME reference - useSyncExternalStore contract
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("pill actions: unsubscribe stops notifications", () => {
+    const listener = vi.fn();
+    const unsub = subscribeToPillActions(listener);
+
+    setPillActions({ toggleRecording: vi.fn() });
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsub();
+    setPillActions({ toggleRecording: null });
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 
@@ -19,14 +19,20 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 
 import { MinimizedPill } from "@/pages/app/components/MinimizedPill";
-import { getPillData, setMinimized, setPillData } from "@/lib/overlay-minimize.store";
+import {
+  getPillData,
+  setMinimized,
+  setPillActions,
+  setPillData,
+} from "@/lib/overlay-minimize.store";
 
 describe("MinimizedPill", () => {
   beforeEach(() => {
     invokeMock.mockReset();
     invokeMock.mockResolvedValue(undefined);
     setMinimized(true); // the pill only ever renders while minimized
-    setPillData({ segmentCount: 0, lastLine: "", status: "idle" });
+    setPillData({ segmentCount: 0, lastLine: "", status: "idle", recording: false });
+    setPillActions({ toggleRecording: null });
   });
 
   it.each([
@@ -43,7 +49,12 @@ describe("MinimizedPill", () => {
   });
 
   it("shows the segment count in the status-count variant", () => {
-    setPillData({ segmentCount: 42, lastLine: "hello", status: "capturing" });
+    setPillData({
+      segmentCount: 42,
+      lastLine: "hello",
+      status: "capturing",
+      recording: true,
+    });
     render(
       <MemoryRouter>
         <MinimizedPill style="status-count" />
@@ -53,7 +64,12 @@ describe("MinimizedPill", () => {
   });
 
   it("shows the last transcript line (truncated) in the status-last-line variant", () => {
-    setPillData({ segmentCount: 1, lastLine: "the quick brown fox", status: "capturing" });
+    setPillData({
+      segmentCount: 1,
+      lastLine: "the quick brown fox",
+      status: "capturing",
+      recording: true,
+    });
     render(
       <MemoryRouter>
         <MinimizedPill style="status-last-line" />
@@ -139,5 +155,103 @@ describe("MinimizedPill", () => {
     );
     expect(collapsed).toEqual([]);
     portal.remove();
+  });
+
+  describe("record button", () => {
+    it("is absent while no toggle is registered - <Completion /> is the only writer", () => {
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+      expect(screen.queryByRole("button", { name: /recording/i })).toBeNull();
+      expect(screen.getByRole("button", { name: /expand/i })).not.toBeNull();
+    });
+
+    it.each([
+      ["status-count"],
+      ["icon-only"],
+      ["status-last-line"],
+    ] as const)("renders beside the expand button in the %s variant", (style) => {
+      setPillActions({ toggleRecording: vi.fn() });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style={style} />
+        </MemoryRouter>
+      );
+
+      const record = screen.getByRole("button", { name: /start meeting recording/i });
+      const expand = screen.getByRole("button", { name: /expand/i });
+      // SIBLINGS, not nested: a <button> inside a <button> is invalid HTML and
+      // the inner click target stops being reliable.
+      expect(record.contains(expand)).toBe(false);
+      expect(expand.contains(record)).toBe(false);
+    });
+
+    it("clicking calls the registered toggle, and does NOT expand the overlay", async () => {
+      const toggleRecording = vi.fn();
+      setPillActions({ toggleRecording });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      await userEvent.click(
+        screen.getByRole("button", { name: /start meeting recording/i })
+      );
+
+      expect(toggleRecording).toHaveBeenCalledTimes(1);
+      expect(invokeMock).not.toHaveBeenCalledWith("restore_overlay");
+      expect(document.body.hasAttribute("data-overlay-minimized")).toBe(true);
+    });
+
+    it("reads as Stop while recording", () => {
+      setPillActions({ toggleRecording: vi.fn() });
+      setPillData({
+        segmentCount: 3,
+        lastLine: "hello",
+        status: "capturing",
+        recording: true,
+      });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      expect(
+        screen.getByRole("button", { name: /stop meeting recording/i })
+      ).not.toBeNull();
+      expect(
+        screen.queryByRole("button", { name: /start meeting recording/i })
+      ).toBeNull();
+    });
+
+    it("re-registering a new toggle re-points the button", async () => {
+      const first = vi.fn();
+      const second = vi.fn();
+      setPillActions({ toggleRecording: first });
+      const { rerender } = render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      // act(): setPillActions notifies the pill's useSyncExternalStore, which
+      // is a React state update from outside React's own event handling.
+      act(() => setPillActions({ toggleRecording: second }));
+      rerender(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      await userEvent.click(
+        screen.getByRole("button", { name: /start meeting recording/i })
+      );
+      expect(first).not.toHaveBeenCalled();
+      expect(second).toHaveBeenCalledTimes(1);
+    });
   });
 });

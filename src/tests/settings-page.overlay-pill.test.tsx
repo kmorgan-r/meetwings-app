@@ -249,7 +249,7 @@ describe("main window listens for overlay-pill-style-changed", () => {
     );
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        width: 52,
+        width: 84,
         height: 52,
         restyle: true,
       });
@@ -262,7 +262,7 @@ describe("main window listens for overlay-pill-style-changed", () => {
     );
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        width: 320,
+        width: 352,
         height: 48,
         restyle: true,
       });
@@ -272,7 +272,7 @@ describe("main window listens for overlay-pill-style-changed", () => {
     );
     await vi.waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        width: 148,
+        width: 180,
         height: 40,
         restyle: true,
       });

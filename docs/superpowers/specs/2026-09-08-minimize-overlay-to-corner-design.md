@@ -308,9 +308,9 @@ duplicated into the store.
 
 | Style key | Content | Logical size |
 |---|---|---|
-| `status-count` (default) | Status dot, segment count, expand chevron | 148 x 40 |
-| `icon-only` | Wing icon plus status dot | 52 x 52 |
-| `status-last-line` | Status dot plus the latest transcript line, truncated | 320 x 48 |
+| `status-count` (default) | Status dot, segment count, expand chevron, record button | 180 x 40 |
+| `icon-only` | Wing icon plus status dot, record button | 84 x 52 |
+| `status-last-line` | Status dot plus the latest transcript line (truncated), record button | 352 x 48 |
 
 ### Settings
 

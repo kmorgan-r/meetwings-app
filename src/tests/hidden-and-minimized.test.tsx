@@ -152,7 +152,7 @@ describe("minimize button (gate ordering, per the spec)", () => {
     // the await (the MutationObserver stomp) is swallowed.
     expect(getMinimized()).toBe(true);
     expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-      width: 148,
+      width: 180,
       height: 40,
       restyle: false,
     });
@@ -187,7 +187,7 @@ describe("minimize button (gate ordering, per the spec)", () => {
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledTimes(1);
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        width: 148,
+        width: 180,
         height: 40,
         restyle: false,
       });
