@@ -19,6 +19,37 @@ import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-con
  */
 export const RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * The upper edge of what recovery will claim: anything said from this instant
+ * on belongs to the live triggers, not to the backstop.
+ *
+ * Captured at module import, so it still means "this run of the app" after a
+ * <Completion /> remount. This is the mirror of the floor `useMeetingLog.ts`
+ * puts on its own recovery read - see its comment at :51-84 for the full
+ * argument; the short version is that a read with no session bound will happily
+ * cross a process boundary in whichever direction it is left open. That one
+ * refuses to reach BACK into a previous run's meeting. This one refuses to
+ * reach FORWARD into the current run's.
+ *
+ * Without it: recovery runs from a startup effect that awaits a config load, a
+ * sweep and a prune, and a user who launches the app and starts talking has STT
+ * writing rows to `messages` throughout. Recovery reads its own process's live
+ * meeting, files it `unassigned`, and lifts the global watermark past it - so
+ * the pill-off or idle trigger that follows finds the span already consumed,
+ * writes no `held` row, and the contact the user had selected is dropped.
+ *
+ * A meeting straddling a restart therefore lands as two rows: the pre-restart
+ * span recovered as `unassigned`, the rest handled live. The live path splits
+ * on its own floor exactly the same way, and two rows the user can see beats
+ * one row that silently swallows a stranger's words.
+ *
+ * Its own constant rather than an import of `useMeetingLog`'s: a lib module
+ * must not depend on a hook, and the millisecond of skew between the two
+ * module-load instants cannot matter - no STT entry can exist that early in
+ * app start.
+ */
+export const RECOVERY_STARTED_AT = Date.now();
+
 let recoveryRan = false; // module scope: survives a <Completion /> remount
 
 /** Test-only. Lets a suite start each case from a clean process state. */
@@ -107,7 +138,7 @@ export async function runMeetingRecovery(): Promise<number> {
     // watermark, not something this floor introduces.
     const floor = Math.max(await getTranscriptWatermark(), Date.now() - RECOVERY_MAX_AGE_MS);
 
-    const entries = await readUnloggedMessages(floor);
+    const entries = await readUnloggedMessages(floor, RECOVERY_STARTED_AT);
     if (entries.length === 0) return 0;
 
     let created = 0;

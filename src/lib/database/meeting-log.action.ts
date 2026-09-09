@@ -235,7 +235,8 @@ SELECT content, timestamp, speaker, audio_source FROM messages
   // readUnloggedMessages for why there is no LIMIT.
   unloggedMessages: `
 SELECT conversation_id, content, timestamp, speaker, audio_source FROM messages
- WHERE conversation_id IS NOT NULL AND audio_source IS NOT NULL AND timestamp > ?
+ WHERE conversation_id IS NOT NULL AND audio_source IS NOT NULL
+   AND timestamp > ? AND timestamp < ?
  ORDER BY conversation_id ASC, timestamp ASC`,
 
   // Slice 3. Routes through `pending` rather than widening `claim` to accept
@@ -931,19 +932,32 @@ export type UnloggedTranscriptEntry = TranscriptEntry & { conversationId: string
  * lifts the watermark for EVERY conversation. A capped read that stopped
  * before some older, unread span would push that span permanently below the
  * watermark - the meetings this whole path exists to rescue, lost by the
- * rescue itself. The caller bounds the work with `floor` instead.
+ * rescue itself. The caller bounds the work with `floor` and `ceiling`
+ * instead, both of which are WHERE clauses and so cannot truncate mid-span the
+ * way a LIMIT would.
+ *
+ * `ceiling` is exclusive and is not optional. This read has no session bound
+ * and no conversation id, so without an upper edge it reaches into the CURRENT
+ * process's own live meeting: recovery runs from a startup effect that awaits
+ * a config load, a sweep and a prune, and a user who launches the app and
+ * starts talking has STT persisting rows the whole time. Filing those as a
+ * recovered `unassigned` row lifts the global watermark past the live span, so
+ * the pill-off or idle trigger that follows finds nothing left to write and
+ * the contact the user picked is dropped. Required rather than defaulted
+ * because a caller that forgets it gets that silently.
  *
  * Shares readMeetingMessages' `audio_source IS NOT NULL` filter, and its
  * KNOWN LIMITATION above: a diarized meeting persists with a NULL
  * audio_source and is invisible to both reads.
  */
 export async function readUnloggedMessages(
-  floor: number
+  floor: number,
+  ceiling: number
 ): Promise<UnloggedTranscriptEntry[]> {
   const db = await getDatabase();
   const rows = await db.select<(MessageRow & { conversation_id: string })[]>(
     QUEUE_SQL.unloggedMessages,
-    [floor]
+    [floor, ceiling]
   );
   return rows.map((row) => ({
     ...toTranscriptEntry(row),

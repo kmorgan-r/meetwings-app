@@ -25,6 +25,7 @@ vi.mock("@/lib/storage/meeting-log-watermark.storage", () => watermarkStorage);
 
 import {
   RECOVERY_MAX_AGE_MS,
+  RECOVERY_STARTED_AT,
   resetMeetingRecoveryGuard,
   runMeetingRecovery,
 } from "@/lib/odoo/meeting-log-recovery";
@@ -120,7 +121,7 @@ describe("runMeetingRecovery", () => {
   it("reads from the queue watermark, so an already-logged meeting is not duplicated", async () => {
     action.getTranscriptWatermark.mockResolvedValue(NOW - 30_000);
     await runMeetingRecovery();
-    expect(action.readUnloggedMessages).toHaveBeenCalledWith(NOW - 30_000);
+    expect(action.readUnloggedMessages).toHaveBeenCalledWith(NOW - 30_000, RECOVERY_STARTED_AT);
   });
 
   it("IGNORES the skip watermark, however far ahead of the queue it sits", async () => {
@@ -182,7 +183,10 @@ describe("runMeetingRecovery", () => {
     // watermarks are 0. Without this floor the first run after setup dumps
     // every meeting ever held into the strip as work to triage.
     await runMeetingRecovery();
-    expect(action.readUnloggedMessages).toHaveBeenCalledWith(NOW - RECOVERY_MAX_AGE_MS);
+    expect(action.readUnloggedMessages).toHaveBeenCalledWith(
+      NOW - RECOVERY_MAX_AGE_MS,
+      RECOVERY_STARTED_AT
+    );
   });
 
   it("writes nothing while Odoo is not configured, and leaves the work for later", async () => {
@@ -236,6 +240,32 @@ describe("runMeetingRecovery", () => {
 
     expect(await runMeetingRecovery()).toBe(1);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves the meeting happening right now to the live triggers", async () => {
+    // The launch-time race. Recovery runs from a startup effect that awaits a
+    // config load, a sweep and a prune first; a user who launches and starts
+    // talking straight away has STT writing to `messages` throughout. Reading
+    // those entries files the user's ACTIVE meeting as "Needs a contact" and
+    // lifts the global watermark past it, so the pill-off or idle trigger that
+    // follows finds the span consumed and writes no `held` row - dropping the
+    // contact the user had already picked.
+    //
+    // Two bounds, because that is what the SQL now takes and a mock that
+    // ignored the ceiling could not fail for the reason this case is about.
+    const spoken = [
+      said("conv-old", RECOVERY_STARTED_AT - 60_000, "a prior run's meeting"),
+      said("conv-live", RECOVERY_STARTED_AT + 1_000, "being said right now"),
+    ];
+    action.readUnloggedMessages.mockImplementation(async (floor: number, ceiling: number) =>
+      spoken.filter((e) => e.timestamp > floor && e.timestamp < ceiling)
+    );
+
+    expect(await runMeetingRecovery()).toBe(1);
+
+    const rows = action.insertQueueRow.mock.calls.map((c) => c[0]);
+    expect(rows.map((r) => r.conversationId)).toEqual(["conv-old"]);
+    expect(rows[0].transcript).not.toContain("being said right now");
   });
 
   it("resolves rather than rejecting when the read fails", async () => {
