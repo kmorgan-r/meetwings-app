@@ -69,6 +69,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         setCalendarBlockPresent,
       }),
       useQuickActions: () => ({}),
+      usePillRecordAction: vi.fn(),
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
@@ -114,6 +115,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         customizable: { cursor: { type: "default" } },
         allAiProviders: [{ id: "openai" }],
         selectedAIProvider: { provider: "openai", variables: {} },
+        selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
     vi.doMock("@/lib", () => ({

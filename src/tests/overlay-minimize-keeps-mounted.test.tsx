@@ -44,6 +44,7 @@ const mockEverything = () => {
       setOverlayPillStyle: vi.fn(),
       allAiProviders: [{ id: "openai" }],
       selectedAIProvider: { provider: "openai", variables: {} },
+      selectedSttProvider: { provider: "", variables: {} },
       meetwingsApiEnabled: false,
     }),
   }));
@@ -112,6 +113,7 @@ const mockEverything = () => {
         };
       },
       useQuickActions: () => ({}),
+      usePillRecordAction: vi.fn(),
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetsRef: { current: [] },
@@ -275,7 +277,7 @@ describe("minimize keeps the overlay mounted (hide, do not swap)", () => {
     await userEvent.click(screen.getByTitle("Minimize"));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        width: 148,
+        width: 180,
         height: 40,
         restyle: false,
       });

@@ -5,6 +5,7 @@ import {
   useMeetingAutoRecord,
   useMeetingLog,
   useOdooTarget,
+  usePillRecordAction,
   useQuickActions,
   type MeetingAutoRecordAudio,
 } from "@/hooks";
@@ -106,7 +107,12 @@ export const Completion = ({
   // the "Summarization failed" fallback body on EVERY meeting, silently.
   // `useApp` here is the CONTEXT one, not the unrelated hook of the same name
   // in @/hooks (which instantiates useSystemAudio and useTitles).
-  const { allAiProviders, selectedAIProvider, meetwingsApiEnabled } = useApp();
+  const {
+    allAiProviders,
+    selectedAIProvider,
+    meetwingsApiEnabled,
+    selectedSttProvider,
+  } = useApp();
   const [useMeetwingsAPI, setUseMeetwingsAPI] = useState(false);
   // Keyed on the context flag, not `[]`. Every other caller in this repo
   // re-reads shouldUseMeetwingsAPI per use (useCompletion.ts:910, :1089,
@@ -188,8 +194,35 @@ export const Completion = ({
         : systemAudio.capturing
           ? "capturing"
           : "idle",
+      // The MEETING session, deliberately not derived from `status` above:
+      // that mirrors the transcribing pipeline's own capture (the headphones
+      // button), a different subsystem, and its `error` would mask a healthy
+      // meeting. Same pair useMeetingAudio is gated on (Audio.tsx:124).
+      recording: completion.meetingAssistMode && completion.enableVAD,
     });
-  }, [completion.meetingTranscript, systemAudio.error, systemAudio.capturing]);
+  }, [
+    completion.meetingTranscript,
+    completion.meetingAssistMode,
+    completion.enableVAD,
+    systemAudio.error,
+    systemAudio.capturing,
+  ]);
+
+  // The pill's outbound half: start/stop a meeting without expanding first.
+  // Mounted HERE for the same reason useMeetingAutoRecord is - it needs
+  // meetingAssistMode and enableVAD, which useCompletion owns.
+  //
+  // canRecord is Audio.tsx:142's `canUseVoice`, repeated rather than lifted:
+  // the mic button there and this one must agree, and the condition is one
+  // boolean. Opening the mic without a provider that can transcribe turns the
+  // pill red and collects nothing.
+  usePillRecordAction({
+    meetingAssistMode: completion.meetingAssistMode,
+    setMeetingAssistMode: completion.setMeetingAssistMode,
+    enableVAD: completion.enableVAD,
+    setEnableVAD: completion.setEnableVAD,
+    canRecord: Boolean(meetwingsApiEnabled || selectedSttProvider.provider),
+  });
 
   // Use meeting-aware quick action handler when in Meeting Assist Mode
   const handleQuickAction = (action: string) => {

@@ -297,20 +297,26 @@ it receives only `systemAudio`.
 Since the layout above requires the pill to be a sibling of the `Card` rather
 than a descendant of it, the data is pushed up instead: `Completion`
 (`completion/index.tsx`, which already holds `completion`) writes
-`{ segmentCount, lastLine, status }` into the same module store the gate
-reads, in an effect keyed on `meetingTranscript`. `MinimizedPill` reads it
+`{ segmentCount, lastLine, status, recording }` into the same module store the
+gate reads, in an effect keyed on `meetingTranscript`. `MinimizedPill` reads it
 through `useSyncExternalStore`.
 
-Three scalars, one-way, written from one place. The transcript itself is not
+Four scalars, one-way, written from one place. The transcript itself is not
 duplicated into the store.
+
+The store also carries the pill's one OUTBOUND action, `toggleRecording`,
+registered by `usePillRecordAction` (mounted from `Completion`) for the same
+sibling reason: the record button starts and stops a meeting without
+expanding first. `null` is the unregistered state, and the pill hides the
+button rather than rendering a dead one.
 
 ### Pill styles
 
 | Style key | Content | Logical size |
 |---|---|---|
-| `status-count` (default) | Status dot, segment count, expand chevron | 148 x 40 |
-| `icon-only` | Wing icon plus status dot | 52 x 52 |
-| `status-last-line` | Status dot plus the latest transcript line, truncated | 320 x 48 |
+| `status-count` (default) | Status dot, segment count, expand chevron, record button | 180 x 40 |
+| `icon-only` | Wing icon plus status dot, record button | 84 x 52 |
+| `status-last-line` | Status dot plus the latest transcript line (truncated), record button | 352 x 48 |
 
 ### Settings
 
@@ -353,7 +359,7 @@ corner geometry as the "pre-minimize" rect.
    `toggle-window-visibility` shortcut) only adds `hidden pointer-events-none`
    to a wrapper div; it never touches window geometry. The two states are
    orthogonal and need no ordering logic. Hiding while minimized leaves a
-   148x40 invisible window in the corner; unhiding brings the pill back. The
+   180x40 invisible window in the corner; unhiding brings the pill back. The
    nesting in "Hide, do not swap" is what produces this: `isHidden` wraps the
    pill, the minimized wrapper does not.
 2. **Multi-monitor.** `current_monitor()` keeps the pill on whichever screen
