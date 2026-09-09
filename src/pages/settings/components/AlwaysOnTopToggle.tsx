@@ -22,27 +22,16 @@ export const AlwaysOnTopToggle = ({ className }: AlwaysOnTopToggleProps) => {
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div>
-            <Label className="text-sm font-medium">
-              {customizable.alwaysOnTop.isEnabled
-                ? "Disable Always On Top"
-                : "Enable Always On Top"}
-            </Label>
-            <p className="text-xs text-muted-foreground mt-1">
-              {customizable.alwaysOnTop.isEnabled
-                ? "Window stays above all other applications (default)"
-                : "Window behaves like normal applications"}
-            </p>
+            <Label className="text-sm font-medium">Always on top</Label>
           </div>
         </div>
         <Switch
           checked={customizable.alwaysOnTop.isEnabled}
           onCheckedChange={handleSwitchChange}
           title={`Toggle to ${
-            !customizable.alwaysOnTop.isEnabled ? "Enabled" : "Disabled"
+            !customizable.alwaysOnTop.isEnabled ? "enable" : "disable"
           } always on top`}
-          aria-label={`Toggle to ${
-            customizable.alwaysOnTop.isEnabled ? "Enabled" : "Disabled"
-          } always on top`}
+          aria-label="Toggle always on top"
         />
       </div>
     </div>
