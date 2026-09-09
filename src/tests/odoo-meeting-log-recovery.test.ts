@@ -123,14 +123,58 @@ describe("runMeetingRecovery", () => {
     expect(action.readUnloggedMessages).toHaveBeenCalledWith(NOW - 30_000);
   });
 
-  it("reads from the SKIP watermark when that one is higher", async () => {
-    // The skip mark records a span a trigger consumed without writing a row.
-    // Ignoring it here re-recovers exactly the entries that mark exists to
-    // exclude, and posts them under whatever contact gets assigned next.
+  it("IGNORES the skip watermark, however far ahead of the queue it sits", async () => {
+    // Inverted deliberately. This case used to assert the opposite, on the
+    // reasoning that the skip mark records a span a trigger consumed without
+    // writing a row, so recovery honouring it avoids re-consuming that span.
+    //
+    // That reasoning conflates two different readers. The skip mark exists for
+    // ONE hazard: a LATER live trigger re-slicing the span and posting it under
+    // whatever contact is selected for the NEXT meeting - a cross-customer
+    // mis-post (meeting-log-watermark.storage.ts:15-25). The live trigger still
+    // reads it, at useMeetingLog.ts:323, and must.
+    //
+    // Recovery cannot commit that hazard. Every row it writes is `unassigned`
+    // with NO targets, so it reaches no contact and no Odoo instance until a
+    // human picks one. Honouring the mark here buys no safety and costs the
+    // whole feature: skipUnwritten runs on the absent, incomplete AND catch
+    // branches, i.e. on exactly the meetings that were said and never queued -
+    // which is the definition of what recovery is for.
     action.getTranscriptWatermark.mockResolvedValue(NOW - 90_000);
     watermarkStorage.state.skip = NOW - 30_000;
     await runMeetingRecovery();
-    expect(action.readUnloggedMessages).toHaveBeenCalledWith(NOW - 30_000);
+    // The FLOOR argument specifically - this case is about which watermark
+    // recovery reaches back to, not about the rest of the read's shape.
+    expect(action.readUnloggedMessages.mock.calls[0][0]).toBe(NOW - 90_000);
+  });
+
+  it("recovers a meeting held before Odoo was set up, which the idle flush skip-marked", async () => {
+    // The end-to-end failure the inverted case above is the mechanism for.
+    //
+    // New user turns Meeting Assist on before configuring Odoo and holds a
+    // meeting. Five idle minutes later the idle flush fires, trigger() takes
+    // the `absent` branch (useMeetingLog.ts:311-316) and skip-marks the whole
+    // span. The user finishes Odoo setup that afternoon. If recovery floors at
+    // the skip mark, the next launch finds nothing and the meeting is gone with
+    // no trace - directly contradicting RECOVERY_MAX_AGE_MS, whose entire
+    // stated purpose is rescuing meetings held with Odoo unconfigured.
+    watermarkStorage.state.skip = NOW - 40_000; // the idle flush consumed it all
+
+    // Filtering on the floor it is HANDED, rather than the flat mockResolvedValue
+    // the cases above use. The real query is `timestamp > ?`; a mock that
+    // returns its rows whatever floor it gets cannot fail for the reason this
+    // case is about, and would pass just as happily against the very code it is
+    // meant to catch.
+    const spoken = [
+      said("conv-1", NOW - 60_000, "before odoo existed"),
+      said("conv-1", NOW - 50_000, "still before"),
+    ];
+    action.readUnloggedMessages.mockImplementation(async (floor: number) =>
+      spoken.filter((e) => e.timestamp > floor)
+    );
+
+    expect(await runMeetingRecovery()).toBe(1);
+    expect(action.insertQueueRow.mock.calls[0][0].transcript).toContain("before odoo existed");
   });
 
   it("never reaches back further than the age limit", async () => {

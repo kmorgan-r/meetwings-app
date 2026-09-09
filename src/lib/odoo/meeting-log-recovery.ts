@@ -5,15 +5,15 @@ import {
   type UnloggedTranscriptEntry,
 } from "@/lib/database/meeting-log.action";
 import { IDLE_FLUSH_MS, renderTranscript, segmentByGap, sessionKeyFor } from "./meeting-log";
-import { getSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
 import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
 
 /**
  * How far back recovery is willing to reach.
  *
- * Both watermarks are 0 on a machine that has been holding meetings with Odoo
- * unconfigured, so without a floor the first run after setup dumps every
- * meeting ever held into the strip as unassigned work to triage. Seven days
+ * The queue watermark is 0 on a machine that has been holding meetings with
+ * Odoo unconfigured - nothing was ever written to raise it - so without a floor
+ * the first run after setup dumps every meeting ever held into the strip as
+ * unassigned work to triage. Seven days
  * covers the cases this path is for - a crash, a kill, an app closed with the
  * pill still on - and a meeting older than that is history, not a backlog.
  */
@@ -77,15 +77,35 @@ export async function runMeetingRecovery(): Promise<number> {
     recoveryRan = true;
     const instance = instanceFingerprint(state.config.url, state.config.db);
 
-    // The same effective watermark the live trigger computes, floored at the
-    // age limit. The skip mark is not optional: it records spans a trigger
-    // consumed WITHOUT writing a row, and ignoring it here would recover
-    // exactly the entries that mark exists to exclude.
-    const floor = Math.max(
-      await getTranscriptWatermark(),
-      getSkipWatermark(),
-      Date.now() - RECOVERY_MAX_AGE_MS
-    );
+    // The QUEUE watermark only, floored at the age limit.
+    //
+    // Deliberately NOT `Math.max(..., getSkipWatermark())`, which is what the
+    // live trigger computes at useMeetingLog.ts:323. The two readers want
+    // different things from that mark and only one of them is in danger.
+    //
+    // The skip mark records a span some trigger consumed without writing a row,
+    // and it exists for ONE hazard: a LATER live trigger re-slicing that span
+    // and posting it under whatever contact is selected for the NEXT meeting -
+    // one customer's words in another customer's chatter
+    // (meeting-log-watermark.storage.ts:15-25). The live trigger picks a
+    // contact, so it must keep honouring it.
+    //
+    // Recovery picks none. Every row below is `unassigned` with NO targets and
+    // reaches no contact until a human chooses one, so there is no mis-post
+    // here to prevent - and honouring the mark would cost the entire feature.
+    // `skipUnwritten` fires on the absent, incomplete AND catch branches
+    // (useMeetingLog.ts:308/314/406), i.e. on precisely the meetings that were
+    // said and never queued. Reading it here excluded the meetings this
+    // function exists to find: a user who held a meeting before setting Odoo up
+    // and left the app idle five minutes had it skip-marked by the idle flush,
+    // and no later run could ever see it again.
+    //
+    // What this does NOT rescue: the global watermark is a single
+    // MAX(transcript_end_at) over the whole queue, so if a LATER meeting gets a
+    // row written before recovery next runs, that row's watermark buries the
+    // earlier unlogged span for good. That is the pre-existing cost of a global
+    // watermark, not something this floor introduces.
+    const floor = Math.max(await getTranscriptWatermark(), Date.now() - RECOVERY_MAX_AGE_MS);
 
     const entries = await readUnloggedMessages(floor);
     if (entries.length === 0) return 0;
