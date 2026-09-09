@@ -86,12 +86,17 @@ export async function saveOdooVerification(config: OdooConfig, uid: number): Pro
 /**
  * The check for `config`, or null if there is no proof it applies to it.
  *
- * NEVER THROWS. Every failure - absent, unreadable, unparseable, a record for
- * other credentials - is the same answer to the page: we cannot claim this
- * connection was verified. Throwing would push a storage fault into the
- * page's config-load catch, which renders a red error line over the
- * credentials form; a missing green check is the honest way to say "press
+ * Never throws for a record it cannot use. Absent, unreadable, unparseable, or
+ * taken against other credentials are all the same answer to the page: we
+ * cannot claim this connection was verified. Throwing would push a storage
+ * fault into the page's config-load catch, which renders a red error line over
+ * the credentials form; a missing green check is the honest way to say "press
  * Test connection", and it is what the user gets today on every reload.
+ *
+ * The one uncaught path is crypto.subtle - the same unguarded dependency
+ * verification.storage.ts has had since it shipped. It is present in every
+ * secure context, which the Tauri webview is; guarding it here would be dead
+ * code no test could reach honestly.
  *
  * Pass the config that is on DISK, not the one in the form. Test connection
  * authenticates with requireOdooConfig's stored values, so a record matched

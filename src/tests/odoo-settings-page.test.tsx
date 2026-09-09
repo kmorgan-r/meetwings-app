@@ -878,6 +878,8 @@ describe("the remembered connection check", () => {
 // evidence for it is already persisted: finishSync stamps last_sync_at on a
 // COMPLETED run only, per instance.
 describe("the remembered sync", () => {
+  const ON_DISK = { url: "http://h:8069", db: "odoo", login: "bob", apiKey: KEY };
+
   it("shows contacts as synced on mount when a run has completed", async () => {
     getSyncState.mockResolvedValue({
       last_write_date: "2026-09-01 00:00:00",
@@ -887,9 +889,80 @@ describe("the remembered sync", () => {
       skipped_rows: 0,
       running_since: null,
     });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
     renderPage();
 
     expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+  });
+
+  // The row is drawn pending={!verified}, so an ungated seed renders step 3
+  // done above an untested step 2 - which is exactly the state every user who
+  // has ever synced lands in on the first launch after this ships, since
+  // last_sync_at predates the verification record. `last_sync_at` is keyed to
+  // url|db alone; the check is keyed to the credentials too, and it is the
+  // narrower claim that has to carry the row.
+  it("does not show a remembered sync above an untested connection", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    renderPage();
+
+    expect(await screen.findByText(/contacts not synced yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+  });
+
+  // The mirror of "drops the verified check when a later test fails". Without
+  // it a failed sync leaves a green "Contacts synced" seeded from disk sitting
+  // directly above its own red failure line.
+  it("drops the synced check when a later sync fails", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    odoo.runSync.mockRejectedValue(odooError("ODOO_AUTH_FAILED", "Odoo rejected the credentials"));
+    await userEvent.click(screen.getByRole("button", { name: /sync contacts/i }));
+
+    expect(await screen.findByText(/contacts not synced yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+  });
+
+  // A sync that DECLINED to run has not failed, and it has not un-synced
+  // anything either: the contacts another window just pulled are still there.
+  it("keeps the remembered sync when another window is already syncing", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    odoo.runSync.mockRejectedValue(odooError("ODOO_SYNC_BUSY", "A sync is already running"));
+    await userEvent.click(screen.getByRole("button", { name: /sync contacts/i }));
+
+    expect(await screen.findByTestId("odoo-sync-status")).toHaveTextContent(/already running/i);
+    expect(screen.getByText(/^contacts synced$/i)).toBeInTheDocument();
   });
 
   it("does not claim a sync that never completed", async () => {

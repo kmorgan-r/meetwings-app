@@ -165,6 +165,15 @@ function StatusLine({ status, testId }: { status: Status; testId?: string }) {
  * still shows green until the next Test connection - accepted, and identical
  * to what API Setup already accepts.
  *
+ * The SEEDED sync is shown only behind a proven check, because the two are
+ * keyed differently: `last_sync_at` is scoped to url|db alone, while the
+ * verification record also covers the login and api key. Ungated, every user
+ * who has ever synced would open this page on the first launch after the
+ * record shipped - and again after changing an api key - and read a green step
+ * 3 above an untested step 2, the same contradiction updateField's comment
+ * below exists to prevent. A sync completed in THIS session needs no such
+ * gate: it is direct evidence, not a claim carried over from a previous run.
+ *
  * `filled` counts what is TYPED; `stored` is whether a complete config is on
  * DISK, and the first row makes the second claim. testOdooConnection and
  * runSync both read persisted storage (requireOdooConfig), never this form, so
@@ -586,11 +595,17 @@ export default function OdooSettings() {
       // Another window syncing is a normal outcome, not a fault - it must not
       // read as an error. That was already true of the copy; carrying `info`
       // here is what stops the ICON from contradicting it.
-      setSyncStatus(
-        report.code === "ODOO_SYNC_BUSY"
-          ? infoStatus(report.message)
-          : errorStatus(`Sync failed: ${describe(report)}`)
-      );
+      if (report.code === "ODOO_SYNC_BUSY") {
+        // The seeded check STAYS: a refused claim pulled no contacts, but it
+        // did not undo the ones the last completed run left behind either.
+        setSyncStatus(infoStatus(report.message));
+        return;
+      }
+      // A genuine failure drops it, exactly as a failed test drops the
+      // verified check. Without this the row seeded from disk renders a green
+      // "Contacts synced" directly above its own red failure line.
+      setSyncedAt(null);
+      setSyncStatus(errorStatus(`Sync failed: ${describe(report)}`));
     }
   }
 
@@ -729,7 +744,7 @@ export default function OdooSettings() {
         stored={stored}
         verified={verifiedUid !== null}
         verifiedDetail={verifiedUid === null ? null : `uid ${verifiedUid}`}
-        synced={syncStatus?.kind === "ok" || syncedAt !== null}
+        synced={syncStatus?.kind === "ok" || (syncedAt !== null && verifiedUid !== null)}
       />
 
       <div className="space-y-4 max-w-md">
