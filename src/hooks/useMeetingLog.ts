@@ -303,7 +303,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // user is told directly instead of the meeting vanishing with no
         // trace anywhere.
         toast.error(
-          `Odoo is set up but incomplete - fill in ${state.missing.join(", ")} in Settings > Odoo`
+          `Odoo is set up but incomplete - fill in ${state.missing.join(", ")} in Settings > Integrations`
         );
         skipUnwritten();
         return;

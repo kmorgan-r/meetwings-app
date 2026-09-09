@@ -984,3 +984,94 @@ describe("the remembered sync", () => {
     await waitFor(() => expect(getSyncState).toHaveBeenCalledWith("http://h:8069|odoo"));
   });
 });
+
+// The calendar's own connection has always PERSISTED - the refresh token lives
+// in the OS keychain and graph_status reads it back on mount - but the page
+// never said so. A returning user's only clue was a Disconnect button
+// appearing beside Connect, which is the same "is this set up or not?" question
+// the Odoo rows above exist to answer.
+describe("the calendar row on the checklist", () => {
+  const CONNECTED = { connected: true, sessionOnly: false };
+  const GRAPH_CONFIG = JSON.stringify({
+    clientId: "abc-123",
+    authority: "https://login.microsoftonline.com/contoso",
+  });
+
+  function calendarStatus(status: { connected: boolean; sessionOnly: boolean }) {
+    // A stored client ID as well as the status: the graph_status effect stays
+    // silent for a config in the `absent` state, so a bare status stub would
+    // never reach the row.
+    secureStorage.secureGet.mockResolvedValue(GRAPH_CONFIG);
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return status;
+      if (cmd === "graph_disconnect") return undefined;
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+  }
+
+  it("reports the calendar as connected on mount when the keychain still holds the token", async () => {
+    calendarStatus(CONNECTED);
+    renderPage();
+
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+  });
+
+  it("says the calendar is not connected when it never was", async () => {
+    renderPage();
+
+    expect(await screen.findByText(/^calendar not connected$/i)).toBeInTheDocument();
+  });
+
+  // A session-only connection is real but does not survive a restart, and the
+  // checklist is read as a claim about the app's steady state - so the row has
+  // to carry the caveat, not just the paragraph further down the page.
+  it("marks a session-only calendar connection as exactly that", async () => {
+    calendarStatus({ connected: true, sessionOnly: true });
+    renderPage();
+
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+    expect(screen.getByText(/this session only/i)).toBeInTheDocument();
+  });
+
+  it("drops the calendar check when the calendar is disconnected", async () => {
+    calendarStatus(CONNECTED);
+    renderPage();
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+
+    expect(await screen.findByText(/^calendar not connected$/i)).toBeInTheDocument();
+  });
+
+  // Four rows, not three: the calendar is one of the connections this page is
+  // for, so a card that reads 100% while it is unconnected is claiming
+  // something it has not checked.
+  it("counts the calendar in the card's progress", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    renderPage();
+
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+    expect(screen.getByText("75% Done")).toBeInTheDocument();
+  });
+
+  it("calls the card Integrations, not Odoo Connection", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "Integrations" })).toBeInTheDocument();
+    expect(screen.queryByText("Odoo Connection")).not.toBeInTheDocument();
+  });
+});

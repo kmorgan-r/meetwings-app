@@ -300,8 +300,8 @@ export default function Meetings() {
       {queue.configState !== "loading" && queue.configState !== "complete" && (
         <p className="text-sm">
           {`${plural(queue.stranded)} Finish setting Odoo up on the `}
-          <Link to="/odoo" className="underline">
-            Odoo page
+          <Link to="/integrations" className="underline">
+            Integrations page
           </Link>
           {" to see and send them."}
         </p>

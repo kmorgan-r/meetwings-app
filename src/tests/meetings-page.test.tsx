@@ -279,7 +279,10 @@ describe("the meetings page", () => {
 
     const line = await screen.findByText(/^2 meetings are waiting\./);
     expect(line.textContent).toContain("Finish setting Odoo up on the");
-    expect(screen.getByRole("link", { name: "Odoo page" })).toHaveAttribute("href", "/odoo");
+    expect(screen.getByRole("link", { name: "Integrations page" })).toHaveAttribute(
+      "href",
+      "/integrations"
+    );
     // The list is not the queue's, so it renders beside the warning.
     expect(screen.getByText("Quarterly review")).toBeInTheDocument();
   });

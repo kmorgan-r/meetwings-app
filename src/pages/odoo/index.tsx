@@ -141,8 +141,16 @@ function StatusLine({ status, testId }: { status: Status; testId?: string }) {
 }
 
 /**
- * The three steps that stand between a blank page and a working Odoo link,
- * rendered with the same checklist vocabulary as the API Setup page.
+ * Every connection this page owns, rendered with the same checklist vocabulary
+ * as the API Setup page: the three steps between a blank page and a working
+ * Odoo link, plus the calendar.
+ *
+ * The calendar is a FOURTH row rather than a card of its own further down,
+ * because it is the one thing on this page a user could not tell the state of.
+ * Its connection has always survived a restart - the refresh token is in the OS
+ * keychain and graph_status reads it back - but nothing said so: the only clue
+ * was a Disconnect button appearing beside Connect. It is drawn at the top
+ * level, not indented under the Odoo steps, because it depends on none of them.
  *
  * `verified` and `synced` both SURVIVE a reload, and are seeded from evidence
  * on disk rather than from anything this session did.
@@ -193,21 +201,29 @@ function OdooSetupCard({
   verified,
   verifiedDetail,
   synced,
+  calendarConnected,
+  calendarSessionOnly,
+  calendarStarted,
 }: {
   filled: number;
   stored: boolean;
   verified: boolean;
   verifiedDetail: string | null;
   synced: boolean;
+  calendarConnected: boolean;
+  calendarSessionOnly: boolean;
+  /** Whether a client ID has been entered - see the calendar row below. */
+  calendarStarted: boolean;
 }) {
-  const done = (stored ? 1 : 0) + (verified ? 1 : 0) + (synced ? 1 : 0);
-  const percent = (done / 3) * 100;
-  const isComplete = done === 3;
+  const done =
+    (stored ? 1 : 0) + (verified ? 1 : 0) + (synced ? 1 : 0) + (calendarConnected ? 1 : 0);
+  const percent = (done / 4) * 100;
+  const isComplete = done === 4;
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 mb-6 max-w-md">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-foreground">Odoo Connection</h2>
+        <h2 className="text-sm font-semibold text-foreground">Integrations</h2>
         <span
           className={cn(
             "text-xs font-medium px-2 py-0.5 rounded-full",
@@ -281,6 +297,35 @@ function OdooSetupCard({
             ) : (
               <span className={cn(verified ? "text-muted-foreground" : "text-muted-foreground/50")}>
                 Contacts not synced yet
+              </span>
+            )}
+          </span>
+        </div>
+
+        {/* `pending` on whether a client ID has been ENTERED, not on the Odoo
+            rows above: the calendar needs none of them, so chaining it would
+            grey out a step the user can take right now. Untouched it reads as
+            "not yet"; once a registration is typed in it turns to the yellow
+            "your turn" every other unfinished row uses. */}
+        <div className="flex items-center gap-2">
+          <StatusIcon done={calendarConnected} pending={!calendarStarted} />
+          <span className="text-sm">
+            {calendarConnected ? (
+              <span className="text-foreground">
+                Calendar connected
+                {/* The caveat belongs HERE, not only in the paragraph beside
+                    the Connect button: this row is read as a claim about the
+                    app's steady state, and a session-only token does not
+                    survive a restart. */}
+                {calendarSessionOnly && (
+                  <span className="text-muted-foreground ml-1">(this session only)</span>
+                )}
+              </span>
+            ) : (
+              <span
+                className={cn(calendarStarted ? "text-muted-foreground" : "text-muted-foreground/50")}
+              >
+                Calendar not connected
               </span>
             )}
           </span>
@@ -734,8 +779,8 @@ export default function OdooSettings() {
 
   return (
     <PageLayout
-      title="Odoo"
-      description="Connect to Odoo to pick contacts and log meetings from your CRM."
+      title="Integrations"
+      description="Connect Odoo to pick contacts and log meetings from your CRM, and your calendar to propose the current meeting's attendees."
     >
       {loadStatus && <StatusLine status={loadStatus} testId="odoo-load-status" />}
 
@@ -745,6 +790,9 @@ export default function OdooSettings() {
         verified={verifiedUid !== null}
         verifiedDetail={verifiedUid === null ? null : `uid ${verifiedUid}`}
         synced={syncStatus?.kind === "ok" || (syncedAt !== null && verifiedUid !== null)}
+        calendarConnected={graphStatus?.connected === true}
+        calendarSessionOnly={graphStatus?.sessionOnly === true}
+        calendarStarted={graph.clientId.trim() !== ""}
       />
 
       <div className="space-y-4 max-w-md">

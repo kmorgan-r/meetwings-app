@@ -70,6 +70,19 @@ describe("the retired route redirects", () => {
     expect(screen.getByTestId("landed")).toHaveTextContent("/meetings");
   });
 
+  it("sends /odoo to /integrations", () => {
+    render(
+      <MemoryRouter initialEntries={["/odoo"]}>
+        <Routes>
+          <Route path="/odoo" element={<Navigate to="/integrations" replace />} />
+          <Route path="/integrations" element={<div data-testid="landed">/integrations</div>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("landed")).toHaveTextContent("/integrations");
+  });
+
   it("sends /meeting-log to /meetings", () => {
     render(
       <MemoryRouter initialEntries={["/meeting-log"]}>
@@ -101,9 +114,19 @@ describe("the real route table", () => {
   // throws on anything else. Vitest always runs from the project root.
   const routesSource = readFileSync(resolve(process.cwd(), "src/routes/index.tsx"), "utf8");
 
+  it("declares the credentials page at /integrations", () => {
+    expect(routesSource).toMatch(/<Route\s+path="\/integrations"\s+element=\{<Odoo\s*\/>\}\s*\/>/);
+  });
+
   it("still declares the /chats redirect", () => {
     expect(routesSource).toMatch(
       /<Route\s+path="\/chats"\s+element=\{<Navigate\s+to="\/meetings"\s+replace\s*\/>\}\s*\/>/
+    );
+  });
+
+  it("still declares the /odoo redirect", () => {
+    expect(routesSource).toMatch(
+      /<Route\s+path="\/odoo"\s+element=\{<Navigate\s+to="\/integrations"\s+replace\s*\/>\}\s*\/>/
     );
   });
 

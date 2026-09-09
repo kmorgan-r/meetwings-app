@@ -38,7 +38,7 @@ export default function AppRoutes() {
           <Route path="/speakers" element={<Speakers />} />
           <Route path="/language" element={<Language />} />
           <Route path="/api-setup" element={<DevSpace />} />
-          <Route path="/odoo" element={<Odoo />} />
+          <Route path="/integrations" element={<Odoo />} />
           <Route path="/meetings" element={<Meetings />} />
           <Route path="/meetings/view/:conversationId" element={<ViewChat />} />
           {/* Redirect old routes for backward compatibility */}
@@ -46,6 +46,7 @@ export default function AppRoutes() {
           <Route path="/meeting-log" element={<Navigate to="/meetings" replace />} />
           <Route path="/chats/view/:conversationId" element={<ChatViewRedirect />} />
           <Route path="/dev-space" element={<Navigate to="/api-setup" replace />} />
+          <Route path="/odoo" element={<Navigate to="/integrations" replace />} />
         </Route>
       </Routes>
     </Router>
