@@ -10,6 +10,11 @@ on:
     #   - "src/**/*.js"
     #   - "src/**/*.jsx"
 
+# Prevent race conditions when multiple PRs trigger simultaneously
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   claude-review:
     # Optional: Filter by PR author
@@ -21,96 +26,67 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      # Ground truth for the verify step below. Any claude[bot] comment older than
-      # this belongs to an earlier run and must not be mistaken for this run's review.
-      - name: Mark run start
-        id: t0
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      # Workaround for anthropics/claude-code-action#1290 (open upstream).
+      # `claude install` exits 0 even when $HOME/.local/bin does not exist, so the
+      # action's installClaudeCode() returns a path to a binary that was never
+      # placed there and the SDK dies with errorClass "executable_not_found".
+      # Hit on PR #59, runs 34285639720 and 34292898151. Creating the directory up
+      # front is enough for the installer to land the binary. Delete this step once
+      # the upstream fix ships.
+      - name: Pre-create ~/.local/bin
+        run: mkdir -p "$HOME/.local/bin"
 
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Tag mode. The action creates its own tracking comment and publishes the
-          # agent's review into it, so delivery no longer depends on the model
-          # choosing to shell out to `gh pr comment`. Documented in action.yml as
-          # applicable to pull_request opened/synchronize, and in the action's
-          # docs/solutions.md "Enhanced Example (With Progress Tracking)".
-          # Prior evidence in this repo: the PR #41 "Claude finished ..." comment is
-          # a tag-mode comment, posted under this same read-only permissions block.
-          track_progress: true
           prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            Adversarial code review. Assume the diff contains at least one real defect and find it; waving the PR through without tracing the changed code's behavior is a failed review.
 
-            Please review this pull request and provide feedback on:
-            - Code quality and best practices
-            - Potential bugs or issues
-            - Performance considerations
-            - Security concerns
-            - Test coverage
+            Run `gh pr diff ${{ github.event.pull_request.number }}` for the diff. Focus on it, but you are NOT confined to it: use Read/Grep/Glob to open callers/callees of changed functions, types, and contracts and confirm the change doesn't break them. Cross-file breakage is in scope.
 
-            Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
+            Check: logic bugs, null/undefined, races, off-by-one, wrong error handling, broken callers; perf (O(n²) hot paths, unbounded loops over chat history, missing pagination); security (injection, API key exposure, secrets in logs, XSS in rendered markdown); test gaps (changed logic untested, tests asserting nothing, happy-path-only).
 
-            Note: the PR branch is already checked out in the current working directory,
-            so read files directly rather than paging a large `gh pr diff`.
+            Flag ANY of these CLAUDE.md violations in changed code as HIGH: `any` type (strict mode is on); relative import instead of the `@/*` alias; plain `fetch(` against an external API instead of `tauriFetch` from `@tauri-apps/plugin-http` (CORS bypass — see the Troubleshooting section of CLAUDE.md); silent error-swallowing catch; a new AI or STT provider added anywhere other than `config/ai-providers.constants.ts` / `config/stt.constants.ts`.
 
-            Your final message is published as the review. Use
-            `mcp__github_inline_comment__create_inline_comment` for issues tied to a
-            specific line.
+            Severity by PLAUSIBILITY, not certainty:
+            - **CRITICAL**: could plausibly cause a security breach, data loss, API key leakage, or a crash on launch.
+            - **HIGH**: could plausibly cause a bug, crash, wrong result, or broken caller under realistic input — or a hard-rule violation above.
+            - **MEDIUM**: real concern unlikely to fire, or narrow edge case. Report it (own section).
+            - **NIT**: pure style, no correctness impact → skip.
+            Don't downgrade to stay silent: if a reasonable input reaches the defect, report it. Every finding needs a concrete FAILURE SCENARIO (input/state → wrong output/crash/violated invariant); no scenario = not a finding.
 
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # Unchanged from the previous revision. Note for future readers: a nonzero
-          # permission-denial count is NOT a failure signal. Run 33569663144 posted its
-          # review with 10 denials; runs 33944259744 (14) and 33944658687 (32) posted
-          # nothing. Denials are ordinary tool-shopping noise. Only the verify step below
-          # distinguishes a delivered review from a lost one.
-          claude_args: '--allowed-tools "Read,Grep,Glob,Write,mcp__github_inline_comment__create_inline_comment,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+            Write the review to `review.md` in the repo root: a one-line **Scope** header (files reviewed + callers traced), then `## Critical` / `## High` / `## Medium` sections (each: `path:line`, one-line defect, failure scenario), omitting empty sections. If nothing is found after genuinely tracing, still write the Scope header + "✅ No critical, high, or medium issues found" — a bare no-issues line without Scope is not acceptable.
 
-      # The whole point of this job is a review on the PR. If one did not land, the job
-      # must be red. A green check that carries no information is the original defect:
-      # this silently produced nothing on PRs #19, #41 and #51 while reporting success.
-      - name: Verify a review was posted
-        # Not bare `always()`: when the action declines a PR that modifies this workflow
-        # it posts nothing BY DESIGN, and a red there would be noise that trains people
-        # to ignore this check. A declined run produces no execution file. The upstream
-        # skip flag is internal to the composite action and cannot be read from here, so
-        # this proxy needs confirming on the first workflow-touching PR.
-        if: always() && steps.claude-review.outputs.execution_file != ''
+            Use CLAUDE.md for conventions. Do NOT run npm/cargo/build/test — static review only.
+
+          claude_args: '--model claude-opus-4-8 --allowed-tools "Write,Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*)"'
+
+      - name: Post review comment
+        if: always()
         env:
-          GH_TOKEN: ${{ github.token }}   # read-only; no new permission is granted
-          PR: ${{ github.event.pull_request.number }}
-          SINCE: ${{ steps.t0.outputs.at }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          # `since` on this endpoint filters by LAST-UPDATED, not created. That matters:
-          # tag mode creates its tracking comment before the agent runs, so a create-time
-          # check would pass a run that posted a placeholder and never wrote the review.
-          # No --paginate: `since` plus per_page=100 bounds the window to this run, and
-          # `gh --paginate` applies --jq per page, which would break the aggregate.
-          len=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments?since=${SINCE}&per_page=100" \
-                  --jq '[.[] | select(.user.login == "claude[bot]") | .body | length] | max // 0')
-          # A size floor rather than matching the action's "Claude finished ..." marker:
-          # the marker is upstream template text that can change, and this way an upstream
-          # change gives a false red, which is the safe direction.
-          if [ "$len" -lt 400 ]; then
-            echo "::error::Claude review job finished green but delivered no review to PR #${PR} (largest fresh claude[bot] comment: ${len} chars)."
+          if [ -f review.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file review.md
+          else
+            # Verdict-artifact guard: the review step can "succeed" without ever
+            # writing review.md (e.g. tool permission denials). Downstream
+            # automation (fix-pr-reviews --loop) must be able to distinguish
+            # "clean review" from "review never happened" — a clean review posts
+            # an explicit "No critical issues found" comment, so a missing file
+            # means the review did not complete. Fail the run.
+            echo "::error::Review produced no review.md verdict artifact — review did not complete (check the review step logs for tool permission denials)."
             exit 1
           fi
-          echo "Review delivered to PR #${PR}: ${len} chars."
-
-      # Optional forensics, DELIBERATELY LEFT OFF. This repo is PUBLIC and the execution
-      # file contains every tool result, which can include secrets. Enable only for a
-      # one-off debug run, and prefer `show_full_output: true` on a private fork instead.
