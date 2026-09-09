@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  IDLE_FLUSH_MS,
   attachmentNameFor,
+  segmentByGap,
   sessionKeyFor,
   sliceTranscript,
   toBase64Utf8,
@@ -52,6 +54,48 @@ describe("sliceTranscript", () => {
     const second = sliceTranscript(bothMeetings, first!.endAt);
     expect(second?.startAt).toBe(9000);
     expect(second?.entries).toHaveLength(2);
+  });
+});
+
+describe("segmentByGap", () => {
+  it("returns no segments for an empty array", () => {
+    expect(segmentByGap([], IDLE_FLUSH_MS)).toEqual([]);
+  });
+
+  it("keeps a continuous run as ONE segment", () => {
+    const segments = segmentByGap([entry(1000), entry(2000), entry(3000)], IDLE_FLUSH_MS);
+    expect(segments).toHaveLength(1);
+    expect(segments[0].startAt).toBe(1000);
+    expect(segments[0].endAt).toBe(3000);
+  });
+
+  it("splits where the silence exceeds the gap", () => {
+    // The whole point: two meetings recorded into one conversation with no
+    // queue row between them must not be recovered as a single spliced row
+    // posted to whichever contact the user picks for it.
+    const segments = segmentByGap(
+      [entry(1000), entry(2000), entry(2000 + IDLE_FLUSH_MS + 1), entry(2000 + IDLE_FLUSH_MS + 2)],
+      IDLE_FLUSH_MS
+    );
+    expect(segments).toHaveLength(2);
+    expect(segments[0].entries.map((e) => e.timestamp)).toEqual([1000, 2000]);
+    expect(segments[1].startAt).toBe(2000 + IDLE_FLUSH_MS + 1);
+  });
+
+  it("does NOT split on a silence exactly equal to the gap", () => {
+    // Strictly greater, matching how the idle timer fires only once the full
+    // window has elapsed with nothing said.
+    const segments = segmentByGap([entry(1000), entry(1000 + IDLE_FLUSH_MS)], IDLE_FLUSH_MS);
+    expect(segments).toHaveLength(1);
+  });
+
+  it("sorts before segmenting, so an out-of-order array is safe", () => {
+    // Same hazard sliceTranscript's MIN/MAX guards against: nothing in the
+    // pipeline guarantees timestamp order, and a naive scan would see a fake
+    // backwards gap and split a single meeting into three.
+    const segments = segmentByGap([entry(3000), entry(1000), entry(2000)], IDLE_FLUSH_MS);
+    expect(segments).toHaveLength(1);
+    expect(segments[0].entries.map((e) => e.timestamp)).toEqual([1000, 2000, 3000]);
   });
 });
 

@@ -23,6 +23,24 @@ export const HOLD_MS = 30_000;
 export const UNDO_BLOCKED_MS = 6_000;
 
 /**
+ * How long Meeting Assist may sit silent before the meeting counts as over.
+ *
+ * ONE constant for two callers, deliberately: the idle trigger
+ * (useMeetingLog.ts) uses it live to decide a meeting has ended, and
+ * `segmentByGap` uses it after the fact to decide where one recovered meeting
+ * stops and the next begins. They are the same judgement, and two constants
+ * would let a recovered span disagree with the live one about how many
+ * meetings a conversation held.
+ *
+ * Five minutes: long enough to sit through a silent screen-share, short enough
+ * that the row is in the strip while the meeting is still fresh. A silence
+ * longer than this inside one real call splits it into two queue rows - the
+ * accepted cost of having any live trigger at all where the Windows watcher is
+ * off.
+ */
+export const IDLE_FLUSH_MS = 5 * 60 * 1000;
+
+/**
  * How stale a `sending` claim must be before the sweep reclaims it.
  *
  * Generously larger than the client's 30s timeout (client.ts:21) plus a
@@ -163,6 +181,53 @@ export function sliceTranscript(
     if (e.timestamp > endAt) endAt = e.timestamp;
   }
   return { entries: kept, startAt, endAt };
+}
+
+/**
+ * Cuts a run of entries into one slice per meeting, splitting wherever the
+ * silence between two consecutive entries runs longer than `gapMs`.
+ *
+ * Recovery's counterpart to the watermark. A live trigger separates two
+ * meetings by writing a row between them; a meeting nobody ever triggered has
+ * no row, so a conversation that held two of them arrives here as one
+ * undifferentiated run. Merging those into a single recovered row would post
+ * one customer's words in the other's chatter note the moment the user
+ * assigned a contact to it - the same mis-post the watermark exists to
+ * prevent, arriving by a different route.
+ *
+ * Sorted first, for the reason `sliceTranscript` takes MIN/MAX rather than
+ * first/last: nothing upstream guarantees timestamp order, and a backwards
+ * step read as a gap would shatter one meeting into several.
+ */
+export function segmentByGap(
+  entries: TranscriptEntry[],
+  gapMs: number
+): TranscriptSlice[] {
+  if (entries.length === 0) return [];
+  const sorted = [...entries].sort((a, b) => a.timestamp - b.timestamp);
+
+  const segments: TranscriptSlice[] = [];
+  let current: TranscriptEntry[] = [sorted[0]];
+  for (let i = 1; i < sorted.length; i++) {
+    // Strictly greater, matching the idle timer: a silence of exactly gapMs
+    // has not yet elapsed the window.
+    if (sorted[i].timestamp - sorted[i - 1].timestamp > gapMs) {
+      segments.push(sliceOf(current));
+      current = [];
+    }
+    current.push(sorted[i]);
+  }
+  segments.push(sliceOf(current));
+  return segments;
+}
+
+/** Sorted input only - the caller owns the ordering. */
+function sliceOf(entries: TranscriptEntry[]): TranscriptSlice {
+  return {
+    entries,
+    startAt: entries[0].timestamp,
+    endAt: entries[entries.length - 1].timestamp,
+  };
 }
 
 /**

@@ -15,12 +15,14 @@ import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import { createOdooClient } from "@/lib/odoo/client";
 import {
   HOLD_MS,
+  IDLE_FLUSH_MS,
   UNDO_BLOCKED_MS,
   renderTranscript,
   sessionKeyFor,
   sliceTranscript,
 } from "@/lib/odoo/meeting-log";
 import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
+import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
@@ -455,6 +457,48 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     if (prev && !meetingAssistMode) void triggerRef.current();
   }, [meetingAssistMode]);
 
+  /**
+   * When the newest thing anyone said arrived. 0 means nothing yet.
+   *
+   * MAX rather than the last element, for the reason sliceTranscript takes
+   * MIN/MAX: addMeetingTranscriptEntries appends caller-supplied timestamps
+   * verbatim, so array order is not timestamp order.
+   */
+  const newestEntryAt = useMemo(() => {
+    let newest = 0;
+    for (const e of meetingTranscript) {
+      if (e.timestamp > newest) newest = e.timestamp;
+    }
+    return newest;
+  }, [meetingTranscript]);
+
+  /**
+   * The idle edge - the third trigger, and the only one that fires while the
+   * app is merely sitting there.
+   *
+   * The other two both need an event that may never come: `meeting-ended`
+   * requires the Windows watcher, which only runs with Auto-record on, and the
+   * pill-off edge requires the user to actually toggle the pill. With
+   * Auto-record off, a user who leaves Meeting Assist on and closes the app
+   * loses the meeting outright - no row, no toast, no trace. This closes that
+   * for a live process; `runMeetingRecovery` covers the crash and the kill.
+   *
+   * Keyed on `newestEntryAt`, so every new entry tears the timer down and arms
+   * a fresh one - a one-shot armed at mount would cut every meeting longer
+   * than the window in half. And keyed on nothing the FIRE changes, so it
+   * cannot re-arm itself: one silence produces one trigger, not one every five
+   * minutes for the rest of the session.
+   *
+   * `newestEntryAt === 0` is the empty transcript. The pill is on by default
+   * with no meeting under way, and arming there would fire a pointless trigger
+   * every five minutes the app is open.
+   */
+  useEffect(() => {
+    if (!isOwner || !meetingAssistMode || newestEntryAt === 0) return;
+    const timer = setTimeout(() => void triggerRef.current(), IDLE_FLUSH_MS);
+    return () => clearTimeout(timer);
+  }, [isOwner, meetingAssistMode, newestEntryAt]);
+
   // App start - and ONCE PER PROCESS, not once per mount.
   //
   // `sweptThisProcess` is module-level for the same reason meeting-log-push's
@@ -500,11 +544,20 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // Same reasoning as the prune above: UNCONDITIONAL, because an orphaned
       // target row needs no Odoo config to exist. runOrphanSweep carries its
       // own try/catch, so no trailing .catch is needed here either.
-      .then(() => runOrphanSweep());
-    // NO trailing .catch here. `runTranscriptPrune` and `runOrphanSweep` both
-    // swallow and log their own failure, so a second catch carrying one of
-    // their messages would be dead code in production and a copy that can
-    // drift. The `void` plus the sweep's catch above already cover the sweep leg.
+      .then(() => runOrphanSweep())
+      // The backstop under all three live triggers, and unconditional for the
+      // same reason as the two above: it needs no reachable Odoo, only stored
+      // credentials, which it checks itself. Last in the chain because it is
+      // the only leg that WRITES rows - running it ahead of the sweep would
+      // hand that sweep a queue it has just changed, for no benefit, since
+      // every row recovery writes is `unassigned` and no sweep pushes those.
+      // Carries its own try/catch, so no trailing .catch here either.
+      .then(() => runMeetingRecovery());
+    // NO trailing .catch here. `runTranscriptPrune`, `runOrphanSweep` and
+    // `runMeetingRecovery` all swallow and log their own failure, so a second
+    // catch carrying one of their messages would be dead code in production
+    // and a copy that can drift. The `void` plus the sweep's catch above
+    // already cover the sweep leg.
   }, [isOwner, summarize]);
 
   /**
