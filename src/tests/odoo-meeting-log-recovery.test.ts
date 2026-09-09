@@ -153,6 +153,19 @@ describe("runMeetingRecovery", () => {
     expect(action.readUnloggedMessages).not.toHaveBeenCalled();
   });
 
+  it("retries after the user finishes setting Odoo up, with no app restart", async () => {
+    // The latch must be set on the OUTCOME, not on entry - the same trap the
+    // sweep effect documents at useMeetingLog.ts:515-523. Latching first means
+    // a launch with no credentials permanently disables recovery for that
+    // process, and finishing Odoo setup mid-session is EXACTLY when a user has
+    // days of unlogged meetings waiting to be found.
+    config.loadOdooConfigState.mockResolvedValueOnce({ state: "absent", config: null });
+    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+
+    expect(await runMeetingRecovery()).toBe(0);
+    expect(await runMeetingRecovery()).toBe(1);
+  });
+
   it("runs once per process, not once per mount", async () => {
     action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
     await runMeetingRecovery();

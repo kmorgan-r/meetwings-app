@@ -52,14 +52,29 @@ export function resetMeetingRecoveryGuard(): void {
  */
 export async function runMeetingRecovery(): Promise<number> {
   if (recoveryRan) return 0;
-  recoveryRan = true;
 
   try {
     // BEFORE the read, so an unconfigured install consumes nothing: the
-    // entries stay above every watermark and the run after the user finishes
-    // setting Odoo up still finds them.
+    // entries stay above every watermark and a later run still finds them.
     const state = await loadOdooConfigState();
     if (state.state !== "complete") return 0;
+
+    // Latched HERE, on the outcome, not on entry - the same rule the sweep
+    // effect spells out at useMeetingLog.ts:515-523. Latching before the
+    // config check would permanently disable recovery for any process that
+    // started without credentials: the user opens /odoo, finishes setting it
+    // up, comes back, and the days of unlogged meetings this function exists
+    // to find stay invisible until an app restart. That is precisely the
+    // moment there is the most to recover.
+    //
+    // It does NOT wait for the read below to succeed, though - deliberately,
+    // and unlike the sweep's `outcome.ran`. Missing credentials are a NORMAL
+    // state a user fixes mid-session; a failing `readUnloggedMessages` means
+    // getDatabase() is down, which takes chat history, prompts and cost
+    // tracking with it. Retrying that on the next remount would buy nothing,
+    // and latching later would open a window where two remounts run the whole
+    // read-and-insert pass concurrently, with no single flight to join them.
+    recoveryRan = true;
     const instance = instanceFingerprint(state.config.url, state.config.db);
 
     // The same effective watermark the live trigger computes, floored at the
