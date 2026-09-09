@@ -4,6 +4,7 @@ import {
   DEFAULT_CUSTOMIZABLE_STATE,
   getCustomizableState,
   updateContentProtection,
+  updateOverlayPillStyle,
 } from "@/lib/storage/customizable.storage";
 import { STORAGE_KEYS } from "@/config/constants";
 
@@ -69,5 +70,65 @@ describe("customizable.storage contentProtection", () => {
     expect(getCustomizableState().appIcon.isVisible).toBe(false);
     expect(getCustomizableState().alwaysOnTop.isEnabled).toBe(true);
     expect(getCustomizableState().cursor.type).toBe("default");
+  });
+});
+
+describe("customizable.storage overlayPill", () => {
+  beforeEach(() => {
+    store.clear();
+    vi.mocked(localStorage.getItem).mockImplementation(
+      (k: string) => store.get(k) ?? null
+    );
+    vi.mocked(localStorage.setItem).mockImplementation(
+      (k: string, v: string) => {
+        store.set(k, v);
+      }
+    );
+  });
+
+  it("defaults to status-count on first install", () => {
+    expect(getCustomizableState().overlayPill).toEqual({
+      style: "status-count",
+    });
+    expect(DEFAULT_CUSTOMIZABLE_STATE.overlayPill.style).toBe("status-count");
+  });
+
+  it("falls back to status-count when stored state predates the setting", () => {
+    // Upgrade path: a blob saved before this key exists must parse.
+    localStorage.setItem(
+      STORAGE_KEYS.CUSTOMIZABLE,
+      JSON.stringify({
+        appIcon: { isVisible: true },
+        alwaysOnTop: { isEnabled: false },
+        autostart: { isEnabled: true },
+        contentProtection: { isEnabled: true },
+        cursor: { type: "invisible" },
+      })
+    );
+
+    expect(getCustomizableState().overlayPill.style).toBe("status-count");
+  });
+
+  it("round-trips a style change and preserves sibling settings", () => {
+    localStorage.setItem(
+      STORAGE_KEYS.CUSTOMIZABLE,
+      JSON.stringify({
+        appIcon: { isVisible: false },
+        alwaysOnTop: { isEnabled: true },
+        autostart: { isEnabled: true },
+        contentProtection: { isEnabled: true },
+        cursor: { type: "default" },
+        overlayPill: { style: "status-count" },
+      })
+    );
+
+    const newState = updateOverlayPillStyle("icon-only");
+
+    expect(newState.overlayPill).toEqual({ style: "icon-only" });
+    expect(getCustomizableState().overlayPill.style).toBe("icon-only");
+    // The writer must not clobber unrelated settings.
+    expect(getCustomizableState().appIcon.isVisible).toBe(false);
+    expect(getCustomizableState().cursor.type).toBe("default");
+    expect(getCustomizableState().contentProtection.isEnabled).toBe(true);
   });
 });

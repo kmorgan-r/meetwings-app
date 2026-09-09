@@ -6,6 +6,7 @@ import {
   AutostartToggle,
   ContentProtectionToggle,
   MeetingAutoRecordToggle,
+  OverlayPillStyleSelect,
 } from "./components";
 import { PageLayout } from "@/layouts";
 import { isWindows } from "@/lib/platform";
@@ -27,6 +28,9 @@ const Settings = () => {
 
       {/* Screen Capture Protection Toggle */}
       <ContentProtectionToggle />
+
+      {/* Minimized Pill Style Select */}
+      <OverlayPillStyleSelect />
 
       {/* AI Conversation Titles Toggle */}
       <AITitlesToggle />

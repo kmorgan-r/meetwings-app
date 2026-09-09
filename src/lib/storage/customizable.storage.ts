@@ -2,6 +2,8 @@ import { STORAGE_KEYS } from "@/config";
 
 export type CursorType = "invisible" | "default" | "auto";
 
+export type OverlayPillStyle = "status-count" | "icon-only" | "status-last-line";
+
 export interface CustomizableState {
   appIcon: {
     isVisible: boolean;
@@ -18,6 +20,9 @@ export interface CustomizableState {
   cursor: {
     type: CursorType;
   };
+  overlayPill: {
+    style: OverlayPillStyle;
+  };
 }
 
 export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
@@ -26,6 +31,7 @@ export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
   autostart: { isEnabled: true },
   contentProtection: { isEnabled: true },
   cursor: { type: "invisible" },
+  overlayPill: { style: "status-count" },
 };
 
 /**
@@ -49,6 +55,8 @@ export const getCustomizableState = (): CustomizableState => {
         parsedState.contentProtection ||
         DEFAULT_CUSTOMIZABLE_STATE.contentProtection,
       cursor: parsedState.cursor || DEFAULT_CUSTOMIZABLE_STATE.cursor,
+      overlayPill:
+        parsedState.overlayPill || DEFAULT_CUSTOMIZABLE_STATE.overlayPill,
     };
   } catch (error) {
     console.error("Failed to get customizable state:", error);
@@ -107,6 +115,18 @@ export const updateContentProtection = (
 ): CustomizableState => {
   const currentState = getCustomizableState();
   const newState = { ...currentState, contentProtection: { isEnabled } };
+  setCustomizableState(newState);
+  return newState;
+};
+
+/**
+ * Update the minimized-pill style preference
+ */
+export const updateOverlayPillStyle = (
+  style: OverlayPillStyle
+): CustomizableState => {
+  const currentState = getCustomizableState();
+  const newState = { ...currentState, overlayPill: { style } };
   setCustomizableState(newState);
   return newState;
 };

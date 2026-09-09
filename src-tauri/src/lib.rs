@@ -111,6 +111,7 @@ pub fn run() {
         .manage(AudioState::default())
         .manage(CaptureState::default())
         .manage(window::ContentProtectionState::default())
+        .manage(window::OverlayMinimizeState::default())
         .manage(shortcuts::RegisteredShortcuts::default())
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
@@ -155,6 +156,8 @@ pub fn run() {
             window::toggle_dashboard,
             window::move_window,
             window::set_content_protection,
+            window::minimize_overlay,
+            window::restore_overlay,
             capture::capture_to_base64,
             capture::start_screen_capture,
             capture::capture_selected_area,
