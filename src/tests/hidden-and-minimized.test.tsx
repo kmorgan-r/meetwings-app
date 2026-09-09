@@ -12,7 +12,7 @@ import { MemoryRouter } from "react-router-dom";
 
 const invokeMock = vi.fn<(cmd: string, args?: Record<string, unknown>) => Promise<void>>();
 
-const mockAppPage = () => {
+const mockAppPage = (cursorType: string = "default") => {
   vi.doMock("@tauri-apps/api/core", () => ({
     invoke: (cmd: string, args?: Record<string, unknown>) => invokeMock(cmd, args),
   }));
@@ -26,7 +26,7 @@ const mockAppPage = () => {
   vi.doMock("@/contexts", () => ({
     useApp: () => ({
       customizable: {
-        cursor: { type: "default" },
+        cursor: { type: cursorType },
         overlayPill: { style: "status-count" },
       },
       setOverlayPillStyle: vi.fn(),
@@ -38,7 +38,7 @@ const mockAppPage = () => {
     Card: ({ children }: any) => <div data-testid="overlay-card">{children}</div>,
     Updater: () => null,
     DragButton: () => null,
-    CustomCursor: () => null,
+    CustomCursor: () => <div data-testid="custom-cursor" />,
     Button: ({ children, onClick, title }: any) => (
       <button onClick={onClick} title={title}>
         {children}
@@ -214,5 +214,50 @@ describe("minimize button (gate ordering, per the spec)", () => {
     await userEvent.click(screen.getByTitle("Minimize"));
     await waitFor(() => expect(getMinimized()).toBe(false));
     consoleError.mockRestore();
+  });
+});
+
+// The drawn cursor. `--cursor-type: none` is set on the whole `main` webview
+// whenever cursor.type is "invisible" (the DEFAULT), so the real pointer is
+// hidden app-wide and <CustomCursor /> is the only thing the user sees. It
+// must therefore survive the minimized wrapper: on main it was a sibling of
+// the Card inside the isHidden wrapper, and minimizing must not swallow it.
+describe("custom cursor placement (invisible-cursor default)", () => {
+  it("stays outside the minimized wrapper so the pill is not cursor-less", async () => {
+    mockAppPage("invisible");
+    mockHooks(false);
+    const { setMinimized } = await import("@/lib/overlay-minimize.store");
+    const { default: App } = await import("@/pages/app");
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    setMinimized(true);
+    await waitFor(() => {
+      expect(screen.queryByTestId("minimized-pill-stub")).not.toBeNull();
+    });
+
+    // The inner wrapper carries `hidden` while minimized; the cursor must not
+    // be inside it.
+    expect(screen.getByTestId("custom-cursor").closest(".hidden")).toBeNull();
+  });
+
+  it("still hides with the app when isHidden is true", async () => {
+    mockAppPage("invisible");
+    mockHooks(true);
+    const { default: App } = await import("@/pages/app");
+
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+
+    // The OUTER wrapper carries `hidden` — hiding the app hides the cursor,
+    // which is main's behaviour and must be preserved.
+    expect(screen.getByTestId("custom-cursor").closest(".hidden")).not.toBeNull();
   });
 });

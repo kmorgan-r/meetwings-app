@@ -229,11 +229,17 @@ const App = () => {
               <Minimize2 className="h-4 w-4" />
             </Button>
           </Card>
-          {customizable.cursor.type === "invisible" && platform !== "linux" ? (
-            <CustomCursor />
-          ) : null}
         </div>
         {minimized && <MinimizedPill style={pillStyle} />}
+        {/* Sibling of BOTH the Card wrapper and the pill, inside the isHidden
+            one — exactly where it sat before the minimized wrapper existed.
+            cursor.type defaults to "invisible", which sets --cursor-type:none
+            on the whole overlay webview, so this drawn pointer is the only
+            cursor the user has; inside the minimized wrapper it would vanish
+            over the pill. Hiding the app still hides it, which is intended. */}
+        {customizable.cursor.type === "invisible" && platform !== "linux" ? (
+          <CustomCursor />
+        ) : null}
       </div>
     </ErrorBoundary>
   );
