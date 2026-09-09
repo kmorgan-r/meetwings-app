@@ -23,6 +23,15 @@ import { safeLocalStorage } from "./helper";
  * `Math.max(getTranscriptWatermark(), getSkipWatermark())`, so a row that IS
  * later written for the real span always advances past whatever this one
  * holds, and a span that was only ever skipped stays excluded either way.
+ *
+ * READ BY THE LIVE TRIGGER ONLY (useMeetingLog.ts:323). `runMeetingRecovery`
+ * deliberately does NOT consult it - not an oversight, and please do not "fix"
+ * it back. The hazard above is entirely about which CONTACT a span gets posted
+ * to; recovery assigns none, writing `unassigned` rows with no targets that
+ * reach nobody until a human picks. Meanwhile every span this mark records is
+ * by definition a meeting that was said and never queued, which is exactly what
+ * recovery looks for - so honouring it there hid the meetings it exists to
+ * find. See the floor comment in meeting-log-recovery.ts.
  */
 export function getSkipWatermark(): number {
   const raw = safeLocalStorage.getItem(STORAGE_KEYS.MEETING_LOG_SKIP_WATERMARK);

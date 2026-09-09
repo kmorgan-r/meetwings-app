@@ -230,6 +230,15 @@ SELECT content, timestamp, speaker, audio_source FROM messages
  WHERE conversation_id = ? AND audio_source IS NOT NULL AND timestamp > ?
  ORDER BY timestamp ASC`,
 
+  // Startup recovery. Same predicate as meetingMessages minus the conversation
+  // bound, plus the id itself so the caller can group by it. See
+  // readUnloggedMessages for why there is no LIMIT.
+  unloggedMessages: `
+SELECT conversation_id, content, timestamp, speaker, audio_source FROM messages
+ WHERE conversation_id IS NOT NULL AND audio_source IS NOT NULL
+   AND timestamp > ? AND timestamp < ?
+ ORDER BY conversation_id ASC, timestamp ASC`,
+
   // Slice 3. Routes through `pending` rather than widening `claim` to accept
   // `failed`: the claim is the statement the sweep and the hold timer both
   // depend on, and widening it to serve a button changes their behaviour.
@@ -870,27 +879,90 @@ export async function readMeetingMessages(
   conversationId: string, watermark: number
 ): Promise<TranscriptEntry[]> {
   const db = await getDatabase();
-  const rows = await db.select<
-    { content: string; timestamp: number; speaker: string | null; audio_source: string | null }[]
-  >(QUEUE_SQL.meetingMessages, [conversationId, watermark]);
-  return rows.map((row) => {
-    let speaker: TranscriptEntry["speaker"];
-    if (row.speaker) {
-      try {
-        speaker = JSON.parse(row.speaker) as TranscriptEntry["speaker"];
-      } catch {
-        // One unreadable blob must not fail the whole recovery read - the
-        // point of this path is that the meeting is otherwise LOST.
-        speaker = undefined;
-      }
+  const rows = await db.select<MessageRow[]>(QUEUE_SQL.meetingMessages, [
+    conversationId,
+    watermark,
+  ]);
+  return rows.map(toTranscriptEntry);
+}
+
+type MessageRow = {
+  content: string;
+  timestamp: number;
+  speaker: string | null;
+  audio_source: string | null;
+};
+
+function toTranscriptEntry(row: MessageRow): TranscriptEntry {
+  let speaker: TranscriptEntry["speaker"];
+  if (row.speaker) {
+    try {
+      speaker = JSON.parse(row.speaker) as TranscriptEntry["speaker"];
+    } catch {
+      // One unreadable blob must not fail the whole recovery read - the
+      // point of this path is that the meeting is otherwise LOST.
+      speaker = undefined;
     }
-    return {
-      original: row.content,
-      timestamp: row.timestamp,
-      speaker,
-      audioSource: (row.audio_source as TranscriptEntry["audioSource"]) ?? undefined,
-    };
-  });
+  }
+  return {
+    original: row.content,
+    timestamp: row.timestamp,
+    speaker,
+    audioSource: (row.audio_source as TranscriptEntry["audioSource"]) ?? undefined,
+  };
+}
+
+/** A spoken message that no queue row covers, tagged with where it was said. */
+export type UnloggedTranscriptEntry = TranscriptEntry & { conversationId: string };
+
+/**
+ * Every spoken message above `floor`, across ALL conversations.
+ *
+ * The read behind startup recovery, and the one thing `readMeetingMessages`
+ * cannot do: recovery runs before any conversation is open, so it has no id to
+ * pass. Grouping the result by `conversationId` and cutting each group on
+ * silence (`segmentByGap`) is the caller's job.
+ *
+ * Ordered by conversation, then by time, so each group arrives as one
+ * contiguous run rather than interleaved with another conversation's.
+ *
+ * No LIMIT, deliberately, and it matters more here than it does for
+ * `readMeetingMessages`. The queue watermark is a single global
+ * `MAX(transcript_end_at)`, so writing a row for one conversation's span
+ * lifts the watermark for EVERY conversation. A capped read that stopped
+ * before some older, unread span would push that span permanently below the
+ * watermark - the meetings this whole path exists to rescue, lost by the
+ * rescue itself. The caller bounds the work with `floor` and `ceiling`
+ * instead, both of which are WHERE clauses and so cannot truncate mid-span the
+ * way a LIMIT would.
+ *
+ * `ceiling` is exclusive and is not optional. This read has no session bound
+ * and no conversation id, so without an upper edge it reaches into the CURRENT
+ * process's own live meeting: recovery runs from a startup effect that awaits
+ * a config load, a sweep and a prune, and a user who launches the app and
+ * starts talking has STT persisting rows the whole time. Filing those as a
+ * recovered `unassigned` row lifts the global watermark past the live span, so
+ * the pill-off or idle trigger that follows finds nothing left to write and
+ * the contact the user picked is dropped. Required rather than defaulted
+ * because a caller that forgets it gets that silently.
+ *
+ * Shares readMeetingMessages' `audio_source IS NOT NULL` filter, and its
+ * KNOWN LIMITATION above: a diarized meeting persists with a NULL
+ * audio_source and is invisible to both reads.
+ */
+export async function readUnloggedMessages(
+  floor: number,
+  ceiling: number
+): Promise<UnloggedTranscriptEntry[]> {
+  const db = await getDatabase();
+  const rows = await db.select<(MessageRow & { conversation_id: string })[]>(
+    QUEUE_SQL.unloggedMessages,
+    [floor, ceiling]
+  );
+  return rows.map((row) => ({
+    ...toTranscriptEntry(row),
+    conversationId: row.conversation_id,
+  }));
 }
 
 export async function retryQueueRow(id: string): Promise<boolean> {

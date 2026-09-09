@@ -92,6 +92,7 @@ import {
   markSent,
   pruneTranscripts,
   readMeetingMessages,
+  readUnloggedMessages,
   reclaimStaleSending,
   recordAttemptError,
   recordErrorOnUnsent,
@@ -784,6 +785,96 @@ describe("readMeetingMessages", () => {
     const entries = await readMeetingMessages("conv-1", 1000);
     expect(entries[0].speaker).toBeUndefined();
     expect(entries[0].original).toBe("hello");
+  });
+});
+
+describe("readUnloggedMessages", () => {
+  function message(over: Record<string, unknown>) {
+    const row = {
+      id: "m1", conversation_id: "conv-1", role: "user", content: "hello",
+      timestamp: 1000, attached_files: null, speaker: null, audio_source: "microphone",
+      ...over,
+    };
+    db.run(
+      `INSERT INTO messages (${Object.keys(row).join(",")}) ` +
+        `VALUES (${Object.keys(row).map(() => "?").join(",")})`,
+      Object.values(row) as never[]
+    );
+  }
+
+  beforeEach(() => {
+    db.run(
+      "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('conv-1','t',1,1)"
+    );
+    db.run(
+      "INSERT INTO conversations (id, title, created_at, updated_at) VALUES ('conv-2','t',1,1)"
+    );
+  });
+
+  // Far above every timestamp these cases use. The ceiling is exercised on its
+  // own below; here it must simply not get in the way.
+  const NO_CEILING = 9_000_000_000_000;
+
+  it("returns spoken rows above the floor from EVERY conversation", async () => {
+    // The one thing readMeetingMessages cannot do. Recovery runs before any
+    // conversation is open, so it has no id to pass - a per-conversation read
+    // would recover nothing at all.
+    message({ id: "a", conversation_id: "conv-1", content: "one", timestamp: 3000 });
+    message({ id: "b", conversation_id: "conv-2", content: "two", timestamp: 4000 });
+    const entries = await readUnloggedMessages(1000, NO_CEILING);
+    expect(entries.map((e) => e.original).sort()).toEqual(["one", "two"]);
+  });
+
+  it("carries the conversation id, which is what the rows get grouped by", async () => {
+    message({ id: "a", conversation_id: "conv-2", timestamp: 3000 });
+    const entries = await readUnloggedMessages(1000, NO_CEILING);
+    expect(entries[0].conversationId).toBe("conv-2");
+  });
+
+  it("excludes typed chat and anything at or below the floor", async () => {
+    // Same hazard readMeetingMessages guards: without the audio_source filter a
+    // typed question is rendered into a customer-visible Odoo attachment.
+    message({ id: "typed", audio_source: null, content: "a typed question", timestamp: 3000 });
+    message({ id: "old", content: "before the floor", timestamp: 1000 });
+    message({ id: "keep", content: "said aloud", timestamp: 3000 });
+    const entries = await readUnloggedMessages(1000, NO_CEILING);
+    expect(entries.map((e) => e.original)).toEqual(["said aloud"]);
+  });
+
+  it("orders by conversation then timestamp, so gap segmentation sees a real run", async () => {
+    message({ id: "b2", conversation_id: "conv-2", content: "second", timestamp: 5000 });
+    message({ id: "a2", conversation_id: "conv-1", content: "later", timestamp: 9000 });
+    message({ id: "b1", conversation_id: "conv-2", content: "first", timestamp: 4000 });
+    message({ id: "a1", conversation_id: "conv-1", content: "earlier", timestamp: 3000 });
+    const entries = await readUnloggedMessages(1000, NO_CEILING);
+    expect(entries.map((e) => e.original)).toEqual(["earlier", "later", "first", "second"]);
+  });
+
+  it("parses the speaker JSON, so a recovered note is labelled like a live one", async () => {
+    message({ id: "s", speaker: JSON.stringify({ speakerLabel: "Ada" }), timestamp: 3000 });
+    const entries = await readUnloggedMessages(1000, NO_CEILING);
+    expect(entries[0].speaker).toEqual({ speakerLabel: "Ada" });
+  });
+
+  it("stops at the ceiling, so the live process's own entries stay out of it", async () => {
+    // Recovery reads across ALL conversations with no session bound, and runs
+    // from a startup effect that awaits a config load, a sweep and a prune
+    // first. A user who launches the app and starts talking immediately has STT
+    // persisting rows to `messages` while those awaits are still pending -
+    // without a ceiling recovery reads its OWN process's live meeting, files it
+    // as unassigned, and lifts the global watermark past it, so the real
+    // trigger later finds the span consumed and drops the contact the user had
+    // already picked. The live trigger's own read is floored at
+    // PROCESS_STARTED_AT for the mirror-image reason (useMeetingLog.ts:51-84).
+    message({ id: "before", content: "a prior run's meeting", timestamp: 3000 });
+    message({ id: "at", content: "exactly at process start", timestamp: 5000 });
+    message({ id: "after", content: "said in this process", timestamp: 6000 });
+
+    const entries = await readUnloggedMessages(1000, 5000);
+
+    // Strictly below: an entry stamped at the captured instant belongs to this
+    // process, so the boundary falls to the live triggers, not to recovery.
+    expect(entries.map((e) => e.original)).toEqual(["a prior run's meeting"]);
   });
 });
 

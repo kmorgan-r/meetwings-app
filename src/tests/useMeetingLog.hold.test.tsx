@@ -37,6 +37,12 @@ const action = vi.hoisted(() => ({
   assignQueueRow: vi.fn(async () => true),
   deleteQueueRow: vi.fn(async () => true),
   sweepOrphanTargets: vi.fn(async () => 0),
+  // This suite does not mock meeting-log-recovery, so the hook's startup chain
+  // runs the REAL runMeetingRecovery against this factory. Leaving it out does
+  // not skip the call - it makes the import undefined, so recovery throws into
+  // its own catch and logs "recovery failed" on every case here. Harmless to
+  // the assertions, but it buries a genuine failure in noise.
+  readUnloggedMessages: vi.fn(async () => []),
 }));
 vi.mock("@/lib/database/meeting-log.action", () => action);
 

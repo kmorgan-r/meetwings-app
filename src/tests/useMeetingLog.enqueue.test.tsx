@@ -47,6 +47,16 @@ const push = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/odoo/meeting-log-push", () => push);
 
+// Mocked at the module boundary: this suite asserts only that the hook starts
+// recovery on the owner window. What recovery DOES - the floors, the
+// segmentation, the unassigned status - is src/tests/odoo-meeting-log-recovery.
+const recovery = vi.hoisted(() => ({
+  runMeetingRecovery: vi.fn(async () => 0),
+  resetMeetingRecoveryGuard: vi.fn(),
+  RECOVERY_MAX_AGE_MS: 7 * 24 * 60 * 60 * 1000,
+}));
+vi.mock("@/lib/odoo/meeting-log-recovery", () => recovery);
+
 // A FULL factory, not `{...actual, loadOdooConfigState}`. The hook imports
 // loadOdooConfigState directly so a partial mock would work here - but Task 10
 // adds pushHeldRow, which calls requireOdooConfig, and THAT resolves the
@@ -108,6 +118,7 @@ import { resetMeetingLogSweepGuard, resetOrphanSweepGuard, useMeetingLog } from 
 // wrapper the real runTranscriptPrune calls - and the actions module is not
 // mocked here, so the real single-flight latch stays under test.
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
+import { IDLE_FLUSH_MS } from "@/lib/odoo/meeting-log";
 import type { SelectedTargets, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
@@ -351,6 +362,86 @@ describe("the pill-off trigger", () => {
     }
     await vi.advanceTimersByTimeAsync(10);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("startup recovery", () => {
+  it("runs on mount in the owner window", async () => {
+    // Without this the hook has no path at all for a meeting lost to a close
+    // or a crash - all three live triggers need the process still running when
+    // the meeting ends.
+    render();
+    await waitFor(() => expect(recovery.runMeetingRecovery).toHaveBeenCalled());
+  });
+
+  it("does not run in a window that is not the owner", async () => {
+    // Same gate as every other trigger: two windows would each read the whole
+    // unlogged span and race to insert the same session keys.
+    windowLabel.value = "dashboard";
+    render();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(recovery.runMeetingRecovery).not.toHaveBeenCalled();
+  });
+});
+
+describe("the idle-flush trigger", () => {
+  it("enqueues once the pill has sat idle for the whole window", async () => {
+    // The trigger that closes the real gap: with Auto-record off the Rust
+    // `meeting-ended` never fires, so a user who leaves the pill on and closes
+    // the app loses the meeting entirely.
+    render();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+  });
+
+  it("does NOT fire before the window is up", async () => {
+    render();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS - 1000);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("rearms on a new entry, so a talking meeting is never cut short", async () => {
+    // THE case that separates a real idle timer from a fixed one-shot armed at
+    // mount. Without the rearm, every meeting longer than the window is split.
+    const { rerender } = render();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS - 1000);
+    rerender({ meetingTranscript: [entry(1000), entry(2000, "still talking")] });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not rearm itself, so one silence enqueues exactly one row", async () => {
+    // The watermark mock stays at 0 here on purpose: a timer that re-armed
+    // after firing would enqueue the SAME span again, and a test that let the
+    // watermark advance would hide that behind the empty-slice return.
+    render();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS * 3);
+    expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays disarmed while the pill is off", async () => {
+    render({ meetingAssistMode: false });
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS * 2);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("stays disarmed with nothing said yet", async () => {
+    // The pill is on by default with no meeting under way. Arming here would
+    // fire a pointless trigger every five minutes the app is open.
+    render({ meetingTranscript: [] });
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS * 2);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("is disarmed by a window that is not the owner", async () => {
+    windowLabel.value = "dashboard";
+    render();
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS * 2);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
   });
 });
 
