@@ -14,12 +14,18 @@ import {
   getQueueCounts,
   type QueueCounts,
 } from "@/lib/database/meeting-log.action";
+import { getSyncState } from "@/lib/database/odoo-contacts.action";
 import {
   instanceFingerprint,
   loadOdooConfig,
   loadOdooConfigState,
   saveOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
+import {
+  clearOdooVerification,
+  loadOdooVerification,
+  saveOdooVerification,
+} from "@/lib/storage/odoo-verification.storage";
 import {
   classifyGraphConfig,
   DEFAULT_AUTHORITY,
@@ -138,13 +144,26 @@ function StatusLine({ status, testId }: { status: Status; testId?: string }) {
  * The three steps that stand between a blank page and a working Odoo link,
  * rendered with the same checklist vocabulary as the API Setup page.
  *
- * `verified` and `synced` are SESSION state, not persisted: pressing Test
- * connection proves the credentials worked just now, which is a different
- * claim from "these credentials are known-good forever". Storing it would
- * mean a slot in verification.storage alongside AI and STT - a secure-store
- * schema change - and would let a checklist keep showing a green check for an
- * API key that was revoked in Odoo an hour ago. A check that resets on reload
- * is the honest one.
+ * `verified` and `synced` both SURVIVE a reload, and are seeded from evidence
+ * on disk rather than from anything this session did.
+ *
+ * They used to be session state, on the argument that a check which resets is
+ * the honest one - a credential can be revoked in Odoo an hour after it
+ * passed. What that traded away is worse: every returning user was told "Not
+ * tested yet" about a connection that has been working for weeks, which is not
+ * a cautious claim but a false one, and the page offers no way to tell it
+ * apart from a genuinely untested config. API Setup has always kept its
+ * verification across launches, keyed to a hash of the credentials
+ * (verification.storage.ts), and this card now makes the same trade for the
+ * same reason.
+ *
+ * What keeps it honest is what the claim is KEYED to, not how long it lasts:
+ * `verified` comes from a record hashed against the stored login + api key and
+ * scoped to the stored database, so any edit to those invalidates it
+ * (odoo-verification.storage.ts), and `synced` comes from `last_sync_at`,
+ * which finishSync stamps per instance on a completed run only. A revoked key
+ * still shows green until the next Test connection - accepted, and identical
+ * to what API Setup already accepts.
  *
  * `filled` counts what is TYPED; `stored` is whether a complete config is on
  * DISK, and the first row makes the second claim. testOdooConnection and
@@ -276,6 +295,10 @@ export default function OdooSettings() {
   // shows the uid as a detail, and re-deriving it from a display string would
   // make the copy load-bearing.
   const [verifiedUid, setVerifiedUid] = useState<number | null>(null);
+  // When the last COMPLETED sync ran for the stored instance, or null if none
+  // has. Seeded from odoo_sync_state beside the queue counts below, so the
+  // third checklist row survives a reload exactly like the second one.
+  const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [queue, setQueue] = useState<QueueCounts | null>(null);
   const [strandedTotal, setStrandedTotal] = useState(0);
   // Bumped by handleSave. Without it the stranded line still says "finish
@@ -310,6 +333,10 @@ export default function OdooSettings() {
     setTestStatus(null);
     setVerifiedUid(null);
     setSyncStatus(null);
+    // The seeded check goes with the session one. Both make the same claim
+    // about the same credentials, and an edit invalidates it either way -
+    // leaving the persisted half up would just move the stale check.
+    setSyncedAt(null);
   }
 
   useEffect(() => {
@@ -324,6 +351,14 @@ export default function OdooSettings() {
           // the storage layer's own truthiness test, so a padded value is not
           // counted as stored here after being refused there.
           setStored(filledCount(loaded) === 4);
+          // Matched against `loaded` - the credentials on DISK, which are the
+          // ones Test connection authenticates with - not against `config`,
+          // which by the time a user is reading this row may hold edits that
+          // nothing has ever sent to Odoo. loadOdooVerification returns null
+          // for anything it cannot prove and never throws, so a missing or
+          // unreadable record simply leaves the row at "Not tested yet".
+          const record = await loadOdooVerification(loaded);
+          if (!cancelled && record) setVerifiedUid(record.uid);
         }
       } catch (err) {
         // Reported, never swallowed - a config that cannot load must not look
@@ -348,6 +383,7 @@ export default function OdooSettings() {
       // next to the stranded line telling the user to finish setting up.
       setStrandedTotal(0);
       setQueue(null);
+      setSyncedAt(null);
       try {
         // NOT currentInstance(): it wraps requireOdooConfig, which THROWS for
         // exactly the half-filled config a user comes to this page to fix - so
@@ -356,10 +392,15 @@ export default function OdooSettings() {
         // throwing.
         const state = await loadOdooConfigState();
         if (state.state === "complete") {
-          const counts = await getQueueCounts(
-            instanceFingerprint(state.config.url, state.config.db)
-          );
+          const instance = instanceFingerprint(state.config.url, state.config.db);
+          const counts = await getQueueCounts(instance);
           if (!cancelled) setQueue(counts);
+          // Scoped to the same fingerprint as the counts: a sync that
+          // completed against a staging database says nothing about this one.
+          // `last_sync_at` is stamped by finishSync alone, so a run that
+          // faulted part-way leaves it null and this row stays honest.
+          const sync = await getSyncState(instance);
+          if (!cancelled) setSyncedAt(sync?.last_sync_at ?? null);
           return;
         }
         // Incomplete or absent: there is no fingerprint to scope by, and every
@@ -466,17 +507,49 @@ export default function OdooSettings() {
     }
   }
 
+  /**
+   * Writes down what Test connection just found, for the next launch.
+   *
+   * Best-effort on purpose, and it runs AFTER the status is set: by the time
+   * this is called the connection has already succeeded or failed on its own
+   * terms, so a store that cannot be written must never relabel a green test
+   * as a red one. Same discipline as notifyOtherWindows above.
+   *
+   * The record is built from the config on DISK, re-read here rather than
+   * taken from `config`: testOdooConnection authenticates with
+   * requireOdooConfig, so the form's unsaved edits are not what passed. An
+   * incomplete config writes nothing - loadOdooVerification could never match
+   * a record it has no credentials to hash against.
+   */
+  async function rememberVerification(uid: number | null): Promise<void> {
+    try {
+      if (uid === null) {
+        await clearOdooVerification();
+        return;
+      }
+      const state = await loadOdooConfigState();
+      if (state.state === "complete") await saveOdooVerification(state.config, uid);
+    } catch (err) {
+      console.error("[Odoo] could not record the connection check:", err);
+    }
+  }
+
   async function handleTestConnection() {
     try {
       const uid = await testOdooConnection();
       setVerifiedUid(uid);
       setTestStatus(okStatus(`Connected as uid ${uid}`));
+      void rememberVerification(uid);
     } catch (err) {
       // Clears the uid as well as setting the failure: a second Test
       // connection that fails after a first that passed must not leave the
       // checklist showing the earlier green check.
       setVerifiedUid(null);
       setTestStatus(errorStatus(describe(reportOdooError(err, "test connection"))));
+      // And clears the STORED one for the same reason, one launch later: a
+      // record left behind here would put the green check back on the next
+      // reload, over credentials Odoo has just refused.
+      void rememberVerification(null);
     }
   }
 
@@ -654,9 +727,9 @@ export default function OdooSettings() {
       <OdooSetupCard
         filled={filled}
         stored={stored}
-        verified={testStatus?.kind === "ok"}
+        verified={verifiedUid !== null}
         verifiedDetail={verifiedUid === null ? null : `uid ${verifiedUid}`}
-        synced={syncStatus?.kind === "ok"}
+        synced={syncStatus?.kind === "ok" || syncedAt !== null}
       />
 
       <div className="space-y-4 max-w-md">
