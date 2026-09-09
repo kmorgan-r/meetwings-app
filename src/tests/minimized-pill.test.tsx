@@ -228,6 +228,84 @@ describe("MinimizedPill", () => {
       ).toBeNull();
     });
 
+    it("hides the divider until a record button exists", () => {
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+      expect(screen.queryByTestId("pill-divider")).toBeNull();
+    });
+
+    it("renders the divider that tells the user the pill is two targets", () => {
+      setPillActions({ toggleRecording: vi.fn() });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      const divider = screen.getByTestId("pill-divider");
+      expect(divider.getAttribute("aria-hidden")).toBe("true");
+      // Invisible at rest, revealed on pill hover - a permanently visible
+      // separator would make the resting pill read as two chips.
+      expect(divider.className).toContain("opacity-0");
+      expect(divider.className).toContain("group-hover/pill:opacity-100");
+    });
+
+    it("keeps the hook classes the cross-zone dimming selectors depend on", () => {
+      setPillActions({ toggleRecording: vi.fn() });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      const expand = screen.getByRole("button", { name: /expand/i });
+      const record = screen.getByRole("button", { name: /start meeting recording/i });
+
+      // Renaming either class silently kills the "dim the other zone" half of
+      // the hover treatment - nothing else in the tree would fail.
+      expect(expand.className).toContain("pill-expand");
+      expect(record.className).toContain("pill-record");
+      expect(expand.className).toContain("group-has-[.pill-record:hover]/pill:opacity-55");
+      expect(record.className).toContain("group-has-[.pill-expand:hover]/pill:opacity-55");
+    });
+
+    it("separates the two zones by hue, and never by --accent", () => {
+      setPillActions({ toggleRecording: vi.fn() });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      const expand = screen.getByRole("button", { name: /expand/i });
+      const record = screen.getByRole("button", { name: /start meeting recording/i });
+
+      expect(expand.className).toContain("hover:bg-foreground/10");
+      expect(record.className).toContain("hover:bg-red-500/15");
+      // The regression this guards: bg-accent over bg-card is a 3% lightness
+      // delta in light mode (global.css:49,59) - a hover state you cannot see.
+      expect(expand.className).not.toContain("accent");
+      expect(record.className).not.toContain("accent");
+    });
+
+    it("is reachable by keyboard - both zones take a visible focus ring", () => {
+      setPillActions({ toggleRecording: vi.fn() });
+      render(
+        <MemoryRouter>
+          <MinimizedPill style="status-count" />
+        </MemoryRouter>
+      );
+
+      for (const name of [/expand/i, /start meeting recording/i]) {
+        const button = screen.getByRole("button", { name });
+        expect(button.className).toContain("focus-visible:ring-2");
+        expect(button.className).toContain("focus-visible:ring-inset");
+      }
+    });
+
     it("re-registering a new toggle re-points the button", async () => {
       const first = vi.fn();
       const second = vi.fn();

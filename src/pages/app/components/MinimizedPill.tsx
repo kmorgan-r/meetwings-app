@@ -29,6 +29,21 @@ const STATUS_DOT_COLORS: Record<string, string> = {
  * the expand button: the record button is a SIBLING, because a <button> nested
  * in a <button> is invalid HTML and makes the inner click target unreliable.
  *
+ * HOVER IS DELIBERATELY NOT `bg-accent`. In light mode --card is oklch(1 0 0)
+ * and --accent is oklch(0.97 0 0) (global.css:49,59) - a 3% lightness delta
+ * over a bg-card pill, which fires but cannot be seen; dark mode's 0.205 ->
+ * 0.269 is barely better. So the two zones separate by HUE and by a real
+ * delta instead: neutral `foreground/10` for expand, a red wash for record.
+ * Hovering either also fades in the divider, which is what tells a first-time
+ * user the pill is two targets at all, and dims the other zone so the signal
+ * reads on a 28px control.
+ *
+ * A tooltip is not an option here: Radix portals to document.body, which
+ * global.css:196 hides outright while minimized, and the window is 40px tall
+ * so it would be clipped regardless. The native `title` stays - it is the one
+ * thing that can paint outside the window - but at ~1s it cannot be the only
+ * feedback.
+ *
  * No `data-tauri-drag-region` anywhere on the pill: a drag region over the
  * click target makes the expand click unreliable, and dragging stays an
  * expanded-overlay affordance via the existing DragButton.
@@ -63,7 +78,7 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
   return (
     <div
       className={cn(
-        "w-full h-full flex items-center gap-0.5 p-0.5 rounded-xl",
+        "group/pill w-full h-full flex items-center p-0.5 rounded-xl",
         "bg-card/95 border border-border shadow-md"
       )}
     >
@@ -73,8 +88,12 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
         title="Expand"
         onClick={handleExpand}
         className={cn(
-          "flex-1 min-w-0 h-full flex items-center justify-center gap-1.5",
-          "rounded-[10px] cursor-pointer hover:bg-accent/90 transition-colors"
+          "group/expand pill-expand flex-1 min-w-0 h-full",
+          "flex items-center justify-center gap-1.5",
+          "rounded-[10px] cursor-pointer transition-all",
+          "hover:bg-foreground/10 active:bg-foreground/15",
+          "group-has-[.pill-record:hover]/pill:opacity-55",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         )}
       >
         <span
@@ -83,11 +102,13 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
             STATUS_DOT_COLORS[pillData.status] ?? STATUS_DOT_COLORS.idle
           )}
         />
-        {style === "icon-only" && <WingIcon className="h-5 w-5" />}
+        {style === "icon-only" && (
+          <WingIcon className="h-5 w-5 transition-transform group-active/expand:scale-90" />
+        )}
         {style === "status-count" && (
           <>
             <span className="text-xs font-medium">{pillData.segmentCount}</span>
-            <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" />
+            <ChevronUp className="h-3.5 w-3.5 text-muted-foreground transition-transform group-active/expand:scale-90" />
           </>
         )}
         {style === "status-last-line" && (
@@ -102,24 +123,54 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
           can serve a recording. A button that silently does nothing is worse
           than no button on a pill this small. */}
       {toggleRecording && (
-        <button
-          type="button"
-          aria-label={
-            pillData.recording ? "Stop meeting recording" : "Start meeting recording"
-          }
-          title={pillData.recording ? "Stop recording" : "Start recording"}
-          onClick={toggleRecording}
-          className={cn(
-            "w-7 h-full flex-shrink-0 flex items-center justify-center",
-            "rounded-[10px] cursor-pointer hover:bg-accent/90 transition-colors"
-          )}
-        >
-          {pillData.recording ? (
-            <Square className="h-3 w-3 fill-red-500 text-red-500" />
-          ) : (
-            <Circle className="h-3 w-3 fill-red-500/70 text-red-500/70" />
-          )}
-        </button>
+        <>
+          {/* The "there are two buttons here" cue. Hidden at rest so the pill
+              stays a single calm shape, and it costs 1px rather than the
+              window resize a real separator would need. */}
+          <span
+            aria-hidden="true"
+            data-testid="pill-divider"
+            className={cn(
+              "w-px h-1/2 mx-0.5 flex-shrink-0 bg-border rounded-full",
+              "opacity-0 group-hover/pill:opacity-100 transition-opacity"
+            )}
+          />
+          <button
+            type="button"
+            aria-label={
+              pillData.recording ? "Stop meeting recording" : "Start meeting recording"
+            }
+            title={pillData.recording ? "Stop recording" : "Start recording"}
+            onClick={toggleRecording}
+            className={cn(
+              "group/record pill-record w-7 h-full flex-shrink-0",
+              "flex items-center justify-center",
+              "rounded-[10px] cursor-pointer transition-all",
+              "hover:bg-red-500/15 active:bg-red-500/25",
+              "group-has-[.pill-expand:hover]/pill:opacity-55",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            )}
+          >
+            {pillData.recording ? (
+              <Square
+                className={cn(
+                  "h-3 w-3 fill-red-500 text-red-500",
+                  "transition-transform group-active/record:scale-90"
+                )}
+              />
+            ) : (
+              <Circle
+                className={cn(
+                  "h-3 w-3 fill-red-500/70 text-red-500/70",
+                  // transition-all, not transition-transform: this one moves
+                  // fill and color on hover as well as scale on press.
+                  "transition-all group-hover/record:fill-red-500",
+                  "group-hover/record:text-red-500 group-active/record:scale-90"
+                )}
+              />
+            )}
+          </button>
+        </>
       )}
     </div>
   );
