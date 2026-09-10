@@ -63,12 +63,6 @@ export const AI_PROVIDER_INFO: Record<string, ProviderInfo> = {
     pricingUrl: "https://groq.com/pricing/",
     description: "Get your API key from Groq (generous free tier!)",
   },
-  perplexity: {
-    name: "Perplexity",
-    signupUrl: "https://www.perplexity.ai/settings/api",
-    pricingUrl: "https://docs.perplexity.ai/guides/pricing",
-    description: "Get your API key and credits from Perplexity",
-  },
   openrouter: {
     name: "OpenRouter",
     signupUrl: "https://openrouter.ai/keys",
@@ -207,10 +201,6 @@ export const AI_MODELS: Record<string, ModelOption[]> = {
   groq: [
     { id: "openai/gpt-oss-120b", name: "GPT-OSS 120B (text only)", recommended: true, description: "Fast, capable reasoning" },
     { id: "openai/gpt-oss-20b", name: "GPT-OSS 20B (text only)", description: "Fastest and cheapest" },
-  ],
-  perplexity: [
-    { id: "sonar-pro", name: "Sonar Pro", recommended: true, description: "Best web-grounded answers" },
-    { id: "sonar", name: "Sonar", description: "Fast, cheap web-grounded answers" },
   ],
   openrouter: [
     { id: "openai/gpt-5.6-luna", name: "GPT-5.6 Luna", recommended: true, description: "Cheap, fast, vision" },

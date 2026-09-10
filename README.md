@@ -219,7 +219,7 @@ The Dev Space provides advanced configuration for developers and power users to 
 
 **AI Providers:**
 
-Configure AI language model providers from a comprehensive list of pre-configured services or create your own custom providers. Supported providers include OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Mistral AI, Cohere, Perplexity, Groq, and Ollama.
+Configure AI language model providers from a comprehensive list of pre-configured services or create your own custom providers. Supported providers include OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Mistral AI, Cohere, Groq, and Ollama.
 
 **Custom AI Provider Setup:**
 
@@ -367,7 +367,7 @@ Own your AI experience. Meetwings gives you unprecedented control over every asp
 
 **Any AI Provider:**
 
-Connect to any LLM provider using simple curl commands. OpenAI, Anthropic, Google, xAI, Mistral, Cohere, Perplexity, Groq, Ollama, or your own custom endpoint. Switch providers anytime without losing your chat history or configuration. Use multiple providers for different use cases.
+Connect to any LLM provider using simple curl commands. OpenAI, Anthropic, Google, xAI, Mistral, Cohere, Groq, Ollama, or your own custom endpoint. Switch providers anytime without losing your chat history or configuration. Use multiple providers for different use cases.
 
 **Any STT Provider:**
 

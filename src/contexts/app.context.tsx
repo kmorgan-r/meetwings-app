@@ -22,6 +22,7 @@ import {
   loadVerificationCache,
   migrateVerificationToSecureStorage,
 } from "@/lib/storage/verification.storage";
+import { parseSavedAiSelection } from "@/lib/storage/ai-providers";
 import {
   getCustomizableState,
   setCustomizableState,
@@ -277,12 +278,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
     setCustomSttProviders(sttList);
 
-    // Load selected AI provider
+    // Load selected AI provider, skipping one whose provider was removed
     const savedSelectedAi = safeLocalStorage.getItem(
       STORAGE_KEYS.SELECTED_AI_PROVIDER
     );
-    if (savedSelectedAi) {
-      setSelectedAIProvider(JSON.parse(savedSelectedAi));
+    const restoredAi =
+      savedSelectedAi &&
+      parseSavedAiSelection(savedSelectedAi, [...AI_PROVIDERS, ...aiList]);
+    if (restoredAi) {
+      setSelectedAIProvider(restoredAi);
     }
 
     // Load selected STT provider
