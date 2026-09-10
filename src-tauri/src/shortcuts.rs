@@ -597,11 +597,18 @@ fn handle_toggle_dashboard<R: Runtime>(app: &AppHandle<R>) {
             }
         }
     } else {
-        // Window doesn't exist, create it
-        match create_dashboard_window(app) {
-            Ok(_) => eprintln!("Dashboard window created successfully"),
-            Err(e) => eprintln!("Failed to create dashboard window: {}", e),
-        }
+        // Off the main thread deliberately: this runs inside the global-shortcut
+        // event handler, and on Windows `build()` deadlocks there for the same
+        // reason it does in a sync command - see the note on
+        // `window::open_dashboard`. Show/hide above are cross-thread dispatches
+        // and stay inline; only creation moves.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            match create_dashboard_window(&app) {
+                Ok(_) => eprintln!("Dashboard window created successfully"),
+                Err(e) => eprintln!("Failed to create dashboard window: {}", e),
+            }
+        });
     }
 }
 

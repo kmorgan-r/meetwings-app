@@ -418,8 +418,18 @@ pub fn is_overlay_minimized(app: AppHandle) -> bool {
         .unwrap()
 }
 
+/// `async` is load-bearing, not stylistic: on Windows `build()` deadlocks when
+/// it runs on the main thread inside a command or an event handler (the
+/// WebView2 controller is created asynchronously and its completion handler
+/// needs the message loop that the command is currently blocking - wry#583).
+/// A sync command runs ON that thread; an async one runs on the async runtime,
+/// which is what leaves the loop free to finish the webview. The symptom of
+/// getting this wrong is not a hang but a window that opens blank forever: the
+/// shell is created, the webview never navigates, and the overlay stops
+/// responding for as long as the loop is wedged. `start_screen_capture` is
+/// async for the same reason.
 #[tauri::command]
-pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     // Check if dashboard window already exists
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
         // Window exists, just focus and show it
@@ -438,8 +448,10 @@ pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// `async` for the reason spelled out on `open_dashboard`: this one also
+/// reaches `create_dashboard_window` when the window is gone.
 #[tauri::command]
-pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
         match dashboard_window.is_visible() {
             Ok(true) => {
@@ -542,6 +554,25 @@ pub fn create_dashboard_window<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A compile-time guard, not a behavioral test: both dashboard commands
+    /// must stay `async`. A sync command runs on the main thread, and
+    /// `create_dashboard_window` -> `build()` there leaves the dashboard a
+    /// blank shell that never navigates (wry#583). Making either one sync
+    /// again returns `Result`, which is not a `Future`, and this stops
+    /// compiling — the failure the runtime cannot show us.
+    #[test]
+    fn the_dashboard_commands_stay_async() {
+        fn returns_a_future<F, Fut>(_command: F)
+        where
+            F: Fn(AppHandle) -> Fut,
+            Fut: std::future::Future,
+        {
+        }
+
+        returns_a_future(open_dashboard);
+        returns_a_future(toggle_dashboard);
+    }
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect<i32, u32> {
         PhysicalRect {
