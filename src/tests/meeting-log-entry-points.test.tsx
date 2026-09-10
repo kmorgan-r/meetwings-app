@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Review finding: a repo-wide grep across src/tests/** found no reference to
 // the /meeting-log route, the "Meeting log" menu item, or the "Open the
-// meeting log" link on /odoo - deleting any one of the three left the full
+// meeting log" link on /integrations - deleting any one of the three left the full
 // suite green while making 4,875 lines of feature unreachable from the UI.
 // The link is covered separately, alongside its sibling count fixtures, in
 // src/tests/odoo-settings-page.test.tsx ("the queue status block"). This file
@@ -67,8 +67,8 @@ describe("the meetings route", () => {
 
   it("still lands the old /meeting-log entry point on it", () => {
     // The queue page merged into /meetings; the old path redirects rather than
-    // 404-ing, because the menu entry and the /odoo link both still point here
-    // until they are moved.
+    // 404-ing, because the menu entry and the /integrations link both still
+    // point here until they are moved.
     window.history.pushState({}, "", "/meeting-log");
     render(<AppRoutes />);
     expect(screen.getByTestId("stub-meetings")).toBeInTheDocument();
@@ -76,11 +76,11 @@ describe("the meetings route", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (b) the "Meeting log" menu item exists and shares the Odoo entry's gate.
+// (b) the "Meeting log" menu item exists and shares the Integrations entry's gate.
 //
 // Pinning the item's mere presence would pass a mutant that disables it under
 // a DIFFERENT condition, or never disables it at all. What actually matters
-// is that it uses the SAME gateOnSetup as the Odoo entry beside it - so this
+// is that it uses the SAME gateOnSetup as the Integrations entry beside it - so
 // asserts both states (gate on, gate off) AND that the two items agree in
 // each state, not just their own hard-coded value.
 // ---------------------------------------------------------------------------
@@ -113,26 +113,27 @@ beforeEach(() => {
 });
 
 describe("the Meetings menu entry", () => {
-  it("is present, points at /meetings, and shares the Odoo entry's setup gate", () => {
+  it("is present, points at /meetings, and shares the Integrations entry's setup gate", () => {
     const { result, rerender } = renderHook(() => useMenuItems());
 
     const meetingsOpen = findItem(result.current.menu, "Meetings");
-    const odooOpen = findItem(result.current.menu, "Odoo");
+    const integrationsOpen = findItem(result.current.menu, "Integrations");
     expect(meetingsOpen.href).toBe("/meetings");
+    expect(integrationsOpen.href).toBe("/integrations");
     // Gate OFF: setup is complete. Both entries enabled, and agreeing.
     expect(meetingsOpen.disabled).toBe(false);
-    expect(meetingsOpen.disabled).toBe(odooOpen.disabled);
+    expect(meetingsOpen.disabled).toBe(integrationsOpen.disabled);
 
     setupStatus.isComplete = false;
     rerender();
 
     const meetingsGated = findItem(result.current.menu, "Meetings");
-    const odooGated = findItem(result.current.menu, "Odoo");
+    const integrationsGated = findItem(result.current.menu, "Integrations");
     // Gate ON: setup incomplete. Both entries disabled, and STILL agreeing -
     // this is what proves it is the SHARED gate, not two independent ones
     // that happen to start out matching.
     expect(meetingsGated.disabled).toBe(true);
-    expect(meetingsGated.disabled).toBe(odooGated.disabled);
+    expect(meetingsGated.disabled).toBe(integrationsGated.disabled);
   });
 
   // The merge's whole point: two entry points collapse into one. A regression

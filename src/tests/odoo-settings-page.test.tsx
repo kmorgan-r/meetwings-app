@@ -72,9 +72,22 @@ vi.mock("@/lib/odoo", async () => {
   return { ...actual, ...odoo };
 });
 
-vi.mock("@/lib/database/odoo-contacts.action", () => ({
-  getSyncState: vi.fn(async () => null),
+// Hoisted, not an inline factory: the page now READS this to seed the synced
+// row from the last completed run, so tests have to steer it per case.
+const { getSyncState } = vi.hoisted(() => ({
+  getSyncState: vi.fn(async () => null as unknown),
 }));
+vi.mock("@/lib/database/odoo-contacts.action", () => ({ getSyncState }));
+
+// The persisted "Test connection" outcome. A sibling module of
+// odoo-config.storage, so it needs its own mock - the hoisted `storage` object
+// above stands in for that file alone.
+const verification = vi.hoisted(() => ({
+  loadOdooVerification: vi.fn(async () => null as unknown),
+  saveOdooVerification: vi.fn(async () => {}),
+  clearOdooVerification: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/storage/odoo-verification.storage", () => verification);
 
 // WITHOUT THIS EVERY TEST IN THIS FILE THROWS ON RENDER.
 //
@@ -122,6 +135,10 @@ beforeEach(() => {
   getQueueCounts.mockResolvedValue({
     waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0, lastError: null,
   });
+  getSyncState.mockResolvedValue(null);
+  verification.loadOdooVerification.mockResolvedValue(null);
+  verification.saveOdooVerification.mockResolvedValue(undefined);
+  verification.clearOdooVerification.mockResolvedValue(undefined);
   // Baseline for the calendar section: nothing stored, graph_status reports
   // disconnected. Individual tests below override one or both.
   secureStorage.secureGet.mockResolvedValue(null);
@@ -751,5 +768,310 @@ describe("the calendar connect section", () => {
     expect(message.textContent).toMatch(/Calendars\.ReadBasic/);
     // The old, malformed deep link must be gone.
     expect(message.textContent).not.toMatch(/adminconsent\?client_id=/);
+  });
+});
+
+// The reason this page has a persisted check at all: a user who set Odoo up
+// last week reopens Settings > Odoo and the card told them the connection was
+// "Not tested yet", with no way to tell an untested config from a working one.
+// API Setup has never behaved that way - it keys its verification to a hash of
+// the credentials and shows it again on the next launch - and these tests hold
+// this page to the same contract.
+describe("the remembered connection check", () => {
+  const ON_DISK = {
+    url: "http://h:8069",
+    db: "odoo",
+    login: "bob",
+    apiKey: KEY,
+  };
+
+  it("shows the stored check on mount instead of asking for another test", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+    expect(screen.getByText(/uid 7/)).toBeInTheDocument();
+    expect(screen.queryByText(/not tested yet/i)).not.toBeInTheDocument();
+  });
+
+  it("still asks for a test when no check has been stored", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    renderPage();
+
+    expect(await screen.findByText(/not tested yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/connection verified/i)).not.toBeInTheDocument();
+  });
+
+  // The record is keyed to the credentials it was taken against, and the ones
+  // that matter are the STORED ones: Test connection authenticates with
+  // requireOdooConfig, never with what is typed in the form.
+  it("matches the stored check against the credentials on disk", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    renderPage();
+
+    await waitFor(() =>
+      expect(verification.loadOdooVerification).toHaveBeenCalledWith(ON_DISK)
+    );
+  });
+
+  it("remembers a passing test for the next launch", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+
+    // The config from storage (login "l"), not the form's - proof the record is
+    // keyed to what was actually authenticated.
+    await waitFor(() =>
+      expect(verification.saveOdooVerification).toHaveBeenCalledWith(
+        { url: "http://h:8069", db: "odoo", login: "l", apiKey: "k" },
+        7
+      )
+    );
+  });
+
+  it("forgets the stored check when a test fails", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    odoo.testOdooConnection.mockRejectedValue(
+      odooError("ODOO_AUTH_FAILED", "Odoo rejected the credentials")
+    );
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+
+    await waitFor(() => expect(verification.clearOdooVerification).toHaveBeenCalled());
+    expect(await screen.findByText(/not tested yet/i)).toBeInTheDocument();
+    expect(verification.saveOdooVerification).not.toHaveBeenCalled();
+  });
+
+  // Writing the record is bookkeeping for the NEXT launch. The connection did
+  // succeed, and a failure to write that down must never be shown as one.
+  it("keeps a passing test green when the check cannot be written down", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.saveOdooVerification.mockRejectedValue(new Error("store is read-only"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+
+    expect(await screen.findByTestId("odoo-test-status")).toHaveTextContent(/connected as uid 7/i);
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+  });
+
+  // Nothing that reads the record can match it against a config that is not
+  // there, so writing one would leave a permanently unusable blob on disk.
+  it("does not write a check down when the config is not fully stored", async () => {
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    storage.loadOdooConfigState.mockResolvedValue({
+      state: "incomplete",
+      config: null,
+      missing: ["apiKey"],
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /test connection/i }));
+
+    expect(await screen.findByText(/connection verified/i)).toBeInTheDocument();
+    await waitFor(() => expect(odoo.testOdooConnection).toHaveBeenCalled());
+    expect(verification.saveOdooVerification).not.toHaveBeenCalled();
+  });
+});
+
+// The third checklist row has the same reload problem as the second, and the
+// evidence for it is already persisted: finishSync stamps last_sync_at on a
+// COMPLETED run only, per instance.
+describe("the remembered sync", () => {
+  const ON_DISK = { url: "http://h:8069", db: "odoo", login: "bob", apiKey: KEY };
+
+  it("shows contacts as synced on mount when a run has completed", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+  });
+
+  // The row is drawn pending={!verified}, so an ungated seed renders step 3
+  // done above an untested step 2 - which is exactly the state every user who
+  // has ever synced lands in on the first launch after this ships, since
+  // last_sync_at predates the verification record. `last_sync_at` is keyed to
+  // url|db alone; the check is keyed to the credentials too, and it is the
+  // narrower claim that has to carry the row.
+  it("does not show a remembered sync above an untested connection", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    renderPage();
+
+    expect(await screen.findByText(/contacts not synced yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+  });
+
+  // The mirror of "drops the verified check when a later test fails". Without
+  // it a failed sync leaves a green "Contacts synced" seeded from disk sitting
+  // directly above its own red failure line.
+  it("drops the synced check when a later sync fails", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    odoo.runSync.mockRejectedValue(odooError("ODOO_AUTH_FAILED", "Odoo rejected the credentials"));
+    await userEvent.click(screen.getByRole("button", { name: /sync contacts/i }));
+
+    expect(await screen.findByText(/contacts not synced yet/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^contacts synced$/i)).not.toBeInTheDocument();
+  });
+
+  // A sync that DECLINED to run has not failed, and it has not un-synced
+  // anything either: the contacts another window just pulled are still there.
+  it("keeps the remembered sync when another window is already syncing", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    storage.loadOdooConfig.mockResolvedValue(ON_DISK);
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    renderPage();
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+
+    odoo.runSync.mockRejectedValue(odooError("ODOO_SYNC_BUSY", "A sync is already running"));
+    await userEvent.click(screen.getByRole("button", { name: /sync contacts/i }));
+
+    expect(await screen.findByTestId("odoo-sync-status")).toHaveTextContent(/already running/i);
+    expect(screen.getByText(/^contacts synced$/i)).toBeInTheDocument();
+  });
+
+  it("does not claim a sync that never completed", async () => {
+    getSyncState.mockResolvedValue({
+      last_write_date: null,
+      last_sync_at: null,
+      last_error_code: "ODOO_AUTH_FAILED",
+      last_error_at: 1757000000000,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    renderPage();
+
+    expect(await screen.findByText(/contacts not synced yet/i)).toBeInTheDocument();
+  });
+
+  it("scopes the remembered sync to the Odoo database on disk", async () => {
+    renderPage();
+    await waitFor(() => expect(getSyncState).toHaveBeenCalledWith("http://h:8069|odoo"));
+  });
+});
+
+// The calendar's own connection has always PERSISTED - the refresh token lives
+// in the OS keychain and graph_status reads it back on mount - but the page
+// never said so. A returning user's only clue was a Disconnect button
+// appearing beside Connect, which is the same "is this set up or not?" question
+// the Odoo rows above exist to answer.
+describe("the calendar row on the checklist", () => {
+  const CONNECTED = { connected: true, sessionOnly: false };
+  const GRAPH_CONFIG = JSON.stringify({
+    clientId: "abc-123",
+    authority: "https://login.microsoftonline.com/contoso",
+  });
+
+  function calendarStatus(status: { connected: boolean; sessionOnly: boolean }) {
+    // A stored client ID as well as the status: the graph_status effect stays
+    // silent for a config in the `absent` state, so a bare status stub would
+    // never reach the row.
+    secureStorage.secureGet.mockResolvedValue(GRAPH_CONFIG);
+    tauriCore.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "graph_status") return status;
+      if (cmd === "graph_disconnect") return undefined;
+      throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
+    });
+  }
+
+  it("reports the calendar as connected on mount when the keychain still holds the token", async () => {
+    calendarStatus(CONNECTED);
+    renderPage();
+
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+  });
+
+  it("says the calendar is not connected when it never was", async () => {
+    renderPage();
+
+    expect(await screen.findByText(/^calendar not connected$/i)).toBeInTheDocument();
+  });
+
+  // A session-only connection is real but does not survive a restart, and the
+  // checklist is read as a claim about the app's steady state - so the row has
+  // to carry the caveat, not just the paragraph further down the page.
+  it("marks a session-only calendar connection as exactly that", async () => {
+    calendarStatus({ connected: true, sessionOnly: true });
+    renderPage();
+
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+    expect(screen.getByText(/this session only/i)).toBeInTheDocument();
+  });
+
+  it("drops the calendar check when the calendar is disconnected", async () => {
+    calendarStatus(CONNECTED);
+    renderPage();
+    expect(await screen.findByText(/^calendar connected$/i)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+
+    expect(await screen.findByText(/^calendar not connected$/i)).toBeInTheDocument();
+  });
+
+  // Four rows, not three: the calendar is one of the connections this page is
+  // for, so a card that reads 100% while it is unconnected is claiming
+  // something it has not checked.
+  it("counts the calendar in the card's progress", async () => {
+    storage.loadOdooConfig.mockResolvedValue({
+      url: "http://h:8069",
+      db: "odoo",
+      login: "bob",
+      apiKey: KEY,
+    });
+    verification.loadOdooVerification.mockResolvedValue({ uid: 7, verifiedAt: 1 });
+    getSyncState.mockResolvedValue({
+      last_write_date: "2026-09-01 00:00:00",
+      last_sync_at: 1757000000000,
+      last_error_code: null,
+      last_error_at: null,
+      skipped_rows: 0,
+      running_since: null,
+    });
+    renderPage();
+
+    expect(await screen.findByText(/^contacts synced$/i)).toBeInTheDocument();
+    expect(screen.getByText("75% Done")).toBeInTheDocument();
+  });
+
+  it("calls the card Integrations, not Odoo Connection", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "Integrations" })).toBeInTheDocument();
+    expect(screen.queryByText("Odoo Connection")).not.toBeInTheDocument();
   });
 });

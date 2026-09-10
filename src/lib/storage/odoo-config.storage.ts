@@ -107,12 +107,15 @@ export async function requireOdooConfig(): Promise<OdooConfig> {
   if (loaded.state === "incomplete") {
     throw odooError(
       "ODOO_NOT_CONFIGURED",
-      `Odoo is set up but incomplete - fill in ${loaded.missing.join(", ")} in Settings > Odoo`,
+      `Odoo is set up but incomplete - fill in ${loaded.missing.join(", ")} in Settings > Integrations`,
       { missing: loaded.missing.join(",") }
     );
   }
   if (loaded.state === "absent") {
-    throw odooError("ODOO_NOT_CONFIGURED", "Odoo is not set up yet - open Settings > Odoo");
+    throw odooError(
+      "ODOO_NOT_CONFIGURED",
+      "Odoo is not set up yet - open Settings > Integrations"
+    );
   }
   return loaded.config;
 }

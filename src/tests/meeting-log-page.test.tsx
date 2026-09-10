@@ -1257,7 +1257,10 @@ describe("when Odoo is not configured", () => {
 
     const line = await screen.findByText(/^2 meetings are waiting\./);
     expect(line.textContent).toContain("Finish setting Odoo up on the");
-    expect(screen.getByRole("link", { name: "Odoo page" })).toHaveAttribute("href", "/odoo");
+    expect(screen.getByRole("link", { name: "Integrations page" })).toHaveAttribute(
+      "href",
+      "/integrations"
+    );
 
     expect(db.listActionableRows).not.toHaveBeenCalled();
     expect(screen.queryByRole("heading", { level: 2 })).toBeNull();

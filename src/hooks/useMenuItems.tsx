@@ -56,8 +56,8 @@ export const useMenuItems = () => {
     },
     {
       icon: Building2Icon,
-      label: "Odoo",
-      href: "/odoo",
+      label: "Integrations",
+      href: "/integrations",
       disabled: gateOnSetup,
     },
     {
