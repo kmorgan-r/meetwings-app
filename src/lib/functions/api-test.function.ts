@@ -159,6 +159,28 @@ async function handleResponseStatus(response: Response): Promise<TestResult | nu
 }
 
 /**
+ * Text of the first `text` block in an Anthropic-style `content` array.
+ * Thinking models put a thinking block first, so `content[0].text` is empty.
+ */
+function firstTextBlock(json: unknown): string | undefined {
+  const blocks = (json as { content?: unknown } | null)?.content;
+  if (!Array.isArray(blocks)) return undefined;
+  return blocks.find((block) => block?.type === "text" && block.text)?.text;
+}
+
+/**
+ * True when generation stopped at the token cap: OpenAI-compatible
+ * `choices[0].finish_reason`, Anthropic `stop_reason`, or Cohere v2 `finish_reason`.
+ */
+function stoppedAtTokenCap(json: unknown): boolean {
+  const reason =
+    getByPath(json, "choices[0].finish_reason") ??
+    getByPath(json, "stop_reason") ??
+    getByPath(json, "finish_reason");
+  return typeof reason === "string" && ["length", "max_tokens"].includes(reason.toLowerCase());
+}
+
+/**
  * Handles fetch errors and converts them to TestResult.
  */
 function handleFetchError(error: unknown): TestResult {
@@ -291,9 +313,11 @@ export async function testAIProvider(
       delete bodyObj.stream_options;
     }
 
-    // Limit response tokens for faster test
+    // Limit response tokens for faster test. OpenAI's GPT-5 family rejects
+    // `max_tokens` with a 400 and only accepts `max_completion_tokens`.
     if (typeof bodyObj === "object" && bodyObj !== null) {
-      bodyObj.max_tokens = 10;
+      const isOpenAI = provider?.id === "openai" || url.includes("api.openai.com");
+      bodyObj[isOpenAI ? "max_completion_tokens" : "max_tokens"] = 10;
     }
 
     // Always use Tauri's HTTP client to bypass CORS for external providers
@@ -331,12 +355,16 @@ export async function testAIProvider(
       };
     }
 
-    const content = getByPath(json, provider?.responseContentPath || "") || "";
+    const content =
+      getByPath(json, provider?.responseContentPath || "") || firstTextBlock(json) || "";
     // Require actual extracted content. `json` is a parsed object and thus almost
     // always truthy, so `content || json` would pass verification for any 200
     // response — including error bodies or shapes that don't match
     // responseContentPath — and real completions would then fail.
-    if (content) {
+    // The one exception is a completion cut off by the 10-token cap: reasoning
+    // models can spend the whole cap thinking, and that still proves the key,
+    // model and endpoint work.
+    if (content || stoppedAtTokenCap(json)) {
       return {
         success: true,
         message: ErrorMessages.SUCCESS_VERIFIED,
