@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import {
   Select,
   SelectContent,
@@ -244,13 +244,6 @@ export const ModelSelector = ({
     [hasModels, models, selectedModel]
   );
 
-  // Sync custom mode state: exit custom mode if user selects a predefined model
-  useEffect(() => {
-    if (isSelectedModelPredefined && isCustomMode) {
-      setIsCustomMode(false);
-    }
-  }, [isSelectedModelPredefined, isCustomMode]);
-
   // If no predefined models, or we're in custom mode, show text input
   if (!hasModels || isCustomMode) {
     return (
@@ -266,12 +259,6 @@ export const ModelSelector = ({
     );
   }
 
-  // If selected model is not in predefined list but we have models, show as custom
-  const displayValue =
-    !isSelectedModelPredefined && selectedModel
-      ? CUSTOM_MODEL_VALUE
-      : selectedModel;
-
   const recommendedModels = models.filter((m) => m.recommended);
   const otherModels = models.filter((m) => !m.recommended);
 
@@ -283,8 +270,11 @@ export const ModelSelector = ({
           providerDisplayName || providerId
         } or enter a custom model name`}
       />
+      {/* Bound to the real id, never CUSTOM_MODEL_VALUE: Radix fires
+          onValueChange only when the value changes, so "Custom model..."
+          must stay a different value while a custom model is saved. */}
       <Select
-        value={displayValue || ""}
+        value={selectedModel || ""}
         onValueChange={(value) => {
           if (value === CUSTOM_MODEL_VALUE) {
             setIsCustomMode(true);
