@@ -122,7 +122,6 @@ export const DEFAULT_PRICING: PricingConfig = {
     "deepseek/deepseek-v4-flash-0731": { inputPer1k: 0.000065, outputPer1k: 0.00018 },
     "upstage/solar-pro4": { inputPer1k: 0.00003, outputPer1k: 0.00012 },
     "openrouter/free": { inputPer1k: 0, outputPer1k: 0 },
-    "thinkingmachines/inkling:free": { inputPer1k: 0, outputPer1k: 0 },
     "nvidia/nemotron-3.5-lightning:free": { inputPer1k: 0, outputPer1k: 0 },
     // Any other ":free" variant typed as a custom model
     ":free": { inputPer1k: 0, outputPer1k: 0 },

@@ -210,7 +210,6 @@ export const AI_MODELS: Record<string, ModelOption[]> = {
     { id: "deepseek/deepseek-v4-flash-0731", name: "DeepSeek V4 Flash (text only)", description: "Ultra cheap" },
     { id: "upstage/solar-pro4", name: "Solar Pro 4 (text only)", description: "Cheapest popular pick" },
     { id: "openrouter/free", name: "Free Models Router", description: "Picks a free model per request, rate-limited" },
-    { id: "thinkingmachines/inkling:free", name: "Inkling (free)", description: "Vision, rate-limited" },
     { id: "nvidia/nemotron-3.5-lightning:free", name: "Nemotron 3.5 Lightning (free, text only)", description: "Rate-limited" },
   ],
   ollama: [
