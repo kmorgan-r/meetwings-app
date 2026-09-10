@@ -180,6 +180,8 @@ export async function* fetchAIResponse(params: {
   userMessage: string;
   imagesBase64?: string[];
   signal?: AbortSignal;
+  /** Called once with the model the provider says answered, e.g. a router's pick */
+  onModel?: (model: string) => void;
 }): AsyncIterable<string> {
   try {
     const {
@@ -190,6 +192,7 @@ export async function* fetchAIResponse(params: {
       userMessage,
       imagesBase64 = [],
       signal,
+      onModel,
     } = params;
 
     // Check if already aborted
@@ -357,6 +360,10 @@ export async function* fetchAIResponse(params: {
         }`;
         return;
       }
+      const respondedModel =
+        typeof json?.model === "string" && json.model ? json.model : undefined;
+      if (respondedModel) onModel?.(respondedModel);
+
       const content =
         getByPath(json, provider?.responseContentPath || "") || "";
       yield content;
@@ -371,6 +378,7 @@ export async function* fetchAIResponse(params: {
               usage,
               provider: provider?.id || selectedProvider.provider,
               model: modelName,
+              respondedModel,
             },
           })
         );
@@ -387,6 +395,8 @@ export async function* fetchAIResponse(params: {
     const decoder = new TextDecoder();
     let buffer = "";
     let capturedUsage: UsageData | null = null;
+    // The `model` the provider reports on its chunks, e.g. a router's pick
+    let respondedModel: string | undefined;
 
     // Extract model name from bodyObj
     const modelName = bodyObj.model || selectedProvider.variables?.MODEL || "unknown";
@@ -439,6 +449,17 @@ export async function* fetchAIResponse(params: {
           try {
             const parsed = JSON.parse(trimmed);
 
+            // Report the answering model once, before the error check below,
+            // so a pick that fails is still named.
+            if (
+              !respondedModel &&
+              typeof parsed?.model === "string" &&
+              parsed.model
+            ) {
+              respondedModel = parsed.model;
+              onModel?.(parsed.model);
+            }
+
             // Routers like OpenRouter keep HTTP 200 once streaming starts and
             // report upstream failures as an SSE event carrying `error`. Only
             // an error with a message counts, so an empty placeholder on a
@@ -486,6 +507,7 @@ export async function* fetchAIResponse(params: {
         usage: capturedUsage,
         provider: provider?.id || selectedProvider.provider,
         model: modelName,
+        respondedModel,
       };
       console.log("[Cost Tracking] Emitting api-usage-captured event:", eventDetail);
       window.dispatchEvent(

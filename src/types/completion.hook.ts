@@ -171,6 +171,19 @@ export interface UseCompletionReturn {
   assignSpeaker: (speakerId: string, label: string, profileId?: string) => void;
   /** Function to update speaker info for a specific entry by timestamp (used by diarization) */
   updateEntrySpeaker: (timestamp: number, speakerInfo: SpeakerInfo) => void;
+
+  // Model attribution
+  /** The model that produced the current answer, as the provider reported it; null until it reports one */
+  respondedModel: RespondedModel | null;
+}
+
+/**
+ * The model a provider says produced an answer, with the model id that was
+ * requested. They differ when a router such as openrouter/free picks the model.
+ */
+export interface RespondedModel {
+  requested: string;
+  model: string;
 }
 
 /**
