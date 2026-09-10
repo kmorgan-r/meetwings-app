@@ -34,14 +34,25 @@ impl Default for ContentProtectionState {
 /// The main overlay's pre-minimize geometry, in PHYSICAL pixels:
 /// (x, y, width, height). In-memory only — a restart starts un-minimized,
 /// and restore falls back to the 600x54 bar when this is None.
+///
+/// `minimized` is the SOURCE OF TRUTH for whether the window is currently the
+/// corner pill. It cannot be derived from `saved`: restore deliberately keeps
+/// the snapshot (see `restore_overlay`), so `saved.is_some()` outlives the
+/// minimized state. The frontend's flag is a mirror of this one and is reset
+/// by anything that resets the webview's JS heap — a reload from the error
+/// screen's retry button, a WebView2 renderer restart — while the window
+/// itself stays a pill. Rust survives all of those, so Rust holds the truth
+/// and the frontend reads it back on mount.
 pub struct OverlayMinimizeState {
     pub saved: Mutex<Option<(i32, i32, u32, u32)>>,
+    pub minimized: Mutex<bool>,
 }
 
 impl Default for OverlayMinimizeState {
     fn default() -> Self {
         Self {
             saved: Mutex::new(None),
+            minimized: Mutex::new(false),
         }
     }
 }
@@ -164,8 +175,27 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
 }
 
 #[tauri::command]
-pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+pub fn set_window_height(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    height: u32,
+) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
+
+    // The backstop for the frontend's `getMinimized()` gate in useWindow.ts.
+    // That one lives in the webview's JS heap and is gone the moment the page
+    // reloads; this one is not. Without it, a reload while minimized lets the
+    // MutationObserver stretch the pill back to a 600px bar from the pill's
+    // bottom-right anchor — most of it off the right edge of the screen —
+    // before the frontend has finished reading the flag back.
+    if *app
+        .state::<OverlayMinimizeState>()
+        .minimized
+        .lock()
+        .unwrap()
+    {
+        return Ok(());
+    }
 
     // Simply set the window size with fixed width and new height
     let new_size = LogicalSize::new(600.0, height as f64);
@@ -255,6 +285,12 @@ pub fn minimize_overlay(
         None => apply()?,
     }
 
+    // Set only once the geometry is actually committed. The rollback arm above
+    // leaves the window expanded, and a flag raised before the apply would gate
+    // `set_window_height` against a window that is not a pill — freezing the
+    // overlay at whatever height it happened to have.
+    *state.minimized.lock().unwrap() = true;
+
     Ok(())
 }
 
@@ -293,7 +329,24 @@ pub fn restore_overlay(app: AppHandle, window: WebviewWindow) -> Result<(), Stri
         .set_position(Position::Physical(PhysicalPosition::new(x, y)))
         .map_err(|e| format!("Failed to position window: {}", e))?;
 
+    // Cleared last: an early return above leaves the window a pill, and the
+    // flag must still say so — the frontend keeps the pill rendered on a
+    // failed restore and the user retries.
+    *state.minimized.lock().unwrap() = false;
+
     Ok(())
+}
+
+/// Whether the overlay window is currently the corner pill. The frontend's
+/// flag is a mirror of this one and does not survive a page reload; the app
+/// page reads this back on mount so a reload cannot leave the full bar
+/// rendering inside pill geometry.
+#[tauri::command]
+pub fn is_overlay_minimized(app: AppHandle) -> bool {
+    *app.state::<OverlayMinimizeState>()
+        .minimized
+        .lock()
+        .unwrap()
 }
 
 #[tauri::command]

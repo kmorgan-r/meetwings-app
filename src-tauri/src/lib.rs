@@ -158,6 +158,7 @@ pub fn run() {
             window::set_content_protection,
             window::minimize_overlay,
             window::restore_overlay,
+            window::is_overlay_minimized,
             capture::capture_to_base64,
             capture::start_screen_capture,
             capture::capture_selected_area,

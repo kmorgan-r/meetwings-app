@@ -74,6 +74,26 @@ const App = () => {
     }
   };
 
+  // Rust owns the minimized flag; this one is a mirror that dies with the
+  // webview's JS heap. Anything that resets it — the error screen's reload
+  // button, a WebView2 renderer restart — used to bring the app back with
+  // `minimized` false while the WINDOW was still the bottom-right pill: the
+  // full Card rendered into pill geometry, the MutationObserver stretched it
+  // to 600px from the corner anchor, and the drag handle and minimize button
+  // ended up off the right edge of the screen where nothing could reach them.
+  // Reading the flag back on mount is what closes that gap; `set_window_height`
+  // is gated in Rust too, so the observer cannot win the race while this
+  // invoke is in flight.
+  useEffect(() => {
+    invoke<boolean>("is_overlay_minimized")
+      .then((isMinimized) => {
+        if (isMinimized) setMinimized(true);
+      })
+      .catch((error) => {
+        console.error("Failed to read the minimized state:", error);
+      });
+  }, []);
+
   // The dashboard settings window writes localStorage and emits
   // overlay-pill-style-changed (it renders in another webview; this one's
   // React state will not re-read storage on its own). Sync the context
