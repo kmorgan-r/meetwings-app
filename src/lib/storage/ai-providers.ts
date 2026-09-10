@@ -80,3 +80,23 @@ export function removeCustomAiProvider(id: string): boolean {
     return false;
   }
 }
+
+/**
+ * The saved AI provider selection, or null when it can't be restored.
+ * A selection whose provider no longer exists (a retired built-in such as
+ * Perplexity) would leave every request failing with "Provider not
+ * provided" instead of sending the user to setup.
+ */
+export function parseSavedAiSelection(
+  saved: string,
+  providers: TYPE_PROVIDER[]
+): { provider: string; variables: Record<string, string> } | null {
+  try {
+    const selection = JSON.parse(saved);
+    return providers.some((p) => p.id === selection?.provider)
+      ? selection
+      : null;
+  } catch {
+    return null;
+  }
+}

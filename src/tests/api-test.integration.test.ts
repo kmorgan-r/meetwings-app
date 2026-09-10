@@ -103,6 +103,7 @@ describe("testAIProvider", () => {
 
       expect(result.success).toBe(false);
       expect(result.message).toBe("Authentication failed: Invalid API key");
+      expect(result.error).toBe("HTTP 401: Unauthorized");
     });
 
     it("should return success for 429 rate limit (key is valid)", async () => {
@@ -172,7 +173,9 @@ describe("testAIProvider", () => {
       expect(result.success).toBe(true);
     });
 
-    it("should handle 403 forbidden as auth error", async () => {
+    it("should report 403 as access denied and keep the provider's reason", async () => {
+      // 403 means the key was accepted but this request was refused
+      // (permissions, guardrail or moderation), so it isn't a key problem.
       mockTauriFetch.mockResolvedValueOnce(
         createMockResponse({
           status: 403,
@@ -184,7 +187,24 @@ describe("testAIProvider", () => {
       const result = await testAIProvider(claudeProvider, selectedProvider);
 
       expect(result.success).toBe(false);
-      expect(result.message).toBe("Authentication failed: Invalid API key");
+      expect(result.message).toBe("Access denied by provider");
+      expect(result.error).toBe("HTTP 403: Forbidden");
+    });
+
+    it("should take the message out of a JSON error body", async () => {
+      mockTauriFetch.mockResolvedValueOnce(
+        createMockResponse({
+          status: 403,
+          ok: false,
+          text: JSON.stringify({
+            error: { code: 403, message: "Blocked by guardrail" },
+          }),
+        })
+      );
+
+      const result = await testAIProvider(claudeProvider, selectedProvider);
+
+      expect(result.error).toBe("HTTP 403: Blocked by guardrail");
     });
   });
 

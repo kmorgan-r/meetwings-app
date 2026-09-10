@@ -10,6 +10,10 @@ const STT_PRICING_STORAGE_KEY = "stt_pricing_config";
  */
 export const DEFAULT_PRICING: PricingConfig = {
   openai: {
+    "gpt-5.6-terra": { inputPer1k: 0.002, outputPer1k: 0.012 },
+    "gpt-5.6-luna": { inputPer1k: 0.0002, outputPer1k: 0.0012 },
+    "gpt-5.6-sol": { inputPer1k: 0.004, outputPer1k: 0.02 },
+    "gpt-6-astra": { inputPer1k: 0.01, outputPer1k: 0.05 },
     "gpt-4o": { inputPer1k: 0.0025, outputPer1k: 0.01 },
     "gpt-4o-mini": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
     "gpt-4-turbo": { inputPer1k: 0.01, outputPer1k: 0.03 },
@@ -18,9 +22,11 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.002, outputPer1k: 0.008 }, // Default for unknown OpenAI models
   },
   claude: {
-    // Current models (per 1M: opus $5/$25, sonnet $3/$15, haiku $1/$5)
+    // Current models (per 1M: fable $10/$50, opus $5/$25, sonnet $2/$10, haiku $1/$5)
+    "claude-fable-5-1": { inputPer1k: 0.01, outputPer1k: 0.05 },
+    "claude-opus-5": { inputPer1k: 0.005, outputPer1k: 0.025 },
     "claude-opus-4-8": { inputPer1k: 0.005, outputPer1k: 0.025 },
-    "claude-sonnet-5": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "claude-sonnet-5": { inputPer1k: 0.002, outputPer1k: 0.01 },
     "claude-haiku-4-5": { inputPer1k: 0.001, outputPer1k: 0.005 },
     // Exact model IDs used in API
     "claude-3-5-sonnet-20241022": { inputPer1k: 0.003, outputPer1k: 0.015 },
@@ -35,12 +41,19 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.003, outputPer1k: 0.015 }, // Default for unknown Claude models
   },
   gemini: {
+    "gemini-3.5-flash-lite": { inputPer1k: 0.0003, outputPer1k: 0.0025 },
+    "gemini-3.1-flash-lite": { inputPer1k: 0.00025, outputPer1k: 0.0015 },
+    // Promo price through 2026-12-31, then $1.50/$7.50 per 1M
+    "gemini-3.8-flash": { inputPer1k: 0.00075, outputPer1k: 0.00375 },
+    "gemini-3.6-flash": { inputPer1k: 0.00075, outputPer1k: 0.00375 },
     "gemini-1.5-pro": { inputPer1k: 0.00125, outputPer1k: 0.005 },
     "gemini-1.5-flash": { inputPer1k: 0.000075, outputPer1k: 0.0003 },
     "gemini-pro": { inputPer1k: 0.000125, outputPer1k: 0.000375 },
     "*": { inputPer1k: 0.000125, outputPer1k: 0.000375 },
   },
   groq: {
+    "openai/gpt-oss-120b": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    "openai/gpt-oss-20b": { inputPer1k: 0.000075, outputPer1k: 0.0003 },
     // Llama 3.3 models
     "llama-3.3-70b-versatile": { inputPer1k: 0.00059, outputPer1k: 0.00079 },
     "llama-3.3-70b-specdec": { inputPer1k: 0.00059, outputPer1k: 0.00099 },
@@ -63,6 +76,11 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.0001, outputPer1k: 0.0001 },
   },
   mistral: {
+    "mistral-large-2512": { inputPer1k: 0.0005, outputPer1k: 0.0015 },
+    "mistral-medium-3-5": { inputPer1k: 0.0015, outputPer1k: 0.0075 },
+    "mistral-small-2603": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    "ministral-14b-2512": { inputPer1k: 0.0002, outputPer1k: 0.0002 },
+    "ministral-8b-2512": { inputPer1k: 0.00015, outputPer1k: 0.00015 },
     // Exact model IDs with -latest suffix
     "mistral-large-latest": { inputPer1k: 0.004, outputPer1k: 0.012 },
     "mistral-medium-latest": { inputPer1k: 0.0027, outputPer1k: 0.0081 },
@@ -77,6 +95,12 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.0004, outputPer1k: 0.0012 },
   },
   perplexity: {
+    // Token prices only; per-request search fees are not tracked.
+    // Longer keys first: "sonar" is a substring of every other Sonar id.
+    "sonar-deep-research": { inputPer1k: 0.002, outputPer1k: 0.008 },
+    "sonar-reasoning-pro": { inputPer1k: 0.002, outputPer1k: 0.008 },
+    "sonar-pro": { inputPer1k: 0.003, outputPer1k: 0.015 },
+    "sonar": { inputPer1k: 0.001, outputPer1k: 0.001 },
     // Online models (with web search)
     "llama-3.1-sonar-large-128k-online": { inputPer1k: 0.001, outputPer1k: 0.001 },
     "llama-3.1-sonar-small-128k-online": { inputPer1k: 0.0002, outputPer1k: 0.0002 },
@@ -89,7 +113,19 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.001, outputPer1k: 0.001 },
   },
   openrouter: {
-    // Popular models via OpenRouter (pricing varies, these are estimates)
+    // Listed models (OpenRouter /api/v1/models, 2026-09-10)
+    "openai/gpt-5.6-luna": { inputPer1k: 0.0002, outputPer1k: 0.0012 },
+    "z-ai/glm-5.3-flash": { inputPer1k: 0.00015, outputPer1k: 0.0005 },
+    // Base rate; weekdays 01-04 and 06-10 UTC bill at 2x
+    "deepseek/deepseek-v4.1-flash": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    "google/gemini-3.8-flash": { inputPer1k: 0.00075, outputPer1k: 0.00375 },
+    "deepseek/deepseek-v4-flash-0731": { inputPer1k: 0.000065, outputPer1k: 0.00018 },
+    "upstage/solar-pro4": { inputPer1k: 0.00003, outputPer1k: 0.00012 },
+    "openrouter/free": { inputPer1k: 0, outputPer1k: 0 },
+    "nvidia/nemotron-3.5-lightning:free": { inputPer1k: 0, outputPer1k: 0 },
+    // Any other ":free" variant typed as a custom model
+    ":free": { inputPer1k: 0, outputPer1k: 0 },
+    // Previously listed models, kept so existing selections still price correctly
     "openai/gpt-4o": { inputPer1k: 0.0025, outputPer1k: 0.01 },
     "anthropic/claude-3.5-sonnet": { inputPer1k: 0.003, outputPer1k: 0.015 },
     "meta-llama/llama-3.1-70b-instruct": { inputPer1k: 0.00059, outputPer1k: 0.00079 },
@@ -104,6 +140,10 @@ export const DEFAULT_PRICING: PricingConfig = {
     "*": { inputPer1k: 0.001, outputPer1k: 0.002 },
   },
   grok: {
+    // Prompts under 200K tokens; larger prompts bill at 2x
+    "grok-4.20-0309-non-reasoning": { inputPer1k: 0.00125, outputPer1k: 0.0025 },
+    "grok-4.6": { inputPer1k: 0.002, outputPer1k: 0.006 },
+    "grok-4.3": { inputPer1k: 0.00125, outputPer1k: 0.0025 },
     // xAI Grok models
     "grok-2": { inputPer1k: 0.002, outputPer1k: 0.01 },
     "grok-2-mini": { inputPer1k: 0.0002, outputPer1k: 0.001 }, // Very cheap!
@@ -112,6 +152,11 @@ export const DEFAULT_PRICING: PricingConfig = {
   },
   ollama: {
     // Ollama is free (runs locally)
+    "ministral-3": { inputPer1k: 0, outputPer1k: 0 },
+    "gemma4": { inputPer1k: 0, outputPer1k: 0 },
+    "qwen3.8": { inputPer1k: 0, outputPer1k: 0 },
+    "qwen3.5": { inputPer1k: 0, outputPer1k: 0 },
+    "granite4.2": { inputPer1k: 0, outputPer1k: 0 },
     "llama3.2": { inputPer1k: 0, outputPer1k: 0 },
     "llama3.1": { inputPer1k: 0, outputPer1k: 0 },
     "mistral": { inputPer1k: 0, outputPer1k: 0 },

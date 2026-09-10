@@ -14,6 +14,7 @@ import { UseCompletionReturn } from "@/types";
 import { MessageHistory } from "./MessageHistory";
 import { QuickActions } from "./QuickActions";
 import { MeetingTranscriptPanel } from "./MeetingTranscriptPanel";
+import { ActiveModels } from "./ActiveModels";
 import { UseQuickActionsReturn } from "@/hooks/useQuickActions";
 import { useApp } from "@/contexts";
 
@@ -21,6 +22,8 @@ interface InputProps extends UseCompletionReturn {
   isHidden: boolean;
   quickActions?: UseQuickActionsReturn;
   onQuickActionClick?: (action: string) => void;
+  /** Meetwings Cloud is answering, so its models are not the selected ones */
+  cloudMode?: boolean;
 }
 
 export const Input = ({
@@ -51,6 +54,8 @@ export const Input = ({
   meetingTranscript,
   clearMeetingTranscript,
   assignSpeaker,
+  respondedModel,
+  cloudMode = false,
 }: InputProps) => {
   const { sttTranslationEnabled } = useApp();
 
@@ -141,16 +146,22 @@ export const Input = ({
           className="w-screen p-0 border shadow-lg overflow-hidden flex flex-col h-[calc(100vh-4rem)]"
           sideOffset={8}
         >
-          <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/30">
-            <div className="flex flex-row gap-1 items-center">
-              <h3 className="font-semibold text-xs select-none">
+          <div className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-muted/30">
+            <div className="flex flex-row gap-2 items-center min-w-0">
+              <h3
+                className="font-semibold text-xs select-none shrink-0"
+                title="Use arrow keys to scroll"
+              >
                 {keepEngaged ? "Conversation Mode" : "AI Response"}
               </h3>
-              <div className="text-[10px] text-muted-foreground/70">
-                (Use arrow keys to scroll)
-              </div>
+              <ActiveModels
+                respondedModel={respondedModel}
+                isLoading={isLoading}
+                cloudMode={cloudMode}
+                listening={enableVAD}
+              />
             </div>
-            <div className="flex items-center gap-2 select-none">
+            <div className="flex items-center gap-2 select-none shrink-0">
               <div className="flex flex-row items-center gap-2 mr-2">
                 <p className="text-[10px]">{`Toggle ${
                   keepEngaged ? "AI response" : "conversation mode"

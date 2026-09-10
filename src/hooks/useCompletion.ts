@@ -40,7 +40,14 @@ import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 // here would be undefined in that suite and the listener's key comparison
 // would short-circuit on every event.
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
-import type { UsageData, TranscriptEntry, SpeakerInfo } from "@/types";
+// Leaf path for the same reason: the usage listener must get the real helper.
+import { isSameModel } from "@/lib/functions/active-model.function";
+import type {
+  UsageData,
+  TranscriptEntry,
+  SpeakerInfo,
+  RespondedModel,
+} from "@/types";
 import { SpeakerIdFactory } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -152,6 +159,11 @@ export const useCompletion = () => {
   const [calendarBlockPresent, setCalendarBlockPresent] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
+  // The model behind the answer in the panel. Only the panel's own requests
+  // set it, so a background call (titles, translation) can't overwrite it.
+  const [respondedModel, setRespondedModel] = useState<RespondedModel | null>(
+    null
+  );
 
   // Meeting Assist Mode state
   const [meetingAssistMode, setMeetingAssistModeState] = useState(() => {
@@ -1029,6 +1041,7 @@ export const useCompletion = () => {
           error: null,
           response: "",
         }));
+        setRespondedModel(null);
 
         try {
           // Use the fetchAIResponse function with signal
@@ -1041,6 +1054,14 @@ export const useCompletion = () => {
             userMessage: input,
             imagesBase64,
             signal,
+            onModel: (model) => {
+              if (currentRequestIdRef.current === requestId) {
+                setRespondedModel({
+                  requested: selectedAIProvider.variables?.model ?? "",
+                  model,
+                });
+              }
+            },
           })) {
             // Only update if this is still the current request
             if (currentRequestIdRef.current !== requestId) {
@@ -1200,6 +1221,7 @@ export const useCompletion = () => {
           error: null,
           response: "",
         }));
+        setRespondedModel(null);
 
         let fullResponse = "";
 
@@ -1223,6 +1245,14 @@ export const useCompletion = () => {
           history: messageHistory,
           userMessage: contextualPrompt,
           signal,
+          onModel: (model) => {
+            if (currentRequestIdRef.current === requestId) {
+              setRespondedModel({
+                requested: selectedAIProvider.variables?.model ?? "",
+                model,
+              });
+            }
+          },
         })) {
           if (currentRequestIdRef.current !== requestId || signal.aborted) {
             return;
@@ -1808,6 +1838,7 @@ export const useCompletion = () => {
               error: null,
               response: "",
             }));
+            setRespondedModel(null);
 
             // Use the fetchAIResponse function with image and signal
             for await (const chunk of fetchAIResponse({
@@ -1818,6 +1849,14 @@ export const useCompletion = () => {
               userMessage: prompt,
               imagesBase64: [base64],
               signal,
+              onModel: (model) => {
+                if (currentRequestIdRef.current === requestId) {
+                  setRespondedModel({
+                    requested: selectedAIProvider.variables?.model ?? "",
+                    model,
+                  });
+                }
+              },
             })) {
               // Only update if this is still the current request
               if (currentRequestIdRef.current !== requestId || signal.aborted) {
@@ -2234,9 +2273,16 @@ export const useCompletion = () => {
         usage: UsageData;
         provider: string;
         model: string;
+        /** The model the provider says answered, when it reported one */
+        respondedModel?: string;
       }>;
 
-      const { usage, provider, model } = customEvent.detail;
+      const {
+        usage,
+        provider,
+        model,
+        respondedModel: answeredModel,
+      } = customEvent.detail;
       console.log("[Cost Tracking] Event detail:", { usage, provider, model });
 
       // Use ref for conversation ID (more reliable than state during async operations)
@@ -2245,6 +2291,10 @@ export const useCompletion = () => {
       console.log("[Cost Tracking] Current conversation ID from ref:", conversationId);
 
       try {
+        // Priced by the requested model, since the pricing table's substring
+        // match can mistake a router's free pick for a paid model. Recorded
+        // under the model that answered, unless that is a snapshot of the
+        // requested one.
         const cost = calculateCost(usage, provider, model);
         console.log("[Cost Tracking] Calculated cost:", cost);
 
@@ -2252,7 +2302,10 @@ export const useCompletion = () => {
           id: crypto.randomUUID(),
           conversationId,
           provider,
-          model,
+          model:
+            answeredModel && !isSameModel(model, answeredModel)
+              ? answeredModel
+              : model,
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           totalTokens: usage.totalTokens,
@@ -2399,5 +2452,7 @@ export const useCompletion = () => {
     sessionSpeakerMap,
     assignSpeaker,
     updateEntrySpeaker,
+    // Model attribution
+    respondedModel,
   };
 };

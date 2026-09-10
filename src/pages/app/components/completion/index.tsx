@@ -258,6 +258,7 @@ export const Completion = ({
         isHidden={isHidden}
         quickActions={quickActions}
         onQuickActionClick={handleQuickAction}
+        cloudMode={useMeetwingsAPI}
       />
       <Screenshot {...completion} />
       <Files {...completion} />

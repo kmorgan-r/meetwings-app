@@ -17,3 +17,4 @@ export * from "./meeting-auto-record";
 export * from "./shortcuts.function";
 export * from "./speaker-label.function";
 export * from "./conversation-markdown.function";
+export * from "./active-model.function";
