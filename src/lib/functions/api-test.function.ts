@@ -54,6 +54,7 @@ const ErrorMessages = {
 
   // Authentication errors
   AUTH_INVALID_KEY: "Authentication failed: Invalid API key",
+  AUTH_FORBIDDEN: "Access denied by provider",
   AUTH_RATE_LIMITED: "Authentication verified (rate limited)",
 
   // Network errors
@@ -138,12 +139,18 @@ function parseCurlTemplate(
  * Returns a TestResult if the status is handled, null if the caller should continue processing.
  */
 async function handleResponseStatus(response: Response): Promise<TestResult | null> {
-  // Authentication errors
+  // 401 means the key was rejected. 403 means the key was accepted but the
+  // request was refused (OpenRouter: permissions, a guardrail block or a
+  // moderation flag). Both keep the provider's reason for the user.
   if (response.status === 401 || response.status === 403) {
+    const detail = await providerErrorDetail(response);
     return {
       success: false,
-      message: ErrorMessages.AUTH_INVALID_KEY,
-      error: `HTTP ${response.status}`,
+      message:
+        response.status === 401
+          ? ErrorMessages.AUTH_INVALID_KEY
+          : ErrorMessages.AUTH_FORBIDDEN,
+      error: `HTTP ${response.status}${detail ? `: ${detail}` : ""}`,
     };
   }
 
@@ -156,6 +163,24 @@ async function handleResponseStatus(response: Response): Promise<TestResult | nu
   }
 
   return null;
+}
+
+/**
+ * The provider's own explanation from an error response: `error.message`
+ * (OpenAI/OpenRouter shape), a string `error` or `message`, else the raw text.
+ */
+async function providerErrorDetail(response: Response): Promise<string> {
+  let text = "";
+  try {
+    text = (await response.text()).trim();
+    const json = JSON.parse(text);
+    const error = json?.error ?? json;
+    const message = typeof error === "string" ? error : error?.message;
+    if (typeof message === "string" && message) return message;
+  } catch {
+    // Unreadable or not JSON: fall back to whatever text there is.
+  }
+  return text.slice(0, 300);
 }
 
 /**

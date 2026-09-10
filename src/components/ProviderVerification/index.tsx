@@ -75,6 +75,24 @@ function categorizeError(
   if (!errorMessage) return defaultError;
 
   const lowerError = errorMessage.toLowerCase();
+  // The provider's own explanation, which Verify keeps after "HTTP <status>: "
+  const detail = errorMessage.match(/^HTTP \d{3}: ([\s\S]+)$/)?.[1];
+
+  // A 403 means the key was accepted but this request was refused
+  // (permissions, a guardrail block or a moderation flag), not a bad key.
+  if (lowerError.startsWith("http 403")) {
+    return {
+      title: "Access denied",
+      description: detail
+        ? `The provider refused this request: ${detail}`
+        : "The provider accepted your key but refused this request.",
+      actions: [
+        "Check your account's privacy, guardrail or allowed-model settings",
+        "Try a different model",
+      ],
+      learnMoreUrl: providerDocs,
+    };
+  }
 
   // Authentication errors
   if (lowerError.includes("invalid api key") ||
@@ -84,7 +102,9 @@ function categorizeError(
       lowerError.includes("unauthorized")) {
     return {
       title: "Invalid API key",
-      description: "The API key you entered was rejected by the provider.",
+      description: detail
+        ? `The provider rejected the API key: ${detail}`
+        : "The API key you entered was rejected by the provider.",
       actions: [
         "Verify the API key is copied correctly (no extra spaces)",
         "Check that the key hasn't expired or been revoked",
