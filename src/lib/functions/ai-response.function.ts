@@ -439,6 +439,20 @@ export async function* fetchAIResponse(params: {
           try {
             const parsed = JSON.parse(trimmed);
 
+            // Routers like OpenRouter keep HTTP 200 once streaming starts and
+            // report upstream failures as an SSE event carrying `error`. Only
+            // an error with a message counts, so an empty placeholder on a
+            // healthy chunk can't cut the answer off.
+            const streamError =
+              typeof parsed?.error === "string"
+                ? parsed.error
+                : parsed?.error?.message;
+            if (streamError) {
+              yield `API error: ${streamError}`;
+              reader.cancel();
+              return;
+            }
+
             // Log the first chunk to see structure
             if (!capturedUsage) {
               console.log("[Cost Tracking] Sample chunk structure:", JSON.stringify(parsed).substring(0, 500));
