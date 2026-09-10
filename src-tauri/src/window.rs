@@ -34,14 +34,25 @@ impl Default for ContentProtectionState {
 /// The main overlay's pre-minimize geometry, in PHYSICAL pixels:
 /// (x, y, width, height). In-memory only — a restart starts un-minimized,
 /// and restore falls back to the 600x54 bar when this is None.
+///
+/// `minimized` is the SOURCE OF TRUTH for whether the window is currently the
+/// corner pill. It cannot be derived from `saved`: restore deliberately keeps
+/// the snapshot (see `restore_overlay`), so `saved.is_some()` outlives the
+/// minimized state. The frontend's flag is a mirror of this one and is reset
+/// by anything that resets the webview's JS heap — a reload from the error
+/// screen's retry button, a WebView2 renderer restart — while the window
+/// itself stays a pill. Rust survives all of those, so Rust holds the truth
+/// and the frontend reads it back on mount.
 pub struct OverlayMinimizeState {
     pub saved: Mutex<Option<(i32, i32, u32, u32)>>,
+    pub minimized: Mutex<bool>,
 }
 
 impl Default for OverlayMinimizeState {
     fn default() -> Self {
         Self {
             saved: Mutex::new(None),
+            minimized: Mutex::new(false),
         }
     }
 }
@@ -126,6 +137,65 @@ fn bottom_right_position(
     (x, y)
 }
 
+/// Pull a window rect back inside a work area, returning the corrected
+/// top-left. A free function beside `bottom_right_position` for the same
+/// reason: the geometry is unit-testable without a live window. PHYSICAL
+/// pixels throughout.
+///
+/// The overlay keeps its drag handle and its minimize button at the RIGHT end
+/// of the bar, so a bar that hangs off the right edge of the screen is a bar
+/// the user cannot move or minimize — the controls that would rescue it are
+/// the part that is off-screen. Clamping on every resize makes that
+/// unreachable state impossible whatever produced the position.
+///
+/// Overflow beats underflow: a window WIDER than the work area pins to the
+/// work area's origin (min then max), keeping its left edge — where the app
+/// draws its content — on screen rather than its right.
+fn clamp_into_work_area(
+    work_area: &PhysicalRect<i32, u32>,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> (i32, i32) {
+    let max_x = work_area.position.x + work_area.size.width as i32 - width as i32;
+    let max_y = work_area.position.y + work_area.size.height as i32 - height as i32;
+    (
+        x.min(max_x).max(work_area.position.x),
+        y.min(max_y).max(work_area.position.y),
+    )
+}
+
+/// Best-effort: pull `window` back inside its monitor's work area. Never
+/// fails the caller — a window that is merely mispositioned is a better
+/// outcome than a resize or a restore that reports failure, and every caller
+/// here has already committed the geometry it cares about.
+fn keep_window_on_screen(window: &WebviewWindow) {
+    let monitor = match window.current_monitor() {
+        Ok(Some(monitor)) => Some(monitor),
+        // A window parked entirely outside every monitor reads as None; the
+        // primary is then the only sane place to pull it back to.
+        _ => window.primary_monitor().ok().flatten(),
+    };
+    let Some(monitor) = monitor else { return };
+    let (Ok(position), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        return;
+    };
+
+    let (x, y) = clamp_into_work_area(
+        monitor.work_area(),
+        position.x,
+        position.y,
+        size.width,
+        size.height,
+    );
+    if (x, y) != (position.x, position.y) {
+        if let Err(e) = window.set_position(Position::Physical(PhysicalPosition::new(x, y))) {
+            eprintln!("Failed to keep the overlay on screen: {}", e);
+        }
+    }
+}
+
 /// The rect `restore_overlay` falls back to when no snapshot exists (hot
 /// reload, restore-before-minimize, or after a restart): the 600x54 LOGICAL
 /// bar, top-center of the given work area, converted to physical pixels.
@@ -164,14 +234,37 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
 }
 
 #[tauri::command]
-pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+pub fn set_window_height(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    height: u32,
+) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
+
+    // The backstop for the frontend's `getMinimized()` gate in useWindow.ts.
+    // That one lives in the webview's JS heap and is gone the moment the page
+    // reloads; this one is not. Without it, a reload while minimized lets the
+    // MutationObserver stretch the pill back to a 600px bar from the pill's
+    // bottom-right anchor — most of it off the right edge of the screen —
+    // before the frontend has finished reading the flag back.
+    if *app
+        .state::<OverlayMinimizeState>()
+        .minimized
+        .lock()
+        .unwrap()
+    {
+        return Ok(());
+    }
 
     // Simply set the window size with fixed width and new height
     let new_size = LogicalSize::new(600.0, height as f64);
     window
         .set_size(Size::Logical(new_size))
         .map_err(|e| format!("Failed to resize window: {}", e))?;
+
+    // Growing from a bottom or right anchor is what pushes the bar off the
+    // work area; this is the one place every expand/collapse passes through.
+    keep_window_on_screen(&window);
 
     Ok(())
 }
@@ -255,6 +348,12 @@ pub fn minimize_overlay(
         None => apply()?,
     }
 
+    // Set only once the geometry is actually committed. The rollback arm above
+    // leaves the window expanded, and a flag raised before the apply would gate
+    // `set_window_height` against a window that is not a pill — freezing the
+    // overlay at whatever height it happened to have.
+    *state.minimized.lock().unwrap() = true;
+
     Ok(())
 }
 
@@ -293,7 +392,30 @@ pub fn restore_overlay(app: AppHandle, window: WebviewWindow) -> Result<(), Stri
         .set_position(Position::Physical(PhysicalPosition::new(x, y)))
         .map_err(|e| format!("Failed to position window: {}", e))?;
 
+    // Cleared last: an early return above leaves the window a pill, and the
+    // flag must still say so — the frontend keeps the pill rendered on a
+    // failed restore and the user retries.
+    *state.minimized.lock().unwrap() = false;
+
+    // The snapshot was taken on whatever monitor the overlay sat on before it
+    // was minimized. Wake a laptop on a different display arrangement and
+    // those coordinates can land nowhere — the overlay would come back
+    // invisible, which is the same trap as coming back unreachable.
+    keep_window_on_screen(&window);
+
     Ok(())
+}
+
+/// Whether the overlay window is currently the corner pill. The frontend's
+/// flag is a mirror of this one and does not survive a page reload; the app
+/// page reads this back on mount so a reload cannot leave the full bar
+/// rendering inside pill geometry.
+#[tauri::command]
+pub fn is_overlay_minimized(app: AppHandle) -> bool {
+    *app.state::<OverlayMinimizeState>()
+        .minimized
+        .lock()
+        .unwrap()
 }
 
 #[tauri::command]
@@ -459,6 +581,55 @@ mod tests {
             bottom_right_position(&area, 148, 40, 16),
             (-1920 + 1920 - 148 - 16, 1080 - 40 - 16)
         );
+    }
+
+    // A window already inside the work area is left exactly where it is.
+    #[test]
+    fn clamp_leaves_an_on_screen_window_alone() {
+        let area = rect(0, 0, 1920, 1040);
+        assert_eq!(clamp_into_work_area(&area, 660, 54, 600, 54), (660, 54));
+    }
+
+    // The reported bug: the bar keeps the pill's bottom-right anchor and is
+    // stretched back to 600px wide, so 400px of it — the drag handle and the
+    // minimize button — hang off the right edge.
+    #[test]
+    fn clamp_pulls_a_right_overflowing_bar_back() {
+        let area = rect(0, 0, 1920, 1040);
+        // y (984) is already inside 1040 - 54, so only x moves.
+        let (x, y) = clamp_into_work_area(&area, 1724, 984, 600, 54);
+        assert_eq!((x, y), (1920 - 600, 984));
+    }
+
+    // Growing downward from a bottom anchor (the 54 -> 600 popover expand)
+    // pushes the window under the taskbar; the work area, not the monitor
+    // size, is the limit.
+    #[test]
+    fn clamp_pulls_a_bottom_overflowing_window_back() {
+        let area = rect(0, 0, 1920, 1040); // 1080 screen, 40px taskbar
+        assert_eq!(
+            clamp_into_work_area(&area, 660, 1000, 600, 600),
+            (660, 1040 - 600)
+        );
+    }
+
+    // A monitor left of the primary has a negative origin, and a window
+    // dragged past its left/top edge must come back to that origin, not to 0.
+    #[test]
+    fn clamp_respects_a_negative_origin() {
+        let area = rect(-1920, -200, 1920, 1080);
+        assert_eq!(
+            clamp_into_work_area(&area, -2600, -900, 600, 54),
+            (-1920, -200)
+        );
+    }
+
+    // Wider than the work area: pin to the origin so the LEFT edge stays
+    // visible. min-then-max ordering is what produces this.
+    #[test]
+    fn clamp_pins_an_oversized_window_to_the_origin() {
+        let area = rect(0, 0, 500, 400);
+        assert_eq!(clamp_into_work_area(&area, 300, 300, 600, 600), (0, 0));
     }
 
     // The restore fallback: 600x54 LOGICAL at top center, converted through the

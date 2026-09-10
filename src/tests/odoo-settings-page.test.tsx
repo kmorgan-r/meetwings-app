@@ -720,7 +720,15 @@ describe("the calendar connect section", () => {
       JSON.stringify({ clientId: "abc-123", authority: "https://login.microsoftonline.com/contoso" })
     );
     renderPage();
-    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("abc-123");
+    // The value assertion is inside waitFor, not chained off findBy. findBy
+    // resolves the moment the input EXISTS, which is the first render - before
+    // the seeding effect's secureGet round trip has landed - and toHaveValue
+    // is then checked once and never retried. It passes on an idle machine and
+    // fails on a loaded CI worker.
+    const clientId = await screen.findByLabelText(/application \(client\) id/i);
+    await waitFor(() => expect(clientId).toHaveValue("abc-123"));
+    // Same setGraph call, so this one is settled by the time the wait above
+    // returns.
     expect(screen.getByLabelText(/^authority$/i)).toHaveValue(
       "https://login.microsoftonline.com/contoso"
     );
@@ -739,7 +747,9 @@ describe("the calendar connect section", () => {
       throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
     });
     renderPage();
-    expect(await screen.findByLabelText(/application \(client\) id/i)).toHaveValue("xyz-999");
+    // Same non-retried-assertion race as the test above.
+    const clientId = await screen.findByLabelText(/application \(client\) id/i);
+    await waitFor(() => expect(clientId).toHaveValue("xyz-999"));
   });
 
   /**

@@ -184,8 +184,13 @@ describe("minimize button (gate ordering, per the spec)", () => {
     fireEvent.click(screen.getByTitle("Minimize"));
     fireEvent.click(screen.getByTitle("Minimize"));
 
+    // Counted by command, not by total invokes: mounting the app page also
+    // reads the minimized flag back from Rust (is_overlay_minimized), and a
+    // bare toHaveBeenCalledTimes(1) would be asserting that unrelated fact.
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledTimes(1);
+      expect(
+        invokeMock.mock.calls.filter(([cmd]) => cmd === "minimize_overlay")
+      ).toHaveLength(1);
       expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
         width: 180,
         height: 40,

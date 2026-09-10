@@ -86,7 +86,11 @@ const mockAppRenderDeps = () => {
     AudioVisualizer: () => null,
     StatusIndicator: () => null,
   }));
-  vi.doMock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+  // Must be thenable: the app page reads is_overlay_minimized on mount and
+  // chains off the result. A bare vi.fn() returns undefined and throws
+  // inside the effect. false = "the window is not the corner pill", which is
+  // this file's assumption everywhere.
+  vi.doMock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => false) }));
   vi.doMock("react-error-boundary", () => ({
     ErrorBoundary: ({ children }: any) => <>{children}</>,
   }));
