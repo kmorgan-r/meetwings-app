@@ -124,6 +124,19 @@ or re-found by the adopt search) and the post step pay nothing.
 `postOrAdoptMessage` needs no probe of its own: if the attachment already
 exists, a re-faulting `message_post` strands nothing new.
 
+An honest limit on what the probe proves: it proves search-visibility, not
+write rights. A record that is searchable but not writable by the API user
+(lead-scoped record rules, say) passes the probe, `ir.attachment.create`
+still succeeds, and `message_post` still faults — the one-orphan-per-retry
+harm survives in that family. This is a pre-existing residual, not a new
+one: the probe closes the missing/invisible family the livecheck verified
+(finding 2's nonexistent-`res_id` shape), and it does not widen the harm
+anywhere else. No cheap record-level write probe exists over XML-RPC
+(`check_access_rights` is model-level; record rules are not), so the
+invariant's honest scope is: no attachment is created on a record the API
+user cannot SEE; a record it can see but not write is named here as an
+accepted residual, and a record-level write probe is follow-up work.
+
 ## What the retry path becomes
 
 `retryTarget` keeps its shape: DB-only, no attempt cap, no wire calls
@@ -222,15 +235,19 @@ strand the rest — and the machinery is deliberately simple:
 4. A singleton id that still faults is skipped — `skipped += 1`, the counter
    `finishSync` already receives — and the cursor moves past it. The run
    continues.
-5. **The zero-upsert breaker.** A page whose isolation ends with *zero
-   upserted rows* — every singleton faulted — is a systemic fault wearing a
-   record fault's clothes: a `PARTNER_FIELDS` drift against the customer's
+5. **The zero-upsert breaker.** A page that ends with *zero upserted rows*
+   is a systemic fault wearing a per-record fault's clothes, and the breaker
+   keys on the per-page upsert count, NOT on which skip path produced the
+   zero — every singleton faulted inside the machinery, or every row failed
+   `parsePartnerRow` (an `ODOO_UNEXPECTED_ROW` shape drift that `search_read`
+   itself survives), reaches the identical outcome the breaker exists to
+   stop: the cursor walks past the whole table and the run ends "successfully"
+   with nothing ingested and the watermark unadvanced — a silent total
+   ingestion failure where today's code fails loudly at
+   `contacts-sync.ts:201-209`. A `PARTNER_FIELDS` drift against the customer's
    server, say, faults with code 2 on every read yet spares the id-only
-   search. Letting that run as skips would walk the cursor past the whole
-   table and end the run "successfully" with nothing ingested and the
-   watermark unadvanced — a silent total ingestion failure where today's code
-   fails loudly at `contacts-sync.ts:201-209`. That outcome is not a skip: fail
-   the run loudly through the existing `failSync` path.
+   search. That outcome is not a skip: fail the run loudly through the
+   existing `failSync` path, whichever route the zero arrived by.
 
 Only `ODOO_FAULT` enters the machinery, at every level of it: a batch or
 singleton fetch that rejects with `ODOO_UNREACHABLE`, `ODOO_UNEXPECTED_ROW` or
@@ -250,7 +267,10 @@ is fixed, with no run still counting it. Both fates are accepted here, and
 giving the sub-watermark one a durable home — a persisted skip ledger the
 picker can render — is follow-up work, not this change. A record that faults
 intermittently (transient server state) is re-fetched next run and recovers
-naturally.
+naturally — but only while its `write_date` stays above the watermark: a
+page-mate advancing `maxWriteDate` past a transiently-faulting record
+excludes it from the next run's domain by the same fate as a permanent skip,
+and that race is part of what the skip-ledger follow-up would make visible.
 
 Transport failures (`ODOO_UNREACHABLE`) and shape failures
 (`ODOO_UNEXPECTED_ROW`) do **not** enter this machinery. Bisection against a
@@ -273,7 +293,12 @@ built on the opposite belief come out:
   the tag is the only surviving trace.
 - `AssignDialog.tsx:186-188` — the `adopted-archived` copy ("Un-archive them
   there to log this meeting to them") is factually wrong; archived targets
-  receive the note.
+  receive the note. The replacement is specified, not left open: the
+  `adopted-archived` case reuses the `adopted-active` wording ("Already in
+  Odoo — added to this meeting." / the log-full variant) — archived is no
+  longer a distinct outcome worth its own copy, and the row's `Archived` tag
+  is the surviving trace, consistent with nothing archived-specific replacing
+  the gate.
 
 Archived rows render as normal selectable rows carrying an `Archived` tag. The
 user picks an archived partner deliberately, the note posts, and
@@ -310,7 +335,11 @@ different decision behind it — out of scope here.
   `odoo shell`, which is a customer-side action, not an app feature.
 - **No change to `fetchOpportunities`' fail-loud contract**
   (`opportunities.ts:131-139`). Its asymmetry with the sync is deliberate and
-  documented there; this spec changes only the sync.
+  documented there; this spec changes only the sync's behaviour. The one
+  carve-out: that file's comment cites "failing the run leaves the watermark
+  unadvanced" for the sync, a premise the contacts-sync change invalidates —
+  the contract stands, the comment text is rewritten in the same plan
+  (Follow-up work).
 - **The proposal region's own archived handling** (spec 2026-09-05: "Archived
   rows get nothing") is untouched.
 
@@ -342,9 +371,18 @@ exactly as a `message_post` MissingError is today.
   `faultString` (number, null) both fall back byte-identical to today's output
   — a truthiness check on `"faultString" in details` passes the first and
   breaks these, which is why both are named; a 10k-character traceback is
-  capped at 400; the redactor catches a key embedded in `faultString`, with the
-  XML-escaped needle `odoo-client.test.ts:48` models asserted end-to-end
-  through unescape-and-redact. The existing fixtures at `:124-147` construct
+  capped at 400; the redactor catches a key embedded in `faultString`. That
+  needle case has a placement requirement, because a vacuous version passes
+  whether or not the new composition redacts: `odooError()` redacts
+  `details.faultString` at construction, so a render-suite needle built with
+  `odooError(...)` never reaches `queueErrorText` raw. The end-to-end proof
+  (wire XML → codec unescape → the client's `odooError` → `queueErrorText`)
+  lives in the client suite: feed the `faultResponse` wire shape
+  (`odoo-client.test.ts:48`) through the real client, catch, feed the caught
+  error to `queueErrorText`, assert the composed text is needle-free; a
+  render-suite companion, if written, constructs its fault via
+  `new OdooError(...)` directly so the composition-half redaction is
+  load-bearing. The existing fixtures at `:124-147` construct
   their ODOO_FAULT with no details at all
   (`odooError("ODOO_FAULT", "Odoo rejected sk-secret on partner 4")`), so they
   pass byte-identical as claimed.
@@ -352,23 +390,50 @@ exactly as a `message_post` MissingError is today.
   assertions on the *order* of wire calls: for a target whose record is gone,
   the client sees the probe `search` and never `ir.attachment.create` or
   `message_post`; for a healthy target, `create` follows the probe; for a
-  probe that *rejects*, the same no-create/no-post order holds and the target
-  lands `failed`; and for every fault leg the target's stored
-  `last_error_code`/`last_error` equal the composed text — the dead-target
-  retry's persisted `last_error` must match the sample composition above,
-  since the stored column is the user-visible fix. The crash-between-wire-and-
-  write leg (wipe local ids, bump attempts) now exercises adopt-or-probe-or-
-  create.
+  probe that *rejects* with a deterministic fault, the same no-create/no-post
+  order holds and the target lands `failed`; and for every fault leg the
+  target's stored `last_error_code`/`last_error` equal the composed text — the
+  dead-target retry's persisted `last_error` must match the sample composition
+  above, since the stored column is the user-visible fix. The probe's *kwargs*
+  are asserted too, not just its method: `limit: 1` and
+  `context: { active_test: false }` — the flag is load-bearing by the
+  invariant section's own words, the stub answers by method only, so
+  order-of-calls assertions alone would pass an implementation that omits the
+  flag and terminally fail archived (still valid) partners. A probe that
+  rejects with `ODOO_UNREACHABLE` (the existing `unreachable()` fixture) gets
+  its own named case: the target returns to `pending`, retryable, with no
+  create and no synthesized fault text — exactly the defect produced by
+  wrapping the probe in a catch-all that synthesizes the fault on any
+  rejection. The suite's shared stub returns `[]` for *every* `search`, so it
+  must become model-aware before any of this is writable: the adopt search
+  (`ir.attachment`) and the probe (`target.model`) are distinguished, the
+  probe returns an id array on hit legs, `[]` only on dead-target legs, a
+  rejection on probe-fault legs — and the existing `attempts > 0` fixtures are
+  re-pointed at the new order (adopt-miss → probe → create), without which
+  they silently flip to probe-miss terminal faults. The
+  crash-between-wire-and-write leg (wipe local ids, bump attempts) now
+  exercises adopt-or-probe-or-create.
 - **`odoo-meeting-log-sweep.test.ts`** — swept targets with null attachment ids
   hit the probe on the real push path, so the suite's `create`/`message_post`
   stubs must answer the new `search` wire call; add one sweep-driven
-  dead-target case (probe, no orphan, failed with the composed text).
+  dead-target case (probe, no orphan, failed with the composed text), with the
+  probe's kwargs (`limit: 1`, `context: { active_test: false }`) asserted on
+  that case too.
 - **Contacts-sync tests** — a faulting `search_read` page splits into
   id-only `search` + successful halves + counted singleton skip, with the
   watermark advancing from the upserted rows only; a page whose every
   singleton faults fails the run loudly (the zero-upsert breaker); a faulting
   id-only search fails the run; `ODOO_UNREACHABLE` and `ODOO_UNEXPECTED_ROW`
   bypass the machinery entirely — zero bisection calls, run-level catch fires.
+  Wire-shape assertions join the outcome assertions: the id-only `search`
+  carries `order`, `limit` and `context.active_test === false` and NO `fields`
+  key — the machinery's own `fields`-kwarg trap, made mock-visible — and every
+  bisection sub-batch `search_read` repeats `fields: PARTNER_FIELDS`, the
+  type filters and the context flag. Two cursor cases are named because they
+  are what terminates the page loop: a skipped singleton advances the cursor
+  past its id, and a successful sub-batch containing a parse-malformed row
+  still advances the cursor from the raw id while counting the skip (the
+  existing raw-id cursor rule must survive the machinery, or the run spins).
 - **`meeting-log-actions.test.ts` / page tests** — `retryTarget` behaviour is
   unchanged by design; the page suite's existing fault-row fixtures keep
   passing, and the AssignDialog tests gain an archived contact selectable and
@@ -390,6 +455,9 @@ exactly as a `message_post` MissingError is today.
   in the contacts-sync section — so a permanently unreachable partner stays
   visible in the picker instead of silently absent once the watermark advances
   past it.
+- A record-level write probe (or equivalent write-shaped pre-check) for the
+  readable-but-unwritable family the existence probe cannot see — the
+  residual accepted in the invariant section.
 - Historical `Odoo fault N` texts stored in `meeting_log_targets.last_error`
   before this fix remain until the row is retried. A user-facing "these texts
   are stale" affordance is not designed here; the retry path's new text makes
