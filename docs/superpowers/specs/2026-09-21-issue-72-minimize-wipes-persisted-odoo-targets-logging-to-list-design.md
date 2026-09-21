@@ -267,6 +267,10 @@ real hook's mount effect pulls in, which the current file does not carry.
      calls is identical across the cycle.
   4. `completionMountSpy` still fired exactly once (App-mount variant only —
      see the fallback below).
+  5. The mounted Minimize button carries `data-overlay-minimize-control` —
+     the real button's attribute wiring, enforced here because the
+     picker-dismiss test's button is a test-local stand-in (see the Testing
+     section's control-provenance note).
 - **Fallback, corrected.** If the real hook inside the full App graph proves
   too entangled, the fallback is the entry-points-SHAPE harness:
   `renderHook` mounting `useCompletion` (stub) and `useOdooTarget` (real)
@@ -323,12 +327,26 @@ real hook's mount effect pulls in, which the current file does not carry.
 - `src/tests/overlay-minimize-keeps-mounted.test.tsx` — third case as
   specified in "The regression test" above.
 - New `src/tests/overlay-minimize-picker-dismiss.test.tsx` — with the picker
-  open and a calendar proposal present, clicking the Minimize button keeps
-  the picker open (`isContactPickerOpen` stays true) and does not fire
-  `useCalendarProposal`'s reset; clicking the RESTORED pill likewise keeps
-  it open. Also pins the boundary: a pointerdown on anything else outside
-  the picker still closes it — the `preventDefault` is scoped to
-  `[data-overlay-minimize-control]`.
+  open, clicking the Minimize control keeps it open (`isContactPickerOpen`
+  stays true; `onOpenChange` is never called with `false`), and clicking the
+  RESTORED pill likewise keeps it open. The automated assertion set is the
+  OPEN-STATE survival only — `useCalendarProposal`'s `reset` is an internal
+  callback of a hook this scaffold does not render a consumer for, so a
+  "reset not fired" assertion would need an unstated module mock that then
+  masks the very effect it claims to watch (the same vacuous-pass hazard the
+  scaffold warning below describes); proposal-state survival stays with the
+  manual gate, which covers it. Also pins the boundary: a pointerdown on
+  anything else outside the picker still closes it — the `preventDefault` is
+  scoped to `[data-overlay-minimize-control]`.
+  **Control provenance.** The restore-click case renders the REAL
+  `MinimizedPill` (a standalone component; its root must carry the marker
+  attribute — that is the pass-1 restore-click regression, and rendering the
+  real pill is what makes it an enforced assertion). The Minimize button is
+  a test-local stand-in stamped with the same attribute — the real button
+  lives inline in the overlay bar and this scaffold cannot mount
+  `app/index.tsx` — so the real button's attribute WIRING is enforced
+  instead by a cheap attribute-presence assertion in the keeps-mounted
+  App-mount variant, where the real overlay bar is mounted.
   **Scaffold warning (this is a NEW scaffold, not a reused one).** There is
   no proven rendered-ContactPicker precedent to copy: both
   `odoo-target-new-chat-entry-points.test.tsx` and
