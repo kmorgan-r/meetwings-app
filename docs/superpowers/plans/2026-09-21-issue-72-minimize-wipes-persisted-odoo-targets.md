@@ -34,7 +34,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `src/tests/odoo-contacts.action.test.ts` (the file already runs the real module against a sql.js DB — reuse its `INSTANCE`/`OTHER` constants and `contact()` helper; `addSelectedTarget` seeds rows). Add a `describe` at the end of the file:
+Append to `src/tests/odoo-contacts.action.test.ts` (the file already runs the real module against a sql.js DB — reuse its `INSTANCE`/`OTHER` constants and `contact()` helper; `addSelectedTarget` seeds rows; verified this session: the file's own file-level `beforeEach` at lines 85-97 recreates the sql.js database and re-applies migrations before EVERY test, so the new describe inherits a clean schema and needs no extra cleanup). Add a `describe` at the end of the file:
 
 ```ts
 describe("[odoo-targets] instrumentation (issue #72)", () => {
@@ -82,7 +82,7 @@ describe("[odoo-targets] instrumentation (issue #72)", () => {
       null,
       2000
     );
-    expect(result).toEqual({ ok: false, reason: "cap" });
+    expect(result).toMatchObject({ ok: false, reason: "cap" });
     expect(lines("addSelectedTarget").at(-1)?.[2]).toMatchObject({
       instance: INSTANCE,
       resId: 999,
@@ -326,6 +326,8 @@ describe("[odoo-targets] hook-side count log (issue #72)", () => {
 
 Match the existing file's import style — `action` (the hoisted action-module mock at line 93), `useOdooTarget`, `renderHook`, `waitFor` are already imported there.
 
+**Verified mock set of this file** (checked this session, so the scaffold premise is not an assumption): `vi.mock("@tauri-apps/api/window")` with a hoisted `windowLabel` (line 6), core (13), event (26), sonner (47), the hoisted `action` object mocked over `@/lib/database/odoo-contacts.action` (69), `@/lib/odoo` as `{ ...importActual("@/lib/odoo/errors"), runSync/currentInstance/createOdooClient/fetchOpportunities }` (86), `@/lib/storage/odoo-config.storage` (90), and a `beforeEach` that `mockResolvedValue`s every action fn — including `odoo.currentInstance.mockResolvedValue("http://h:8069|odoo")`, which is what makes the `clearTargets("http://h:8069|odoo")` assertion passable. The sibling test at lines 1005-1012 already dispatches exactly `window.dispatchEvent(new CustomEvent("newConversationStarted"))` and asserts `action.clearTargets` with that instance — the trigger shape and the assertion are both proven in this file.
+
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `npx vitest run src/tests/useOdooTarget.test.tsx`
@@ -346,9 +348,18 @@ In `src/hooks/useOdooTarget.ts`, directly after the existing `setTargetCount` ef
  * impurity StrictMode punishes.
  */
 useEffect(() => {
-  console.info("[odoo-targets]", "targets", { count: targets.length });
+  console.info("[odoo-targets]", "targets", {
+    instance: instanceRef.current ?? null,
+    count: targets.length,
+  });
 }, [targets]);
 ```
+
+`instanceRef` (line 255) is the hook's cached resolve — `null` until the mount
+effect resolves it, then stable. Carrying it on this line is what keeps the
+Global Constraint's "every line carries an `instance` key" true for the
+hook-side line too, and lets the manual gate match the count line against
+the action-layer lines.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -434,9 +445,13 @@ vi.mock("@/lib/database/odoo-contacts.action", () => ({
   clearTargets: vi.fn(async () => {}),
   purgeOtherInstances: vi.fn(async () => {}),
 }));
-// The pure helpers stay REAL (compareContacts/filterContacts are plain
-// functions); only the network/instance surface is stubbed, following the
-// odoo-target-new-chat-entry-points pattern of keeping the error classes.
+// The pure helpers stay REAL (compareContacts/filterContacts/kindLabel and
+// the MAX_TARGETS constant are value-imported by ContactPicker and
+// dereferenced during render — `filterContacts` throws if missing), so this
+// spread MUST be the FULL @/lib/odoo barrel via importOriginal — NOT the
+// entry-points pattern's spread of `@/lib/odoo/errors` only, which lacks all
+// four names (MAX_TARGETS reaches the barrel via a re-export from
+// @/lib/odoo/meeting-log). Only the network/instance surface is stubbed.
 vi.mock("@/lib/odoo", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
@@ -701,6 +716,19 @@ Also reset the new spy in `beforeEach`: `setTargetCountSpy.mockClear(); actionSp
 
 - [ ] **Step 2: Write the new test case**
 
+This case DEPENDS on Task 3: its Minimize-button attribute assertion is only
+true once Task 3 added `data-overlay-minimize-control` to the real button in
+`app/index.tsx`. Execute Task 3 first (or expect exactly one failing
+assertion until it lands). The Tauri `core` and `event` modules need NO
+additions — `mockEverything()` already doMocks both (the real hook's
+`invoke` and `listen` resolve through the existing mocks); the additions
+below are exactly the ones the file lacks. `@/lib/odoo`'s stub list covers
+the network-touching exports (runSync/createOdooClient/fetchOpportunities,
+plus searchLeads/createOrAdoptContact which only fire on user actions, and
+the `LEAD_SEARCH_MIN_CHARS` constant the hook imports) — following the
+entry-points shape but with the barrel's own pure helpers retained where
+this test needs them.
+
 Append to the existing `describe`:
 
 ```ts
@@ -726,6 +754,9 @@ it("the SQLite-backed target list survives a minimize/restore cycle (issue #72)"
       currentInstance: vi.fn(async () => "http://h:8069|odoo"),
       createOdooClient: vi.fn(() => ({ authenticate: vi.fn(), execute: vi.fn(), serverDate: null })),
       fetchOpportunities: vi.fn(async () => []),
+      searchLeads: vi.fn(async () => []),
+      createOrAdoptContact: vi.fn(async () => null),
+      LEAD_SEARCH_MIN_CHARS: 3,
     };
   });
   vi.doMock("@/lib/storage/odoo-config.storage", () => ({
@@ -740,11 +771,20 @@ it("the SQLite-backed target list survives a minimize/restore cycle (issue #72)"
     return { ...hooksBarrelStub(), useOdooTarget: realHook.useOdooTarget };
   });
 
-  // The "seed": configuring the action mock to rehydrate one row. There is
-  // no stateful sql mock to receive an addSelectedTarget call.
+  // The "seed": configuring the action mocks the mount effect and its
+  // reload leg consume (useOdooTarget.ts:655-682). There is no stateful sql
+  // mock to receive an addSelectedTarget call. getSyncState/listContacts
+  // follow the entry-points scaffold's values — a plain vi.fn() returning
+  // undefined would run `reload` against undefined and can crash or leave
+  // setTargetCountSpy's last call at 0.
   actionSpies.loadTargets.mockResolvedValue([
     { model: "res.partner", resId: 1, name: "A" },
   ]);
+  actionSpies.getSyncState.mockResolvedValue({
+    last_sync_at: 1000,
+    last_error_code: null,
+  });
+  actionSpies.listContacts.mockResolvedValue([]);
 
   const { default: App } = await import("@/pages/app");
   const { setMinimized } = await import("@/lib/overlay-minimize.store");
@@ -798,7 +838,23 @@ it("the SQLite-backed target list survives a minimize/restore cycle (issue #72)"
 Run: `npx vitest run src/tests/overlay-minimize-keeps-mounted.test.tsx`
 First expected FAIL mode (pre-implementation is already true — Task 3 landed the attribute): if the attribute assertion fails, Task 3 was not applied to `app/index.tsx`; re-check. With Task 3 done, the new case should PASS on first run — its value is REGRESSION protection: before the fix it would have caught a cycle-window wipe via `setTargetCountSpy`/action spies. Verify the whole FILE still passes (tests 1-2 must not regress from the scaffold extraction).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Mutation check — prove the new case can fail**
+
+"Spies never called" is vacuous unless the test demonstrably fails when a wipe DOES fire. Mutate the product: temporarily add one line to `handleMinimize` in `src/pages/app/index.tsx` (after `setMinimized(true)`):
+
+```ts
+window.dispatchEvent(new CustomEvent("newConversationStarted")); // MUTATION — revert before commit
+```
+
+Run: `npx vitest run src/tests/overlay-minimize-keeps-mounted.test.tsx`
+Expected: the new case FAILS — `setTargetCountSpy` last called with 0 (the handleNewChat wipe empties the list) and `actionSpies.clearTargets` called. If it cannot be made to fail, the case is non-guarding: document that in the task report instead of claiming regression coverage. Then REVERT the mutation and re-run to green. (This mutant mirrors the signature table's row 1 — the cheapest wipe to inject — which is also why it is a fair proxy for the real mechanism.)
+
+- [ ] **Step 5: Full-suite check**
+
+Run: `npx vitest run` (the whole suite, once, before the commit step)
+Expected: the change's files pass. Known caveat from this repo's full-suite behavior: `overlay-minimize-keeps-mounted`, `meeting-log-page` (AssignDialog) and `odoo-settings-page` (calendar seed) are pre-existing full-run flakes that pass solo and fail under full-suite load on main too — a timeout there is triaged against a solo rerun, never auto-"fixed". If the NEW case itself flakes under load, split it into its own test file rather than deepening the known-flaky host.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/tests/overlay-minimize-keeps-mounted.test.tsx
