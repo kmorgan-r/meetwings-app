@@ -41,6 +41,7 @@ import {
   upsertContacts,
 } from "@/lib/database/odoo-contacts.action";
 import type { OdooContact } from "@/types";
+import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import {
   applyMigration14,
   readMigration,
@@ -353,5 +354,112 @@ describe("migration 14 backfill", () => {
     const db = await seedPre14([]);
     await applyMigration14(db);
     expect(() => db.exec("SELECT 1 FROM odoo_selected_target")).toThrow();
+  });
+});
+
+describe("[odoo-targets] instrumentation (issue #72)", () => {
+  // The file-level beforeEach stops at migration 13 - odoo_selected_targets
+  // only exists once migration 14 has run (and 12 goes first, since 14's
+  // backfill reads FROM meeting_log_queue), so this block layers the same two
+  // migrations the "selected targets" describe does.
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    db.run(readMigration("meeting-log-queue.sql"));
+    db.run(readMigration("odoo-multi-target.sql"));
+    infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => infoSpy.mockRestore());
+
+  const lines = (op: string) =>
+    infoSpy.mock.calls.filter((c) => c[0] === "[odoo-targets]" && c[1] === op);
+
+  it("loadTargets logs the op with the instance key and row count", async () => {
+    await addSelectedTarget(
+      INSTANCE,
+      { model: "res.partner", resId: 1, name: "A" },
+      null,
+      1000
+    );
+    infoSpy.mockClear();
+    const rowsLoaded = await loadTargets(INSTANCE);
+    expect(rowsLoaded).toHaveLength(1);
+    expect(lines("loadTargets")).toHaveLength(2); // before-call + outcome
+    expect(lines("loadTargets")[0][2]).toMatchObject({ instance: INSTANCE });
+    expect(lines("loadTargets")[1][2]).toMatchObject({
+      instance: INSTANCE,
+      rowCount: 1,
+      outcome: "ok",
+    });
+  });
+
+  it("addSelectedTarget logs ok:false on the cap rejection", async () => {
+    for (let i = 0; i < MAX_TARGETS; i++) {
+      await addSelectedTarget(
+        INSTANCE,
+        { model: "res.partner", resId: i + 1, name: `C${i}` },
+        null,
+        1000 + i
+      );
+    }
+    infoSpy.mockClear();
+    const result = await addSelectedTarget(
+      INSTANCE,
+      { model: "res.partner", resId: 999, name: "Overflow" },
+      null,
+      2000
+    );
+    expect(result).toMatchObject({ ok: false, reason: "cap" });
+    expect(lines("addSelectedTarget").at(-1)?.[2]).toMatchObject({
+      instance: INSTANCE,
+      resId: 999,
+      outcome: { ok: false, reason: "cap" },
+    });
+  });
+
+  it("clearTargets logs before the DELETE and the outcome after", async () => {
+    await addSelectedTarget(
+      INSTANCE,
+      { model: "res.partner", resId: 2, name: "B" },
+      null,
+      1000
+    );
+    infoSpy.mockClear();
+    await clearTargets(INSTANCE);
+    expect(lines("clearTargets")).toHaveLength(2);
+    expect(lines("clearTargets")[0][2]).toMatchObject({ instance: INSTANCE });
+    expect(lines("clearTargets")[1][2]).toMatchObject({ outcome: "ok" });
+  });
+
+  it("purgeOtherInstances logs instance + rowsAffected, sourced from the DELETE results", async () => {
+    await addSelectedTarget(
+      INSTANCE,
+      { model: "res.partner", resId: 3, name: "Keep" },
+      null,
+      1000
+    );
+    await addSelectedTarget(
+      OTHER,
+      { model: "res.partner", resId: 9, name: "Gone" },
+      null,
+      1000
+    );
+    infoSpy.mockClear();
+    await purgeOtherInstances(INSTANCE);
+    expect(lines("purgeOtherInstances").at(-1)?.[2]).toMatchObject({
+      instance: INSTANCE,
+      rowsAffected: 1, // the OTHER row; odoo_contacts/odoo_sync_state are empty here
+      outcome: "ok",
+    });
+    // the kept instance's rows survive
+    expect(await loadTargets(INSTANCE)).toHaveLength(1);
+  });
+
+  it("a failed op still logs — the before-call line wins", async () => {
+    const { getDatabase } = await import("@/lib/database/config");
+    vi.mocked(getDatabase).mockRejectedValueOnce(new Error("database is locked"));
+    infoSpy.mockClear();
+    await expect(loadTargets(INSTANCE)).rejects.toThrow("database is locked");
+    expect(lines("loadTargets")).toHaveLength(1); // before-call line only
+    expect(lines("loadTargets")[0][2]).toMatchObject({ instance: INSTANCE });
   });
 });
