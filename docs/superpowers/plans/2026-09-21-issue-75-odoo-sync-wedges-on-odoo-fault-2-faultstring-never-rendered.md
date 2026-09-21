@@ -4,7 +4,7 @@
 
 **Goal:** Make an Odoo XML-RPC fault name its cause in the queue text, stop the push from writing an attachment to an unproven record, and let the contacts sync walk past a faulting record instead of dying on it — plus remove the livecheck-disproven archived-target gates in AssignDialog.
 
-**Architecture:** Four local edits. (1) `queueErrorText` composes `details.faultString` (redacted, capped) into the persisted `last_error`. (2) `createOrAdoptAttachment` gains an existence probe between the adopt-search and `ir.attachment.create`; a zero-row probe result throws a synthesized `ODOO_FAULT` whose text rides in `err.message` — no wire write happens on an unproven record. (3) The contacts-sync page fetch gains fault isolation: on `ODOO_FAULT` it re-names the page's ids with a field-less plain `search`, bisects the reads halving on each fault, skips a still-faulting singleton, and a zero-ingested page fails the run loudly. (4) AssignDialog drops `disabled={!c.active}` and the disproven comments; the `Archived` tag survives as the only trace.
+**Architecture:** Four local edits. (1) `queueErrorText` composes `details.faultString` (redacted, capped) into the persisted `last_error`. (2) `createOrAdoptAttachment` gains an existence probe between the adopt-search and `ir.attachment.create`; a zero-row probe result throws a synthesized `ODOO_FAULT` whose text rides in `err.message` — no wire write happens on an unproven record. (3) The contacts-sync page fetch gains fault isolation: on `ODOO_FAULT` it re-names the page's ids with a field-less plain `search`, bisects the reads halving on each fault, skips a still-faulting singleton, and a multi-record page that ingests zero rows fails the run loudly (a single-record page is exempt — it is a per-record skip). (4) AssignDialog drops `disabled={!c.active}` and the disproven comments; the `Archived` tag survives as the only trace.
 
 **Tech Stack:** React 19 + TypeScript + Vitest (sql.js in-memory DB for push/sweep suites), Tauri 2 plugin-http, Odoo 17 XML-RPC.
 
@@ -87,6 +87,23 @@ it("caps a 10k-character internal-fault traceback at 400 characters with an elli
   expect(out.text.endsWith("…")).toBe(true);
 });
 
+it("redacts BEFORE capping: a key straddling the 400-char cut never leaks a fragment", () => {
+  // Order-of-operations pin: capping the RAW faultString first would split the
+  // key across the cut, and neither fragment matches the redactor's needle -
+  // a partial leak into the persisted text. The composed prefix
+  // "ODOO_FAULT: Odoo fault 2 - " is 27 chars, so 368 filler chars put the
+  // key at indices 395-403: a cap-first implementation slices it mid-key.
+  setOdooRedactor(["sk-secret"]);
+  const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
+    faultCode: 2,
+    faultString: `${"x".repeat(368)}sk-secret tail`,
+  });
+  const out = queueErrorText(err);
+  expect(out.text.length).toBe(401);
+  expect(out.text.endsWith("…")).toBe(true);
+  expect(out.text).not.toContain("sk-");
+});
+
 it("redacts a key that arrives raw in a directly-constructed faultString", () => {
   // Construction-time redaction is BYPASSED on purpose (raw OdooError) so the
   // composition's own redact() call is load-bearing, not decorative.
@@ -133,7 +150,15 @@ export function queueErrorText(thrown: unknown): { code: string; text: string } 
     // An INTERNAL fault (code 1) can carry a full Python traceback here, and
     // this column is rendered verbatim in every queue group - hence the cap.
     text = `${text} - ${redact(faultString)}`;
-    if (text.length > 400) text = `${text.slice(0, 400)}…`;
+    if (text.length > 400) {
+      // Cap on a code-point boundary: a lone high surrogate persisted into
+      // last_error can make the SQLite driver reject the write, and the
+      // per-target record() catch would swallow it - the target loses its
+      // error text entirely.
+      let cut = 400;
+      if (text.charCodeAt(cut - 1) >= 0xd800 && text.charCodeAt(cut - 1) <= 0xdbff) cut = 399;
+      text = `${text.slice(0, cut)}…`;
+    }
   }
   return { code: err.code, text };
 }
@@ -326,12 +351,29 @@ it("returns a probe-blip target to pending, retryable, with no create and no syn
   expect(t.lastErrorCode).toBe("ODOO_UNREACHABLE");
   expect(t.lastError ?? "").not.toContain("missing or inaccessible");
 });
+
+it("treats a malformed probe row as shape drift, not a zero-row miss", async () => {
+  // A non-empty answer with no usable id must NOT wear the "search returned 0
+  // rows" message - that text must stay literally true.
+  seedRow({ id: "r1", status: "pending" });
+  seedTargets("r1", [{ resId: 42, status: "pending" }]);
+  scriptProbe(client, 42, [false] as XmlRpcValue);
+  await pushQueuedRow(await readRow("r1"), deps);
+  const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+  expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual(["res.partner.search"]);
+  const t = (await listTargets("r1"))[0];
+  expect(t.status).toBe("failed");
+  expect(t.lastErrorCode).toBe("ODOO_UNEXPECTED_ROW");
+  expect(t.lastError ?? "").not.toContain("missing or inaccessible");
+});
 ```
+
+Both suites already arm the redactor in their `beforeEach` (`setOdooRedactor([CONFIG.apiKey, CONFIG.login])`) — the composed-`last_error` assertions above rely on that arming; do not add new redactor setup.
 
 - [ ] **Step 2: Run the push suite, verify the new tests fail and the old fixtures break in the predicted way**
 
 Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts`
-Expected: the four new fake-client tests FAIL (today no probe is issued: a "search" never happens for a fresh target, so `res.partner.search` never appears). Additionally, several wire-chain fixtures break with ODOO_UNEXPECTED_ROW (a search eats an `<int>` response) — that is the mechanical re-point Step 4 fixes.
+Expected: the five new fake-client tests FAIL (today no probe is issued: a "search" never happens for a fresh target, so `res.partner.search` never appears). Additionally, several wire-chain fixtures break with ODOO_UNEXPECTED_ROW (a search eats an `<int>` response) — that is the mechanical re-point Step 4 fixes.
 
 - [ ] **Step 3: Implement the probe in `createOrAdoptAttachment`**
 
@@ -364,12 +406,12 @@ async function createOrAdoptAttachment(
   // A probe REJECTION propagates untouched to the per-target catch, whose
   // isRetryable discipline keeps an ODOO_UNREACHABLE blip retryable and lets
   // a genuine ODOO_FAULT stay deterministic with its faultString rendered.
-  const proven = firstId(
-    await deps.client.execute(target.model, "search", [
-      [["id", "=", target.resId]],
-    ], { limit: 1, context: { active_test: false } })
-  );
-  if (proven === null) {
+  const probeResult = await deps.client.execute(target.model, "search", [
+    [["id", "=", target.resId]],
+  ], { limit: 1, context: { active_test: false } });
+  // Only a genuinely EMPTY result is the miss - the synthesized message says
+  // "search returned 0 rows" and that must stay literally true.
+  if (Array.isArray(probeResult) && probeResult.length === 0) {
     // No server fault exists here, so none is fabricated: the code is
     // ODOO_FAULT (deterministic, exactly like a message_post MissingError)
     // but the message segment "Odoo fault N" is reserved for a real
@@ -379,6 +421,18 @@ async function createOrAdoptAttachment(
       "ODOO_FAULT",
       `target record ${target.resId} missing or inaccessible (search returned 0 rows)`,
       { resId: target.resId, model: target.model }
+    );
+  }
+  const proven = firstId(probeResult);
+  if (proven === null) {
+    // A non-empty probe answer with no usable id is SHAPE DRIFT, not a
+    // zero-row miss - laundering it into the "0 rows" text would put a lie in
+    // the diagnostic record. Same deterministic classification as every other
+    // malformed response in the push (firstId's non-list throw, expectInt).
+    throw odooError(
+      "ODOO_UNEXPECTED_ROW",
+      "Odoo returned a probe result with no usable id",
+      { resId: target.resId }
     );
   }
   return expectInt(
@@ -394,7 +448,7 @@ async function createOrAdoptAttachment(
 
 - [ ] **Step 4: Re-point the wire-chain fixtures (mechanical, same file)**
 
-Every wire test below a fresh target (no stored ids, `attempts` 0) now sees a probe `search` before `ir.attachment.create`. Insert `arrayResponse([42])` (probe hit) after `AUTH()` wherever a create follows, and shift every `tauriFetch.mock.calls[N]` index that pointed at the create/post by +1. Exact per-test changes (test name → new chain, with index fixes):
+Every wire test below a fresh target (no stored ids, `attempts` 0) now sees a probe `search` before `ir.attachment.create`. PROBE ORDERING (authoritative): the probe FOLLOWS the adopt-search, which only runs when `attemptsBefore > 0` — so a fresh target's chain is `AUTH, probe, create, …` while a retry that adopts pays no probe and `creates when the retry search finds nothing` inserts the probe AFTER the empty adopt search. The per-fixture chains below are authoritative; the general shape is "insert `arrayResponse([42])` (probe hit) after `AUTH()` wherever a create directly follows, and after an empty adopt search otherwise", shifting every `tauriFetch.mock.calls[N]` index that pointed at the create/post by +1. Exact per-test changes (test name → new chain, with index fixes):
 
 | Test | New tauriFetch chain | Index fixes |
 |---|---|---|
@@ -541,13 +595,13 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: `client.execute`, `OdooError`/`odooError`/`toOdooError` (already imported), `PAGE_LIMIT`, `PARTNER_FIELDS`.
-- Produces: no exported-signature change. `syncContacts(deps)` keeps its shape; `SyncResult.skipped` now also counts machinery singleton skips. The watermark (`maxWriteDate`) still advances only from successfully parsed rows — unchanged. A run that trips the zero-upsert breaker throws `ODOO_UNEXPECTED_ROW` through the existing run-level catch, so `failSync(instance, code, now)` fires exactly as today.
+- Produces: no exported-signature change. `syncContacts(deps)` keeps its shape; `SyncResult.skipped` now also counts machinery singleton skips. The watermark (`maxWriteDate`) still advances only from successfully parsed rows — unchanged. A run that trips the zero-upsert breaker (a MULTI-record page that ingested zero rows) throws `ODOO_UNEXPECTED_ROW` through the existing run-level catch, so `failSync(instance, code, now)` fires exactly as today; a single-record page whose only record singleton-faults completes the run with `skipped: 1` instead.
 
 **Design notes the implementer must not skip:**
 
 1. **Only `ODOO_FAULT` enters the machinery, at every level.** A page fetch rejecting anything else re-throws untouched. Inside the machinery, an id-only `search` rejection re-throws (a fault there is not record-shaped). A sub-batch or singleton fetch rejecting non-`ODOO_FAULT` re-throws. The machinery narrows record faults; it never launders other failure shapes into skips.
 2. **The plain `search` takes NO `fields` kwarg** — domain/offset/limit/order only. A `fields: ["id"]` kwarg on `search` is a server-side fault that would make the entire machinery a no-op no mocked test could catch. The wire-shape test asserts its absence explicitly.
-3. **The zero-upsert breaker keys on the count of rows HANDED to the upsert (`contacts.length === 0`), not on `upsertContacts`' return.** The spec says "keys on the per-page upsert count"; the only reading that is implementable without a false positive is the handed-row count: `upsertContacts` returns the count of rows that genuinely CHANGED (guarded upsert's per-row `rowsAffected`, `odoo-contacts.action.ts:97-102`), and a healthy re-sync of unchanged data legitimately changes zero rows — keying on the return would fail every healthy no-op run and break the existing mocked fixtures that leave it at 0. The load-bearing half of the spec's rule survives intact: the breaker does NOT care which skip path produced the zero — every singleton faulted inside the machinery, or every row failed `parsePartnerRow`, both reach the same loud failure.
+3. **The zero-upsert breaker keys on the count of rows HANDED to the upsert (`contacts.length === 0`), not on `upsertContacts`' return — and exempts a single-record page.** The spec says "keys on the per-page upsert count"; the only reading that is implementable without a false positive is the handed-row count: `upsertContacts` returns the count of rows that genuinely CHANGED (guarded upsert's per-row `rowsAffected`, `odoo-contacts.action.ts:97-102`), and a healthy re-sync of unchanged data legitimately changes zero rows — keying on the return would fail every healthy no-op run and break the existing mocked fixtures that leave it at 0. The load-bearing half of the spec's rule survives intact: the breaker does NOT care which skip path produced the zero — every singleton faulted inside the machinery, or every row failed `parsePartnerRow`, both reach the same loud failure. The ONE exemption is `pageIdCount === 1`: the spec's item 4 ("a singleton id that still faults is skipped... the run continues") and item 5 ("whichever route the zero arrived by") conflict for a page whose only record singleton-faulted, and item 4 wins there — there is no table-walk to hide, the skip is counted, and the run recovers when a page-mate appears; item 5's named scenario (whole-table drift) fires on every multi-record page.
 4. **The break condition moves from `page.length` to the page's id count** (`rows + singleton-skipped ids`). A fault-isolated page can be short because of skips, not because the table ended — breaking on row count alone would strand every later page behind the fault. On a non-faulting page the id count equals the row count, so the existing short-page semantics are preserved.
 5. **Skipped singletons advance the cursor past their id** (folded into `pageMaxId`), or the loop re-fetches the identical domain forever. The existing raw-id rule (cursor advances from the RAW id before parsing) survives unchanged for rows the machinery returns.
 
@@ -736,6 +790,76 @@ describe("the page-fault machinery", () => {
       expect(action.failSync).toHaveBeenCalledWith(INSTANCE, code, NOW);
     }
   });
+
+  it("bisects only on FAULT: a successful sub-batch is never re-fetched", async () => {
+    // The recursion-duplication killer: after [1,2] succeeds its rows are in,
+    // and the machinery must NOT re-read them (the fault catch is the only
+    // place bisection happens).
+    const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+      const batch = idsIn(args);
+      if (method === "search") return [1, 2, 3, 4];
+      if (batch) {
+        if (batch.length === 4) throw fault(); // the whole-page read faults
+        if (batch.includes(4)) throw fault(); // [3,4] and the [4] singleton fault
+        return batch.map((id) => partner({ id })); // [1,2] ok, [3] ok
+      }
+      throw fault(); // page fetch
+    });
+    const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+    const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+    const batches = execute.mock.calls
+      .filter(([, m, a]) => m === "search_read" && idsIn(a))
+      .map(([, , a]) => idsIn(a));
+    expect(batches).toEqual([[1, 2, 3, 4], [1, 2], [3, 4], [3], [4]]);
+    expect(result.skipped).toBe(1);
+    expect(result.fetched).toBe(3); // 1, 2, 3 - each exactly once
+    expect(action.upsertContacts.mock.calls[0][1]).toMatchObject([
+      { id: 1 }, { id: 2 }, { id: 3 },
+    ]);
+  });
+
+  it("does not fail the run when a page's ONLY record singleton-faults (the single-record exemption)", async () => {
+    // Item 4's fate, not item 5's: one id, singleton fault, skip counted,
+    // cursor past it, run completes, watermark untouched so the record is
+    // re-fetched next run and the machinery recovers when a page-mate joins.
+    const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+      const batch = idsIn(args);
+      if (method === "search") return [7];
+      if (batch) throw fault(); // the singleton read faults
+      throw fault(); // page fetch
+    });
+    const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+    const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+    expect(result.skipped).toBe(1);
+    expect(result.fetched).toBe(0);
+    expect(action.finishSync).toHaveBeenCalledWith(INSTANCE, null, NOW, 1);
+    expect(action.failSync).not.toHaveBeenCalled();
+  });
+
+  it("re-throws a non-fault failure from INSIDE the machinery: a sub-batch ODOO_UNREACHABLE is never laundered into a skip", async () => {
+    // Only ODOO_FAULT narrows. A transport failure on a sub-batch read must
+    // fail the run - skipping rows on a dead server would silently drop them.
+    const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+      const batch = idsIn(args);
+      if (method === "search") return [1, 2];
+      if (batch) {
+        if (batch.length === 2) throw fault();
+        throw new OdooError("ODOO_UNREACHABLE", "down", {}); // the singleton read
+      }
+      throw fault(); // page fetch
+    });
+    const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+    await expect(
+      syncContacts({ client, instance: INSTANCE, now: NOW })
+    ).rejects.toMatchObject({ code: "ODOO_UNREACHABLE" });
+    expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNREACHABLE", NOW);
+    expect(action.finishSync).not.toHaveBeenCalled();
+  });
 });
 ```
 
@@ -810,9 +934,10 @@ async function fetchRowsBisectingFaults(
     return;
   }
   out.rows.push(...expectRows(rows, "search_read"));
-  if (ids.length > 1) {
-    await fetchRowsBisectingFaults(client, ids.slice(Math.floor(ids.length / 2)), out);
-  }
+  // BISECTION HAPPENS ONLY IN THE FAULT CATCH. A successful read answered
+  // EVERY id it was given - recursing into the second half here would re-fetch
+  // it (duplicate rows, inflated fetched, O(log n) wasted RPCs per healthy
+  // sub-batch).
 }
 ```
 
@@ -899,8 +1024,8 @@ for (;;) {
   changed += await upsertContacts(instance, contacts, now);
   fetched += contacts.length;
 
-  // THE ZERO-UPSERT BREAKER. A page that listed records and handed the
-  // upsert ZERO rows is a systemic fault wearing a per-record fault's
+  // THE ZERO-UPSERT BREAKER. A page that listed MULTIPLE records and handed
+  // the upsert ZERO rows is a systemic fault wearing a per-record fault's
   // clothes - the cursor would walk the whole table and the run would end
   // "successfully" with nothing ingested. Keyed on the rows HANDED to the
   // upsert, not on its return (that return counts genuinely-CHANGED rows and
@@ -908,8 +1033,20 @@ for (;;) {
   // route the zero came by - every singleton faulted, or every row failed
   // parse - the outcome is identical and loud, through the existing
   // failSync path.
+  //
+  // THE SINGLE-RECORD EXEMPTION (pageIdCount === 1): a page whose ONLY id
+  // singleton-faulted is item 4's accepted fate - "a singleton id that still
+  // faults is skipped and the cursor moves past it; the run continues" - not
+  // a systemic fault: there is no table-walk to hide, the skip is counted and
+  // surfaced, the watermark stays put so the record is re-fetched next run,
+  // and the run recovers naturally the moment a healthy page-mate joins the
+  // domain. Failing the run there would re-create the exact permanent wedge
+  // this task removes, for a page the breaker's own harm rationale (the
+  // silent total walk) does not describe. The breaker's named scenario - a
+  // PARTNER_FIELDS drift faulting every read yet sparing the id-only search -
+  // fires on every multi-record page and is unaffected.
   const pageIdCount = page.length + isolatedSkips.length;
-  if (pageIdCount > 0 && contacts.length === 0) {
+  if (pageIdCount > 1 && contacts.length === 0) {
     throw odooError(
       "ODOO_UNEXPECTED_ROW",
       `a page listed ${pageIdCount} partner records and none could be ingested - the field list or domain no longer matches this server`,
@@ -947,7 +1084,8 @@ git commit -m "feat: walk contacts-sync past a faulting record instead of dying 
 
 ODOO_FAULT on a page fetch re-names the page's ids with a field-less plain
 search, bisects the reads, skips a still-faulting singleton, and a page that
-upserts zero rows fails the run loudly (the zero-upsert breaker).
+listed multiple records but upserted none fails the run loudly (the
+zero-upsert breaker; a single-record page is exempt - item 4's fate).
 
 Co-Authored-By: Claude Code <noreply@anthropic.com>"
 ```
@@ -1121,7 +1259,8 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - `queueErrorText` faultString rendering (redacted, capped, appended; fallback byte-identical; message segment stays) → Task 1.
 - Existence probe + synthesized ODOO_FAULT + retryable-vs-deterministic probe discipline → Task 2 (no catch wraps the probe — Step 3's comment is normative).
 - Retry path: `retryTarget` untouched, no attempt cap → Global Constraints; nothing in any task touches `meeting-log-actions.ts`.
-- Contacts-sync page-fault machinery (id-only search, bisection, singleton skip, watermark-from-upserted, zero-upsert breaker, non-fault re-throws, cursor rules) → Task 3, including both named cursor cases as tests.
+- Contacts-sync page-fault machinery (id-only search, bisection, singleton skip, watermark-from-upserted, zero-upsert breaker with the single-record exemption, non-fault re-throws, cursor rules) → Task 3, including both named cursor cases as tests.
+- **Plan-review revisions (2026-09-21, 5-reviewer panel):** bisection happens only on fault (a successful sub-batch is never re-fetched); the breaker exempts a single-record page (spec items 4/5 conflict there; the exemption test pins item 4's fate); the probe's miss is a genuinely EMPTY result — a non-empty answer with no usable id is `ODOO_UNEXPECTED_ROW`, keeping the "0 rows" message literally true; the 400-char cap cuts on a code-point boundary and a redact-before-cap straddle test pins the ordering; a sub-batch-level non-FAULT rejection re-throws (test added).
 - `opportunities.ts` comment rewrite (same plan as the sync change) → Task 3 Step 4.
 - Archived-gate removal + copy merge + informational tag → Task 4.
 - `.livecheck/` — conditional future work, not a code task (spec: "if a livecheck run happens").
