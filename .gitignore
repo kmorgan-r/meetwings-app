@@ -39,3 +39,4 @@ ship-run.log
 ship-run.err.log
 bootstrap.txt
 pwsh.pid
+graft/
