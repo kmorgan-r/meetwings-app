@@ -71,7 +71,7 @@ Three steps in the issue's order, plus one scoped secondary fix:
 | Caller attribution | Short captured stack in each log line; no signature changes |
 | UI-side visibility | One effect-based count log in `useOdooTarget` — makes a UI-only wipe diagnosable in one round |
 | Log permanence | Kept permanently, `[odoo-targets]` prefix — ops fire at user frequency, and a future reporter can paste them |
-| Regression test | Extend the keeps-mounted test with a real-`useOdooTarget` case against the mocked sql plugin |
+| Regression test | Extend the keeps-mounted test with a real-`useOdooTarget` case; survival asserted via wipe spies + the hook's own in-memory count (no stateful sql mock exists — the action layer is what this repo's tests mock) |
 | Fix selection | By log signature per the candidate table; each fix ships with a test reproducing its mechanism |
 | Interact-outside defect | In scope, secondary — same click, damage confirmed by code reading |
 
@@ -166,35 +166,45 @@ then calls `reset()`, wiping calendar-proposal state. Even if it cannot
 explain the DB wipe, minimize currently destroys the proposal the user was
 about to confirm.
 
-The fix refuses the dismissal when the pointerdown lands on the minimize
+The fix refuses the dismissal when the pointerdown lands on either minimize
 control. This matches the documented minimize policy from the 2026-09-08
 spec — "minimize only hides it" — under which a popover MAY stay open while
 minimized (the portal is already CSS-hidden via the `data-overlay-minimized`
-body rule, and restore re-shows it):
+body rule, verified present at `src/global.css:196`:
+`body[data-overlay-minimized="true"] [data-radix-popper-content-wrapper]`,
+and restore re-shows it):
 
 ```tsx
 <PopoverContent
   className="w-80 p-3 popover-opaque"
   onPointerDownOutside={(e) => {
     const t = e.detail.originalEvent.target as HTMLElement | null;
-    if (t?.closest("[data-minimize-button]")) e.preventDefault();
+    if (t?.closest("[data-overlay-minimize-control]")) e.preventDefault();
   }}
   onFocusOutside={(e) => {
     // Same check: the click also moves focus, and Radix fires this as a
     // separate dismissal — preventing only the pointerdown one leaves the
     // focus dismissal to close the picker anyway.
     const t = e.detail.originalEvent.target as HTMLElement | null;
-    if (t?.closest("[data-minimize-button]")) e.preventDefault();
+    if (t?.closest("[data-overlay-minimize-control]")) e.preventDefault();
   }}
 >
 ```
 
-- `data-minimize-button` is added to the Minimize button in the overlay bar
-  (`src/pages/app/index.tsx`). Not on the pill — the pill is a sibling of the
-  `Card` and exists only while minimized, when the picker surface is already
-  hidden.
+- `data-overlay-minimize-control` is added to BOTH minimize surfaces: the
+  Minimize button in the overlay bar (`src/pages/app/index.tsx`) AND the
+  root of `MinimizedPill` (`src/pages/app/components/MinimizedPill.tsx`).
+  The pill needs it as much as the button: with only the button marked, the
+  restore click on the pill is itself a pointerdown outside the still-open
+  (CSS-hidden) portal, so Radix dismisses the picker at RESTORE instead —
+  `onOpenChange(false)` fires, and the same `!isPickerOpen` close effect
+  wipes the proposal state one step later, reproducing the identical end
+  state through a different door. Marking both is what makes the picker
+  survive the full cycle, which is the policy the 2026-09-08 spec actually
+  states.
 - `preventDefault()` on a Radix dismissal keeps the popover open; the
-  Minimize button still receives the click and still minimizes.
+  Minimize button still receives the click and still minimizes, and the
+  pill's expand click still restores.
 - Scoped to this one popover. The other popovers (mic, files, message
   history) have the same interact-outside interaction with the Minimize
   button, but their close wipes nothing — noted here so it cannot read as an
@@ -203,31 +213,76 @@ body rule, and restore re-shows it):
 ### 4. The regression test (the issue's named requirement)
 
 Extend `src/tests/overlay-minimize-keeps-mounted.test.tsx` with a third case.
-The current file cannot assert SQLite survival — its `useOdooTarget` is a
-stub — so the new case swaps the stub for the real hook:
+The current file cannot assert survival — its `useOdooTarget` is a stub — so
+the new case swaps the stub for the real hook.
 
-- Scaffold: reuse `useOdooTarget.test.tsx`'s proven plugin-sql/window/event
-  mock scaffold. `vi.doMock("@/hooks", ...)` keeps the real `useOdooTarget`
-  (importOriginal spread) and overrides only `useCompletion` exactly as the
-  file already does; the action module is wrapped in a doMock that spies its
-  exports over the actual implementations.
-- Seed one row via `addSelectedTarget` against the mocked DB before render.
-- Mount App — the real hook's mount effect rehydrates, so targets starts at
-  length 1 (this also asserts the rehydrate itself works inside the overlay
-  tree).
+**Verified ground for the scaffold.** The real hook mounts inside the REAL
+`Completion` component (`src/pages/app/components/completion/index.tsx:51`
+calls `useOdooTarget`), which this file deliberately keeps real while stubbing
+its other children — so the `Input` stub (which hides the ContactPicker UI)
+does NOT block the hook from mounting. What blocks it is the mock surface the
+real hook's mount effect pulls in, which the current file does not carry.
+
+- Scaffold: the `@/hooks` barrel doMock keeps its existing stub object with
+  ONLY the `useOdooTarget` entry swapped for the real hook — NOT an
+  `importOriginal` spread, which would un-stub every other hook the file
+  deliberately stubs and drag their real import trees into a module-mock
+  environment built for stubs. The hook's consumer path is Completion, so
+  nothing else needs un-stubbing.
+- The swap pulls in the real hook's own imports, and the file must add the
+  doMocks for them, following the proven scaffold in
+  `odoo-target-new-chat-entry-points.test.tsx` — which mocks the ACTION
+  MODULE layer, not the sql plugin (there is no stateful plugin-sql mock
+  anywhere in this repo's hook tests; `useOdooTarget.test.tsx` also mocks
+  the action module via `vi.mock("@/lib/database/odoo-contacts.action",
+  () => action)`):
+  - `@/lib/database/odoo-contacts.action` — spies (`vi.fn`) over every
+    export; `loadTargets` mock-resolves one seeded row (the "seed" is
+    configuring the action mock, NOT calling `addSelectedTarget` against a
+    real DB — no stateful sql mock exists to receive one).
+  - `@/lib/odoo` — `importActual` of `@/lib/odoo/errors` plus
+    `runSync`/`currentInstance`/`createOdooClient`/`fetchOpportunities` as
+    `vi.fn` (the mount effect branches on `getCurrentWindow().label ===
+    "main"` and calls `runSync`; without this mock the mount effect dies
+    before `loadTargets` and the length-1 precondition is unreachable).
+  - `@/lib/storage/odoo-config.storage`, `sonner`,
+    `@tauri-apps/api/window` (label `"main"`) — the same trio the
+    entry-points scaffold mocks.
+- Mount App — the real hook's mount effect rehydrates through the mocked
+  `loadTargets`, so `targets` starts at length 1 (this also asserts the
+  rehydrate works inside the overlay tree).
 - `setMinimized(true)` → `setMinimized(false)`.
-- Assert: the wipe spies (`clearTargets`, `removeSelectedTarget`) were never
-  called; `loadTargets(instance)` still returns the row after the cycle; the
-  instance string in the action-layer spy calls is identical across the
-  cycle; `completionMountSpy` still fired exactly once.
-
-Named fallback: if the real hook inside the full App graph proves too
-entangled with the stubs this file already carries (the real hook pulls the
-odoo API surface and `getCurrentWindow`), mount a minimal harness component
-calling `useOdooTarget` directly — the shape `useOdooTarget.test.tsx` already
-uses — and drive the store's `setMinimized` around it. The assertion set is
-identical; the scaffold choice is left to the plan so it cannot stall the
-case.
+- Assert, in this order of load-bearing-ness:
+  1. **In-memory survival** (covers the UI-only-wipe candidate, which every
+     DB-side assertion would miss): the stub's `setTargetCount` — the real
+     hook pushes `targets.length` to it on every targets change
+     (`useOdooTarget.ts:251-253`) — is last called with `1` after restore;
+     and the `[odoo-targets] targets` console lines (spy `console.info`)
+     contain no count-0 line inside the cycle window.
+  2. **No wipe ops** — the action spies `clearTargets`,
+     `removeSelectedTarget` AND `purgeOtherInstances` (the only wipe vector
+     needing no user click — omitting it would leave the purge mechanism
+     covered only by the manual gate) were never called during the cycle.
+  3. **Instance stability** — the instance string in the action-layer spy
+     calls is identical across the cycle.
+  4. `completionMountSpy` still fired exactly once (App-mount variant only —
+     see the fallback below).
+- **Fallback, corrected.** If the real hook inside the full App graph proves
+  too entangled, the fallback is the entry-points-SHAPE harness:
+  `renderHook` mounting `useCompletion` (stub) and `useOdooTarget` (real)
+  together — the shape `odoo-target-new-chat-entry-points.test.tsx` already
+  uses — driven by the store's `setMinimized` around it. Its assertion set
+  is NOT identical, and the design does not pretend it is: a bare
+  `setMinimized` cycle fires NO trigger this hook listens for (its wipe
+  paths are the `newConversationStarted` window listener and the
+  `odoo-instance-changed` Tauri listener — neither reads the minimize
+  store), so the bare cycle is a no-op CONTROL, not the mechanism test. The
+  fallback drops `completionMountSpy` (it lives inside the useCompletion
+  stub's effect and only fires under the App-mount variant), keeps
+  assertions 1–3 as the control, and the mechanism test proper — whichever
+  trigger the signature table names — fires that trigger around the cycle
+  and asserts the fix suppresses the wipe. The scaffold choice is left to
+  the plan; the trigger-firing requirement is not.
 
 ## Edge cases
 
@@ -270,14 +325,34 @@ case.
 - New `src/tests/overlay-minimize-picker-dismiss.test.tsx` — with the picker
   open and a calendar proposal present, clicking the Minimize button keeps
   the picker open (`isContactPickerOpen` stays true) and does not fire
-  `useCalendarProposal`'s reset (observable as no wipe of the proposal
-  state / no refetch on restore). Also pins the boundary: a pointerdown on
-  anything else outside the picker still closes it — the `preventDefault`
-  is scoped to `[data-minimize-button]`. Follows the proven ContactPicker
-  mount scaffold from `odoo-target-new-chat-entry-points.test.tsx`.
+  `useCalendarProposal`'s reset; clicking the RESTORED pill likewise keeps
+  it open. Also pins the boundary: a pointerdown on anything else outside
+  the picker still closes it — the `preventDefault` is scoped to
+  `[data-overlay-minimize-control]`.
+  **Scaffold warning (this is a NEW scaffold, not a reused one).** There is
+  no proven rendered-ContactPicker precedent to copy: both
+  `odoo-target-new-chat-entry-points.test.tsx` and
+  `odoo-target-create-contact.test.tsx` are `renderHook` harnesses that
+  render no components, and the keeps-mounted file stubs `Input` to null and
+  the Popover primitives to passthroughs — under either of those, a real
+  Radix `onPointerDownOutside` can never fire and the test would pass
+  vacuously while the fix's props are never exercised. So this test renders
+  the REAL `ContactPicker` with the REAL `@/components` Popover primitives
+  (the shadcn wrapper over `@radix-ui/react-popover`), stubbing only Tauri
+  core/event/window, contexts, `sonner`, and the odoo surface (action spies
+  + `@/lib/odoo` + `odoo-config.storage`). Two hazards to plan for: jsdom
+  lacks `PointerEvent` and `Element.hasPointerCapture`, which Radix's
+  DismissableLayer needs (standard test-setup polyfills); and the scaffold's
+  own sanity check comes FIRST — assert that a pointerdown on a plain
+  outside element CLOSES the picker, proving the dismissal machinery fires
+  in jsdom at all, before the minimize-control case is allowed to assert
+  anything.
 - **Manual gate.** `npm run tauri dev`, configure Odoo, open the picker, add
-  two targets, note "Logging to (2)", minimize, restore. The count is intact
-  and the console shows one mount-time `loadTargets` line and no
-  `clearTargets`/`purgeOtherInstances` lines in the cycle window. Repeat with
-  the picker open during the minimize — the proposal state survives. If the
-  mechanism reproduces, the log names it before any fix is written.
+  two targets, note "Logging to (2)", minimize, restore. The count is intact;
+  `loadTargets` lines occur only at mount (exact count depends on the
+  reload leg and the StrictMode double-mount in dev — do not read the count,
+  read the WINDOW), and no `clearTargets`/`purgeOtherInstances` lines appear
+  in the minimize→restore window. Repeat with the picker open during the
+  minimize, then click the restored pill — the proposal state survives both
+  clicks. If the mechanism reproduces, the log names it before any fix is
+  written.
