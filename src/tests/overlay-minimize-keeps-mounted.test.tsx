@@ -425,7 +425,12 @@ describe("minimize keeps the overlay mounted (hide, do not swap)", () => {
       "true"
     );
 
-    setMinimized(true);
+    // The MINIMIZE leg goes through the real button: `handleMinimize`'s body
+    // (src/pages/app/index.tsx) is where a wipe would be wired in a
+    // regression, and a bare setMinimized(true) would bypass it. The store
+    // import stays for the RESTORE leg — the pill is a stub div in this
+    // scaffold, there is no real restore button to click.
+    await userEvent.click(screen.getByTitle("Minimize"));
     await waitFor(() => {
       expect(screen.getByTestId("minimized-pill-stub")).not.toBeNull();
     });
@@ -435,7 +440,12 @@ describe("minimize keeps the overlay mounted (hide, do not swap)", () => {
     });
 
     // 1. In-memory survival (covers the UI-only-wipe candidate): the size
-    //    push ends at 1, and no count-0 line fired inside the cycle.
+    //    push ends at 1 — the in-memory list is intact after the cycle.
+    //    What this case asserts is the zero wipe ops below
+    //    (clearTargets/removeSelectedTarget/purgeOtherInstances never
+    //    called) plus this count; there is NO console.info spy in this
+    //    file, so no count-0 log line is asserted here (that
+    //    discrimination pattern lives in useOdooTarget.test.tsx).
     expect(setTargetCountSpy).toHaveBeenLastCalledWith(1);
     // 2. No wipe ops — including purgeOtherInstances, the only wipe vector
     //    needing no user click.

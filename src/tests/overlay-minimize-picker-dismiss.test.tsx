@@ -190,6 +190,38 @@ describe("the minimize controls do not dismiss an open ContactPicker (issue #72)
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
+  // The focus half of the guard: a real click on the Minimize button also
+  // MOVES focus, and Radix treats that as a separate dismissal — the
+  // `onFocusOutside` guard in ContactPicker.tsx runs against a document-level
+  // `focusin` listener (react-dismissable-layer's useFocusOutside), which the
+  // pointerdown pair above never reaches because fireEvent.pointerDown does
+  // not move focus.
+  //
+  // A bare synthetic focusin is NOT enough: Radix's isFocusInsideReactTreeRef
+  // is armed by the layer's focus capture (PopoverContent's mount auto-focus
+  // leaves focus on an element INSIDE the popover), and only the layer's
+  // onBlurCapture disarms it. A synthetic focusin moves no focus, so no blur
+  // fires and Radix would silently skip the dismissal. A real focus move
+  // emits focusout from the previously-focused element before focusin on the
+  // new one — so each case below emits that same pair.
+  it("SANITY: the focus dismissal machinery fires at all — a plain outside focus move closes the picker", async () => {
+    render(<Harness />);
+    await flushDismissalListeners();
+    fireEvent.focusOut(document.activeElement as HTMLElement);
+    fireEvent.focusIn(screen.getByTestId("plain-outside"));
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("a focusin on the Minimize control keeps the picker open", async () => {
+    render(<Harness />);
+    await flushDismissalListeners();
+    fireEvent.focusOut(document.activeElement as HTMLElement);
+    fireEvent.focusIn(screen.getByTestId("minimize-standin"));
+    // Radix fires onOpenChange(true) when the popover first opens — assert
+    // it was never called with FALSE.
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+
   it("the real MinimizedPill root carries the marker attribute", () => {
     const { container } = render(<MinimizedPill style="status-count" />);
     expect(
