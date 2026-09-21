@@ -1,6 +1,6 @@
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const windowLabel = vi.hoisted(() => ({ value: "main" }));
 vi.mock("@tauri-apps/api/window", () => ({
@@ -1693,5 +1693,42 @@ describe("clearing every target at once", () => {
     // the row is still sitting in odoo_selected_targets.
     expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
     expect(result.current.targetsRef.current).toHaveLength(1);
+  });
+});
+
+describe("[odoo-targets] hook-side count log (issue #72)", () => {
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => infoSpy.mockRestore());
+
+  const countLines = () => infoSpy.mock.calls.filter((c) => c[1] === "targets");
+
+  it("logs count transitions, and a UI wipe shows as a count-0 line with the clearTargets op beside it", async () => {
+    action.loadTargets.mockResolvedValue([
+      { model: "res.partner", resId: 1, name: "A" },
+    ]);
+    renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: true,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount: vi.fn(),
+      })
+    );
+    await waitFor(() =>
+      expect(countLines().some((c) => c[2].count === 1)).toBe(true)
+    );
+
+    // The new-chat wipe: in-memory clear first (the count-0 line), DB wipe
+    // second (the clearTargets action line). Both must be on the record.
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
+    await waitFor(() =>
+      expect(countLines().some((c) => c[2].count === 0)).toBe(true)
+    );
+    await waitFor(() =>
+      expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo")
+    );
   });
 });

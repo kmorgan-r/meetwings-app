@@ -252,6 +252,22 @@ export function useOdooTarget({
     setTargetCount(targets.length);
   }, [targets, setTargetCount]);
 
+  /**
+   * Issue #72 instrumentation: the UI-side mirror of the action-layer
+   * `[odoo-targets]` logs. A UI-only wipe empties this list with zero DB
+   * writes and is invisible at the action layer; this line is what makes it
+   * diagnosable in one round instead of two. Effect-based, deliberately NOT
+   * inside `applyTargets`' `setTargets` updater — updaters run during render
+   * and twice under StrictMode, and a side effect there is exactly the
+   * impurity StrictMode punishes.
+   */
+  useEffect(() => {
+    console.info("[odoo-targets]", "targets", {
+      instance: instanceRef.current ?? null,
+      count: targets.length,
+    });
+  }, [targets]);
+
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
   /**
