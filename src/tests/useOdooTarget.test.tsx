@@ -1718,14 +1718,23 @@ describe("[odoo-targets] hook-side count log (issue #72)", () => {
       })
     );
     await waitFor(() =>
-      expect(countLines().some((c) => c[2].count === 1)).toBe(true)
+      expect(
+        countLines().some(
+          (c) => c[2].count === 1 && (c[2] as Record<string, unknown>).instance === "http://h:8069|odoo"
+        )
+      ).toBe(true)
     );
 
     // The new-chat wipe: in-memory clear first (the count-0 line), DB wipe
     // second (the clearTargets action line). Both must be on the record.
+    // The mount effect fires with the initial empty `targets` and emits its
+    // own count-0 line before loadTargets resolves, so a bare `some(count ===
+    // 0)` is satisfied by that pre-existing line even if the wipe never
+    // logged. Only an INCREASE in the count-0 line count can discriminate.
+    const wipesBefore = countLines().filter((c) => c[2].count === 0).length;
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
     await waitFor(() =>
-      expect(countLines().some((c) => c[2].count === 0)).toBe(true)
+      expect(countLines().filter((c) => c[2].count === 0).length).toBeGreaterThan(wipesBefore)
     );
     await waitFor(() =>
       expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo")
