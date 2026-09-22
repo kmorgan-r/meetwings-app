@@ -574,5 +574,37 @@ describe("syncContacts", () => {
       const lastDomain = (pageFetches[pageFetches.length - 1][2] as unknown[][][])[0];
       expect(lastDomain).toContainEqual(["id", ">", 200]);
     });
+
+    it("treats a page whose ids all vanished mid-window as benign: no breaker, run completes", async () => {
+      // Records deleted or re-typed between the id-only `search` and the
+      // bisected reads come back as neither rows nor skips - a benign
+      // concurrent-modification race, not field-list drift. The read-evidence
+      // condition must exempt it: zero rows AND zero skips means nothing was
+      // read and nothing faulted.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          const idLeaf = (args[0] as unknown[][]).find((l) => l[0] === "id");
+          if (idLeaf && idLeaf[1] === ">" && (idLeaf[2] as number) >= 6) return [];
+          return [5, 6];
+        }
+        if (batch) return []; // both records vanished mid-window, read succeeds empty
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(0);
+      expect(result.fetched).toBe(0);
+      expect(action.failSync).not.toHaveBeenCalled();
+      expect(action.finishSync).toHaveBeenCalledWith(INSTANCE, null, NOW, 0);
+      // The cursor folded the id-search's max id (ids are id-asc): it moved
+      // past the vanished window instead of stalling on it.
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      expect(pageFetches).toHaveLength(1); // one faulting page, then the empty window ends the run
+    });
   });
 });

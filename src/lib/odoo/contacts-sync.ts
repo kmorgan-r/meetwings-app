@@ -190,12 +190,17 @@ export async function syncContacts(deps: {
 
       let page: XmlRpcValue;
       const isolatedSkips: number[] = [];
-      // Set ONLY by the machinery below, to the id-only `search`'s count. A
-      // record deleted or re-typed BETWEEN that search and the bisected reads
-      // is named in `ids` but comes back as neither a row nor a skip - keying
-      // the page's id count on rows+skips alone would shrink the count and
-      // break the loop early, silently stranding every later page.
+      // Set ONLY by the machinery below. `machineryIdCount` is the id-only
+      // `search`'s count; a record deleted or re-typed BETWEEN that search
+      // and the bisected reads is named in `ids` but comes back as neither a
+      // row nor a skip - keying the page's id count on rows+skips alone
+      // would shrink the count and break the loop early, silently stranding
+      // every later page. `machineryMaxId` (ids are `order: "id asc"`, so the
+      // last element is the max) folds into the cursor for the same reason:
+      // a window whose records ALL vanished would otherwise stall the cursor
+      // and re-fetch the identical domain forever.
       let machineryIdCount: number | null = null;
+      let machineryMaxId: number | null = null;
       try {
         page = await client.execute("res.partner", "search_read", [domain], {
           fields: PARTNER_FIELDS,
@@ -233,6 +238,7 @@ export async function syncContacts(deps: {
         skipped += isolated.skippedIds.length;
         isolatedSkips.push(...isolated.skippedIds);
         machineryIdCount = ids.length;
+        machineryMaxId = ids.length > 0 ? ids[ids.length - 1] : null;
       }
 
       if (runStartedAt === null && client.serverDate) {
@@ -258,6 +264,7 @@ export async function syncContacts(deps: {
       // skipped (their write_date is unknown and stays above the watermark).
       let pageMaxId = cursor;
       for (const rawId of isolatedSkips) pageMaxId = Math.max(pageMaxId, rawId);
+      if (machineryMaxId !== null) pageMaxId = Math.max(pageMaxId, machineryMaxId);
       for (const raw of page) {
         const rawId = (raw as { id?: unknown } | null)?.id;
         if (typeof rawId === "number" && Number.isInteger(rawId)) {
@@ -319,6 +326,14 @@ export async function syncContacts(deps: {
       // silent total walk) does not describe. The breaker's named scenario - a
       // PARTNER_FIELDS drift faulting every read yet sparing the id-only search -
       // fires on every multi-record page and is unaffected.
+      //
+      // THE READ-EVIDENCE CONDITION: a page whose ids were ALL removed from
+      // scope BETWEEN the id-only search and the bisected reads (deleted or
+      // re-typed) comes back with zero rows AND zero skips - nothing was read
+      // and nothing faulted, so there is no drift evidence and the race is
+      // benign: the run continues past it. The breaker fires only when reads
+      // actually happened (rows returned, or singletons skipped) and yielded
+      // nothing ingestable.
       // The break below keys on this ID count, not the row count: a
       // fault-isolated page is short because records were skipped, not because
       // the table ended. On a non-faulting page the two are the same number.
@@ -328,7 +343,11 @@ export async function syncContacts(deps: {
       // it shrink the count would break the loop early and strand every later
       // page behind it.
       const pageIdCount = machineryIdCount ?? page.length + isolatedSkips.length;
-      if (pageIdCount > 1 && contacts.length === 0) {
+      if (
+        pageIdCount > 1 &&
+        contacts.length === 0 &&
+        (page.length > 0 || isolatedSkips.length > 0)
+      ) {
         throw odooError(
           "ODOO_UNEXPECTED_ROW",
           `a page listed ${pageIdCount} partner records and none could be ingested - the field list or domain no longer matches this server`,
