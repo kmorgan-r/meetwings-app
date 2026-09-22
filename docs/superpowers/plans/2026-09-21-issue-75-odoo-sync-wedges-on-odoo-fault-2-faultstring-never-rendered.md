@@ -121,7 +121,7 @@ it("redacts a key that arrives raw in a directly-constructed faultString", () =>
 - [ ] **Step 2: Run the render tests, verify they fail**
 
 Run: `npx vitest run src/tests/odoo-meeting-log-render.test.ts`
-Expected: FAIL — the four new cases fail (today's text has no faultString half, no cap); all existing fixtures at `:124-147` pass.
+Expected: FAIL — of the five new cases, four fail (no faultString half, no cap, no redact-before-cap ordering) and the byte-identical fallback case passes vacuously as a green guard; all existing fixtures at `:124-147` pass.
 
 - [ ] **Step 3: Implement the composition in `queueErrorText`**
 
@@ -280,7 +280,7 @@ execute: vi.fn(
 ),
 ```
 
-3. Add the four named probe cases (after the "never re-attempts a failed target either" test):
+3. Add the five named probe cases (after the "never re-attempts a failed target either" test):
 
 ```ts
 it("probes the record before creating an attachment and terminally fails a dead target with the composed text", async () => {
@@ -475,7 +475,7 @@ Unchanged fixtures (no probe reaches them — verify, do not edit): `reuses a st
 - [ ] **Step 5: Run the push suite, verify green**
 
 Run: `npx vitest run src/tests/odoo-meeting-log-push.test.ts`
-Expected: PASS — old fixtures green on the new order (adopt-miss → probe → create), the four probe legs green.
+Expected: PASS — old fixtures green on the new order (adopt-miss → probe → create), all five probe legs green.
 
 - [ ] **Step 6: Point the sweep suite's wire stubs at the probe, and add the sweep-driven dead-target case**
 
