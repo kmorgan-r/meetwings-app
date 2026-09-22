@@ -247,12 +247,15 @@ describe("the happy path", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))   // ir.attachment.create
       .mockResolvedValueOnce(intResponse(999));  // message_post
     await pushQueuedRow(row, makeDeps());
 
-    expect(calls()).toEqual(["authenticate", "ir.attachment.create", "res.partner.message_post"]);
-    const body = String(tauriFetch.mock.calls[2][1].body);
+    expect(calls()).toEqual([
+      "authenticate", "res.partner.search", "ir.attachment.create", "res.partner.message_post",
+    ]);
+    const body = String(tauriFetch.mock.calls[3][1].body);
     expect(body).toContain("<int>555</int>"); // attachment_ids: [thatId]
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent", sent_at: NOW });
     expect(await listTargets("row-1")).toMatchObject([
@@ -270,23 +273,29 @@ describe("the happy path", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))   // ir.attachment.create
       .mockResolvedValueOnce(intResponse(999));  // message_post
 
     await pushQueuedRow(row, makeDeps());
 
-    // Index 2 is the message_post POST; index 0 is authenticate.
-    const body = String(tauriFetch.mock.calls[2][1].body);
+    // Index 3 is the message_post POST; index 0 is authenticate.
+    const body = String(tauriFetch.mock.calls[3][1].body);
     expect(body).toContain("subtype_xmlid");
     expect(body).toContain("mail.mt_note");
   });
 
-  it("issues NO search on the first attempt", async () => {
-    // This is what pins the attemptsBefore boundary. `attempts` is incremented
-    // by the claim CAS, so a post-CAS read is already 1 on a brand-new row and
-    // an `attempts > 0` gate would fire on every first push - two wasted round
-    // trips per meeting for every user, and every first attempt exposed to the
-    // search-failure path.
+  it("issues no ADOPT search on the first attempt", async () => {
+    // This is what pins the attemptsBefore boundary - and what the boundary
+    // pins is the ADOPT search, nothing else. `attempts` is incremented by the
+    // claim CAS, so a post-CAS read is already 1 on a brand-new row and an
+    // `attempts > 0` gate would fire the adopt search on every first push -
+    // two wasted round trips per meeting for every user, and every first
+    // attempt exposed to the search-failure path.
+    //
+    // The probe's own `res.partner.search` in the chain below is DELIBERATE on
+    // every attachment creation: it is the invariant's cost, one `search` per
+    // creation on a fresh target, not a regression of the gate.
     //
     // Do NOT pre-claim the row here. An earlier draft did, which left the DB
     // row `sending` while the in-memory copy still said `pending`, so
@@ -298,10 +307,14 @@ describe("the happy path", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps());
-    expect(calls()).toEqual(["authenticate", "ir.attachment.create", "res.partner.message_post"]);
+    expect(calls()).toEqual([
+      "authenticate", "res.partner.search", "ir.attachment.create", "res.partner.message_post",
+    ]);
+    expect(calls()).not.toContain("ir.attachment.search");
   });
 
   it("names the attachment from transcript_start_at and the row id", async () => {
@@ -310,10 +323,11 @@ describe("the happy path", () => {
     const row = await readRow("row-1");
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps());
-    expect(String(tauriFetch.mock.calls[1][1].body)).toContain("-row-1.md");
+    expect(String(tauriFetch.mock.calls[2][1].body)).toContain("-row-1.md");
   });
 
   it("puts the AI summary in the note body instead of the fallback", async () => {
@@ -330,6 +344,7 @@ describe("the happy path", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     const d = makeDeps({
@@ -339,7 +354,7 @@ describe("the happy path", () => {
     });
     await pushQueuedRow(row, d);
 
-    const body = String(tauriFetch.mock.calls[2][1].body);
+    const body = String(tauriFetch.mock.calls[3][1].body);
     expect(body).toContain("They agreed to start the pilot.");
     expect(body).not.toContain("Summarization failed");
 
@@ -398,12 +413,18 @@ describe("model discrimination", () => {
     seedTargets("row-1", [{ resId: 88, model: "crm.lead" }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([88])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps());
+    expect(calls()).toContain("crm.lead.search");
     expect(calls()).toContain("crm.lead.message_post");
     expect(calls()).not.toContain("res.partner.message_post");
-    expect(String(tauriFetch.mock.calls[1][1].body)).toContain("crm.lead"); // res_model
+    // Index 2 is the ir.attachment.create POST. The probe body contains
+    // "crm.lead" too - but as the search's model, not the attachment's
+    // res_model - so the res_model assertion must read the CREATE body to stay
+    // load-bearing.
+    expect(String(tauriFetch.mock.calls[2][1].body)).toContain("crm.lead"); // res_model
   });
 
   it("posts to res.partner with contact_id when lead_id is null", async () => {
@@ -411,6 +432,7 @@ describe("model discrimination", () => {
     seedTargets("row-1", [{ resId: 42, model: "res.partner" }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps());
@@ -458,7 +480,8 @@ describe("idempotency", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
-      .mockResolvedValueOnce(arrayResponse([]))
+      .mockResolvedValueOnce(arrayResponse([]))     // adopt search: no match
+      .mockResolvedValueOnce(arrayResponse([42]))   // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(arrayResponse([]))   // mail.message.search
       .mockResolvedValueOnce(intResponse(999));
@@ -548,7 +571,10 @@ describe("the code table", () => {
   it("keeps the row pending on a 5xx", async () => {
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockResolvedValueOnce(xml("", 503));
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockResolvedValueOnce(xml("", 503));
     await pushQueuedRow(row, makeDeps());
     expect(await getQueueRow("row-1")).toMatchObject({ status: "pending" });
   });
@@ -559,7 +585,10 @@ describe("the code table", () => {
     // forever.
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockResolvedValueOnce(xml("", 413));
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockResolvedValueOnce(xml("", 413));
     await pushQueuedRow(row, makeDeps());
     expect(await getQueueRow("row-1")).toMatchObject({ status: "failed" });
   });
@@ -567,7 +596,10 @@ describe("the code table", () => {
   it("keeps the row pending on a 429", async () => {
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockResolvedValueOnce(xml("", 429));
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockResolvedValueOnce(xml("", 429));
     await pushQueuedRow(row, makeDeps());
     expect(await getQueueRow("row-1")).toMatchObject({ status: "pending" });
   });
@@ -590,18 +622,23 @@ describe("the code table", () => {
   it("FAILS the row on ODOO_FAULT", async () => {
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockResolvedValueOnce(faultResponse(2, "no such partner"));
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockResolvedValueOnce(faultResponse(2, "no such partner"));
     await pushQueuedRow(row, makeDeps());
     expect(await getQueueRow("row-1")).toMatchObject({ status: "failed", last_error_code: "ODOO_FAULT" });
   });
 
   it("FAILS the row on an unexpected Odoo return value", async () => {
     // expectInt turns this into ODOO_UNEXPECTED_ROW - an OdooError - which
-    // isRetryable's `default` correctly refuses to retry.
+    // isRetryable's `default` correctly refuses to retry. The boolean lands on
+    // the ir.attachment.create response, after the probe has passed.
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(xml("<methodResponse><params><param><value><boolean>0</boolean></value></param></params></methodResponse>"));
     await pushQueuedRow(row, makeDeps());
     expect(await getQueueRow("row-1")).toMatchObject({ status: "failed" });
@@ -659,7 +696,10 @@ describe("a pre-wire failure is never terminal", () => {
     // simulated without a second database.
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockResolvedValueOnce(intResponse(555));
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockResolvedValueOnce(intResponse(555));
     failNextWrite.value = "UPDATE meeting_log_targets SET attachment_id";
     await pushQueuedRow(row, makeDeps());
     expect(calls()).toContain("ir.attachment.create");
@@ -674,12 +714,13 @@ describe("summarization is walled off from the push", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({
       summarize: vi.fn(async (_conversationId: string | null) => { throw new Error("429"); }),
     }));
-    expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
+    expect(String(tauriFetch.mock.calls[3][1].body)).toContain("Summarization failed");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent" });
   });
 
@@ -690,10 +731,11 @@ describe("summarization is walled off from the push", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async (_conversationId: string | null) => null) }));
-    expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
+    expect(String(tauriFetch.mock.calls[3][1].body)).toContain("Summarization failed");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "sent" });
   });
 
@@ -712,10 +754,11 @@ describe("summarization is walled off from the push", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({ summarize: vi.fn(async (_conversationId: string | null) => null) }));
-    const body = String(tauriFetch.mock.calls[2][1].body);
+    const body = String(tauriFetch.mock.calls[3][1].body);
     expect(body).toContain("line-0");
     expect(body).not.toContain("line-11");
   });
@@ -725,12 +768,13 @@ describe("summarization is walled off from the push", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({
       summarize: vi.fn(async (_conversationId: string | null) => summary({ summary: "" })),
     }));
-    expect(String(tauriFetch.mock.calls[2][1].body)).toContain("Summarization failed");
+    expect(String(tauriFetch.mock.calls[3][1].body)).toContain("Summarization failed");
   });
 
   it("leaves last_error NULL when the summarizer rejects", async () => {
@@ -743,6 +787,7 @@ describe("summarization is walled off from the push", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockResolvedValueOnce(intResponse(555))
       .mockResolvedValueOnce(intResponse(999));
     await pushQueuedRow(row, makeDeps({
@@ -765,6 +810,7 @@ describe("last_error redaction", () => {
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch
       .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
       .mockRejectedValueOnce(new Error(`socket hang up while sending sk-secret to odoo`));
     await pushQueuedRow(row, makeDeps());
     const stored = await getQueueRow("row-1");
@@ -778,10 +824,13 @@ describe("the claimed set", () => {
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
     let observed = false;
-    tauriFetch.mockResolvedValueOnce(AUTH()).mockImplementationOnce(async () => {
-      observed = claimed.has("row-1");
-      throw new Error("boom");
-    });
+    tauriFetch
+      .mockResolvedValueOnce(AUTH())
+      .mockResolvedValueOnce(arrayResponse([42])) // existence probe
+      .mockImplementationOnce(async () => {
+        observed = claimed.has("row-1");
+        throw new Error("boom");
+      });
     await pushQueuedRow(row, makeDeps());
     expect(observed).toBe(true);
     expect(claimed.has("row-1")).toBe(false);
@@ -807,12 +856,23 @@ describe("the push loop, per target", () => {
       authenticate: vi.fn(async () => 7),
       execute: vi.fn(
         async (
-          _model: string,
+          model: string,
           method: string,
-          _args: XmlRpcValue[],
+          args: XmlRpcValue[],
           _kwargs?: Record<string, XmlRpcValue>
         ): Promise<XmlRpcValue> => {
-          if (method === "search") return [];
+          if (method === "search") {
+            // Adopt searches (ir.attachment, mail.message) never match, as before.
+            if (model === "ir.attachment" || model === "mail.message") return [];
+            // The existence probe on the target's model: the record EXISTS unless
+            // this test scripts otherwise. Extract resId from the probe's domain
+            // [[["id", "=", resId]]].
+            const resId = (args as unknown as number[][][])[0]?.[0]?.[2];
+            const scripted = probeScripts.get(fake)?.get(typeof resId === "number" ? resId : -1);
+            if (scripted instanceof Error) throw scripted;
+            if (scripted !== undefined) return scripted;
+            return [typeof resId === "number" ? resId : 1];
+          }
           if (method === "message_post") {
             postCount += 1;
             const failure = postFailures.get(fake);
@@ -834,6 +894,20 @@ describe("the push loop, per target", () => {
 
   function failPostFor(target: OdooClient, n: number, error: unknown) {
     postFailures.set(target, { n, error });
+  }
+
+  // Per-test scripts for the existence probe, keyed by the target's resId.
+  // Absent = the record exists (the overwhelmingly common case); `[]` = a dead
+  // or invisible record; an Error = the probe call itself faults.
+  const probeScripts = new WeakMap<OdooClient, Map<number, XmlRpcValue | Error>>();
+
+  function scriptProbe(target: OdooClient, resId: number, answer: XmlRpcValue | Error) {
+    let m = probeScripts.get(target);
+    if (!m) {
+      m = new Map();
+      probeScripts.set(target, m);
+    }
+    m.set(resId, answer);
   }
 
   function odooFault() {
@@ -1052,6 +1126,90 @@ describe("the push loop, per target", () => {
     expect((await listTargets("r1")).find((x) => x.resId === 1)).toMatchObject({
       status: "failed", lastErrorCode: "ODOO_FAULT",
     });
+  });
+
+  it("probes the record before creating an attachment and terminally fails a dead target with the composed text", async () => {
+    seedRow({ id: "r1", status: "pending" });
+    seedTargets("r1", [{ resId: 42, status: "pending" }]);
+    scriptProbe(client, 42, []); // record gone
+    await pushQueuedRow(await readRow("r1"), deps);
+
+    const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual(["res.partner.search"]);
+    // Kwargs are asserted, not just the method: omitting
+    // `context: { active_test: false }` would terminally fail ARCHIVED (still
+    // valid) partners, and an order-of-calls assertion alone cannot see it.
+    expect(client.execute).toHaveBeenCalledWith(
+      "res.partner", "search", [[["id", "=", 42]]],
+      { limit: 1, context: { active_test: false } }
+    );
+    const t = (await listTargets("r1"))[0];
+    expect(t.status).toBe("failed");
+    expect(t.lastErrorCode).toBe("ODOO_FAULT");
+    expect(t.lastError).toBe(
+      "ODOO_FAULT: target record 42 missing or inaccessible (search returned 0 rows)"
+    );
+  });
+
+  it("probes before create on a healthy target: search, then create, then post", async () => {
+    seedRow({ id: "r1", status: "pending" });
+    seedTargets("r1", [{ resId: 42, status: "pending" }]);
+    await pushQueuedRow(await readRow("r1"), deps); // default probe: record exists
+    const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual([
+      "res.partner.search",
+      "ir.attachment.create",
+      "res.partner.message_post",
+    ]);
+    expect(client.execute).toHaveBeenCalledWith(
+      "res.partner", "search", [[["id", "=", 42]]],
+      { limit: 1, context: { active_test: false } }
+    );
+  });
+
+  it("treats a faulting probe as deterministic: no create, no post, target failed", async () => {
+    seedRow({ id: "r1", status: "pending" });
+    seedTargets("r1", [{ resId: 42, status: "pending" }]);
+    scriptProbe(client, 42, odooFault());
+    await pushQueuedRow(await readRow("r1"), deps);
+    const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual(["res.partner.search"]);
+    const t = (await listTargets("r1"))[0];
+    expect(t.status).toBe("failed");
+    expect(t.lastErrorCode).toBe("ODOO_FAULT");
+    // Task 1's fix is visible on the push path: the real fault's faultString is
+    // rendered into the stored text.
+    expect(t.lastError).toBe("ODOO_FAULT: Odoo fault 2 - AccessError");
+  });
+
+  it("returns a probe-blip target to pending, retryable, with no create and no synthesized fault", async () => {
+    // This is the defect a catch-all around the probe produces: synthesizing the
+    // fault on ANY rejection turns an ODOO_UNREACHABLE blip into a terminal row.
+    seedRow({ id: "r1", status: "pending" });
+    seedTargets("r1", [{ resId: 42, status: "pending" }]);
+    scriptProbe(client, 42, unreachable());
+    await pushQueuedRow(await readRow("r1"), deps);
+    const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual(["res.partner.search"]);
+    const t = (await listTargets("r1"))[0];
+    expect(t.status).toBe("pending");
+    expect(t.lastErrorCode).toBe("ODOO_UNREACHABLE");
+    expect(t.lastError ?? "").not.toContain("missing or inaccessible");
+  });
+
+  it("treats a malformed probe row as shape drift, not a zero-row miss", async () => {
+    // A non-empty answer with no usable id must NOT wear the "search returned 0
+    // rows" message - that text must stay literally true.
+    seedRow({ id: "r1", status: "pending" });
+    seedTargets("r1", [{ resId: 42, status: "pending" }]);
+    scriptProbe(client, 42, [false] as XmlRpcValue);
+    await pushQueuedRow(await readRow("r1"), deps);
+    const made = (client.execute as ReturnType<typeof vi.fn>).mock.calls;
+    expect(made.map(([m, meth]) => `${m}.${meth}`)).toEqual(["res.partner.search"]);
+    const t = (await listTargets("r1"))[0];
+    expect(t.status).toBe("failed");
+    expect(t.lastErrorCode).toBe("ODOO_UNEXPECTED_ROW");
+    expect(t.lastError ?? "").not.toContain("missing or inaccessible");
   });
 
   it("stamps last_meeting_at for every contact target and skips leads", async () => {
