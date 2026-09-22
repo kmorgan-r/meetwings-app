@@ -327,6 +327,13 @@ export async function syncContacts(deps: {
       // PARTNER_FIELDS drift faulting every read yet sparing the id-only search -
       // fires on every multi-record page and is unaffected.
       //
+      // The "watermark stays put" guarantee above is SPECIFIC to the
+      // single-record page (there are no page-mates to advance it). On a
+      // MULTI-record page a skipped record's page-mates DO advance the
+      // watermark past its (unknown) write_date, and the record is then absent
+      // from the domain until it is edited again - the spec's accepted
+      // sub-watermark fate, made durable only by the skip-ledger follow-up.
+      //
       // THE READ-EVIDENCE CONDITION: a page whose ids were ALL removed from
       // scope BETWEEN the id-only search and the bisected reads (deleted or
       // re-typed) comes back with zero rows AND zero skips - nothing was read
