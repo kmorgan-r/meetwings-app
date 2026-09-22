@@ -190,6 +190,12 @@ export async function syncContacts(deps: {
 
       let page: XmlRpcValue;
       const isolatedSkips: number[] = [];
+      // Set ONLY by the machinery below, to the id-only `search`'s count. A
+      // record deleted or re-typed BETWEEN that search and the bisected reads
+      // is named in `ids` but comes back as neither a row nor a skip - keying
+      // the page's id count on rows+skips alone would shrink the count and
+      // break the loop early, silently stranding every later page.
+      let machineryIdCount: number | null = null;
       try {
         page = await client.execute("res.partner", "search_read", [domain], {
           fields: PARTNER_FIELDS,
@@ -226,6 +232,7 @@ export async function syncContacts(deps: {
         page = isolated.rows as XmlRpcValue;
         skipped += isolated.skippedIds.length;
         isolatedSkips.push(...isolated.skippedIds);
+        machineryIdCount = ids.length;
       }
 
       if (runStartedAt === null && client.serverDate) {
@@ -312,7 +319,15 @@ export async function syncContacts(deps: {
       // silent total walk) does not describe. The breaker's named scenario - a
       // PARTNER_FIELDS drift faulting every read yet sparing the id-only search -
       // fires on every multi-record page and is unaffected.
-      const pageIdCount = page.length + isolatedSkips.length;
+      // The break below keys on this ID count, not the row count: a
+      // fault-isolated page is short because records were skipped, not because
+      // the table ended. On a non-faulting page the two are the same number.
+      // For a machinery page the count is the id-only `search`'s length (see
+      // `machineryIdCount` above): a record deleted or re-typed between that
+      // search and the bisected reads is neither a row nor a skip, and letting
+      // it shrink the count would break the loop early and strand every later
+      // page behind it.
+      const pageIdCount = machineryIdCount ?? page.length + isolatedSkips.length;
       if (pageIdCount > 1 && contacts.length === 0) {
         throw odooError(
           "ODOO_UNEXPECTED_ROW",
@@ -321,9 +336,6 @@ export async function syncContacts(deps: {
         );
       }
 
-      // The break keys on the page's ID count, not its row count: a
-      // fault-isolated page is short because records were skipped, not because
-      // the table ended. On a non-faulting page the two are the same number.
       if (pageIdCount < PAGE_LIMIT) break;
     }
 

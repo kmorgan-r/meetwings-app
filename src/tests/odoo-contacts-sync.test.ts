@@ -540,5 +540,39 @@ describe("syncContacts", () => {
       expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNREACHABLE", NOW);
       expect(action.finishSync).not.toHaveBeenCalled();
     });
+
+    it("keys the machinery page's id count on the id-only search: a record that vanishes mid-window does not break the run early", async () => {
+      // A record deleted (or re-typed) between the id-only `search` and the
+      // bisected reads is named in `ids` but comes back as neither a row nor
+      // a skip. Keying the page's id count on rows+skips alone would shrink
+      // it below PAGE_LIMIT and break the loop early, silently stranding
+      // every later page behind the advanced watermark.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          const idLeaf = (args[0] as unknown[][]).find((l) => l[0] === "id");
+          if (idLeaf && idLeaf[1] === ">" && (idLeaf[2] as number) >= 200) return [];
+          return Array.from({ length: 200 }, (_v, i) => i + 1);
+        }
+        if (batch) {
+          if (batch.includes(200)) throw fault(); // whole window faults -> bisects down
+          return batch.filter((id) => id !== 50).map((id) => partner({ id })); // id 50 vanishes mid-read
+        }
+        throw fault(); // page fetch faults every time
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(1);
+      // The run continued past the shortened page: a page-2 fetch exists with
+      // the domain moved past id 200. (rows 198 + skip 1 = 199 would have
+      // broken the run after page 1 under a rows+skips count.)
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      const lastDomain = (pageFetches[pageFetches.length - 1][2] as unknown[][][])[0];
+      expect(lastDomain).toContainEqual(["id", ">", 200]);
+    });
   });
 });
