@@ -1586,21 +1586,32 @@ describe("AssignDialog: new contact", () => {
     );
   });
 
-  it("does not preview an archived adoption - it cannot be selected at all", async () => {
+  it("previews and auto-adds an archived adoption - the tag is the only trace", async () => {
+    // Livecheck 2026-08-30: message_post on an ARCHIVED res.partner SUCCEEDS.
+    // The old gates were built on the opposite belief and are gone; the tag is
+    // the only surviving trace of the distinction.
     const archived = contact({ id: 42, name: "Priya Patel", active: false });
     createContact.createOrAdoptContact.mockResolvedValue({ kind: "adopted-archived", contact: archived });
-    await openCreateForm();
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+    await userEvent.click(screen.getByRole("button", { name: "+ New contact" }));
 
     await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
     await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
 
     expect(
-      await screen.findByText(
-        "This person is already in Odoo but archived. Un-archive them there to log this meeting to them."
-      )
+      await screen.findByText("Already in Odoo — added to this meeting.")
     ).toBeInTheDocument();
-    expect(opportunities.fetchOpportunities).not.toHaveBeenCalled();
+    // Previewed: the archived contact is selected exactly as an active one.
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+    expect(props.onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [{ model: "res.partner", resId: 42, name: "Priya Patel" }],
+      })
+    );
   });
 
   it("keeps the form open and the typed fields on a failed create", async () => {
@@ -1840,7 +1851,7 @@ describe("the assign dialog's contact list", () => {
     expect(dialog().queryByRole("button", { name: "Ada Lovelace" })).toBeNull();
   });
 
-  it("refuses an archived contact, which is the target Reassign exists to escape", async () => {
+  it("offers an archived contact as selectable and addable, with the tag as the only trace", async () => {
     contacts.listContacts.mockResolvedValue([
       contact({ id: 8, name: "Gone Partner", active: false }),
     ]);
@@ -1850,10 +1861,15 @@ describe("the assign dialog's contact list", () => {
     await renderPage();
     await openAssignReady("na", "Reassign");
 
-    // Two buttons now share the archived contact's row - the preview button
-    // and its AddToggle - so both must refuse the pick, not just one.
-    expect(dialog().getByRole("button", { name: "Gone Partner Archived" })).toBeDisabled();
-    expect(dialog().getByRole("button", { name: /add Gone Partner/i })).toBeDisabled();
+    // Archived rows render as normal selectable rows carrying an Archived tag;
+    // the livecheck disproved the "unrecoverable" premise the old gating cited.
+    const rowButton = dialog().getByRole("button", { name: "Gone Partner Archived" });
+    expect(rowButton).toBeEnabled();
+    expect(dialog().getByRole("button", { name: /add Gone Partner/i })).toBeEnabled();
+
+    // Previewing an archived contact works exactly as an active one.
+    await userEvent.click(rowButton);
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
   });
 });
 
