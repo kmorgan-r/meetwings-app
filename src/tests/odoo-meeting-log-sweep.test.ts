@@ -369,6 +369,13 @@ describe("runMeetingLogSweep", () => {
     expect(stored?.last_error).toBe(
       "ODOO_FAULT: target record 999 missing or inaccessible (search returned 0 rows)"
     );
+    const target = (await listTargets("row-1"))[0];
+    expect(target).toMatchObject({
+      status: "failed",
+      lastErrorCode: "ODOO_FAULT",
+      lastError: "ODOO_FAULT: target record 999 missing or inaccessible (search returned 0 rows)",
+    });
+
     // The probe's kwargs, on the WIRE: limit 1, active_test false, no fields key.
     expect(probeBody).toContain("<int>999</int>"); // the target's resId in the domain
     expect(probeBody).toContain("<name>limit</name>");

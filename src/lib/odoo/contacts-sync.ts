@@ -241,11 +241,10 @@ export async function syncContacts(deps: {
 
       const contacts: OdooContact[] = [];
       // The cursor advances from the RAW id, before parsing, and is applied
-      // after the page. Advancing it only from successfully parsed rows means a
-      // page whose rows ALL fail parsePartnerRow leaves the cursor exactly where
-      // it was - and because a full page also means `page.length === PAGE_LIMIT`,
-      // the loop re-requests the identical page forever, holding the claim,
-      // burning requests, reporting nothing and never finishing.
+      // after the page - so a row that fails parsePartnerRow cannot strand the
+      // cursor on itself; the loop always moves past it. Should a multi-record
+      // page still yield nothing ingestable, the zero-upsert breaker below
+      // fails the run loudly instead.
       // `isolatedSkips` is a per-page `const number[]` declared beside `page`
       // above and RESET each iteration by re-declaration - its ids are folded
       // into pageMaxId below so the cursor moves past records the machinery

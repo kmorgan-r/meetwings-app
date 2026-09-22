@@ -582,7 +582,8 @@ describe("the code table", () => {
   it("FAILS the row on a 4xx that is not 408 or 429", async () => {
     // client.ts:58-62 maps EVERY non-2xx to ODOO_UNREACHABLE, so without the
     // status split a proxy 413 on a large attachment retries every launch
-    // forever.
+    // forever. After the probe re-point, the 413 lands on the
+    // ir.attachment.create response, after the probe has passed.
     const row = seedRow();
     seedTargets("row-1", [{ resId: 42 }]);
     tauriFetch

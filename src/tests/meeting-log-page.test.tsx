@@ -2177,9 +2177,12 @@ describe("what the assign dialog hands up", () => {
   });
 
   it("is offered on a current-instance FAILED row as Reassign, and assigns it", async () => {
-    // Reassign, owner-approved 2026-08-25. A meeting whose Odoo target was
-    // archived is otherwise unrecoverable except by deleting the transcript:
-    // isRetryable calls the fault final, so Retry reproduces it forever.
+    // Reassign, owner-approved 2026-08-25. It exists for a target the API user
+    // can no longer SEE (deleted or record-rule-hidden): the existence probe
+    // makes its retry cost two search calls and an error text that names the
+    // cause, but the target never recovers by itself. An ARCHIVED target, by
+    // contrast, is fully loggable now - message_post on one succeeds
+    // (livecheck 2026-08-30).
     contacts.listContacts.mockResolvedValue([
       contact(),
       contact({ id: 8, name: "Bea Nordvik" }),
