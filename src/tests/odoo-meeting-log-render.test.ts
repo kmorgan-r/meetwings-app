@@ -221,4 +221,26 @@ describe("queueErrorText", () => {
     expect(out.text).not.toContain("sk-secret");
     expect(out.text).toContain("Traceback mentioning"); // benign half survives
   });
+
+  it("cuts a surrogate pair cleanly at the 400-char cap", () => {
+    // The surrogate-boundary branch: an emoji whose HIGH surrogate lands at
+    // index 399 must be excluded WHOLE by the cap (cut moves to 399), never
+    // sliced into a lone surrogate - a lone high surrogate persisted into
+    // last_error can make the SQLite driver reject the write, and the
+    // per-target record() catch would swallow it. The composed prefix
+    // "ODOO_FAULT: Odoo fault 2 - " is 27 chars, so 372 filler units put the
+    // emoji pair at indices 399-400: a plain slice(0, 400) keeps the lone
+    // high, the boundary check drops the whole pair.
+    setOdooRedactor(["sk-secret"]);
+    const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
+      faultCode: 2,
+      faultString: `${"x".repeat(372)}😀 tail`,
+    });
+    const out = queueErrorText(err);
+    expect(out.text.length).toBe(400); // 399 kept units + the ellipsis
+    expect(out.text.endsWith("…")).toBe(true);
+    // No lone high surrogate anywhere in the stored text: every high
+    // surrogate is immediately followed by its low half.
+    expect(out.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
 });
