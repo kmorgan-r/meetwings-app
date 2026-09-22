@@ -440,6 +440,7 @@ describe("syncContacts", () => {
       await expect(
         syncContacts({ client, instance: INSTANCE, now: NOW })
       ).rejects.toMatchObject({ code: "ODOO_UNEXPECTED_ROW" });
+      expect(execute).toHaveBeenCalledTimes(1);
       expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNEXPECTED_ROW", NOW);
       expect(action.finishSync).not.toHaveBeenCalled();
     });
