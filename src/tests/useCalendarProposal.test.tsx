@@ -76,6 +76,25 @@ function setup(over: Partial<Parameters<typeof useCalendarProposal>[0]> = {}) {
   return { ...view, setCalendarBlockPresent };
 }
 
+async function broadcastConnectionChanged() {
+  await act(async () => {
+    for (const handler of listeners.get("graph-connection-changed") ?? []) {
+      handler({ payload: null });
+    }
+  });
+}
+
+function keychainReadFails() {
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
+    throw new Error(`unexpected command ${cmd}`);
+  });
+}
+
+function meetingsCalls() {
+  return invoke.mock.calls.filter(([cmd]) => cmd === "graph_current_meetings").length;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   listeners.clear();
@@ -234,6 +253,26 @@ describe("presence", () => {
       }
     });
     await waitFor(() => expect(result.current.present).toBe(true));
+  });
+
+  /**
+   * Review Focus 4: a keychain read failure on the very first status read
+   * (`connected` was never true) shows the retryable error, and a "Try again"
+   * that succeeds restores the real state rather than leaving the error up.
+   */
+  it("recovers from a keychain read failure on mount via Try again", async () => {
+    keychainReadFails();
+    const { result } = setup();
+    await waitFor(() =>
+      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
+    );
+
+    mockGraph([]);
+    await act(async () => {
+      result.current.onRetry();
+    });
+    await waitFor(() => expect(result.current.state).not.toMatchObject({ kind: "error" }));
+    expect(result.current.present).toBe(true);
   });
 });
 
@@ -650,5 +689,43 @@ describe("lifecycle", () => {
     const un = vi.fn();
     resolveListen!(un);
     await waitFor(() => expect(un).toHaveBeenCalled());
+  });
+
+  /**
+   * Issue #73: a real Disconnect whose status read hits GRAPH_NO_KEYCHAIN
+   * must still count as a transition. `readStatus` sets `connected` false on
+   * EVERY status error, so the reconnect that follows flips it back true,
+   * `connectedChanged` resets, and the new account's meeting is fetched. A
+   * carve-out that kept `connected` true on GRAPH_NO_KEYCHAIN would leave
+   * `hasFetched` latched through both broadcasts and resurface the previous
+   * account's proposal after only one fetch.
+   */
+  it("refetches for the reconnected account when the disconnect's status read failed", async () => {
+    mockGraph([meeting("e1", "Sync")]);
+    const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
+    const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
+      initialProps: props,
+    });
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
+    );
+
+    // Disconnected on /odoo, but this window's status read fails.
+    keychainReadFails();
+    await broadcastConnectionChanged();
+    await waitFor(() =>
+      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
+    );
+
+    // Reconnected - a DIFFERENT account, with a different meeting live now.
+    mockGraph([meeting("e2", "Someone else's meeting")]);
+    await broadcastConnectionChanged();
+    await waitFor(() =>
+      expect(result.current.state).toMatchObject({
+        kind: "proposal",
+        subject: "Someone else's meeting",
+      })
+    );
+    expect(meetingsCalls()).toBe(2);
   });
 });
