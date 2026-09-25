@@ -17,6 +17,7 @@ global.fetch = vi.fn(() => {
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { createOdooClient } from "@/lib/odoo/client";
 import { OdooError } from "@/lib/odoo/errors";
+import { queueErrorText } from "@/lib/odoo/meeting-log";
 import { isRedactorInitialised, resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
 
 const mockFetch = vi.mocked(tauriFetch);
@@ -131,6 +132,31 @@ describe("createOdooClient", () => {
     expect(surfaced).not.toContain("example.com");
     // ...and the traceback is still there, redacted rather than discarded.
     expect(String(caught?.details.faultString)).toContain("Traceback");
+  });
+
+  // THE wire-to-storage proof this fix exists for: wire XML carrying an
+  // XML-escaped key inside faultString → codec unescape (&amp; last) → the
+  // client's odooError() → queueErrorText. A naive replaceAll on the ESCAPED
+  // form misses; the unescape-and-redact chain must catch it. This is the only
+  // test that proves the composed stored text is needle-free from the wire down.
+  it("renders a wire fault through queueErrorText with the key gone end-to-end", async () => {
+    mockFetch.mockResolvedValueOnce(
+      faultResponse(`Traceback: create('odoo', '${LOGIN}', '${KEY}', {})`)
+    );
+    let caught: OdooError | null = null;
+    try {
+      await createOdooClient(CONFIG).authenticate();
+    } catch (err) {
+      caught = err as OdooError;
+    }
+    expect(caught?.code).toBe("ODOO_FAULT");
+    const { text } = queueErrorText(caught);
+    expect(text).not.toContain("i9j0");
+    expect(text).not.toContain("example.com");
+    // The fix's whole point: the faultString SURVIVES into the stored text
+    // (redacted), where today's queueErrorText drops it entirely.
+    expect(text).toContain("Odoo fault 3");
+    expect(text).toContain("Traceback");
   });
 
   it("throws ODOO_MALFORMED_RESPONSE for a proxy login page", async () => {

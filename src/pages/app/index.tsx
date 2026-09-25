@@ -244,6 +244,7 @@ const App = () => {
               className="cursor-pointer"
               title="Minimize"
               aria-label="Minimize overlay"
+              data-overlay-minimize-control="true"
               onClick={handleMinimize}
             >
               <Minimize2 className="h-4 w-4" />

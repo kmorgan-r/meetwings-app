@@ -128,15 +128,15 @@ export function searchDomain(contact: OpportunityLookupContact): XmlRpcValue[] {
  * would double the throw surface of the one live call the picker makes, and
  * add a round trip to the live-meeting path.
  *
- * This THROWS on the first unreadable row, where syncContacts skips and counts.
- * The asymmetry is deliberate, not an oversight. In the sync, failing the run
- * leaves the watermark unadvanced, so one malformed partner among thousands
- * wedges syncing permanently with no way past it. Here nothing is wedged: the
- * target is already committed to the contact BEFORE this call runs, the
- * failure lands in `opportunityError` beside a Retry button, and the user
- * keeps a working contact-only selection. Loud beats partial when a partial
- * list means "no open deals" - which is the sentence that sends slice 2 to
- * the wrong record.
+ * This THROWS on the first unreadable row, where syncContacts isolates and skips.
+ * The asymmetry is deliberate, not an oversight. The sync walks past a faulting
+ * record (id-only search + bisection, with a zero-upsert breaker for systemic
+ * drifts) because a run that died on one bad partner would wedge syncing
+ * permanently with no way past it. Here nothing is wedged: the target is already
+ * committed to the contact BEFORE this call runs, the failure lands in
+ * `opportunityError` beside a Retry button, and the user keeps a working
+ * contact-only selection. Loud beats partial when a partial list means "no open
+ * deals" - which is the sentence that sends slice 2 to the wrong record.
  */
 export async function fetchOpportunities(
   client: OdooClient,

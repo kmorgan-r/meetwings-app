@@ -363,7 +363,22 @@ export const ContactPicker = memo(function ContactPicker({
         components/ui/popover.tsx so every other popover in the app keeps
         following the user's transparency setting.
       */}
-      <PopoverContent className="w-80 p-3 popover-opaque">
+      <PopoverContent
+        className="w-80 p-3 popover-opaque"
+        onPointerDownOutside={(e) => {
+          const target = e.detail.originalEvent.target as HTMLElement | null;
+          if (target?.closest("[data-overlay-minimize-control]"))
+            e.preventDefault();
+        }}
+        onFocusOutside={(e) => {
+          // The click also moves focus, and Radix fires this as a separate
+          // dismissal — preventing only the pointerdown one leaves the focus
+          // dismissal to close the picker anyway.
+          const target = e.detail.originalEvent.target as HTMLElement | null;
+          if (target?.closest("[data-overlay-minimize-control]"))
+            e.preventDefault();
+        }}
+      >
         <div className="flex flex-col gap-2">
           {calendar !== undefined && (
             <CalendarProposal

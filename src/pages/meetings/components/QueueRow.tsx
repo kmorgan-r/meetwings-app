@@ -70,6 +70,8 @@ export interface QueueRowProps {
   onReloadTranscript: (row: MeetingLogListRow) => void;
   onRetryTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
   onRemoveTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
+  /** Swap one failed target for another contact. The page opens the picker. */
+  onRetargetTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
   /** By ROW id: two rows can share one conversation. */
   onStartRename: (rowId: string) => void;
   /**
@@ -220,6 +222,7 @@ function QueueRowInner({
   onReloadTranscript,
   onRetryTarget,
   onRemoveTarget,
+  onRetargetTarget,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -489,9 +492,34 @@ function QueueRowInner({
                     >
                       Retry this one
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => onRemoveTarget(row, t)}>
-                      Remove
-                    </Button>
+                    {/*
+                      Distinct from the ROW-level Reassign, which is hidden the
+                      moment any sibling is sent. This one re-points ONLY this
+                      target, so it is the way out when the contact it names
+                      was deleted in Odoo. Needs no message id: retargetQueueTarget
+                      refuses a target whose note may be live.
+                    */}
+                    {t.messageId === null && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={otherDatabase}
+                        onClick={() => onRetargetTarget(row, t)}
+                      >
+                        Choose a different contact
+                      </Button>
+                    )}
+                    {/*
+                      removeQueueTarget refuses any target that already made an
+                      attachment or a message (a note may be live), so offering
+                      Remove there is a button that can only say no - the same
+                      reasoning as hasSentTarget above.
+                    */}
+                    {t.attachmentId === null && t.messageId === null && (
+                      <Button size="sm" variant="ghost" onClick={() => onRemoveTarget(row, t)}>
+                        Remove
+                      </Button>
+                    )}
                   </>
                 )}
               </div>
@@ -592,12 +620,13 @@ function sameTranscript(a: TranscriptView | null, b: TranscriptView | null): boo
 }
 
 /**
- * Length plus, per target, `id`/`status`/`lastError` - the same shape as
- * `sameTranscript` above. `name` itself is not compared: it is written once
- * at insert (meeting-log.action.ts's `insertTarget`) and never updated after,
- * so an unchanged `id` already proves an unchanged `name`.
+ * Length plus, per target, every column the row renders from - the same shape
+ * as `sameTranscript` above. An unchanged `id` proves nothing else: a retarget
+ * (QUEUE_SQL.retargetFailedTarget) rewrites model/res_id/name/attachment_id/
+ * message_id under the SAME target id, and `attachmentId`/`messageId` gate the
+ * Remove button.
  *
- * The RESOLVED name is compared instead, via `targetNameOf(t, contacts)` -
+ * The name is compared RESOLVED, via `targetNameOf(t, contacts)` -
  * NOT `contacts` itself by reference. `contacts` is rebuilt into a brand-new
  * Map on every reload (index.tsx's `reload`), so comparing it directly would
  * fail on every row every time, the exact disaster this comparator exists to
@@ -620,7 +649,11 @@ function sameTargets(
     const other = listB[i];
     return (
       t.id === other.id &&
+      t.model === other.model &&
+      t.resId === other.resId &&
       t.status === other.status &&
+      t.attachmentId === other.attachmentId &&
+      t.messageId === other.messageId &&
       t.lastError === other.lastError &&
       targetNameOf(t, contactsA) === targetNameOf(other, contactsB)
     );
@@ -675,6 +708,7 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.onReloadTranscript === b.onReloadTranscript &&
     a.onRetryTarget === b.onRetryTarget &&
     a.onRemoveTarget === b.onRemoveTarget &&
+    a.onRetargetTarget === b.onRetargetTarget &&
     a.onStartRename === b.onStartRename &&
     a.onCommitRename === b.onCommitRename &&
     a.onCancelRename === b.onCancelRename

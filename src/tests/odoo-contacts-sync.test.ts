@@ -16,7 +16,7 @@ const action = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/database/odoo-contacts.action", () => action);
 
-import { syncContacts } from "@/lib/odoo/contacts-sync";
+import { PAGE_LIMIT, PARTNER_FIELDS, syncContacts } from "@/lib/odoo/contacts-sync";
 import { OdooError } from "@/lib/odoo/errors";
 import { resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
 
@@ -45,6 +45,17 @@ function clientReturning(pages: unknown[][], dateHeader = "Tue, 04 Aug 2026 12:0
     client: { authenticate: vi.fn(async () => 7), execute, serverDate: dateHeader },
     execute,
   };
+}
+
+/** The "id in [batch]" leaf of a machinery call's domain, or null for a plain page fetch. */
+function idsIn(args: unknown[]): number[] | null {
+  const domain = (args[0] as unknown[][] | undefined) ?? [];
+  const leaf = domain.find((l) => Array.isArray(l) && l[0] === "id" && l[1] === "in");
+  return leaf ? (leaf[2] as number[]) : null;
+}
+
+function fault() {
+  return new OdooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "read blew up" });
 }
 
 beforeEach(() => {
@@ -274,5 +285,326 @@ describe("syncContacts", () => {
       syncContacts({ client: bad, instance: INSTANCE, now: NOW })
     ).rejects.toBeInstanceOf(OdooError);
     expect(action.releaseSync).toHaveBeenCalledTimes(1);
+  });
+
+  describe("the page-fault machinery", () => {
+    it("isolates a faulting page: id-only search, halved sub-batches, one counted singleton skip", async () => {
+      // Page fetch faults -> plain search names [1,2,3] -> the batch read
+      // faults (id 3 is the bad record) -> bisect [1] ok, [2,3] faults ->
+      // [2] ok, [3] singleton faults -> skipped. Two rows upserted; the
+      // watermark advances from the UPSERTED rows' write_date only.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[], kwargs: unknown) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          // The machinery's own `fields`-kwarg trap, made mock-visible.
+          expect(kwargs).toEqual({
+            order: "id asc",
+            limit: PAGE_LIMIT,
+            context: { active_test: false },
+          });
+          return [1, 2, 3];
+        }
+        if (batch) {
+          if (batch.includes(3)) throw fault();
+          return batch.map((id) => partner({ id }));
+        }
+        throw fault(); // the page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: "Tue, 04 Aug 2026 12:00:00 GMT" };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(1);
+      expect(result.fetched).toBe(2);
+      expect(action.upsertContacts).toHaveBeenCalledTimes(1);
+      expect(action.upsertContacts.mock.calls[0][1]).toMatchObject([{ id: 1 }, { id: 2 }]);
+      expect(action.finishSync).toHaveBeenCalledWith(INSTANCE, "2026-08-01 09:59:59", NOW, 1);
+
+      // Deterministic bisection: the whole batch first, then the halves.
+      const batches = execute.mock.calls
+        .filter(([, m, a]) => m === "search_read" && idsIn(a))
+        .map(([, , a]) => idsIn(a));
+      expect(batches).toEqual([[1, 2, 3], [1], [2, 3], [2], [3]]);
+
+      // Wire shapes: the id-only search carries NO fields key; every sub-batch
+      // read keeps fields, the type filters and the context flag.
+      const searchCall = execute.mock.calls.find(([, m]) => m === "search")!;
+      expect(searchCall[3]).not.toHaveProperty("fields");
+      const subBatchCalls = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && idsIn(a)
+      );
+      for (const [, , a, kw] of subBatchCalls) {
+        expect((kw as { fields: string[] }).fields).toEqual(PARTNER_FIELDS);
+        expect((kw as { context: unknown }).context).toEqual({ active_test: false });
+        const domain = (a as unknown[][][])[0];
+        for (const t of ["delivery", "invoice", "other"]) {
+          expect(domain).toContainEqual(["type", "!=", t]);
+        }
+      }
+    });
+
+    it("advances the cursor past a skipped singleton", async () => {
+      // 200 ids, the id-200 singleton keeps faulting. The cursor must move past
+      // it, or the next page's domain re-fetches the identical window forever.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          // The mock honours the domain's id-cursor leaf, as the real server
+          // does: a search that ignored it would name the same 200 ids for the
+          // NEXT page's window too, the machinery would re-read ids at or
+          // below the cursor, and the run would die on the existing
+          // "no usable id" backstop - never showing the cursor move this test
+          // is about. With the cursor honoured, the second page's search
+          // returns [] and the loop breaks cleanly.
+          const floor = ((args[0] as unknown[][]).find((l) => l[0] === "id")?.[2] as number) ?? 0;
+          return Array.from({ length: PAGE_LIMIT }, (_v, i) => i + 1).filter((id) => id > floor);
+        }
+        if (batch) {
+          // includes(200), not a singleton-only throw: bisection only reaches
+          // the singleton through a faulting read that CONTAINS id 200, so the
+          // fault must ride the record, not the batch shape.
+          if (batch.includes(200)) throw fault();
+          return batch.map((id) => partner({ id }));
+        }
+        throw fault(); // page fetch faults every time in this run
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      // The next page fetch's domain moved past the skipped id (raw id 200).
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      const lastDomain = (pageFetches[pageFetches.length - 1][2] as unknown[][][])[0];
+      expect(lastDomain).toContainEqual(["id", ">", 200]);
+    });
+
+    it("keeps the raw-id cursor rule inside the machinery: a parse-malformed row in a successful sub-batch advances the cursor from its raw id", async () => {
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          // Domain-aware, as above - the next page's window must come back
+          // empty or the stale re-delivery trips the "no usable id" backstop
+          // instead of the cursor move under test.
+          const floor = ((args[0] as unknown[][]).find((l) => l[0] === "id")?.[2] as number) ?? 0;
+          return Array.from({ length: PAGE_LIMIT }, (_v, i) => i + 1).filter((id) => id > floor);
+        }
+        if (batch) {
+          const rows = batch.map((id) => partner({ id }));
+          if (batch.includes(200)) {
+            // Row 200 parse-fails (no write_date) but still carries a raw id.
+            rows[rows.length - 1] = { id: 200, name: "x" };
+          }
+          return rows;
+        }
+        throw fault();
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(1);
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      const lastDomain = (pageFetches[pageFetches.length - 1][2] as unknown[][][])[0];
+      // The cursor advanced from the RAW id 200, not from the parsed max (199) -
+      // a parsed-only cursor would re-fetch row 200 every run and spin.
+      expect(lastDomain).toContainEqual(["id", ">", 200]);
+    });
+
+    it("fails the run loudly when a page yields zero upserted rows from the machinery (every singleton faults)", async () => {
+      // A PARTNER_FIELDS drift faults with code 2 on every read yet spares the
+      // id-only search. Without the breaker the cursor walks past the whole
+      // table, the run "succeeds", nothing is ingested and the watermark is
+      // unadvanced - a silent total failure where today's code fails loudly.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") return [1, 2];
+        if (batch) throw fault(); // every read faults, down to the singletons
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      await expect(
+        syncContacts({ client, instance: INSTANCE, now: NOW })
+      ).rejects.toMatchObject({ code: "ODOO_UNEXPECTED_ROW" });
+      expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNEXPECTED_ROW", NOW);
+      expect(action.finishSync).not.toHaveBeenCalled();
+    });
+
+    it("fails the run loudly when every row of a non-empty page fails parse (the breaker does not care which route the zero came by)", async () => {
+      const broken = Array.from({ length: PAGE_LIMIT }, (_v, i) => partner({ id: i + 1, write_date: 123 }));
+      const { client, execute } = clientReturning([broken, broken]);
+      await expect(
+        syncContacts({ client, instance: INSTANCE, now: NOW })
+      ).rejects.toMatchObject({ code: "ODOO_UNEXPECTED_ROW" });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNEXPECTED_ROW", NOW);
+      expect(action.finishSync).not.toHaveBeenCalled();
+    });
+
+    it("re-throws when the id-only search itself faults: the fault is not record-shaped", async () => {
+      const execute = vi.fn(async () => {
+        throw fault(); // page fetch AND the id-only search both fault
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+      await expect(
+        syncContacts({ client, instance: INSTANCE, now: NOW })
+      ).rejects.toMatchObject({ code: "ODOO_FAULT" });
+      expect(execute).toHaveBeenCalledTimes(2); // page fetch + id-only search, no bisection
+      expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_FAULT", NOW);
+    });
+
+    it("never enters the machinery for ODOO_UNREACHABLE or ODOO_UNEXPECTED_ROW - zero bisection calls", async () => {
+      for (const code of ["ODOO_UNREACHABLE", "ODOO_UNEXPECTED_ROW"] as const) {
+        const execute = vi.fn(async () => {
+          throw new OdooError(code, "down", {});
+        });
+        const client = { authenticate: vi.fn(), execute, serverDate: null };
+        await expect(
+          syncContacts({ client, instance: INSTANCE, now: NOW })
+        ).rejects.toMatchObject({ code });
+        expect(execute).toHaveBeenCalledTimes(1); // the page fetch, nothing else
+        expect(action.failSync).toHaveBeenCalledWith(INSTANCE, code, NOW);
+      }
+    });
+
+    it("bisects only on FAULT: a successful sub-batch is never re-fetched", async () => {
+      // The recursion-duplication killer: after [1,2] succeeds its rows are in,
+      // and the machinery must NOT re-read them (the fault catch is the only
+      // place bisection happens).
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") return [1, 2, 3, 4];
+        if (batch) {
+          if (batch.length === 4) throw fault(); // the whole-page read faults
+          if (batch.includes(4)) throw fault(); // [3,4] and the [4] singleton fault
+          return batch.map((id) => partner({ id })); // [1,2] ok, [3] ok
+        }
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      const batches = execute.mock.calls
+        .filter(([, m, a]) => m === "search_read" && idsIn(a))
+        .map(([, , a]) => idsIn(a));
+      expect(batches).toEqual([[1, 2, 3, 4], [1, 2], [3, 4], [3], [4]]);
+      expect(result.skipped).toBe(1);
+      expect(result.fetched).toBe(3); // 1, 2, 3 - each exactly once
+      expect(action.upsertContacts.mock.calls[0][1]).toMatchObject([
+        { id: 1 }, { id: 2 }, { id: 3 },
+      ]);
+    });
+
+    it("does not fail the run when a page's ONLY record singleton-faults (the single-record exemption)", async () => {
+      // Item 4's fate, not item 5's: one id, singleton fault, skip counted,
+      // cursor past it, run completes, watermark untouched so the record is
+      // re-fetched next run and the machinery recovers when a page-mate joins.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") return [7];
+        if (batch) throw fault(); // the singleton read faults
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(1);
+      expect(result.fetched).toBe(0);
+      expect(action.finishSync).toHaveBeenCalledWith(INSTANCE, null, NOW, 1);
+      expect(action.failSync).not.toHaveBeenCalled();
+    });
+
+    it("re-throws a non-fault failure from INSIDE the machinery: a sub-batch ODOO_UNREACHABLE is never laundered into a skip", async () => {
+      // Only ODOO_FAULT narrows. A transport failure on a sub-batch read must
+      // fail the run - skipping rows on a dead server would silently drop them.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") return [1, 2];
+        if (batch) {
+          if (batch.length === 2) throw fault();
+          throw new OdooError("ODOO_UNREACHABLE", "down", {}); // the singleton read
+        }
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      await expect(
+        syncContacts({ client, instance: INSTANCE, now: NOW })
+      ).rejects.toMatchObject({ code: "ODOO_UNREACHABLE" });
+      expect(action.failSync).toHaveBeenCalledWith(INSTANCE, "ODOO_UNREACHABLE", NOW);
+      expect(action.finishSync).not.toHaveBeenCalled();
+    });
+
+    it("keys the machinery page's id count on the id-only search: a record that vanishes mid-window does not break the run early", async () => {
+      // A record deleted (or re-typed) between the id-only `search` and the
+      // bisected reads is named in `ids` but comes back as neither a row nor
+      // a skip. Keying the page's id count on rows+skips alone would shrink
+      // it below PAGE_LIMIT and break the loop early, silently stranding
+      // every later page behind the advanced watermark.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          const idLeaf = (args[0] as unknown[][]).find((l) => l[0] === "id");
+          if (idLeaf && idLeaf[1] === ">" && (idLeaf[2] as number) >= 200) return [];
+          return Array.from({ length: 200 }, (_v, i) => i + 1);
+        }
+        if (batch) {
+          if (batch.includes(200)) throw fault(); // whole window faults -> bisects down
+          return batch.filter((id) => id !== 50).map((id) => partner({ id })); // id 50 vanishes mid-read
+        }
+        throw fault(); // page fetch faults every time
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(1);
+      // The run continued past the shortened page: a page-2 fetch exists with
+      // the domain moved past id 200. (rows 198 + skip 1 = 199 would have
+      // broken the run after page 1 under a rows+skips count.)
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      const lastDomain = (pageFetches[pageFetches.length - 1][2] as unknown[][][])[0];
+      expect(lastDomain).toContainEqual(["id", ">", 200]);
+    });
+
+    it("treats a page whose ids all vanished mid-window as benign: no breaker, run completes", async () => {
+      // Records deleted or re-typed between the id-only `search` and the
+      // bisected reads come back as neither rows nor skips - a benign
+      // concurrent-modification race, not field-list drift. The read-evidence
+      // condition must exempt it: zero rows AND zero skips means nothing was
+      // read and nothing faulted.
+      const execute = vi.fn(async (_m: string, method: string, args: unknown[]) => {
+        const batch = idsIn(args);
+        if (method === "search") {
+          const idLeaf = (args[0] as unknown[][]).find((l) => l[0] === "id");
+          if (idLeaf && idLeaf[1] === ">" && (idLeaf[2] as number) >= 6) return [];
+          return [5, 6];
+        }
+        if (batch) return []; // both records vanished mid-window, read succeeds empty
+        throw fault(); // page fetch
+      });
+      const client = { authenticate: vi.fn(), execute, serverDate: null };
+
+      const result = await syncContacts({ client, instance: INSTANCE, now: NOW });
+
+      expect(result.skipped).toBe(0);
+      expect(result.fetched).toBe(0);
+      expect(action.failSync).not.toHaveBeenCalled();
+      expect(action.finishSync).toHaveBeenCalledWith(INSTANCE, null, NOW, 0);
+      // The cursor folded the id-search's max id (ids are id-asc): it moved
+      // past the vanished window instead of stalling on it.
+      const pageFetches = execute.mock.calls.filter(
+        ([, m, a]) => m === "search_read" && !idsIn(a)
+      );
+      expect(pageFetches).toHaveLength(1); // one faulting page, then the empty window ends the run
+    });
   });
 });

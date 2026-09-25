@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const sync = vi.hoisted(() => ({ syncContacts: vi.fn() }));
 vi.mock("@/lib/odoo/contacts-sync", () => sync);
 
+const reconcile = vi.hoisted(() => ({ reconcileDeletedContacts: vi.fn(async () => 0) }));
+vi.mock("@/lib/odoo/contacts-reconcile", () => reconcile);
+
 const storage = vi.hoisted(() => ({
   requireOdooConfig: vi.fn(async () => ({
     url: "http://h:8069",
@@ -39,6 +42,29 @@ beforeEach(() => {
 });
 
 describe("runSync", () => {
+  it("reconciles deletions after a successful sync", async () => {
+    await runSync("refresh");
+    expect(reconcile.reconcileDeletedContacts).toHaveBeenCalledWith(
+      expect.objectContaining({ instance: "http://h:8069|odoo" })
+    );
+  });
+
+  it("does not reconcile when the sync itself failed", async () => {
+    sync.syncContacts.mockRejectedValueOnce(new Error("boom"));
+    await expect(runSync("refresh")).rejects.toThrow("boom");
+    expect(reconcile.reconcileDeletedContacts).not.toHaveBeenCalled();
+  });
+
+  it("never fails the sync because the reconcile failed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    reconcile.reconcileDeletedContacts.mockRejectedValueOnce(new Error("nope"));
+
+    await expect(runSync("refresh")).resolves.toEqual({ ran: true, ...RESULT });
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   // The StrictMode double-mount case, and the "Refresh pressed twice" case.
   // Both callers must get the SAME run, not two concurrent paged pulls - the
   // second of which claimSync would refuse with ODOO_SYNC_BUSY, turning a
