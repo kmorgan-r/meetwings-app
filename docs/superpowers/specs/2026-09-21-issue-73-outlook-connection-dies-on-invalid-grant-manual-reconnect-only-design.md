@@ -59,7 +59,7 @@ Three changes, one per fix direction in the issue:
 | What resets the streak? | Successful `adopt` inside `adopt_and_persist_with` (covers connect and refresh, session-only included). Nothing else |
 | What leaves the streak untouched? | Transport errors, 5xx, 429, every non-`invalid_grant` code, and an `invalid_grant` for a token that is no longer the current credential |
 | Second instance behavior | Restore and focus the existing dashboard, or create it via `open_dashboard`; argv ignored |
-| `GRAPH_NO_KEYCHAIN` remedy | "Try again" (moved to the retryable set) plus a "if this keeps happening, reconnect" hint; `connected` not flipped; no calendar fetch while the status read is failing |
+| `GRAPH_NO_KEYCHAIN` remedy | "Try again" (moved to the retryable set) plus a "if this keeps happening, reconnect" hint. (The `connected`-not-flipped carve-out and its fetch gate were dropped at plan review; see §3's note.) |
 | Persist-failure latch | Out of scope (see non-goals) |
 | Dev builds vs the installed app | Share the identifier, so one blocks the other. Accepted and documented (see §2) |
 
@@ -394,6 +394,19 @@ keychain read failure as `Err(GRAPH_NO_KEYCHAIN)` and its doc comment
 (`mod.rs:185-193`) explicitly forbids collapsing it into `connected: false`.
 The collapse happens in the webview:
 
+> **Superseded at plan review (2026-09-25; see the plan's Task 4).** The
+> `readStatus` carve-out and the `statusError` fetch gate below are NOT
+> implemented, and `useCalendarProposal.ts` is left unchanged. While
+> `statusError` is set the hook's return is identical whether `connected`
+> flipped or not, so the carve-out changes nothing on screen. Its only effect
+> is to suppress the `connectedChanged` reset on recovery, and that reset is
+> what stops a real Disconnect (whose status read hit `GRAPH_NO_KEYCHAIN`)
+> followed by a reconnect to a different account from resurfacing the previous
+> account's proposal. The requirement this section serves ("transient, not
+> disconnected") is met by the remedy-table change further down. The two
+> paragraphs below and the matching Vitest bullets under Testing are kept for
+> the record only.
+
 **`readStatus`** (`src/hooks/useCalendarProposal.ts:172-177`). The catch
 currently sets `connected = false` for every failure code. Split one code out:
 
@@ -576,7 +589,11 @@ target):
 
 Vitest, matching the existing files under `src/tests/`:
 
-- `useCalendarProposal.test.tsx` — the hook does not return `connected`
+- `useCalendarProposal.test.tsx` — **superseded at plan review** along with
+  §3's carve-out. The first two bullets below are replaced by the plan's Task 4
+  pins: a mount-time keychain failure recovers via "Try again", and a
+  Disconnect whose status read failed still refetches for the reconnected
+  account. Original text, for the record: the hook does not return `connected`
   (`UseCalendarProposalReturn`, `useCalendarProposal.ts:37-42`), and while
   `statusError` is set its return is identical whether `connected` flipped or
   not. Assert through the fetch effect instead:

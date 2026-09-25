@@ -4,7 +4,7 @@
 
 **Goal:** Stop deleting the Outlook (Graph) keychain credential on the first Entra `invalid_grant`, add a single-instance guard, and stop reporting a transient keychain read failure as "disconnected".
 
-**Architecture:** Rust keeps an in-memory `invalid_grant_streak` on `GraphState`; a new `record_invalid_grant_with` counts confirmed failures against the CURRENT credential under `persist_op` and deletes only at 3. `refresh_and_adopt` is split into an injectable `refresh_and_adopt_with` seam so the arm is testable without a network or a real keychain. `tauri-plugin-single-instance` surfaces the dashboard on a second launch. In the webview, `readStatus` no longer flips `connected` on `GRAPH_NO_KEYCHAIN`, the fetch effect waits while a status error is showing, and `GRAPH_NO_KEYCHAIN` becomes retryable with a reconnect hint.
+**Architecture:** Rust keeps an in-memory `invalid_grant_streak` on `GraphState`; a new `record_invalid_grant_with` counts confirmed failures against the CURRENT credential under `persist_op` and deletes only at 3. `refresh_and_adopt` is split into an injectable `refresh_and_adopt_with` seam so the arm is testable without a network or a real keychain. `tauri-plugin-single-instance` surfaces the dashboard on a second launch. In the webview, `GRAPH_NO_KEYCHAIN` becomes retryable with a reconnect hint; the hook's `readStatus` is deliberately left as is (see Task 4's deviation note) and only gains pinning tests.
 
 **Tech Stack:** Tauri 2 (Rust, tokio), React 19 + TypeScript (strict), Vitest + Testing Library.
 
@@ -20,11 +20,12 @@
 - `AUTH_EXPIRED` copy, verbatim: `Your Microsoft sign-in expired. Reconnect from the Odoo page's Calendar section.`
 - `GRAPH_NO_KEYCHAIN` hint copy, verbatim: `Couldn't read the saved calendar connection from this device's secure storage. If this keeps happening, reconnect from the Odoo page's Calendar section.`
 - `AUTH_EXPIRED` stays non-retryable. `GRAPH_NO_KEYCHAIN` becomes retryable.
+- `useCalendarProposal`'s `readStatus` keeps setting `connected = false` on EVERY status error, `GRAPH_NO_KEYCHAIN` included, and the fetch effect is not changed — a deliberate deviation from spec §3, recorded in Task 4.
 - Comments that the change makes false are rewritten in the same task that makes them false (the spec's "Explicit supersessions" list, items 1–12).
 
-**Environment (fresh worktree):** `node_modules` must exist (if not: `cmd //c "mklink /J node_modules C:\Users\kmorg\meetwings-app\node_modules"`). Run Rust tests from `src-tauri/` with the shared target dir to avoid a cold build:
-`CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::`
-Run Vitest scoped to one file, never the full suite: `npx vitest run <file>`.
+**Environment (fresh worktree):** `node_modules` must exist (if not: `cmd //c "mklink /J node_modules C:\Users\kmorg\meetwings-app\node_modules"`). Run Rust tests from the repo root with `--manifest-path` (no `cd`) and the shared target dir to avoid a cold build:
+`CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::`
+Run Vitest scoped to one file, never the full suite: `npx vitest run <file>`. Type-check with `npx tsc --noEmit` (`npm run lint` is eslint only and does not type-check).
 
 ## Review Focus
 
@@ -229,7 +230,7 @@ Append inside `mod tests` in `src-tauri/src/graph/mod.rs`, after the last existi
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run (from `src-tauri/`): `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::`
+Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::`
 Expected: compile errors — `cannot find function should_forget`, `no field invalid_grant_streak`, `cannot find function record_invalid_grant_with`, `cannot find type Ordering`.
 
 - [ ] **Step 3: Add the import, the constant, and the field**
@@ -543,10 +544,10 @@ with:
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run (from `src-tauri/`): `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::`
+Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::`
 Expected: all `graph::` tests PASS, including the 11 new ones and every pre-existing one. No `dead_code` warning for `forget_refresh_token` (it is gone) and no warning for any new item.
 
-Then confirm no stray references: `grep -rn "forget_refresh_token\b\|forget_refresh_token(" src-tauri/src` — expected: only `forget_refresh_token_with` hits.
+Then confirm no stray references: `grep -rn "forget_refresh_token\b" src-tauri/src` — expected: no output (grep exits 1). `\b` does not match inside `forget_refresh_token_with` (`_` is a word character), so any hit is a leftover mention of the deleted wrapper.
 
 - [ ] **Step 9: Commit**
 
@@ -798,7 +799,7 @@ Append inside `mod tests`, after Task 1's tests:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run (from `src-tauri/`): `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::`
+Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::`
 Expected: compile error `cannot find function refresh_and_adopt_with`.
 
 - [ ] **Step 3: Split `refresh_and_adopt` into the seam and the wrapper**
@@ -923,12 +924,36 @@ async fn refresh_and_adopt(
 
 `adopt_and_persist` (the wrapper at ~330-336) may now have no caller other than `graph_connect` — it still has that one; leave it.
 
+- [ ] **Step 3b: Rewrite the comments the split made false**
+
+`refresh_op` is now held by `refresh_and_adopt_with`, which calls `adopt_and_persist_with`, not the wrappers. Three docs still name the wrappers:
+
+1. `GraphState` lock-invariant doc, part 1 (as rewritten by Task 1 Step 7.1). Replace:
+
+```rust
+///    `persist_op`: `refresh_and_adopt` holds `refresh_op` while calling
+///    `adopt_and_persist` or `record_invalid_grant_with`, each of which takes
+```
+
+with:
+
+```rust
+///    `persist_op`: `refresh_and_adopt_with` holds `refresh_op` while calling
+///    `adopt_and_persist_with` or `record_invalid_grant_with`, each of which takes
+```
+
+2. `refresh_op` field doc (line ~160). Replace `` /// Serializes `refresh_and_adopt` calls against EACH OTHER - not against `` with `` /// Serializes `refresh_and_adopt_with` calls against EACH OTHER - not against ``.
+
+3. `fresh_access_token` doc (line ~391). Replace `` /// already there) and the re-read inside `refresh_and_adopt`, immediately `` with `` /// already there) and the re-read inside `refresh_and_adopt_with`, immediately ``.
+
+The mentions in `graph_current_meetings` (~647-675) and the loopback test docs (~1161-1162) name the `refresh_and_adopt` wrapper those sites really call; leave them.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run (from `src-tauri/`): `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::`
+Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::`
 Expected: all `graph::` tests PASS, including the 6 new seam tests and the three existing loopback tests (`refresh_and_adopt_finds_a_token_another_call_already_adopted_and_does_not_redeem_again`, `refresh_and_adopt_does_not_shortcut_on_the_token_the_caller_just_had_rejected`, `refresh_and_adopt_still_takes_the_shortcut_when_memory_holds_a_different_token`) unchanged.
 
-Also build the whole crate so the tauri command futures are checked for `Send`: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo check` — expected: no errors.
+Also build the whole crate so the tauri command futures are checked for `Send`: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo check --manifest-path src-tauri/Cargo.toml` — expected: no errors.
 
 - [ ] **Step 5: Commit**
 
@@ -1012,8 +1037,8 @@ with:
 
 - [ ] **Step 3: Compile**
 
-Run (from `src-tauri/`): `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo check`
-Expected: no errors (Cargo.lock gains `tauri-plugin-single-instance` and its deps). Then `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --lib graph::` — expected: still all PASS.
+Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo check --manifest-path src-tauri/Cargo.toml`
+Expected: no errors (Cargo.lock gains `tauri-plugin-single-instance` and its deps). Then check the lock did not move `tauri` itself: `git diff src-tauri/Cargo.lock | grep -A2 '^ name = "tauri"$'` must show `version = "2.8.2"` as an unchanged context line, never a `-`/`+` pair. If `tauri` was bumped, revert `Cargo.lock` and pin the plugin to the newest release whose `tauri` requirement 2.8.2 satisfies (`tauri-plugin-single-instance = "=2.x.y"`), then rerun. Then `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::` — expected: still all PASS.
 
 - [ ] **Step 4: Document the dev-workflow consequence**
 
@@ -1036,19 +1061,26 @@ Manual gate (record the result in the PR description; not blocking this task): q
 
 ---
 
-### Task 4: `GRAPH_NO_KEYCHAIN` does not flip `connected`; no fetch during a status error (hook)
+### Task 4: Pin the hook's status-error recovery (tests only)
+
+**Deviation from spec §3 (plan review, pass 1).** Spec §3 had `readStatus` skip `setConnected(false)` for `GRAPH_NO_KEYCHAIN` and gate the fetch effect on `statusError`. Both are dropped: `src/hooks/useCalendarProposal.ts` is NOT modified. Three facts decide it:
+
+1. While `statusError !== null` the hook returns `{ present: blockPresent, state: errorState, onRetry: retryStatus }` (`useCalendarProposal.ts` ~544-551), and `blockPresent` is forced `true` (~123). So `connected` is unobservable to every consumer during a status error. Its only behavioral effect is on recovery: a false → true flip fires `connectedChanged`, which resets and refetches.
+2. That reset is a safety mechanism. With the carve-out, a `graph-connection-changed` broadcast from a real Disconnect whose `graph_status` read hits `GRAPH_NO_KEYCHAIN` leaves `connected` true and `hasFetched` latched. A reconnect to a DIFFERENT account then reads `connected: true` again, `connectedChanged` stays false, and the previous account's proposal resurfaces. That is the stale-proposal bug the existing `discards a stale proposal and refetches on a disconnect-then-reconnect while the picker stays open` test pins, reopened through a new door.
+3. The issue's requirement (report `GRAPH_NO_KEYCHAIN` as transient, not as "disconnected") is user-visible only through the error block's copy and controls, and Task 5 delivers those: retryable, with a reconnect hint. The internal flag was never on screen.
+
+So this task adds two tests that pin today's behavior: one for Review Focus 4, and one that fails if anyone reintroduces the carve-out.
 
 **Files:**
-- Modify: `src/hooks/useCalendarProposal.ts` (`readStatus` catch ~172-177, fetch effect doc + body ~411-464)
-- Test: `src/tests/useCalendarProposal.test.tsx` (new tests in the `lifecycle` describe block, and one in `presence`)
+- Test: `src/tests/useCalendarProposal.test.tsx` (three helpers after `setup`; one test at the end of `presence`, one at the end of `lifecycle`)
 
 **Interfaces:**
-- Consumes: existing hook internals only. `UseCalendarProposalReturn` (`present`, `state`, `onPickCandidate`, `onRetry`) is unchanged.
+- Consumes: the existing hook and test helpers (`mockGraph`, `meeting`, `setup`, `listeners`, `CONTACTS`, `invoke`).
 - Produces: nothing other tasks use.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Add the tests**
 
-In `src/tests/useCalendarProposal.test.tsx`, add this helper right after `function setup(...) {...}`:
+In `src/tests/useCalendarProposal.test.tsx`, add these helpers right after `function setup(...) {...}`:
 
 ```ts
 async function broadcastConnectionChanged() {
@@ -1059,10 +1091,9 @@ async function broadcastConnectionChanged() {
   });
 }
 
-function keychainReadFails(events: unknown[]) {
+function keychainReadFails() {
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === "graph_status") throw new Error("GRAPH_NO_KEYCHAIN");
-    if (cmd === "graph_current_meetings") return { ownAddress: "me@corp.test", events };
     throw new Error(`unexpected command ${cmd}`);
   });
 }
@@ -1081,7 +1112,7 @@ At the end of the `describe("presence", ...)` block add:
    * that succeeds restores the real state rather than leaving the error up.
    */
   it("recovers from a keychain read failure on mount via Try again", async () => {
-    keychainReadFails([]);
+    keychainReadFails();
     const { result } = setup();
     await waitFor(() =>
       expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
@@ -1100,14 +1131,15 @@ At the end of the `describe("lifecycle", ...)` block add:
 
 ```ts
   /**
-   * Issue #73: a keychain READ failure says nothing about the connection, so
-   * `connected` must not flip. The hook does not return `connected`, and
-   * while `statusError` is set its return is identical either way - so this
-   * observes the flip through the fetch effect instead: flipping `connected`
-   * false and back true fires `connectedChanged`, which resets and refetches.
-   * Against the unfixed hook this makes TWO graph_current_meetings calls.
+   * Issue #73: a real Disconnect whose status read hits GRAPH_NO_KEYCHAIN
+   * must still count as a transition. `readStatus` sets `connected` false on
+   * EVERY status error, so the reconnect that follows flips it back true,
+   * `connectedChanged` resets, and the new account's meeting is fetched. A
+   * carve-out that kept `connected` true on GRAPH_NO_KEYCHAIN would leave
+   * `hasFetched` latched through both broadcasts and resurface the previous
+   * account's proposal after only one fetch.
    */
-  it("keeps the fetched proposal through a keychain read hiccup, with no refetch", async () => {
+  it("refetches for the reconnected account when the disconnect's status read failed", async () => {
     mockGraph([meeting("e1", "Sync")]);
     const props = { isPickerOpen: true, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
     const { result } = renderHook((p: typeof props) => useCalendarProposal(p), {
@@ -1116,144 +1148,43 @@ At the end of the `describe("lifecycle", ...)` block add:
     await waitFor(() =>
       expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
     );
-    const before = result.current.state;
 
-    keychainReadFails([meeting("e1", "Sync")]);
+    // Disconnected on /odoo, but this window's status read fails.
+    keychainReadFails();
     await broadcastConnectionChanged();
     await waitFor(() =>
       expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
     );
 
-    mockGraph([meeting("e1", "Sync")]);
-    await broadcastConnectionChanged();
-    await waitFor(() => expect(result.current.state).toEqual(before));
-    expect(meetingsCalls()).toBe(1);
-  });
-
-  /**
-   * With `connected` left true through a keychain hiccup, nothing but the
-   * `statusError` gate stops a picker open from fetching behind the error
-   * banner - and `hasFetched` would then latch, so recovery would show a
-   * result fetched during the hiccup with nothing re-triggering. The
-   * recovery half also pins `statusError` in the effect's dependency array:
-   * without it, clearing the error re-runs nothing and the block sits on
-   * "loading" forever.
-   */
-  it("does not fetch while the status read is failing, and fetches once it recovers", async () => {
-    mockGraph([meeting("e1", "Sync")]);
-    const props = { isPickerOpen: false, contacts: CONTACTS, setCalendarBlockPresent: vi.fn() };
-    const { result, rerender } = renderHook((p: typeof props) => useCalendarProposal(p), {
-      initialProps: props,
-    });
-    await waitFor(() => expect(result.current.present).toBe(true));
-
-    keychainReadFails([meeting("e1", "Sync")]);
+    // Reconnected - a DIFFERENT account, with a different meeting live now.
+    mockGraph([meeting("e2", "Someone else's meeting")]);
     await broadcastConnectionChanged();
     await waitFor(() =>
-      expect(result.current.state).toEqual({ kind: "error", code: "GRAPH_NO_KEYCHAIN" })
+      expect(result.current.state).toMatchObject({
+        kind: "proposal",
+        subject: "Someone else's meeting",
+      })
     );
-
-    rerender({ ...props, isPickerOpen: true });
-    // Flush any effect-triggered fetch before asserting there was none.
-    await act(async () => {});
-    expect(meetingsCalls()).toBe(0);
-
-    mockGraph([meeting("e1", "Sync")]);
-    await act(async () => {
-      result.current.onRetry();
-    });
-    await waitFor(() =>
-      expect(result.current.state).toMatchObject({ kind: "proposal", subject: "Sync" })
-    );
-    expect(meetingsCalls()).toBe(1);
+    expect(meetingsCalls()).toBe(2);
   });
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [ ] **Step 2: Run the tests**
 
 Run: `npx vitest run src/tests/useCalendarProposal.test.tsx`
-Expected: `keeps the fetched proposal through a keychain read hiccup, with no refetch` FAILS (`expected 2 to be 1`). `recovers from a keychain read failure on mount via Try again` and `does not fetch while the status read is failing...` may pass on the unfixed hook (today `connected` flips false, which also blocks the fetch) — that is expected; they pin behavior the fix must keep. Every pre-existing test PASSES.
+Expected: all tests PASS, the two new ones included. They pin behavior the hook already has, so they pass on first run; Step 3 proves the lifecycle one can fail.
 
-- [ ] **Step 3: Stop flipping `connected` on `GRAPH_NO_KEYCHAIN`**
+- [ ] **Step 3: Mutation check (do it, then revert)**
 
-In `readStatus`, replace:
+In `readStatus`'s `catch` in `src/hooks/useCalendarProposal.ts`, wrap `setConnected(false);` in `if (toGraphError(err).code !== "GRAPH_NO_KEYCHAIN") { ... }`. Rerun the file: `refetches for the reconnected account when the disconnect's status read failed` FAILS (the `waitFor` times out with the state still the `Sync` proposal). Revert the hook, then confirm `git diff --stat src/hooks/useCalendarProposal.ts` prints nothing.
 
-```ts
-    } catch (err) {
-      if (mine === statusGen.current) {
-        setConnected(false);
-        setStatusError(toGraphError(err).code);
-      }
-    }
-```
+Then `npx tsc --noEmit` and `npm run lint`. Expected: no new errors.
 
-with:
-
-```ts
-    } catch (err) {
-      if (mine === statusGen.current) {
-        const code = toGraphError(err).code;
-        // A keychain read failure says nothing about the connection: Rust
-        // propagates it and the block below renders it as a transient error.
-        // Flipping connected here is the exact collapse GraphState::status's
-        // doc comment (graph/mod.rs) forbids.
-        if (code !== "GRAPH_NO_KEYCHAIN") {
-          setConnected(false);
-        }
-        setStatusError(code);
-      }
-    }
-```
-
-- [ ] **Step 4: Gate the fetch effect on `statusError`**
-
-In the fetch effect, replace:
-
-```ts
-    if (!present || hasFetched.current) return;
-    hasFetched.current = true;
-    void fetchNow();
-  }, [isPickerOpen, present, connected, fetchNow, reset]);
-```
-
-with:
-
-```ts
-    if (!present || statusError !== null || hasFetched.current) return;
-    hasFetched.current = true;
-    void fetchNow();
-  }, [isPickerOpen, present, connected, statusError, fetchNow, reset]);
-```
-
-and append this paragraph to the end of the doc comment directly above `const hasFetched = useRef(false);` (before its closing `*/`):
-
-```ts
-   *
-   * `statusError` gates the fetch, and is in the dependency array for the
-   * same load-bearing reason `present` is. Every status error used to force
-   * `connected` false, so `present` alone kept a fetch from starting behind
-   * the error banner. GRAPH_NO_KEYCHAIN no longer flips `connected` (a
-   * keychain read failure says nothing about the connection), so without
-   * this gate a picker open during the hiccup would fetch a result nobody
-   * sees and latch `hasFetched`, leaving recovery with nothing to re-trigger.
-   * When `statusError` clears, the effect re-runs and fetches if this open
-   * has not fetched yet.
-```
-
-- [ ] **Step 5: Run the tests to verify they pass**
-
-Run: `npx vitest run src/tests/useCalendarProposal.test.tsx`
-Expected: all tests PASS, including the three new ones and the existing `surfaces an unreadable connection state as an error, not a silent absence` and `publishes the same presence it returns, including on a status error`.
-
-Mutation check (do it, then revert): delete `statusError !== null ||` from the effect's early return → `does not fetch while the status read is failing...` FAILS. Restore it and remove `statusError` from the dependency array → the same test FAILS (times out on "loading"). Restore both.
-
-Then `npm run lint` — expected: no new errors (`react-hooks/exhaustive-deps` is satisfied: `statusError` is now both read and listed).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/hooks/useCalendarProposal.ts src/tests/useCalendarProposal.test.tsx
-git commit -m "fix(calendar): a keychain read failure no longer reads as disconnected (#73)
+git add src/tests/useCalendarProposal.test.tsx
+git commit -m "test(calendar): pin status-error recovery for GRAPH_NO_KEYCHAIN (#73)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1480,7 +1411,7 @@ Expected: all PASS.
 Then the neighbours that read the same component or codes, each scoped:
 `npx vitest run src/tests/CalendarProposal.create.test.tsx`, `npx vitest run src/tests/CalendarProposal.slots.test.tsx`, `npx vitest run src/tests/graph-errors.test.ts`, `npx vitest run src/tests/odoo-settings-page.test.tsx` — expected: all PASS unchanged (the `odoo-settings-page` `GRAPH_NO_KEYCHAIN` cases are connect/status-path copy on the Odoo page, untouched here). If `odoo-settings-page` times out on the calendar-seed case, rerun that file alone once — it is a known full-run flake that passes alone.
 
-Then `npm run lint` — expected: no new errors.
+Then `npx tsc --noEmit` and `npm run lint` — expected: no new errors.
 
 - [ ] **Step 7: Commit**
 
@@ -1497,3 +1428,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 1. **Single-instance** — see Task 3's manual gate.
 2. **The fix's own success criterion.** With a calendar connected, make the stored refresh token fail with `invalid_grant` (e.g. revoke sessions for the account in Entra), then RESTART the app before the first picker open — a still-valid in-memory access token (~55 minutes) would otherwise serve the open without redeeming the refresh token (`mod.rs:645-653`). Open the picker once: the block shows "Your Microsoft sign-in expired. Reconnect from the Odoo page's Calendar section.", and the Odoo page still shows the calendar connected (Disconnect visible). Restart the app: the block still appears with the same copy (before this change it vanished). Open the picker three times in one launch: the third deletes the credential, and the Odoo page shows no Disconnect button after a reload. A reconnect at any point restores a working connection.
+
+## PR description notes (accepted, not fixed here)
+
+- The `GRAPH_NO_KEYCHAIN` hint says "Couldn't read", but a FAILED DELETE at the invalid_grant threshold also surfaces `GRAPH_NO_KEYCHAIN` (Task 1's `record_invalid_grant_surfaces_a_failed_delete_and_keeps_the_streak`). The remedy it names (reconnect) is still right for that case; only the verb is loose.
+- Follow-up, out of #73's scope: a reconnect to a different account WITHOUT a disconnect in between (the Odoo page's "Connect calendar" is always rendered) keeps `connected` true → true, so `useCalendarProposal` does not reset and an open picker can keep the previous account's proposal. Pre-existing; Task 4 deliberately does not widen the broadcast listener to cover it.
