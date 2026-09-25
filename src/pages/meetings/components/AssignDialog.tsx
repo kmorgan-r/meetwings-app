@@ -174,12 +174,12 @@ const CREATE_FAILURE_COPY: Partial<Record<OdooErrorCode, string>> = {
 
 /**
  * `autoAdded` is `null` for the two outcomes `submitCreate` never attempts an
- * add for (an archived adoption, and `created-invisible` - neither has a
- * selectable, active contact behind it) and for `failed` (no contact was ever
- * created). It is `true`/`false` for every other outcome: the contact IS
- * active, and `submitCreate` always calls `addTarget` for it - `false` means
- * only that the cap was full, exactly like the "· limit reached" copy the
- * "Logging to" heading already uses elsewhere in this dialog.
+ * add for (`created-invisible` - no selectable contact behind it - and
+ * `failed`, where no contact was ever created). It is `true`/`false` for
+ * every other outcome, archived adoptions included: the contact is
+ * selectable, and `submitCreate` always calls `addTarget` for it - `false`
+ * means only that the cap was full, exactly like the "· limit reached" copy
+ * the "Logging to" heading already uses elsewhere in this dialog.
  */
 function createResultText(result: CreateResult, autoAdded: boolean | null): string {
   switch (result.kind) {
@@ -188,11 +188,10 @@ function createResultText(result: CreateResult, autoAdded: boolean | null): stri
         ? "Created in Odoo and added to this meeting."
         : "Created in Odoo. The log is full, so tick them below once you free a slot.";
     case "adopted-active":
+    case "adopted-archived":
       return autoAdded
         ? "Already in Odoo — added to this meeting."
         : "Already in Odoo. The log is full, so tick them below once you free a slot.";
-    case "adopted-archived":
-      return "This person is already in Odoo but archived. Un-archive them there to log this meeting to them.";
     case "created-invisible":
       return "Created in Odoo, but it isn't visible to this connection.";
     case "cached-failed":
@@ -509,23 +508,18 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
           const idx = prev.findIndex((c) => c.id === outcome.contact.id);
           return idx === -1 ? [...prev, outcome.contact] : prev.map((c, i) => (i === idx ? outcome.contact : c));
         });
-        // Archived contacts cannot be previewed OR added - see the
-        // `disabled={!c.active}` on both the select button and the AddToggle
-        // below, which this must not bypass.
-        if (outcome.contact.active) {
-          selectContact(outcome.contact);
-          // `targetsRef.current`, not `addTarget`'s own resolved value - see
-          // that ref's own doc comment for why this call site cannot trust it.
-          if (targetsRef.current.length < MAX_TARGETS) {
-            await addTarget({
-              model: "res.partner",
-              resId: outcome.contact.id,
-              name: outcome.contact.name,
-            });
-            autoAdded = true;
-          } else {
-            autoAdded = false;
-          }
+        // `targetsRef.current`, not `addTarget`'s own resolved value - see
+        // that ref's own doc comment for why this call site cannot trust it.
+        selectContact(outcome.contact);
+        if (targetsRef.current.length < MAX_TARGETS) {
+          await addTarget({
+            model: "res.partner",
+            resId: outcome.contact.id,
+            name: outcome.contact.name,
+          });
+          autoAdded = true;
+        } else {
+          autoAdded = false;
         }
       }
 
@@ -712,15 +706,11 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                     <button
                       type="button"
                       data-testid="assign-contact"
-                      // Reassign exists because a target Odoo archived is
-                      // unrecoverable; letting the user pick ANOTHER archived
-                      // partner reproduces the same terminal ODOO_FAULT.
-                      disabled={!c.active}
                       aria-pressed={selected?.id === c.id}
                       onClick={() => selectContact(c)}
                       className={`flex-1 rounded-lg px-2 py-1 text-left text-sm hover:bg-muted/50 ${
                         selected?.id === c.id ? "bg-muted" : ""
-                      } ${c.active ? "" : "opacity-50"}`}
+                      }`}
                     >
                       {c.name}
                       {c.companyName && (
@@ -736,7 +726,6 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                       name={c.name}
                       targets={targets}
                       atCap={atCap}
-                      disabled={!c.active}
                       onAdd={addTarget}
                       onRemove={removeTarget}
                     />

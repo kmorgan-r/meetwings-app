@@ -28,6 +28,77 @@ export const PARTNER_FIELDS = [
   "type",
 ];
 
+/**
+ * Which partner types are cached. Shared with contacts-reconcile.ts so the
+ * cache and the "is it still in Odoo" question can never disagree about it, and
+ * by the page fetch and its fault-isolated re-fetches.
+ */
+export const PARTNER_TYPE_LEAVES: XmlRpcValue[] = [
+  ["type", "!=", "delivery"],
+  ["type", "!=", "invoice"],
+  ["type", "!=", "other"],
+];
+
+function expectRows(value: XmlRpcValue, what: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw odooError("ODOO_UNEXPECTED_ROW", `Odoo returned a non-list from ${what}`);
+  }
+  return value;
+}
+
+function expectIds(value: XmlRpcValue, what: string): number[] {
+  const rows = expectRows(value, what);
+  return rows.map((v, i) => {
+    if (typeof v !== "number" || !Number.isInteger(v)) {
+      throw odooError("ODOO_UNEXPECTED_ROW", `Odoo returned a non-integer id at index ${i} from ${what}`);
+    }
+    return v;
+  });
+}
+
+const asFault = (err: unknown): OdooError | null =>
+  err instanceof OdooError && err.code === "ODOO_FAULT" ? err : null;
+
+/**
+ * The fault-isolated row fetch. ONLY an ODOO_FAULT enters: any other
+ * rejection re-throws and fails the run exactly as today. A batch that
+ * faults is halved and both halves retried; a singleton that still faults
+ * is recorded as skipped and the cursor moves past it. Successful rows
+ * accumulate in `out.rows`.
+ */
+async function fetchRowsBisectingFaults(
+  client: OdooClient,
+  ids: number[],
+  out: { rows: unknown[]; skippedIds: number[] }
+): Promise<void> {
+  if (ids.length === 0) return;
+  const domain: XmlRpcValue[] = [["id", "in", ids], ...PARTNER_TYPE_LEAVES];
+  let rows: XmlRpcValue;
+  try {
+    rows = await client.execute("res.partner", "search_read", [domain], {
+      fields: PARTNER_FIELDS,
+      context: { active_test: false },
+    });
+  } catch (err) {
+    if (asFault(err) === null) throw err;
+    const mid = Math.floor(ids.length / 2);
+    if (mid === 0) {
+      // Singleton: this record's read is what faults. Skip it, count it,
+      // move the cursor past it - the run continues.
+      out.skippedIds.push(ids[0]);
+      return;
+    }
+    await fetchRowsBisectingFaults(client, ids.slice(0, mid), out);
+    await fetchRowsBisectingFaults(client, ids.slice(mid), out);
+    return;
+  }
+  out.rows.push(...expectRows(rows, "search_read"));
+  // BISECTION HAPPENS ONLY IN THE FAULT CATCH. A successful read answered
+  // EVERY id it was given - recursing into the second half here would re-fetch
+  // it (duplicate rows, inflated fetched, O(log n) wasted RPCs per healthy
+  // sub-batch).
+}
+
 /** Odoo returns `false` for an unset field of any type. */
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -63,16 +134,6 @@ export function parsePartnerRow(raw: unknown): OdooContact {
     lastMeetingAt: null,
   };
 }
-
-/**
- * Which partner types are cached. Shared with contacts-reconcile.ts so the
- * cache and the "is it still in Odoo" question can never disagree about it.
- */
-export const PARTNER_TYPE_LEAVES: XmlRpcValue[] = [
-  ["type", "!=", "delivery"],
-  ["type", "!=", "invoice"],
-  ["type", "!=", "other"],
-];
 
 /**
  * The incremental pull.
@@ -131,12 +192,58 @@ export async function syncContacts(deps: {
       domain.push(["id", ">", cursor]);
       domain.push(...PARTNER_TYPE_LEAVES);
 
-      const page = await client.execute("res.partner", "search_read", [domain], {
-        fields: PARTNER_FIELDS,
-        order: "id asc",
-        limit: PAGE_LIMIT,
-        context: { active_test: false },
-      });
+      let page: XmlRpcValue;
+      const isolatedSkips: number[] = [];
+      // Set ONLY by the machinery below. `machineryIdCount` is the id-only
+      // `search`'s count; a record deleted or re-typed BETWEEN that search
+      // and the bisected reads is named in `ids` but comes back as neither a
+      // row nor a skip - keying the page's id count on rows+skips alone
+      // would shrink the count and break the loop early, silently stranding
+      // every later page. `machineryMaxId` (ids are `order: "id asc"`, so the
+      // last element is the max) folds into the cursor for the same reason:
+      // a window whose records ALL vanished would otherwise stall the cursor
+      // and re-fetch the identical domain forever.
+      let machineryIdCount: number | null = null;
+      let machineryMaxId: number | null = null;
+      try {
+        page = await client.execute("res.partner", "search_read", [domain], {
+          fields: PARTNER_FIELDS,
+          order: "id asc",
+          limit: PAGE_LIMIT,
+          context: { active_test: false },
+        });
+      } catch (err) {
+        // ONLY ODOO_FAULT enters the machinery. A transport failure (UNREACHABLE)
+        // or a shape failure (UNEXPECTED_ROW) re-throws to the run-level catch:
+        // bisection against a dead server burns calls to learn nothing, and a
+        // shape drift is systemic, not per-record.
+        if (asFault(err) === null) throw err;
+        // 1. Re-fetch the same domain as an id-only PLAIN search. No `fields`
+        // kwarg - plain search takes none, and a fields kwarg here is a
+        // server-side fault that would make this whole machinery a no-op. A
+        // read-side crash (a computed field raising for one record) happens on
+        // READ, not on search, so this call names the page's ids without
+        // tripping the fault.
+        // 2. If THIS faults, the fault is domain/permission/server-shaped -
+        // re-throw. The run fails honestly, as today.
+        const ids = expectIds(
+          await client.execute("res.partner", "search", [domain], {
+            order: "id asc",
+            limit: PAGE_LIMIT,
+            context: { active_test: false },
+          }),
+          "search"
+        );
+        // 3-4. Bisect the reads; a singleton that still faults is skipped and
+        // counted; the cursor moves past it.
+        const isolated = { rows: [] as unknown[], skippedIds: [] as number[] };
+        await fetchRowsBisectingFaults(client, ids, isolated);
+        page = isolated.rows as XmlRpcValue;
+        skipped += isolated.skippedIds.length;
+        isolatedSkips.push(...isolated.skippedIds);
+        machineryIdCount = ids.length;
+        machineryMaxId = ids.length > 0 ? ids[ids.length - 1] : null;
+      }
 
       if (runStartedAt === null && client.serverDate) {
         const parsed = new Date(client.serverDate);
@@ -151,12 +258,17 @@ export async function syncContacts(deps: {
 
       const contacts: OdooContact[] = [];
       // The cursor advances from the RAW id, before parsing, and is applied
-      // after the page. Advancing it only from successfully parsed rows means a
-      // page whose rows ALL fail parsePartnerRow leaves the cursor exactly where
-      // it was - and because a full page also means `page.length === PAGE_LIMIT`,
-      // the loop re-requests the identical page forever, holding the claim,
-      // burning requests, reporting nothing and never finishing.
+      // after the page - so a row that fails parsePartnerRow cannot strand the
+      // cursor on itself; the loop always moves past it. Should a multi-record
+      // page still yield nothing ingestable, the zero-upsert breaker below
+      // fails the run loudly instead.
+      // `isolatedSkips` is a per-page `const number[]` declared beside `page`
+      // above and RESET each iteration by re-declaration - its ids are folded
+      // into pageMaxId below so the cursor moves past records the machinery
+      // skipped (their write_date is unknown and stays above the watermark).
       let pageMaxId = cursor;
+      for (const rawId of isolatedSkips) pageMaxId = Math.max(pageMaxId, rawId);
+      if (machineryMaxId !== null) pageMaxId = Math.max(pageMaxId, machineryMaxId);
       for (const raw of page) {
         const rawId = (raw as { id?: unknown } | null)?.id;
         if (typeof rawId === "number" && Number.isInteger(rawId)) {
@@ -197,7 +309,64 @@ export async function syncContacts(deps: {
       changed += await upsertContacts(instance, contacts, now);
       fetched += contacts.length;
 
-      if (page.length < PAGE_LIMIT) break;
+      // THE ZERO-UPSERT BREAKER. A page that listed MULTIPLE records and handed
+      // the upsert ZERO rows is a systemic fault wearing a per-record fault's
+      // clothes - the cursor would walk the whole table and the run would end
+      // "successfully" with nothing ingested. Keyed on the rows HANDED to the
+      // upsert, not on its return (that return counts genuinely-CHANGED rows and
+      // is legitimately zero for unchanged data on a healthy re-sync). Whichever
+      // route the zero came by - every singleton faulted, or every row failed
+      // parse - the outcome is identical and loud, through the existing
+      // failSync path.
+      //
+      // THE SINGLE-RECORD EXEMPTION (pageIdCount === 1): a page whose ONLY id
+      // singleton-faulted is item 4's accepted fate - "a singleton id that still
+      // faults is skipped and the cursor moves past it; the run continues" - not
+      // a systemic fault: there is no table-walk to hide, the skip is counted and
+      // surfaced, the watermark stays put so the record is re-fetched next run,
+      // and the run recovers naturally the moment a healthy page-mate joins the
+      // domain. Failing the run there would re-create the exact permanent wedge
+      // this task removes, for a page the breaker's own harm rationale (the
+      // silent total walk) does not describe. The breaker's named scenario - a
+      // PARTNER_FIELDS drift faulting every read yet sparing the id-only search -
+      // fires on every multi-record page and is unaffected.
+      //
+      // The "watermark stays put" guarantee above is SPECIFIC to the
+      // single-record page (there are no page-mates to advance it). On a
+      // MULTI-record page a skipped record's page-mates DO advance the
+      // watermark past its (unknown) write_date, and the record is then absent
+      // from the domain until it is edited again - the spec's accepted
+      // sub-watermark fate, made durable only by the skip-ledger follow-up.
+      //
+      // THE READ-EVIDENCE CONDITION: a page whose ids were ALL removed from
+      // scope BETWEEN the id-only search and the bisected reads (deleted or
+      // re-typed) comes back with zero rows AND zero skips - nothing was read
+      // and nothing faulted, so there is no drift evidence and the race is
+      // benign: the run continues past it. The breaker fires only when reads
+      // actually happened (rows returned, or singletons skipped) and yielded
+      // nothing ingestable.
+      // The break below keys on this ID count, not the row count: a
+      // fault-isolated page is short because records were skipped, not because
+      // the table ended. On a non-faulting page the two are the same number.
+      // For a machinery page the count is the id-only `search`'s length (see
+      // `machineryIdCount` above): a record deleted or re-typed between that
+      // search and the bisected reads is neither a row nor a skip, and letting
+      // it shrink the count would break the loop early and strand every later
+      // page behind it.
+      const pageIdCount = machineryIdCount ?? page.length + isolatedSkips.length;
+      if (
+        pageIdCount > 1 &&
+        contacts.length === 0 &&
+        (page.length > 0 || isolatedSkips.length > 0)
+      ) {
+        throw odooError(
+          "ODOO_UNEXPECTED_ROW",
+          `a page listed ${pageIdCount} partner records and none could be ingested - the field list or domain no longer matches this server`,
+          { cursor, pageIds: pageIdCount }
+        );
+      }
+
+      if (pageIdCount < PAGE_LIMIT) break;
     }
 
     const next = computeWatermark(maxWriteDate, runStartedAt);

@@ -33,3 +33,9 @@ docs/*
 .claude/
 .claude-ship-state.json
 .claude-pr-fix-state.json
+.claude-pr-fix-state*.json
+.claude-fleet-state.json
+ship-run.log
+ship-run.err.log
+bootstrap.txt
+pwsh.pid
