@@ -403,9 +403,9 @@ The collapse happens in the webview:
 > what stops a real Disconnect (whose status read hit `GRAPH_NO_KEYCHAIN`)
 > followed by a reconnect to a different account from resurfacing the previous
 > account's proposal. The requirement this section serves ("transient, not
-> disconnected") is met by the remedy-table change further down. The two
-> paragraphs below and the matching Vitest bullets under Testing are kept for
-> the record only.
+> disconnected") is met by the remedy-table change further down. Everything
+> from here up to **The remedy table**, and the matching Vitest bullets under
+> Testing, is kept for the record only.
 
 **`readStatus`** (`src/hooks/useCalendarProposal.ts:172-177`). The catch
 currently sets `connected = false` for every failure code. Split one code out:

@@ -1038,7 +1038,7 @@ with:
 - [ ] **Step 3: Compile**
 
 Run: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo check --manifest-path src-tauri/Cargo.toml`
-Expected: no errors (Cargo.lock gains `tauri-plugin-single-instance` and its deps). Then check the lock did not move `tauri` itself: `git diff src-tauri/Cargo.lock | grep -A2 '^ name = "tauri"$'` must show `version = "2.8.2"` as an unchanged context line, never a `-`/`+` pair. If `tauri` was bumped, revert `Cargo.lock` and pin the plugin to the newest release whose `tauri` requirement 2.8.2 satisfies (`tauri-plugin-single-instance = "=2.x.y"`), then rerun. Then `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::` — expected: still all PASS.
+Expected: no errors (Cargo.lock gains `tauri-plugin-single-instance` and its deps). Then check the lock did not move `tauri` itself: `grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock` — expected second line `version = "2.8.2"`. Anything else means `tauri` was bumped: revert `Cargo.lock` and pin the plugin to the newest release whose `tauri` requirement 2.8.2 satisfies (`tauri-plugin-single-instance = "=2.x.y"`), then rerun. Then `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib graph::` — expected: still all PASS.
 
 - [ ] **Step 4: Document the dev-workflow consequence**
 
