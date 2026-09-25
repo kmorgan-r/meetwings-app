@@ -65,6 +65,16 @@ export function parsePartnerRow(raw: unknown): OdooContact {
 }
 
 /**
+ * Which partner types are cached. Shared with contacts-reconcile.ts so the
+ * cache and the "is it still in Odoo" question can never disagree about it.
+ */
+export const PARTNER_TYPE_LEAVES: XmlRpcValue[] = [
+  ["type", "!=", "delivery"],
+  ["type", "!=", "invoice"],
+  ["type", "!=", "other"],
+];
+
+/**
  * The incremental pull.
  *
  * Paging is keyset on `id`, not `offset`. With offset + order by write_date,
@@ -119,9 +129,7 @@ export async function syncContacts(deps: {
       // OMITTED, not defaulted, on the first run. See the test.
       if (watermark !== null) domain.push(["write_date", ">", watermark]);
       domain.push(["id", ">", cursor]);
-      domain.push(["type", "!=", "delivery"]);
-      domain.push(["type", "!=", "invoice"]);
-      domain.push(["type", "!=", "other"]);
+      domain.push(...PARTNER_TYPE_LEAVES);
 
       const page = await client.execute("res.partner", "search_read", [domain], {
         fields: PARTNER_FIELDS,
