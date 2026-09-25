@@ -30,6 +30,33 @@ jobs:
       issues: read
       id-token: write
 
+    # Shared by the primary and fallback review steps so the two attempts can
+    # never drift apart. Edit the prompt and the model/tool list here, once.
+    env:
+      # Secrets cannot be read in a step `if:`, so expose only whether the
+      # fallback token is configured.
+      HAS_FALLBACK_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK != '' }}
+      REVIEW_CLAUDE_ARGS: '--model claude-opus-4-8 --allowed-tools "Write,Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*)"'
+      REVIEW_PROMPT: |
+        Adversarial code review. Assume the diff contains at least one real defect and find it; waving the PR through without tracing the changed code's behavior is a failed review.
+
+        Run `gh pr diff ${{ github.event.pull_request.number }}` for the diff. Focus on it, but you are NOT confined to it: use Read/Grep/Glob to open callers/callees of changed functions, types, and contracts and confirm the change doesn't break them. Cross-file breakage is in scope.
+
+        Check: logic bugs, null/undefined, races, off-by-one, wrong error handling, broken callers; perf (O(n²) hot paths, unbounded loops over chat history, missing pagination); security (injection, API key exposure, secrets in logs, XSS in rendered markdown); test gaps (changed logic untested, tests asserting nothing, happy-path-only).
+
+        Flag ANY of these CLAUDE.md violations in changed code as HIGH: `any` type (strict mode is on); relative import instead of the `@/*` alias; plain `fetch(` against an external API instead of `tauriFetch` from `@tauri-apps/plugin-http` (CORS bypass — see the Troubleshooting section of CLAUDE.md); silent error-swallowing catch; a new AI or STT provider added anywhere other than `config/ai-providers.constants.ts` / `config/stt.constants.ts`.
+
+        Severity by PLAUSIBILITY, not certainty:
+        - **CRITICAL**: could plausibly cause a security breach, data loss, API key leakage, or a crash on launch.
+        - **HIGH**: could plausibly cause a bug, crash, wrong result, or broken caller under realistic input — or a hard-rule violation above.
+        - **MEDIUM**: real concern unlikely to fire, or narrow edge case. Report it (own section).
+        - **NIT**: pure style, no correctness impact → skip.
+        Don't downgrade to stay silent: if a reasonable input reaches the defect, report it. Every finding needs a concrete FAILURE SCENARIO (input/state → wrong output/crash/violated invariant); no scenario = not a finding.
+
+        Write the review to `review.md` in the repo root: a one-line **Scope** header (files reviewed + callers traced), then `## Critical` / `## High` / `## Medium` sections (each: `path:line`, one-line defect, failure scenario), omitting empty sections. If nothing is found after genuinely tracing, still write the Scope header + "✅ No critical, high, or medium issues found" — a bare no-issues line without Scope is not acceptable.
+
+        Use CLAUDE.md for conventions. Do NOT run npm/cargo/build/test — static review only.
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -46,32 +73,36 @@ jobs:
       - name: Pre-create ~/.local/bin
         run: mkdir -p "$HOME/.local/bin"
 
+      # Primary attempt on account 1. continue-on-error keeps the job alive when
+      # this account is out of usage, so the fallback below can take over; the
+      # Post step still fails the run if neither attempt leaves a review.md.
       - name: Run Claude Code Review
         id: claude-review
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Adversarial code review. Assume the diff contains at least one real defect and find it; waving the PR through without tracing the changed code's behavior is a failed review.
+          prompt: ${{ env.REVIEW_PROMPT }}
+          claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
 
-            Run `gh pr diff ${{ github.event.pull_request.number }}` for the diff. Focus on it, but you are NOT confined to it: use Read/Grep/Glob to open callers/callees of changed functions, types, and contracts and confirm the change doesn't break them. Cross-file breakage is in scope.
+      # Fallback attempt on account 2. Runs on ANY primary failure, not just an
+      # exhausted account: the action hides the underlying error, so there is no
+      # reliable usage-limit signal to key on. The cost is one extra attempt on
+      # account 2 when the failure is something else (e.g. an action bug).
+      # Also runs when the primary "succeeded" without writing review.md.
+      - name: Discard partial review from primary attempt
+        if: env.HAS_FALLBACK_TOKEN == 'true' && (steps.claude-review.outcome == 'failure' || hashFiles('review.md') == '')
+        run: rm -f review.md
 
-            Check: logic bugs, null/undefined, races, off-by-one, wrong error handling, broken callers; perf (O(n²) hot paths, unbounded loops over chat history, missing pagination); security (injection, API key exposure, secrets in logs, XSS in rendered markdown); test gaps (changed logic untested, tests asserting nothing, happy-path-only).
-
-            Flag ANY of these CLAUDE.md violations in changed code as HIGH: `any` type (strict mode is on); relative import instead of the `@/*` alias; plain `fetch(` against an external API instead of `tauriFetch` from `@tauri-apps/plugin-http` (CORS bypass — see the Troubleshooting section of CLAUDE.md); silent error-swallowing catch; a new AI or STT provider added anywhere other than `config/ai-providers.constants.ts` / `config/stt.constants.ts`.
-
-            Severity by PLAUSIBILITY, not certainty:
-            - **CRITICAL**: could plausibly cause a security breach, data loss, API key leakage, or a crash on launch.
-            - **HIGH**: could plausibly cause a bug, crash, wrong result, or broken caller under realistic input — or a hard-rule violation above.
-            - **MEDIUM**: real concern unlikely to fire, or narrow edge case. Report it (own section).
-            - **NIT**: pure style, no correctness impact → skip.
-            Don't downgrade to stay silent: if a reasonable input reaches the defect, report it. Every finding needs a concrete FAILURE SCENARIO (input/state → wrong output/crash/violated invariant); no scenario = not a finding.
-
-            Write the review to `review.md` in the repo root: a one-line **Scope** header (files reviewed + callers traced), then `## Critical` / `## High` / `## Medium` sections (each: `path:line`, one-line defect, failure scenario), omitting empty sections. If nothing is found after genuinely tracing, still write the Scope header + "✅ No critical, high, or medium issues found" — a bare no-issues line without Scope is not acceptable.
-
-            Use CLAUDE.md for conventions. Do NOT run npm/cargo/build/test — static review only.
-
-          claude_args: '--model claude-opus-4-8 --allowed-tools "Write,Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*)"'
+      - name: Run Claude Code Review (fallback account)
+        id: claude-review-fallback
+        if: env.HAS_FALLBACK_TOKEN == 'true' && (steps.claude-review.outcome == 'failure' || hashFiles('review.md') == '')
+        # Keep this pin identical to the primary step above.
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
+          prompt: ${{ env.REVIEW_PROMPT }}
+          claude_args: ${{ env.REVIEW_CLAUDE_ARGS }}
 
       - name: Post review comment
         if: always()
@@ -87,6 +118,6 @@ jobs:
             # "clean review" from "review never happened" — a clean review posts
             # an explicit "No critical issues found" comment, so a missing file
             # means the review did not complete. Fail the run.
-            echo "::error::Review produced no review.md verdict artifact — review did not complete (check the review step logs for tool permission denials)."
+            echo "::error::Review produced no review.md verdict artifact — review did not complete (check the primary and fallback review step logs for usage limits or tool permission denials)."
             exit 1
           fi

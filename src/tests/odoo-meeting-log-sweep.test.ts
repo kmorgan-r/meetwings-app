@@ -44,7 +44,7 @@ vi.mock("@/lib/secure-storage", () => ({
   secureDelete: vi.fn(async (key: string) => void store.delete(key)),
 }));
 
-import { getQueueRow } from "@/lib/database/meeting-log.action";
+import { getQueueRow, listTargets } from "@/lib/database/meeting-log.action";
 import { createOdooClient } from "@/lib/odoo/client";
 import { claimed, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
@@ -144,6 +144,12 @@ function calls(): string[] {
   });
 }
 
+/** The execute_kw body's (model, method) pair - same parse calls() uses. */
+function modelMethod(body: string): { model: string; method: string } {
+  const strings = [...body.matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  return { model: strings[2], method: strings[3] };
+}
+
 beforeEach(async () => {
   const wasmBinary = fs.readFileSync(
     path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm")
@@ -177,6 +183,11 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") {
+        order.push("probe"); // existence probe before each create
+        return arrayResponse([42]);
+      }
       if (body.includes("ir.attachment")) {
         order.push("create");
         // Resolve on the next macrotask so an overlapping run would interleave.
@@ -189,8 +200,8 @@ describe("runMeetingLogSweep", () => {
 
     await runMeetingLogSweep(async () => null);
 
-    // Sequential: create/post/create/post, never create/create/post/post.
-    expect(order).toEqual(["create", "post", "create", "post"]);
+    // Sequential: probe/create/post per row, never create/create/post/post.
+    expect(order).toEqual(["probe", "create", "post", "probe", "create", "post"]);
     expect((await getQueueRow("a"))?.status).toBe("sent");
     expect((await getQueueRow("b"))?.status).toBe("sent");
   });
@@ -205,6 +216,8 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
       return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
     });
     await runMeetingLogSweep(async () => null);
@@ -219,6 +232,8 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
       return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
     });
 
@@ -241,6 +256,8 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
       if (body.includes("ir.attachment") && call++ === 0) return faultResponse(2, "nope");
       return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
     });
@@ -258,6 +275,8 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
       return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
     });
     await runMeetingLogSweep(async () => null);
@@ -281,6 +300,8 @@ describe("runMeetingLogSweep", () => {
     tauriFetch.mockImplementation(async (_url, init) => {
       const body = String((init as { body: string }).body);
       if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
       await new Promise((r) => setTimeout(r, 5));
       return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
     });
@@ -319,5 +340,48 @@ describe("runMeetingLogSweep", () => {
     seedRow({ id: "a", session_key: "a" });
     failNextWrite.value = "UPDATE meeting_log_queue SET status = 'pending'";
     await expect(runMeetingLogSweep(async () => null)).resolves.toMatchObject({ ran: false });
+  });
+
+  it("sweeps a dead target through the probe: no orphan, failed with the composed text", async () => {
+    // The sweep drives the REAL pushQueuedRow, so a swept target with a null
+    // attachment id hits the probe on the production path. The dead-target leg
+    // must produce zero wire writes and the persisted composed text - the
+    // sweep-visible half of the invariant.
+    seedRow();
+    seedTargets("row-1", 999);
+    let probeBody = "";
+    tauriFetch.mockImplementation(async (_url, init) => {
+      const body = String((init as { body: string }).body);
+      if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") {
+        probeBody = body;
+        return arrayResponse([]); // record gone
+      }
+      return body.includes("ir.attachment") ? intResponse(555) : intResponse(999);
+    });
+    await runMeetingLogSweep(async () => null);
+
+    expect(calls()).toEqual(["authenticate", "res.partner.search"]);
+    expect(calls()).not.toContain("ir.attachment.create");
+    const stored = await getQueueRow("row-1");
+    expect(stored).toMatchObject({ status: "failed", last_error_code: "ODOO_FAULT" });
+    expect(stored?.last_error).toBe(
+      "ODOO_FAULT: target record 999 missing or inaccessible (search returned 0 rows)"
+    );
+    const target = (await listTargets("row-1"))[0];
+    expect(target).toMatchObject({
+      status: "failed",
+      lastErrorCode: "ODOO_FAULT",
+      lastError: "ODOO_FAULT: target record 999 missing or inaccessible (search returned 0 rows)",
+    });
+
+    // The probe's kwargs, on the WIRE: limit 1, active_test false, no fields key.
+    expect(probeBody).toContain("<int>999</int>"); // the target's resId in the domain
+    expect(probeBody).toContain("<name>limit</name>");
+    expect(probeBody).toContain("<int>1</int>");
+    expect(probeBody).toContain("<name>active_test</name>");
+    expect(probeBody).toContain("<boolean>0</boolean>");
+    expect(probeBody).not.toContain("<name>fields</name>");
   });
 });

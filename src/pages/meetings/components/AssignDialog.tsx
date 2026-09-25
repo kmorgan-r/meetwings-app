@@ -22,6 +22,7 @@ import { fetchOpportunities, kindLabel } from "@/lib/odoo/opportunities";
 import { requireOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type {
   MeetingLogListRow,
+  MeetingLogTarget,
   OdooContact,
   OdooErrorCode,
   OdooOpportunity,
@@ -88,6 +89,12 @@ export interface AssignDialogProps {
   row: MeetingLogListRow;
   /** The fingerprint the page resolved this cycle, for `listContacts`. */
   instance: string;
+  /**
+   * Set when the dialog swaps ONE failed target rather than assigning the whole
+   * meeting. The list then holds a single choice (picking another replaces it)
+   * and the record being replaced is not offered.
+   */
+  replacing?: MeetingLogTarget;
   onConfirm: (payload: AssignPayload) => void;
   onCancel: () => void;
 }
@@ -167,12 +174,12 @@ const CREATE_FAILURE_COPY: Partial<Record<OdooErrorCode, string>> = {
 
 /**
  * `autoAdded` is `null` for the two outcomes `submitCreate` never attempts an
- * add for (an archived adoption, and `created-invisible` - neither has a
- * selectable, active contact behind it) and for `failed` (no contact was ever
- * created). It is `true`/`false` for every other outcome: the contact IS
- * active, and `submitCreate` always calls `addTarget` for it - `false` means
- * only that the cap was full, exactly like the "· limit reached" copy the
- * "Logging to" heading already uses elsewhere in this dialog.
+ * add for (`created-invisible` - no selectable contact behind it - and
+ * `failed`, where no contact was ever created). It is `true`/`false` for
+ * every other outcome, archived adoptions included: the contact is
+ * selectable, and `submitCreate` always calls `addTarget` for it - `false`
+ * means only that the cap was full, exactly like the "· limit reached" copy
+ * the "Logging to" heading already uses elsewhere in this dialog.
  */
 function createResultText(result: CreateResult, autoAdded: boolean | null): string {
   switch (result.kind) {
@@ -181,11 +188,10 @@ function createResultText(result: CreateResult, autoAdded: boolean | null): stri
         ? "Created in Odoo and added to this meeting."
         : "Created in Odoo. The log is full, so tick them below once you free a slot.";
     case "adopted-active":
+    case "adopted-archived":
       return autoAdded
         ? "Already in Odoo — added to this meeting."
         : "Already in Odoo. The log is full, so tick them below once you free a slot.";
-    case "adopted-archived":
-      return "This person is already in Odoo but archived. Un-archive them there to log this meeting to them.";
     case "created-invisible":
       return "Created in Odoo, but it isn't visible to this connection.";
     case "cached-failed":
@@ -197,7 +203,7 @@ function createResultText(result: CreateResult, autoAdded: boolean | null): stri
   }
 }
 
-export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialogProps) {
+export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: AssignDialogProps) {
   // Consumed INSIDE the dialog, never in the page shell: AppProvider rebuilds
   // its value every render and calls loadData() on cross-window `storage`
   // events, so a provider change in the main window would otherwise repaint a
@@ -402,8 +408,14 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   const visible = useMemo(
     // `filterContacts` returns a COPY, which is what makes the in-place sort
     // safe here; sorting its argument would reorder the cache during render.
-    () => filterContacts(contacts, query).sort(compareContacts).slice(0, MAX_CONTACT_ROWS),
-    [contacts, query]
+    () =>
+      filterContacts(contacts, query)
+        // The record being replaced is dead or wrong by definition; until the
+        // next sync drops it from the cache it must not be pickable again.
+        .filter((c) => !(replacing?.model === "res.partner" && c.id === replacing.resId))
+        .sort(compareContacts)
+        .slice(0, MAX_CONTACT_ROWS),
+    [contacts, query, replacing]
   );
 
   // Gated on `ready`, not rendered eagerly: before shouldUseMeetwingsAPI
@@ -412,7 +424,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   const providerMissing =
     preflight.state === "ready" && !viaMeetwingsAPI && providerConfig === null;
 
-  const atCap = targets.length >= MAX_TARGETS;
+  const atCap = !replacing && targets.length >= MAX_TARGETS;
 
   /**
    * Purely LOCAL staging - no database write, unlike `useOdooTarget`'s own
@@ -425,6 +437,8 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
   const addTarget = useCallback((t: SelectedTarget): Promise<{ ok: boolean; reason?: "cap" }> => {
     let result: { ok: boolean; reason?: "cap" } = { ok: true };
     setTargets((prev) => {
+      // One choice only: a swap has exactly one destination.
+      if (replacing) return [t];
       const idx = prev.findIndex((x) => x.model === t.model && x.resId === t.resId);
       if (idx !== -1) return prev.map((x, i) => (i === idx ? t : x));
       if (prev.length >= MAX_TARGETS) {
@@ -434,7 +448,7 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
       return [...prev, t];
     });
     return Promise.resolve(result);
-  }, []);
+  }, [replacing]);
 
   const removeTarget = useCallback(
     (model: SelectedTarget["model"], resId: number): Promise<void> => {
@@ -494,23 +508,18 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
           const idx = prev.findIndex((c) => c.id === outcome.contact.id);
           return idx === -1 ? [...prev, outcome.contact] : prev.map((c, i) => (i === idx ? outcome.contact : c));
         });
-        // Archived contacts cannot be previewed OR added - see the
-        // `disabled={!c.active}` on both the select button and the AddToggle
-        // below, which this must not bypass.
-        if (outcome.contact.active) {
-          selectContact(outcome.contact);
-          // `targetsRef.current`, not `addTarget`'s own resolved value - see
-          // that ref's own doc comment for why this call site cannot trust it.
-          if (targetsRef.current.length < MAX_TARGETS) {
-            await addTarget({
-              model: "res.partner",
-              resId: outcome.contact.id,
-              name: outcome.contact.name,
-            });
-            autoAdded = true;
-          } else {
-            autoAdded = false;
-          }
+        // `targetsRef.current`, not `addTarget`'s own resolved value - see
+        // that ref's own doc comment for why this call site cannot trust it.
+        selectContact(outcome.contact);
+        if (targetsRef.current.length < MAX_TARGETS) {
+          await addTarget({
+            model: "res.partner",
+            resId: outcome.contact.id,
+            name: outcome.contact.name,
+          });
+          autoAdded = true;
+        } else {
+          autoAdded = false;
         }
       }
 
@@ -558,7 +567,11 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
       <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {row.status === "failed" ? "Reassign this meeting" : "Assign this meeting"}
+            {replacing
+              ? "Choose a different contact"
+              : row.status === "failed"
+                ? "Reassign this meeting"
+                : "Assign this meeting"}
           </DialogTitle>
           <DialogDescription>
             {`Choose who the meeting from ${meetingDateOf(row)} belongs to. It is sent to Odoo as soon as you confirm.`}
@@ -693,15 +706,11 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                     <button
                       type="button"
                       data-testid="assign-contact"
-                      // Reassign exists because a target Odoo archived is
-                      // unrecoverable; letting the user pick ANOTHER archived
-                      // partner reproduces the same terminal ODOO_FAULT.
-                      disabled={!c.active}
                       aria-pressed={selected?.id === c.id}
                       onClick={() => selectContact(c)}
                       className={`flex-1 rounded-lg px-2 py-1 text-left text-sm hover:bg-muted/50 ${
                         selected?.id === c.id ? "bg-muted" : ""
-                      } ${c.active ? "" : "opacity-50"}`}
+                      }`}
                     >
                       {c.name}
                       {c.companyName && (
@@ -717,7 +726,6 @@ export function AssignDialog({ row, instance, onConfirm, onCancel }: AssignDialo
                       name={c.name}
                       targets={targets}
                       atCap={atCap}
-                      disabled={!c.active}
                       onAdd={addTarget}
                       onRemove={removeTarget}
                     />

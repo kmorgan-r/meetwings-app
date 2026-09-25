@@ -252,6 +252,22 @@ export function useOdooTarget({
     setTargetCount(targets.length);
   }, [targets, setTargetCount]);
 
+  /**
+   * Issue #72 instrumentation: the UI-side mirror of the action-layer
+   * `[odoo-targets]` logs. A UI-only wipe empties this list with zero DB
+   * writes and is invisible at the action layer; this line is what makes it
+   * diagnosable in one round instead of two. Effect-based, deliberately NOT
+   * inside `applyTargets`' `setTargets` updater — updaters run during render
+   * and twice under StrictMode, and a side effect there is exactly the
+   * impurity StrictMode punishes.
+   */
+  useEffect(() => {
+    console.info("[odoo-targets]", "targets", {
+      instance: instanceRef.current ?? null,
+      count: targets.length,
+    });
+  }, [targets]);
+
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
   /**
@@ -629,6 +645,29 @@ export function useOdooTarget({
     [applyTargets, commit, resolveInstance]
   );
 
+  /**
+   * Re-reads the pins after a sync. `runSync`'s reconcileDeletedContacts drops
+   * the pin of a contact Odoo deleted, and `reload`'s archival filter keeps a
+   * partner that is merely absent from the cache, so without this the next
+   * meeting is still queued to the dead id. `target` is cleared only when its
+   * own row is gone: re-deriving it from the last row would be lossy (a lead
+   * picked under a partner loses its contactId) on every manual refresh.
+   */
+  const rereadPins = useCallback(
+    async (instance: string, token: number) => {
+      const persisted = await loadTargets(instance);
+      if (token !== selectionToken.current) return;
+      applyTargets(persisted);
+      setTarget((prev) => {
+        const key = prev && toSelectedTarget(prev);
+        return key && persisted.some((p) => p.model === key.model && p.resId === key.resId)
+          ? prev
+          : null;
+      });
+    },
+    [applyTargets]
+  );
+
   const triageSyncFailure = useCallback(
     async (err: unknown, token: number) => {
       if (isNotConfigured(err)) {
@@ -672,6 +711,7 @@ export function useOdooTarget({
           // the cache tables directly, which already distinguish "ran,
           // nothing changed" from "did not run" via last_sync_at.
           await runSync("app-start", meetingAssistModeRef.current);
+          await rereadPins(instance, token);
         }
         await reload(token);
       } catch (err) {
@@ -1262,11 +1302,12 @@ export function useOdooTarget({
     const token = selectionToken.current;
     try {
       await runSync("refresh", meetingAssistModeRef.current);
+      await rereadPins(await resolveInstance(), token);
       await reload(token);
     } catch (err) {
       await triageSyncFailure(err, token);
     }
-  }, [reload, triageSyncFailure]);
+  }, [reload, rereadPins, resolveInstance, triageSyncFailure]);
 
   /**
    * The overlay never navigates. <Completion /> lives in the `main` window,

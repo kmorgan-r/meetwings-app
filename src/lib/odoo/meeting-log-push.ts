@@ -254,6 +254,49 @@ export async function pushQueuedRow(row: DbMeetingLogRow, deps: PushDeps): Promi
         const adopted = firstId(found);
         if (adopted !== null) return adopted;
       }
+      // THE PROBE. No ir.attachment is created on a record the API user cannot
+      // see: a deleted record AND a record-rule-invisible record both return zero
+      // rows here, and both are exactly the cases where message_post would fault
+      // with MissingError/AccessError AFTER ir.attachment.create has already
+      // stranded an unreclaimable orphan (livecheck finding 2). `active_test:
+      // false` is load-bearing: without it the probe classifies an ARCHIVED
+      // (still valid) partner as missing and reintroduces a false terminal state.
+      // The window between probe and create is a race in theory; the post-fault
+      // target carries its persisted attachment id for the retry to reuse.
+      //
+      // NO catch wraps this: only a zero-row probe RESULT synthesizes the fault.
+      // A probe REJECTION propagates untouched to the per-target catch, whose
+      // isRetryable discipline keeps an ODOO_UNREACHABLE blip retryable and lets
+      // a genuine ODOO_FAULT stay deterministic with its faultString rendered.
+      const probeResult = await deps.client.execute(target.model, "search", [
+        [["id", "=", target.resId]],
+      ], { limit: 1, context: { active_test: false } });
+      // Only a genuinely EMPTY result is the miss - the synthesized message says
+      // "search returned 0 rows" and that must stay literally true.
+      if (Array.isArray(probeResult) && probeResult.length === 0) {
+        // No server fault exists here, so none is fabricated: the code is
+        // ODOO_FAULT (deterministic, exactly like a message_post MissingError)
+        // but the message segment "Odoo fault N" is reserved for a real
+        // faultCode and is not reused. The cause rides in err.message, which
+        // queueErrorText already renders.
+        throw odooError(
+          "ODOO_FAULT",
+          `target record ${target.resId} missing or inaccessible (search returned 0 rows)`,
+          { resId: target.resId, model: target.model }
+        );
+      }
+      const proven = firstId(probeResult);
+      if (proven === null) {
+        // A non-empty probe answer with no usable id is SHAPE DRIFT, not a
+        // zero-row miss - laundering it into the "0 rows" text would put a lie in
+        // the diagnostic record. Same deterministic classification as every other
+        // malformed response in the push (firstId's non-list throw, expectInt).
+        throw odooError(
+          "ODOO_UNEXPECTED_ROW",
+          "Odoo returned a probe result with no usable id",
+          { resId: target.resId }
+        );
+      }
       return expectInt(
         await deps.client.execute("ir.attachment", "create", [
           { name, res_model: target.model, res_id: target.resId, datas: getDatas() },

@@ -35,6 +35,7 @@ const actions = vi.hoisted(() => ({
   // left undefined here would throw "not a function" the day one does.
   retryTarget: vi.fn(),
   removeQueueTarget: vi.fn(),
+  retargetMeetingLogTarget: vi.fn(),
 }));
 vi.mock("@/lib/odoo/meeting-log-actions", () => actions);
 
@@ -1287,6 +1288,44 @@ describe("the contact map", () => {
     expect(contacts.listContacts).toHaveBeenCalledTimes(db.listActionableRows.mock.calls.length);
   });
 
+  it("swaps one failed target for another contact from the queue page", async () => {
+    contacts.listContacts.mockResolvedValue([
+      contact({ id: 57, name: "Andres Vergara", companyName: "Invest Conservation" }),
+    ]);
+    actions.retargetMeetingLogTarget.mockResolvedValue({ kind: "ok" });
+    db.listActionableRows.mockResolvedValue([
+      row({
+        id: "na",
+        status: "failed",
+        targets: [
+          { id: "t-55", rowId: "na", model: "res.partner", resId: 55, name: "Anja",
+            status: "sent", attachmentId: 1, messageId: 2, lastError: null,
+            lastErrorCode: null, createdAt: 1, sentAt: 1 },
+          { id: "t-56", rowId: "na", model: "res.partner", resId: 56, name: "Andres Vergara",
+            status: "failed", attachmentId: 3265, messageId: null, lastError: "ODOO_FAULT",
+            lastErrorCode: "ODOO_FAULT", createdAt: 1, sentAt: null },
+        ],
+      }),
+    ]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Expand targets" }));
+    await userEvent.click(screen.getByRole("button", { name: /choose a different contact/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /add Andres Vergara/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() =>
+      expect(actions.retargetMeetingLogTarget).toHaveBeenCalledWith(
+        "na",
+        "t-56",
+        { model: "res.partner", resId: 57, name: "Andres Vergara" },
+        // providerConfig may legitimately be null on this page, so match the
+        // callback the hook always adds instead of the config.
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      )
+    );
+  });
+
   // A lead picked out of the search has NO res.partner behind it, so the row
   // carries a lead_id and no contact_id. Reading that as "No contact chosen"
   // offers to assign a meeting that is already correctly targeted - and the
@@ -1493,6 +1532,78 @@ describe("AssignDialog", () => {
     }
     expect(screen.getByRole("button", { name: /add F/i })).toHaveAttribute("aria-disabled", "true");
   });
+
+  describe("replacing one target", () => {
+    const DEAD = {
+      id: "t-56", rowId: "r1", model: "res.partner" as const, resId: 56,
+      name: "Andres Vergara", status: "failed" as const, attachmentId: 3265,
+      messageId: null, lastError: "ODOO_FAULT", lastErrorCode: "ODOO_FAULT",
+      createdAt: 1, sentAt: null,
+    };
+    const ANDRES_57 = contact({ id: 57, name: "Andres Vergara", companyName: "Invest Conservation" });
+
+    function replacingProps() {
+      return {
+        row: row({ id: "r1", status: "failed" }),
+        instance: INSTANCE,
+        replacing: DEAD,
+        onConfirm: vi.fn(),
+        onCancel: vi.fn(),
+      };
+    }
+
+    it("titles itself for the contact being replaced", async () => {
+      contacts.listContacts.mockResolvedValue([ANDRES_57]);
+      render(<AssignDialog {...replacingProps()} />);
+      await screen.findByPlaceholderText("Search contacts");
+      expect(screen.getByRole("heading", { name: /choose a different contact/i })).toBeVisible();
+    });
+
+    it("does not offer the dead contact it is replacing", async () => {
+      contacts.listContacts.mockResolvedValue([
+        contact({ id: 56, name: "Andres Vergara" }),
+        ANDRES_57,
+      ]);
+      render(<AssignDialog {...replacingProps()} />);
+      await screen.findByPlaceholderText("Search contacts");
+      // Both are named "Andres Vergara"; only the live one (57) may remain.
+      expect(screen.getAllByRole("button", { name: /add Andres Vergara/i })).toHaveLength(1);
+    });
+
+    it("keeps exactly one choice: picking a second replaces the first", async () => {
+      const BENTLEY = contact({ id: 3, name: "Bentley AS" });
+      contacts.listContacts.mockResolvedValue([ANDRES_57, BENTLEY]);
+      const props = replacingProps();
+      render(<AssignDialog {...props} />);
+      await screen.findByPlaceholderText("Search contacts");
+
+      await userEvent.click(screen.getByRole("button", { name: /add Andres Vergara/i }));
+      await userEvent.click(screen.getByRole("button", { name: /add Bentley AS/i }));
+      await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+      expect(props.onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targets: [{ model: "res.partner", resId: 3, name: "Bentley AS" }],
+        })
+      );
+    });
+
+    it("hands up the chosen contact on Confirm", async () => {
+      contacts.listContacts.mockResolvedValue([ANDRES_57]);
+      const props = replacingProps();
+      render(<AssignDialog {...props} />);
+      await screen.findByPlaceholderText("Search contacts");
+
+      await userEvent.click(screen.getByRole("button", { name: /add Andres Vergara/i }));
+      await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+      expect(props.onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targets: [{ model: "res.partner", resId: 57, name: "Andres Vergara" }],
+        })
+      );
+    });
+  });
 });
 
 describe("AssignDialog: new contact", () => {
@@ -1586,21 +1697,32 @@ describe("AssignDialog: new contact", () => {
     );
   });
 
-  it("does not preview an archived adoption - it cannot be selected at all", async () => {
+  it("previews and auto-adds an archived adoption - the tag is the only trace", async () => {
+    // Livecheck 2026-08-30: message_post on an ARCHIVED res.partner SUCCEEDS.
+    // The old gates were built on the opposite belief and are gone; the tag is
+    // the only surviving trace of the distinction.
     const archived = contact({ id: 42, name: "Priya Patel", active: false });
     createContact.createOrAdoptContact.mockResolvedValue({ kind: "adopted-archived", contact: archived });
-    await openCreateForm();
+    const props = assignDialogProps();
+    render(<AssignDialog {...props} />);
+    await screen.findByPlaceholderText("Search contacts");
+    await userEvent.click(screen.getByRole("button", { name: "+ New contact" }));
 
     await userEvent.type(screen.getByLabelText("New contact name"), "Priya Patel");
     await userEvent.type(screen.getByLabelText("New contact email"), "priya@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Create contact" }));
 
     expect(
-      await screen.findByText(
-        "This person is already in Odoo but archived. Un-archive them there to log this meeting to them."
-      )
+      await screen.findByText("Already in Odoo — added to this meeting.")
     ).toBeInTheDocument();
-    expect(opportunities.fetchOpportunities).not.toHaveBeenCalled();
+    // Previewed: the archived contact is selected exactly as an active one.
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+    expect(props.onConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targets: [{ model: "res.partner", resId: 42, name: "Priya Patel" }],
+      })
+    );
   });
 
   it("keeps the form open and the typed fields on a failed create", async () => {
@@ -1840,7 +1962,7 @@ describe("the assign dialog's contact list", () => {
     expect(dialog().queryByRole("button", { name: "Ada Lovelace" })).toBeNull();
   });
 
-  it("refuses an archived contact, which is the target Reassign exists to escape", async () => {
+  it("offers an archived contact as selectable and addable, with the tag as the only trace", async () => {
     contacts.listContacts.mockResolvedValue([
       contact({ id: 8, name: "Gone Partner", active: false }),
     ]);
@@ -1850,10 +1972,15 @@ describe("the assign dialog's contact list", () => {
     await renderPage();
     await openAssignReady("na", "Reassign");
 
-    // Two buttons now share the archived contact's row - the preview button
-    // and its AddToggle - so both must refuse the pick, not just one.
-    expect(dialog().getByRole("button", { name: "Gone Partner Archived" })).toBeDisabled();
-    expect(dialog().getByRole("button", { name: /add Gone Partner/i })).toBeDisabled();
+    // Archived rows render as normal selectable rows carrying an Archived tag;
+    // the livecheck disproved the "unrecoverable" premise the old gating cited.
+    const rowButton = dialog().getByRole("button", { name: "Gone Partner Archived" });
+    expect(rowButton).toBeEnabled();
+    expect(dialog().getByRole("button", { name: /add Gone Partner/i })).toBeEnabled();
+
+    // Previewing an archived contact works exactly as an active one.
+    await userEvent.click(rowButton);
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalled());
   });
 });
 
@@ -2161,9 +2288,12 @@ describe("what the assign dialog hands up", () => {
   });
 
   it("is offered on a current-instance FAILED row as Reassign, and assigns it", async () => {
-    // Reassign, owner-approved 2026-08-25. A meeting whose Odoo target was
-    // archived is otherwise unrecoverable except by deleting the transcript:
-    // isRetryable calls the fault final, so Retry reproduces it forever.
+    // Reassign, owner-approved 2026-08-25. It exists for a target the API user
+    // can no longer SEE (deleted or record-rule-hidden): the existence probe
+    // makes its retry cost two search calls and an error text that names the
+    // cause, but the target never recovers by itself. An ARCHIVED target, by
+    // contrast, is fully loggable now - message_post on one succeeds
+    // (livecheck 2026-08-30).
     contacts.listContacts.mockResolvedValue([
       contact(),
       contact({ id: 8, name: "Bea Nordvik" }),
@@ -2406,6 +2536,7 @@ describe("QueueRow", () => {
     onReloadTranscript: vi.fn(),
     onRetryTarget: vi.fn(),
     onRemoveTarget: vi.fn(),
+    onRetargetTarget: vi.fn(),
   };
 
   it("summarises how many targets failed", () => {
