@@ -1,6 +1,6 @@
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const windowLabel = vi.hoisted(() => ({ value: "main" }));
 vi.mock("@tauri-apps/api/window", () => ({
@@ -1771,5 +1771,51 @@ describe("clearing every target at once", () => {
     // the row is still sitting in odoo_selected_targets.
     expect(result.current.targets.map((t) => t.resId)).toEqual([1]);
     expect(result.current.targetsRef.current).toHaveLength(1);
+  });
+});
+
+describe("[odoo-targets] hook-side count log (issue #72)", () => {
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => infoSpy.mockRestore());
+
+  const countLines = () => infoSpy.mock.calls.filter((c) => c[1] === "targets");
+
+  it("logs count transitions, and a UI wipe shows as a count-0 line with the clearTargets op beside it", async () => {
+    action.loadTargets.mockResolvedValue([
+      { model: "res.partner", resId: 1, name: "A" },
+    ]);
+    renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: true,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount: vi.fn(),
+      })
+    );
+    await waitFor(() =>
+      expect(
+        countLines().some(
+          (c) => c[2].count === 1 && (c[2] as Record<string, unknown>).instance === "http://h:8069|odoo"
+        )
+      ).toBe(true)
+    );
+
+    // The new-chat wipe: in-memory clear first (the count-0 line), DB wipe
+    // second (the clearTargets action line). Both must be on the record.
+    // The mount effect fires with the initial empty `targets` and emits its
+    // own count-0 line before loadTargets resolves, so a bare `some(count ===
+    // 0)` is satisfied by that pre-existing line even if the wipe never
+    // logged. Only an INCREASE in the count-0 line count can discriminate.
+    const wipesBefore = countLines().filter((c) => c[2].count === 0).length;
+    window.dispatchEvent(new CustomEvent("newConversationStarted"));
+    await waitFor(() =>
+      expect(countLines().filter((c) => c[2].count === 0).length).toBeGreaterThan(wipesBefore)
+    );
+    await waitFor(() =>
+      expect(action.clearTargets).toHaveBeenCalledWith("http://h:8069|odoo")
+    );
   });
 });

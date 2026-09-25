@@ -256,7 +256,27 @@ export async function failSync(
   );
 }
 
+/**
+ * [odoo-targets] — issue #72 instrumentation. Every read/write of
+ * odoo_selected_targets passes through here, so this is the one place a
+ * minimize-path wipe can show itself. `stack` carries frames 2-5 of the
+ * captured stack: the immediate caller chain, enough to tell
+ * handleNewChat from clearAllTargets from purgeOtherInstances' runSync
+ * caller without threading an origin parameter through every call site.
+ * Permanent on purpose: ops fire at user frequency, and a future reporter
+ * can paste these lines instead of triggering a fresh investigation.
+ */
+const logTargetOp = (
+  op: string,
+  instance: string | null,
+  detail: Record<string, unknown> = {}
+) => {
+  const stack = (new Error().stack ?? "").split("\n").slice(2, 6).join(" <- ");
+  console.info("[odoo-targets]", op, { instance, ...detail, stack });
+};
+
 export async function purgeOtherInstances(instance: string): Promise<void> {
+  logTargetOp("purgeOtherInstances", instance);
   const db = await getDatabase();
   // meeting_log_queue is DELIBERATELY NOT PURGED HERE. It is the one table
   // whose other-instance rows must survive a credentials change: a queued
@@ -265,9 +285,17 @@ export async function purgeOtherInstances(instance: string): Promise<void> {
   // write-ahead queue exists to protect, on a routine credentials edit. The
   // push re-checks `instance` before every write instead, and the /odoo page
   // surfaces the stranded rows under their own wording.
-  await db.execute("DELETE FROM odoo_contacts WHERE instance <> ?", [instance]);
-  await db.execute("DELETE FROM odoo_sync_state WHERE instance <> ?", [instance]);
-  await db.execute("DELETE FROM odoo_selected_targets WHERE instance <> ?", [instance]);
+  let rowsAffected = 0;
+  rowsAffected +=
+    (await db.execute("DELETE FROM odoo_contacts WHERE instance <> ?", [instance]))
+      .rowsAffected ?? 0;
+  rowsAffected +=
+    (await db.execute("DELETE FROM odoo_sync_state WHERE instance <> ?", [instance]))
+      .rowsAffected ?? 0;
+  rowsAffected +=
+    (await db.execute("DELETE FROM odoo_selected_targets WHERE instance <> ?", [instance]))
+      .rowsAffected ?? 0;
+  logTargetOp("purgeOtherInstances", instance, { rowsAffected, outcome: "ok" });
 }
 
 /**
@@ -318,12 +346,15 @@ export const SELECTED_TARGET_SQL = {
 };
 
 export async function loadTargets(instance: string): Promise<SelectedTargets> {
+  logTargetOp("loadTargets", instance);
   const db = await getDatabase();
   const rows = await db.select<{ model: SelectedTarget["model"]; res_id: number; name: string | null }[]>(
     SELECTED_TARGET_SQL.list,
     [instance]
   );
-  return rows.map((row) => ({ model: row.model, resId: row.res_id, name: row.name }));
+  const targets = rows.map((row) => ({ model: row.model, resId: row.res_id, name: row.name }));
+  logTargetOp("loadTargets", instance, { rowCount: targets.length, outcome: "ok" });
+  return targets;
 }
 
 /**
@@ -340,13 +371,21 @@ export async function addSelectedTarget(
   conversationId: string | null,
   at: number
 ): Promise<{ ok: boolean; reason?: "cap" }> {
+  logTargetOp("addSelectedTarget", instance, { model: t.model, resId: t.resId });
   const db = await getDatabase();
   const existing = await db.select<{ n: number }[]>(SELECTED_TARGET_SQL.countOthers, [
     instance,
     t.model,
     t.resId,
   ]);
-  if ((existing[0]?.n ?? 0) >= MAX_TARGETS) return { ok: false, reason: "cap" };
+  if ((existing[0]?.n ?? 0) >= MAX_TARGETS) {
+    logTargetOp("addSelectedTarget", instance, {
+      model: t.model,
+      resId: t.resId,
+      outcome: { ok: false, reason: "cap" },
+    });
+    return { ok: false, reason: "cap" };
+  }
   await db.execute(SELECTED_TARGET_SQL.upsert, [
     instance,
     t.model,
@@ -355,6 +394,11 @@ export async function addSelectedTarget(
     conversationId,
     at,
   ]);
+  logTargetOp("addSelectedTarget", instance, {
+    model: t.model,
+    resId: t.resId,
+    outcome: { ok: true },
+  });
   return { ok: true };
 }
 
@@ -363,11 +407,19 @@ export async function removeSelectedTarget(
   model: string,
   resId: number
 ): Promise<void> {
+  logTargetOp("removeSelectedTarget", instance, { model, resId });
   const db = await getDatabase();
   await db.execute(SELECTED_TARGET_SQL.remove, [instance, model, resId]);
+  logTargetOp("removeSelectedTarget", instance, {
+    model,
+    resId,
+    outcome: "ok",
+  });
 }
 
 export async function clearTargets(instance: string): Promise<void> {
+  logTargetOp("clearTargets", instance);
   const db = await getDatabase();
   await db.execute(SELECTED_TARGET_SQL.clear, [instance]);
+  logTargetOp("clearTargets", instance, { outcome: "ok" });
 }

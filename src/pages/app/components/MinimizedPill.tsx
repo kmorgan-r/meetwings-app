@@ -77,6 +77,7 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
 
   return (
     <div
+      data-overlay-minimize-control="true"
       className={cn(
         "group/pill w-full h-full flex items-center p-0.5 rounded-xl",
         "bg-card/95 border border-border shadow-md"
