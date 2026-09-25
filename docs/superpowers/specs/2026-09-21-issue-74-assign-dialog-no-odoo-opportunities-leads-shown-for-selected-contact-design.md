@@ -23,7 +23,8 @@ These are constraints this spec builds on. Do not re-derive them.
 - **No transport failure.** Both surfaces call the same primitive —
   `fetchOpportunities` (`src/lib/odoo/opportunities.ts:141-152`) — from
   `useOdooTarget.ts:870` in the overlay and `AssignDialog.tsx:365` in the
-  dialog. A meetings-page-specific failure mode is ruled out.
+  dialog. A meetings-page-specific *transport* failure is ruled out (C0 below
+  is a meetings-page-specific UI split, not a transport failure).
 - **The contacts fed to both calls come from the same cache.** The overlay's
   `onSelect` passes the `OdooContact` it was clicked with
   (`useOdooTarget.ts:836-882`); the dialog passes a row from `listContacts`
@@ -108,8 +109,8 @@ The second OR branch of `searchDomain` (`opportunities.ts:100-113`) reaches
 
 `email_from` on `crm.lead` is a free-text char field that stock Odoo fills
 with the formatted `"Jane Doe" <jane@acme.example>` string, not the bare
-address. `=ilike` is exact-and-case-insensitive — a raw address never matches
-a formatted value. Stock Odoo 13+ also carries `email_normalized`, a stored,
+address. `=ilike` carries no wrapping `%` and compares the whole value — a raw
+address never matches a formatted value. Stock Odoo 13+ also carries `email_normalized`, a stored,
 lowercase copy of `email_from` built precisely for this comparison. The arm
 matches against the one representation the field is least likely to hold.
 
@@ -164,7 +165,8 @@ Concretely, two rules:
   addable as `crm.lead` targets through the dialog's existing `addTarget`.
 - **Diagnostics** — a `console.info` in the dialog's lookup path, following
   the issue #72 `[odoo-targets]` precedent (`useOdooTarget.ts:255-269`), so
-  the reporter can confirm which candidate bit them.
+  that if deals are still missing after this change the reporter can tell C1
+  from C2.
 - **Zero-rows hint** — when the contact-first lookup returns zero rows, a
   separate line under the empty state points at the search box, because after
   this change "no deals" and "try the search" are both true statements the
@@ -285,6 +287,14 @@ The `contact_name =ilike name` arm stays as the second identity path, and the
 arm stays gated on `partner_id = false` and `type = lead`: it exists to reach
 unlinked leads, and broadening it would violate invariant 2.
 
+**Comments this makes wrong, revised in the same change.** `searchDomain`'s
+doc comment says an unlinked lead matches on "`contact_name` or `email_from`"
+(`opportunities.ts:53`) and that "`=ilike` is exact and case-insensitive"
+(`:63-65`). Both are rewritten: the `=ilike` note covers `contact_name` only
+and describes it as "no wrapping `%`", and `email_normalized =` gets its own
+line saying why it is `=`. The C1 change likewise rewrites rule 1's "the
+contact or their parent company" (`:49`) to name the `child_of` coverage.
+
 **Known limitation, accepted:** a customised install that drops
 `email_normalized` makes `search_read` fault. That surfaces as
 `ODOO_FAULT` in the dialog's existing error row — visible, retryable, and
@@ -304,9 +314,10 @@ one box filters the cached contacts and, live, searches Odoo's leads.
   called with `void` from the timer and is documented and written **never to
   reject** — every await inside a try, as `useOdooTarget.ts:934-969`'s
   `onSearchLeads` does.
-- **Constants.** `LEAD_SEARCH_LIMIT` and `LEAD_SEARCH_MIN_CHARS` are imported
-  from `@/lib/odoo/opportunities` (shared lib, the two surfaces must not
-  drift). `LEAD_SEARCH_DEBOUNCE_MS` (350) is **restated** locally, not
+- **Constants.** `LEAD_SEARCH_MIN_CHARS` is imported from
+  `@/lib/odoo/opportunities` (shared lib, the two surfaces must not drift).
+  `LEAD_SEARCH_LIMIT` is **not** imported: `searchLeads` applies it itself
+  (`opportunities.ts:206-210`) and nothing in the dialog reads it. `LEAD_SEARCH_DEBOUNCE_MS` (350) is **restated** locally, not
   imported from `ContactPicker.tsx` — the same rule `MAX_CONTACT_ROWS`
   follows at `AssignDialog.tsx:57-66`: it is the overlay picker's own
   contract, and importing across page trees would drag the overlay component
@@ -347,6 +358,10 @@ The contact rows' `AddToggle` `onAdd` becomes: `addTarget(t)`, then
 `selectContact(c)` unless `selected?.id === c.id` already. Removing a contact
 does not change the preview. The existing `selectContact` token ordering
 covers a preview fired this way exactly as it covers a name click.
+`selectContact`'s doc comment (`AssignDialog.tsx:341-344`) — "Adding is the
+row's own `AddToggle`, independent of whether this contact's deals happen to
+be on screen" — is revised to say adding a contact also previews it, while
+previewing still adds nothing.
 
 ### Zero-rows hint
 
@@ -380,10 +395,13 @@ lead names or subjects**. Not gated on `import.meta.env.DEV`: the reporter
 runs the release build, and a dev-only line would never reach them. It reaches
 exactly where #72's lines already reach.
 
-What it tells apart in one run: C0 (no line at all — no lookup ran), C1
+C0 needs no log line: it ships in the same build as its fix, and is
+confirmed by the reporter's own account (deals now appear on `+ add`). If
+deals are still missing after this change, the line tells apart C1
 (`isCompany: true`, `parentId: null`, `rows: 0`) and C2 (`hasEmail: true`,
 `rows: 0` with an unlinked lead known to exist in Odoo). It cannot detect C3
-— it logs only the cached id — which stays follow-up work.
+directly — it logs only the cached id — though `rows: 0` persisting after both
+fixes points at it by elimination; C3 stays follow-up work.
 
 ## Testing
 
