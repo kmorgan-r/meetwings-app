@@ -526,7 +526,8 @@ describe("persisting a selection", () => {
     await act(async () => {
       rejectRemove(new Error("database is locked"));
     });
-    await waitFor(() => expect(action.loadTargets).toHaveBeenCalledTimes(2));
+    // Mount reads the pins twice (before and after its sync); this is the third.
+    await waitFor(() => expect(action.loadTargets).toHaveBeenCalledTimes(3));
 
     // Carla (token 3) persists cleanly while Bea's commit is still stuck in
     // its catch, waiting on the re-read.
@@ -989,6 +990,52 @@ describe("a sync that archives the selected partner", () => {
   });
 });
 
+// reconcileDeletedContacts (inside runSync) drops the pin of a contact Odoo
+// deleted. reload()'s archival filter keeps a partner that is merely ABSENT
+// from the cache, so without a post-sync re-read of the pins the next meeting
+// is still queued to the dead id.
+describe("a sync that deletes the pinned contact", () => {
+  const PIN = { model: "res.partner", resId: 1, name: null };
+
+  it("drops it from the live selection once the app-start sync settles", async () => {
+    let releaseSync = () => {};
+    odoo.runSync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSync = () =>
+            resolve({ ran: true, changed: 0, fetched: 0, skipped: 0, clampSkipped: false });
+        })
+    );
+    action.loadTargets.mockResolvedValue([PIN]);
+    const { result } = mount();
+    await waitFor(() => expect(result.current.targets).toEqual([PIN]));
+
+    action.loadTargets.mockResolvedValue([]);
+    action.listContacts.mockResolvedValue([colleague]);
+    await act(async () => releaseSync());
+
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.targetsRef.current).toEqual([]));
+    expect(result.current.targetRef.current).toBeNull();
+  });
+
+  it("drops it on a manual refresh too", async () => {
+    action.loadTargets.mockResolvedValue([PIN]);
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.targets).toEqual([PIN]));
+
+    action.loadTargets.mockResolvedValue([]);
+    action.listContacts.mockResolvedValue([colleague]);
+    await act(async () => {
+      await result.current.pickerProps.onRefresh();
+    });
+
+    await waitFor(() => expect(result.current.targetsRef.current).toEqual([]));
+    expect(result.current.targetRef.current).toBeNull();
+  });
+});
+
 // Finding 3: the third DB-deletion trigger the spec names. Emitted by
 // useCompletion's startNewConversation, which every "start a new chat" path
 // (the newConversation request event, a deleted-conversation fallback, and
@@ -1298,6 +1345,10 @@ describe("Task 11: the multi-target list", () => {
     result: { current: ReturnType<typeof useOdooTarget> },
     items: SelectedTarget[]
   ) {
+    // Let the mount settle first. Its post-sync pin re-read answers from
+    // this stateless `loadTargets` mock, not from what addTarget wrote, so an
+    // add racing it would be wiped where a real database would keep it.
+    await waitFor(() => expect(result.current.pickerProps.cache.kind).toBe("ready"));
     for (const t of items) {
       await act(async () => {
         await result.current.addTarget(t);
@@ -1318,6 +1369,8 @@ describe("Task 11: the multi-target list", () => {
         c.id === contactId ? { ...c, active: false } : c
       )
     );
+    // What the database holds, for onRefresh's post-sync pin re-read.
+    action.loadTargets.mockResolvedValue(result.current.targets);
     await act(async () => {
       await result.current.pickerProps.onRefresh();
     });
