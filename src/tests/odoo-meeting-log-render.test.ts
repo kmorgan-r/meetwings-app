@@ -149,4 +149,58 @@ describe("queueErrorText", () => {
     expect(out.text).not.toContain("sk-secret");
     expect(out.text).toContain("partner 4");
   });
+
+  it("keeps the first line of a fault 2 faultString", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString:
+          "Record does not exist or has been deleted.\n(Record: res.partner(56,), User: 2)",
+      })
+    );
+    expect(out.text).toBe(
+      "ODOO_FAULT: Odoo fault 2 - Record does not exist or has been deleted."
+    );
+  });
+
+  it("keeps the LAST line of a fault 1 traceback, where the exception is", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 1", {
+        faultCode: 1,
+        faultString:
+          'Traceback (most recent call last):\n  File "x.py", line 1, in f\nValueError: bad value',
+      })
+    );
+    expect(out.text).toBe("ODOO_FAULT: Odoo fault 1 - ValueError: bad value");
+  });
+
+  it("caps a very long fault line", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "x".repeat(500) })
+    );
+    expect(out.text.length).toBeLessThan(260);
+    expect(out.text.endsWith("…")).toBe(true);
+  });
+
+  it("never stores a secret that arrived inside faultString", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString: "Denied for key sk-secret",
+      })
+    );
+    expect(out.text).not.toContain("sk-secret");
+  });
+
+  it("stores the code alone for a fault when the redactor is unarmed", () => {
+    resetOdooRedactor();
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "anything" })
+    );
+    expect(out.text).toBe("ODOO_FAULT");
+  });
 });
