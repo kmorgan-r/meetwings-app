@@ -159,24 +159,50 @@ describe("fetchOpportunities", () => {
  * entirely.
  */
 describe("searchDomain", () => {
-  it("builds the whole thing: linked records, or an unlinked lead by identity", () => {
+  const BASE = [
+    ["active", "=", true],
+    ["type", "in", ["lead", "opportunity"]],
+    // The won filter, scoped to opportunities: a lead is never won.
+    "|",
+    ["type", "=", "lead"],
+    ["probability", "<", 100],
+  ];
+
+  it("builds the whole thing for a person: linked records, or an unlinked lead by identity", () => {
     expect(searchDomain(ada({ parentId: 9 }))).toEqual([
-      ["active", "=", true],
-      ["type", "in", ["lead", "opportunity"]],
-      // The won filter, scoped to opportunities: a lead is never won.
-      "|",
-      ["type", "=", "lead"],
-      ["probability", "<", 100],
+      ...BASE,
       // Reachability: Odoo's own link, OR an unlinked lead that names this
       // contact itself.
       "|",
-      ["partner_id", "in", [1, 9]],
+      // The link, FLATTENED: the person (and anything under them), or their
+      // own company. Three prefix items - never one nested ["|", a, b].
+      "|",
+      ["partner_id", "child_of", 1],
+      ["partner_id", "=", 9],
       "&",
       "&",
       ["type", "=", "lead"],
       ["partner_id", "=", false],
       "|",
-      ["email_from", "=ilike", "ada@analytical.example"],
+      ["email_normalized", "=", "ada@analytical.example"],
+      ["contact_name", "=ilike", "Ada Lovelace"],
+    ]);
+  });
+
+  // Issue #74, C1. Odoo routinely files a company's deals on the PERSON under
+  // it. `partner_id in [company]` found none of them, and the dialog said "No
+  // open opportunities or leads" for a company with open deals.
+  it("builds the whole thing for a company: child_of reaches the people under it", () => {
+    expect(searchDomain(ada())).toEqual([
+      ...BASE,
+      "|",
+      ["partner_id", "child_of", 1],
+      "&",
+      "&",
+      ["type", "=", "lead"],
+      ["partner_id", "=", false],
+      "|",
+      ["email_normalized", "=", "ada@analytical.example"],
       ["contact_name", "=ilike", "Ada Lovelace"],
     ]);
   });
@@ -187,11 +213,18 @@ describe("searchDomain", () => {
   // silently, and slice 2 posts to the contact record while open deals sit on
   // the parent.
   it("searches the parent company as well as the contact", () => {
-    expect(searchDomain(ada({ parentId: 9 }))).toContainEqual(["partner_id", "in", [1, 9]]);
+    const domain = searchDomain(ada({ parentId: 9 }));
+    expect(domain).toContainEqual(["partner_id", "child_of", 1]);
+    expect(domain).toContainEqual(["partner_id", "=", 9]);
   });
 
-  it("omits a null parent", () => {
-    expect(searchDomain(ada())).toContainEqual(["partner_id", "in", [1]]);
+  // Invariant 2. `child_of` on the PARENT would reach every sibling person at
+  // that company, and their deals belong to them, not to this contact.
+  it("never walks down from the parent, so a sibling's deals stay hidden", () => {
+    const flat = JSON.stringify(searchDomain(ada({ parentId: 9 })));
+    expect(flat).not.toContain('["partner_id","child_of",9]');
+    expect(flat).not.toContain('"child_of",[');
+    expect(flat).not.toContain('"partner_id","in"');
   });
 
   // active = false means LOST in Odoo; WON opportunities stay active = true
@@ -203,17 +236,36 @@ describe("searchDomain", () => {
   // THE BUG THIS CLAUSE EXISTS FOR. Odoo's default for an unconverted lead is
   // free-text contact details and NO partner, so a partner_id-only search finds
   // none of them - a real Leads list looked empty here.
-  it("finds an unlinked lead by the contact's own name and email", () => {
+  it("finds an unlinked lead by the contact's own name and normalized email", () => {
     const domain = searchDomain(ada());
     expect(domain).toContainEqual(["contact_name", "=ilike", "Ada Lovelace"]);
-    expect(domain).toContainEqual(["email_from", "=ilike", "ada@analytical.example"]);
+    expect(domain).toContainEqual(["email_normalized", "=", "ada@analytical.example"]);
     // A lead already pointed at a DIFFERENT partner belongs to that partner,
     // whatever name it carries.
     expect(domain).toContainEqual(["partner_id", "=", false]);
+    // Issue #74, C2: Odoo fills email_from with `"Ada" <ada@...>`, which no
+    // whole-value comparison against a bare address can match.
+    expect(JSON.stringify(domain)).not.toContain("email_from");
   });
 
-  // `ilike` wraps its value in %...%, so "ada@x.com" would also match
-  // "notada@x.com" - a meeting posted to a stranger's lead.
+  it("normalizes the address it compares", () => {
+    expect(searchDomain(ada({ email: "  Ada@Analytical.EXAMPLE " }))).toContainEqual([
+      "email_normalized",
+      "=",
+      "ada@analytical.example",
+    ]);
+  });
+
+  // `=ilike` is SQL ILIKE with no escaping: `_` matches any character, so
+  // "jane_doe@..." would also reach "jane.doe@..."'s lead - a meeting posted
+  // to a stranger.
+  it("compares the address exactly, so SQL wildcard characters stay literal", () => {
+    const domain = searchDomain(ada({ email: "jane_doe@acme.example" }));
+    expect(domain).toContainEqual(["email_normalized", "=", "jane_doe@acme.example"]);
+    expect(JSON.stringify(domain)).not.toContain('"email_normalized","=ilike"');
+  });
+
+  // `ilike` wraps its value in %...%, so "Ada" would also match "Adam Smith".
   it("never uses a substring operator for the identity match", () => {
     const flat = JSON.stringify(searchDomain(ada()));
     expect(flat).toContain('"=ilike"');
@@ -221,22 +273,33 @@ describe("searchDomain", () => {
     expect(flat).not.toContain('"like"');
   });
 
-  it("drops the email clause for a contact that has none", () => {
-    const domain = searchDomain(ada({ email: null }));
-    expect(JSON.stringify(domain)).not.toContain("email_from");
-    expect(domain).toContainEqual(["contact_name", "=ilike", "Ada Lovelace"]);
+  // A blank address is no address: `email_normalized = ""` must never reach
+  // the wire.
+  it("drops the email clause for a contact that has none, blank included", () => {
+    for (const email of [null, "", "   "]) {
+      const domain = searchDomain(ada({ email }));
+      const flat = JSON.stringify(domain);
+      expect(flat).not.toContain("email_normalized");
+      expect(flat).not.toContain("email_from");
+      expect(domain).toContainEqual(["contact_name", "=ilike", "Ada Lovelace"]);
+    }
   });
 
   // Nothing to recognise an unlinked lead BY. Widening the search on a blank
   // value would match every unlinked lead in the database.
   it("asks only for linked records when the contact has no identity at all", () => {
     expect(searchDomain(ada({ name: "   ", email: null }))).toEqual([
-      ["active", "=", true],
-      ["type", "in", ["lead", "opportunity"]],
+      ...BASE,
+      ["partner_id", "child_of", 1],
+    ]);
+  });
+
+  it("flattens the person link on the identity-less path too", () => {
+    expect(searchDomain(ada({ parentId: 9, name: "   ", email: null }))).toEqual([
+      ...BASE,
       "|",
-      ["type", "=", "lead"],
-      ["probability", "<", 100],
-      ["partner_id", "in", [1]],
+      ["partner_id", "child_of", 1],
+      ["partner_id", "=", 9],
     ]);
   });
 
