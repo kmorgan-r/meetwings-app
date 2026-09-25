@@ -4,6 +4,7 @@
 //   node .livecheck/queue-poke.mjs show
 //   node .livecheck/queue-poke.mjs backup
 //   node .livecheck/queue-poke.mjs unsend-write-failure   <-- forces leg 4's state
+//   node .livecheck/queue-poke.mjs retarget <targetId> <resId> <name...>   <-- points ONE failed target at another record
 //
 // `unsend-write-failure` reproduces the one state the live harness cannot: a
 // target whose message_post reached Odoo but whose local `sent` write did not.
@@ -46,7 +47,7 @@ const show = () => {
     JSON.stringify(
       db
         .prepare(
-          "SELECT row_id, model, res_id, name, status, attachment_id, message_id FROM meeting_log_targets ORDER BY created_at DESC LIMIT 10"
+          "SELECT id, row_id, model, res_id, name, status, attachment_id, message_id FROM meeting_log_targets ORDER BY created_at DESC LIMIT 10"
         )
         .all(),
       null,
@@ -79,6 +80,45 @@ if (cmd === "show") {
     "UPDATE meeting_log_queue SET status = 'pending', sent_at = NULL WHERE id = ?"
   ).run(victim.row_id);
   console.log("done - relaunch the app and open the meeting-log page");
+  show();
+} else if (cmd === "retarget") {
+  const [targetId, resId, ...nameParts] = process.argv.slice(3);
+  const name = nameParts.join(" ");
+  if (!targetId || !/^\d+$/.test(resId ?? "") || !name) {
+    console.log("usage: retarget <targetId> <resId> <name...>");
+    process.exit(1);
+  }
+  const target = db
+    .prepare("SELECT row_id FROM meeting_log_targets WHERE id = ?")
+    .get(targetId);
+  if (!target) {
+    console.log("no such target:", targetId);
+    process.exit(1);
+  }
+  // Only a FAILED res.partner target with no message id, so a note that may
+  // already be live is never re-pointed. Looser than
+  // QUEUE_SQL.retargetFailedTarget: no parent-status gate (a `sending` or
+  // `deleted` parent is not refused) and no row_id match. An operator tool:
+  // close the app first.
+  const res = db
+    .prepare(
+      `UPDATE meeting_log_targets
+          SET res_id = ?, name = ?, status = 'pending',
+              attachment_id = NULL, message_id = NULL, sent_at = NULL,
+              last_error = NULL, last_error_code = NULL
+        WHERE id = ? AND model = 'res.partner' AND status = 'failed' AND message_id IS NULL`
+    )
+    .run(Number(resId), name, targetId);
+  if (res.changes === 0) {
+    console.log("refused: that target is not a failed res.partner target without a message id");
+    process.exit(1);
+  }
+  db.prepare(
+    `UPDATE meeting_log_queue
+        SET status = 'pending', last_error = NULL, last_error_code = NULL
+      WHERE id = ? AND status IN ('failed','pending')`
+  ).run(target.row_id);
+  console.log("retargeted -> res.partner", resId, name, "- relaunch Meetwings; it sends on start");
   show();
 } else {
   console.log("unknown command:", cmd);

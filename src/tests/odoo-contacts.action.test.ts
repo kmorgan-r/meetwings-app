@@ -30,8 +30,10 @@ import {
   addSelectedTarget,
   claimSync,
   clearTargets,
+  deleteContact,
   failSync,
   finishSync,
+  listContactIds,
   listContacts,
   loadTargets,
   purgeOtherInstances,
@@ -353,5 +355,23 @@ describe("migration 14 backfill", () => {
     const db = await seedPre14([]);
     await applyMigration14(db);
     expect(() => db.exec("SELECT 1 FROM odoo_selected_target")).toThrow();
+  });
+});
+
+describe("listContactIds / deleteContact", () => {
+  it("lists only this instance's ids", async () => {
+    await upsertContacts(INSTANCE, [contact({ id: 1 }), contact({ id: 2 })], 1);
+    await upsertContacts(OTHER, [contact({ id: 3 })], 1);
+    expect((await listContactIds(INSTANCE)).sort()).toEqual([1, 2]);
+  });
+
+  it("deletes one id in one instance and nothing else", async () => {
+    await upsertContacts(INSTANCE, [contact({ id: 1 }), contact({ id: 2 })], 1);
+    await upsertContacts(OTHER, [contact({ id: 1 })], 1);
+
+    await deleteContact(INSTANCE, 1);
+
+    expect((await listContacts(INSTANCE)).map((c) => c.id)).toEqual([2]);
+    expect((await listContacts(OTHER)).map((c) => c.id)).toEqual([1]);
   });
 });
