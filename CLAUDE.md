@@ -287,6 +287,8 @@ Currently no automated tests. When adding tests:
 
 **Build failures**: Ensure Rust toolchain is installed for Tauri
 
+**`npm run tauri dev` exits immediately / focuses another window**: the single-instance guard (`tauri-plugin-single-instance`) keys on the app identifier, which dev and installed builds share. Quit the installed Meetwings (it autostarts) before running `tauri dev`; two dev builds from different worktrees cannot run at once either.
+
 ## Contributing
 
 1. Fork the repository
