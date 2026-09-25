@@ -414,8 +414,10 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
 
   /**
    * Previews a contact's open opportunities/leads below the list - it does
-   * NOT add anything. Adding is the row's own `AddToggle`, independent of
-   * whether this contact's deals happen to be on screen.
+   * NOT add anything. Adding is the row's own `AddToggle`, which also calls
+   * this, so an added contact's deals are on screen (issue #74: `+ add`
+   * used to stage a contact and show no deals at all). Previewing still
+   * never adds.
    *
    * TOKEN-ORDERED on both branches. Concurrent lookups are reachable by this
    * dialog's own argument for the client promise ("two quick contact
@@ -866,7 +868,13 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                       name={c.name}
                       targets={targets}
                       atCap={atCap}
-                      onAdd={addTarget}
+                      onAdd={(t) => {
+                        const added = addTarget(t);
+                        // Adding previews too - see selectContact. A contact
+                        // already on screen is not fetched again.
+                        if (selected?.id !== c.id) selectContact(c);
+                        return added;
+                      }}
                       onRemove={removeTarget}
                     />
                   </div>
@@ -941,9 +949,19 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
 
             {opportunityError === null && opportunities !== null && (
               opportunities.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  No open opportunities or leads for this contact.
-                </p>
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    No open opportunities or leads for this contact.
+                  </p>
+                  {/*
+                    Its OWN element: the line above is matched whole by the
+                    "a failed fetch must never read as no open deals" pin
+                    (meeting-log-page.test.tsx), which appending would defeat.
+                  */}
+                  <p className="text-xs text-muted-foreground">
+                    Expecting a deal? Search for it by name in the box above.
+                  </p>
+                </>
               ) : (
                 <div className="flex flex-col gap-1">
                   {(shownOpportunities ?? []).map((opp) => (

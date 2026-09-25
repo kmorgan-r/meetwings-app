@@ -467,3 +467,82 @@ describe("AssignDialog lead search (issue #74)", () => {
     });
   });
 });
+
+describe("AssignDialog: adding a contact previews its deals (issue #74, C0)", () => {
+  // `+ add` is the dialog's prominent action. It used to stage the contact
+  // and show no deals at all - "they don't show up after selecting one".
+  it("shows a contact's deals when it is added, without a name click", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([deal()]);
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "add Ada Lovelace" }));
+
+    expect(await screen.findByText("Heat pumps for the north wing")).toBeInTheDocument();
+    expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1);
+    expect(opportunities.fetchOpportunities.mock.calls[0][1]).toMatchObject({ id: 7 });
+    expect(screen.getByRole("button", { name: "Ada Lovelace" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: "added Ada Lovelace" })).toBeInTheDocument();
+  });
+
+  it("does not re-fetch a contact that is already previewed", async () => {
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+    await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole("button", { name: "add Ada Lovelace" }));
+    expect(screen.getByRole("button", { name: "added Ada Lovelace" })).toBeInTheDocument();
+    // Let a wrongly-fired lookup reach the mock before counting.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the preview alone when a contact is taken back off", async () => {
+    opportunities.fetchOpportunities.mockResolvedValue([deal()]);
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "add Ada Lovelace" }));
+    expect(await screen.findByText("Heat pumps for the north wing")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "added Ada Lovelace" }));
+
+    expect(screen.getByRole("button", { name: "add Ada Lovelace" })).toBeInTheDocument();
+    expect(screen.getByText("Heat pumps for the north wing")).toBeInTheDocument();
+    expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AssignDialog: zero-rows hint (issue #74)", () => {
+  it("points at the search box as its own line under an empty lookup", async () => {
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+
+    // The original line, matched WHOLE: the hint must not be appended to it,
+    // or meeting-log-page.test.tsx's "a failed fetch never reads as no open
+    // deals" pin would pass whichever branch rendered.
+    expect(
+      await screen.findByText("No open opportunities or leads for this contact.")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Expecting a deal? Search for it by name in the box above.")
+    ).toBeInTheDocument();
+  });
+
+  it("never shows the hint when the lookup failed", async () => {
+    opportunities.fetchOpportunities.mockRejectedValue(new Error("crm.lead blew up"));
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+
+    expect(await screen.findByText(/could not be read/)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Expecting a deal? Search for it by name in the box above.")
+    ).toBeNull();
+    expect(screen.queryByText("No open opportunities or leads for this contact.")).toBeNull();
+  });
+});
