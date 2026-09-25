@@ -200,6 +200,26 @@ function OpportunityRow({
   );
 }
 
+/**
+ * Issue #74 instrumentation: one line per contact lookup, so a report of
+ * "deals don't show up" can be told apart in one run - C1 (a company:
+ * `isCompany`, `parentId: null`, `rows: 0`) from C2 (`hasEmail`, `rows: 0`
+ * with an unlinked lead known to exist in Odoo). Follows the #72
+ * `[odoo-targets]` precedent (useOdooTarget.ts:255-269): unguarded, and ids,
+ * flags, codes and counts only - NEVER the contact's name or email, never a
+ * lead's name.
+ */
+function logLookup(contact: OdooContact, rows: number | null, code: string | null): void {
+  console.info("[assign-dialog]", "opportunities", {
+    contactId: contact.id,
+    parentId: contact.parentId,
+    isCompany: contact.isCompany,
+    hasEmail: Boolean(contact.email?.trim()),
+    rows,
+    code,
+  });
+}
+
 /** The Company filter's render cap - the same five CalendarProposal.tsx uses
  * for its own version of this control, restated rather than imported (see
  * MAX_CONTACT_ROWS above for why). */
@@ -440,11 +460,14 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
           const client = await getClient();
           const rows = await fetchOpportunities(client, contact);
           if (token !== selectionToken.current) return;
+          logLookup(contact, rows.length, null);
           setOpportunities(rows);
           setIsLookingUp(false);
         } catch (err) {
           if (token !== selectionToken.current) return;
-          setOpportunityError(reportOdooError(err, "fetch opportunities").code);
+          const code = reportOdooError(err, "fetch opportunities").code;
+          logLookup(contact, null, code);
+          setOpportunityError(code);
           setIsLookingUp(false);
         }
       })();

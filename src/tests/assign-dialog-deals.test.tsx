@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Issue #74: AssignDialog's deals panel and lead search, rendered DIRECTLY.
 // `vi.hoisted` for the reason src/tests/meeting-log-page.test.tsx:6-9 gives.
@@ -544,5 +544,67 @@ describe("AssignDialog: zero-rows hint (issue #74)", () => {
       screen.queryByText("Expecting a deal? Search for it by name in the box above.")
     ).toBeNull();
     expect(screen.queryByText("No open opportunities or leads for this contact.")).toBeNull();
+  });
+});
+
+describe("[assign-dialog] lookup log (issue #74)", () => {
+  let info: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    info = vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    info.mockRestore();
+  });
+
+  const lines = () => info.mock.calls.filter((c) => c[0] === "[assign-dialog]");
+
+  // Tells C1 (a company: isCompany, parentId null, rows 0) from C2 (hasEmail,
+  // rows 0) in one run - and names nobody.
+  it("logs ids, flags and the row count on success, never a name or email", async () => {
+    contacts.listContacts.mockResolvedValue([
+      contact({ id: 3, name: "Bentley AS", email: "post@bentley.example", isCompany: true }),
+    ]);
+    opportunities.fetchOpportunities.mockResolvedValue([deal(), deal({ id: 501 })]);
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Bentley AS" }));
+
+    await waitFor(() => expect(lines()).toHaveLength(1));
+    expect(lines()[0]).toEqual([
+      "[assign-dialog]",
+      "opportunities",
+      { contactId: 3, parentId: null, isCompany: true, hasEmail: true, rows: 2, code: null },
+    ]);
+    const flat = JSON.stringify(lines());
+    expect(flat).not.toContain("Bentley");
+    expect(flat).not.toContain("bentley.example");
+    expect(flat).not.toContain("Heat pumps");
+  });
+
+  it("logs the error code, and no row count, on failure", async () => {
+    opportunities.fetchOpportunities.mockRejectedValue(new Error("crm.lead blew up"));
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+
+    await waitFor(() => expect(lines()).toHaveLength(1));
+    expect(lines()[0][2]).toEqual({
+      contactId: 7,
+      parentId: null,
+      isCompany: false,
+      hasEmail: false,
+      rows: null,
+      code: "ODOO_INTERNAL",
+    });
+  });
+
+  it("counts a whitespace-only email as no email", async () => {
+    contacts.listContacts.mockResolvedValue([contact({ email: "   " })]);
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+
+    await waitFor(() => expect(lines()).toHaveLength(1));
+    expect(lines()[0][2]).toMatchObject({ hasEmail: false, rows: 0 });
   });
 });
