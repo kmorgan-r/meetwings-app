@@ -1019,6 +1019,31 @@ describe("a sync that deletes the pinned contact", () => {
     expect(result.current.targetRef.current).toBeNull();
   });
 
+  // The re-read and reload()'s archival filter in ONE sync: filtering the
+  // pre-re-read list would put the deleted pin back while dropping the
+  // archived one.
+  it("does not resurrect it when the same sync also archives another pin", async () => {
+    const ARCHIVED = { model: "res.partner", resId: 2, name: null };
+    let releaseSync = () => {};
+    odoo.runSync.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSync = () =>
+            resolve({ ran: true, changed: 0, fetched: 0, skipped: 0, clampSkipped: false });
+        })
+    );
+    action.loadTargets.mockResolvedValue([ARCHIVED, PIN]);
+    const { result } = mount();
+    await waitFor(() => expect(result.current.targets).toEqual([ARCHIVED, PIN]));
+
+    action.loadTargets.mockResolvedValue([ARCHIVED]);
+    action.listContacts.mockResolvedValue([{ ...colleague, active: false }]);
+    await act(async () => releaseSync());
+
+    await waitFor(() => expect(action.removeSelectedTarget).toHaveBeenCalled());
+    await waitFor(() => expect(result.current.targetsRef.current).toEqual([]));
+  });
+
   it("drops it on a manual refresh too", async () => {
     action.loadTargets.mockResolvedValue([PIN]);
     const { result } = mount();
