@@ -128,6 +128,24 @@ export async function listContacts(instance: string): Promise<OdooContact[]> {
   return rows.map(toContact);
 }
 
+export async function listContactIds(instance: string): Promise<number[]> {
+  const db = await getDatabase();
+  const rows = await db.select<{ id: number }[]>(
+    "SELECT id FROM odoo_contacts WHERE instance = ?",
+    [instance]
+  );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * One id at a time, on purpose: the caller's list is the few contacts Odoo
+ * deleted, and a per-id statement never meets a bound-parameter limit.
+ */
+export async function deleteContact(instance: string, id: number): Promise<void> {
+  const db = await getDatabase();
+  await db.execute("DELETE FROM odoo_contacts WHERE instance = ? AND id = ?", [instance, id]);
+}
+
 export async function setColleague(
   instance: string,
   id: number,

@@ -111,6 +111,7 @@ export default function Meetings() {
   // Captured, so the dialog's onConfirm closes over a non-null row rather than
   // re-reading `queue.assignRow` behind a `!`.
   const assignRow = queue.assignRow;
+  const retarget = queue.retarget;
   const search = conversations.search ?? "";
 
   // Stable across renders so `ConversationList`'s `React.memo` boundary holds:
@@ -323,6 +324,7 @@ export default function Meetings() {
         readTranscript={queue.readTranscript}
         handleRetryTarget={queue.handleRetryTarget}
         handleRemoveTarget={queue.handleRemoveTarget}
+        handleRetargetTarget={queue.handleRetargetTarget}
         conversationTitles={conversationTitles}
         renamingRowId={renamingQueueRowId}
         onStartRename={handleStartQueueRename}
@@ -387,6 +389,18 @@ export default function Meetings() {
           instance={queue.instance}
           onConfirm={(payload) => queue.handleAssignConfirm(assignRow, payload)}
           onCancel={queue.handleAssignCancel}
+        />
+      )}
+      {retarget !== null && (
+        <AssignDialog
+          key={`${retarget.row.id}:${retarget.target.id}`}
+          row={retarget.row}
+          replacing={retarget.target}
+          instance={queue.instance}
+          onConfirm={(payload) =>
+            queue.handleRetargetConfirm(retarget.row, retarget.target, payload)
+          }
+          onCancel={queue.handleRetargetCancel}
         />
       )}
     </PageLayout>

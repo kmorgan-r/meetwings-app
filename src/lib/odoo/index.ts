@@ -1,5 +1,6 @@
 export * from "./client";
 export * from "./contact-ordering";
+export * from "./contacts-reconcile";
 export * from "./contacts-sync";
 export * from "./create-contact";
 export * from "./errors";
@@ -19,6 +20,7 @@ import { getSyncState } from "@/lib/database/odoo-contacts.action";
 import { instanceFingerprint, requireOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type { SyncResult } from "@/types";
 import { createOdooClient } from "./client";
+import { reconcileDeletedContacts } from "./contacts-reconcile";
 import { syncContacts } from "./contacts-sync";
 import { odooError } from "./errors";
 import { decideSync, type SyncDecision, type SyncTrigger } from "./sync-decisions";
@@ -102,11 +104,16 @@ export async function runSync(trigger: SyncTrigger, meetingMode = false): Promis
     });
     if (decision !== "run") return { ran: false, reason: decision };
 
-    const result = await syncContacts({
-      client: createOdooClient(config),
-      instance,
-      now: Date.now(),
-    });
+    const client = createOdooClient(config);
+    const result = await syncContacts({ client, instance, now: Date.now() });
+    // syncContacts has already released its own claimSync by here. Never allowed
+    // to fail the run: the contacts are already pulled, and a deletion sweep that
+    // could not run is retried next sync. It does sit inside `inFlight`, so a
+    // joining caller waits for it too. Another window's sync interleaving is
+    // benign - see reconcileDeletedContacts on why the local ids are read first.
+    await reconcileDeletedContacts({ client, instance }).catch((err) =>
+      console.warn("[Odoo] contact reconcile failed:", err)
+    );
     return { ran: true, ...result };
   })();
 

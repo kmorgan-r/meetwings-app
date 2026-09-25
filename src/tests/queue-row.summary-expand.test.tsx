@@ -55,6 +55,7 @@ function baseProps(rowOver: Partial<MeetingLogListRow>): QueueRowProps {
     onReloadTranscript: vi.fn(),
     onRetryTarget: vi.fn(),
     onRemoveTarget: vi.fn(),
+    onRetargetTarget: vi.fn(),
     onStartRename: vi.fn(),
     onCommitRename: vi.fn(async () => true),
     onCancelRename: vi.fn(),

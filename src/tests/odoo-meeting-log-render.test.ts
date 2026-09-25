@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { buildNoteBody, queueErrorText, renderTranscript } from "@/lib/odoo/meeting-log";
-import { odooError } from "@/lib/odoo/errors";
+import { odooError, OdooError } from "@/lib/odoo/errors";
 import { resetOdooRedactor, setOdooRedactor } from "@/lib/odoo/redactor";
 import type { SummarizationResult, TranscriptEntry } from "@/types";
 
@@ -148,5 +148,85 @@ describe("queueErrorText", () => {
     expect(out.code).toBe("ODOO_FAULT");
     expect(out.text).not.toContain("sk-secret");
     expect(out.text).toContain("partner 4");
+  });
+
+  it("keeps the first line of a fault 2 faultString", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString:
+          "Record does not exist or has been deleted.\n(Record: res.partner(56,), User: 2)",
+      })
+    );
+    expect(out.text).toBe(
+      "ODOO_FAULT: Odoo fault 2 - Record does not exist or has been deleted."
+    );
+  });
+
+  it("keeps the LAST line of a fault 1 traceback, where the exception is", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 1", {
+        faultCode: 1,
+        faultString:
+          'Traceback (most recent call last):\n  File "x.py", line 1, in f\nValueError: bad value',
+      })
+    );
+    expect(out.text).toBe("ODOO_FAULT: Odoo fault 1 - ValueError: bad value");
+  });
+
+  it("caps a very long fault line", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "x".repeat(500) })
+    );
+    expect(out.text.length).toBeLessThan(260);
+    expect(out.text.endsWith("…")).toBe(true);
+  });
+
+  it("never stores a secret that arrived inside faultString", () => {
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString: "Denied for key sk-secret",
+      })
+    );
+    expect(out.text).not.toContain("sk-secret");
+  });
+
+  it("keeps today's output when faultString is absent, empty, or not a string", () => {
+    setOdooRedactor(["sk-secret"]);
+    const outs = [
+      queueErrorText(odooError("ODOO_FAULT", "Odoo fault 2")),
+      queueErrorText(new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: "" })),
+      queueErrorText(
+        new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: 2 as unknown as string })
+      ),
+    ];
+    for (const out of outs) expect(out.text).toBe("ODOO_FAULT: Odoo fault 2");
+  });
+
+  it("redacts a key in a faultString that skipped construction-time redaction", () => {
+    // `new OdooError`, not `odooError()`: the latter redacts at construction, so
+    // the render-side redact() would never be exercised.
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      new OdooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString: "Traceback mentioning sk-secret in the payload",
+      })
+    );
+    expect(out.text).not.toContain("sk-secret");
+    expect(out.text).toContain("Traceback mentioning");
+  });
+
+  it("stores the code alone for a fault when the redactor is unarmed", () => {
+    resetOdooRedactor();
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "anything" })
+    );
+    expect(out.text).toBe("ODOO_FAULT");
   });
 });

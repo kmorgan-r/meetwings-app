@@ -30,8 +30,10 @@ import {
   addSelectedTarget,
   claimSync,
   clearTargets,
+  deleteContact,
   failSync,
   finishSync,
+  listContactIds,
   listContacts,
   loadTargets,
   purgeOtherInstances,
@@ -461,5 +463,23 @@ describe("[odoo-targets] instrumentation (issue #72)", () => {
     await expect(loadTargets(INSTANCE)).rejects.toThrow("database is locked");
     expect(lines("loadTargets")).toHaveLength(1); // before-call line only
     expect(lines("loadTargets")[0][2]).toMatchObject({ instance: INSTANCE });
+  });
+});
+
+describe("listContactIds / deleteContact", () => {
+  it("lists only this instance's ids", async () => {
+    await upsertContacts(INSTANCE, [contact({ id: 1 }), contact({ id: 2 })], 1);
+    await upsertContacts(OTHER, [contact({ id: 3 })], 1);
+    expect((await listContactIds(INSTANCE)).sort()).toEqual([1, 2]);
+  });
+
+  it("deletes one id in one instance and nothing else", async () => {
+    await upsertContacts(INSTANCE, [contact({ id: 1 }), contact({ id: 2 })], 1);
+    await upsertContacts(OTHER, [contact({ id: 1 })], 1);
+
+    await deleteContact(INSTANCE, 1);
+
+    expect((await listContacts(INSTANCE)).map((c) => c.id)).toEqual([2]);
+    expect((await listContacts(OTHER)).map((c) => c.id)).toEqual([1]);
   });
 });
