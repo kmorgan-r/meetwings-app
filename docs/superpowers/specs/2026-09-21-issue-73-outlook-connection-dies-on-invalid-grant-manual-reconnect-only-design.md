@@ -58,7 +58,7 @@ Three changes, one per fix direction in the issue:
 | Streak persisted across launches? | No. In-memory, resets on any successful token adoption. Consequence accepted — see "Why in-memory" below |
 | What resets the streak? | Successful `adopt` inside `adopt_and_persist_with` (covers connect and refresh, session-only included). Nothing else |
 | What leaves the streak untouched? | Transport errors, 5xx, 429, every non-`invalid_grant` code, and an `invalid_grant` for a token that is no longer the current credential |
-| Second instance behavior | Route to the existing `open_dashboard` path; argv ignored |
+| Second instance behavior | Restore and focus the existing dashboard, or create it via `open_dashboard`; argv ignored |
 | `GRAPH_NO_KEYCHAIN` remedy | "Try again" (moved to the retryable set) plus a "if this keeps happening, reconnect" hint; `connected` not flipped; no calendar fetch while the status read is failing |
 | Persist-failure latch | Out of scope (see non-goals) |
 | Dev builds vs the installed app | Share the identifier, so one blocks the other. Accepted and documented (see §2) |
@@ -93,7 +93,8 @@ invalid_grant_streak: std::sync::atomic::AtomicU32,
 ```
 
 An atomic, not another `Mutex`, so it adds nothing to the module's lock-order
-invariant (the doc comment block at `mod.rs:116-138` stays true as written).
+invariant (the ORDERING in the doc comment block at `mod.rs:116-138` stays
+true; its prose is updated — see the supersession list).
 Every read-modify-write of it happens while holding `persist_op`: the bump in
 `record_invalid_grant_with` (below) and the reset in `adopt_and_persist_with`.
 `graph_connect`'s adopt (`mod.rs:601`) goes through `adopt_and_persist_with`
@@ -147,6 +148,8 @@ pattern (`adopt_and_persist_with` injects `persist`,
 A new function records a confirmed failure:
 
 ```rust
+use std::sync::atomic::Ordering; // mod.rs imports only `std::sync::Mutex` today
+
 /// Caller must NOT hold `persist_op`; this takes it.
 fn record_invalid_grant_with(
     state: &GraphState,
@@ -180,7 +183,9 @@ resets it); after a FAILED delete, memory is clear but the dead token is still
 on disk, so the next refresh re-reads it, fails, and `4 >= 3` retries the
 delete immediately instead of waiting three more failures.
 
-`refresh_and_adopt_with`'s `AUTH_EXPIRED` arm becomes:
+`refresh_and_adopt_with` calls the injected refresh as
+`refresh(stored.clone()).await` (it takes the `String` by value, and the arm
+below still needs `stored`). Its `AUTH_EXPIRED` arm becomes:
 
 ```rust
 Err(code) if code == AUTH_EXPIRED => {
@@ -292,6 +297,19 @@ change, or a reader trusts a comment that no longer describes the code:
 8. `CalendarProposal.tsx:67-68` — "GRAPH_NOT_CONNECTED, GRAPH_CONSENT_REQUIRED
    and GRAPH_NO_KEYCHAIN are milder versions of the same gap". Drop
    `GRAPH_NO_KEYCHAIN`; it is no longer in this table.
+9. `mod.rs:121-125` — the lock-invariant prose calling `refresh_and_adopt` →
+   `adopt_and_persist` "the only nesting of the two". `refresh_and_adopt_with`
+   now also reaches `persist_op` through `record_invalid_grant_with`, under
+   `refresh_op`; same order, so the invariant holds — name both nestings.
+10. `mod.rs:134-138` — names `forget_refresh_token_with` as the function that
+    reads `session_only` then takes `session`. That read moves into
+    `clear_and_delete`; name it instead.
+11. `mod.rs:145-148` — `persist_op`'s doc lists exactly two guarded
+    sequences. Add the third: `record_invalid_grant_with`'s
+    check-bump-and-maybe-forget.
+12. `src/tests/CalendarProposal.states.test.tsx:186-187` — "The three codes …
+    the OTHER six". Four retryable codes and five settings-pointer codes after
+    the move.
 
 #### Copy: `AUTH_EXPIRED`
 
@@ -326,23 +344,34 @@ flag) is out of scope; the issue's fix direction does not include it.
   On Windows the plugin uses a named mutex, so the second process detects the
   first and exits before any state or window setup runs.
 
-Callback body: surface the dashboard through the existing `open_dashboard`
-command (`src-tauri/src/window.rs:432`), ignoring argv and cwd. This app has
-no deep-link or protocol-handler surface for the argv to feed:
+Callback body: surface the dashboard, ignoring argv and cwd. This app has no
+deep-link or protocol-handler surface for the argv to feed. An existing
+dashboard is restored directly — `open_dashboard` (`src-tauri/src/window.rs:432`)
+calls only `set_focus` then `show` (`window.rs:434-441`), and on Windows
+neither restores a MINIMIZED window — and a missing one is created through
+`open_dashboard`:
 
 ```rust
 .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
     // The dashboard, not the overlay: `main` is the 54px skipTaskbar overlay
     // whose visibility the toggle shortcut tracks in its own state
     // (shortcuts.rs `is_hidden`), which a direct show() here would desync.
-    // `open_dashboard` is async for the reason on its own doc comment, so it
-    // runs on the async runtime, not on this callback's thread.
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = window::open_dashboard(app).await;
-    });
+    if let Some(dashboard) = app.get_webview_window("dashboard") {
+        let _ = dashboard.unminimize();
+        let _ = dashboard.show();
+        let _ = dashboard.set_focus();
+    } else {
+        // `open_dashboard` is async for the reason on its own doc comment, so
+        // it runs on the async runtime, not on this callback's thread.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = window::open_dashboard(app).await;
+        });
+    }
 }))
 ```
+
+`get_webview_window` comes from `tauri::Manager`, already imported in `lib.rs`.
 
 No capability/permission entries: the plugin exposes no frontend API. This is
 the change that makes Decision 1's retry sound — with one process, nothing
@@ -438,8 +467,11 @@ const RETRYABLE_HINT: Partial<Record<RetryableGraphErrorCode, string>> = {
 };
 ```
 
-and render `RETRYABLE_HINT[state.code]` (when defined) in the retryable branch,
-in the same muted `<p>` style as the remedy line.
+and render `RETRYABLE_HINT[state.code as RetryableGraphErrorCode]` (when
+defined) in the retryable branch, in the same muted `<p>` style as the remedy
+line. The cast is needed for the same reason the remedy lookup already casts
+(`CalendarProposal.tsx:655-657`): `retryable` is a `Set.has` boolean, not a
+type guard, and indexing with a bare `GraphErrorCode` is TS7053 under strict.
 
 The `AUTH_EXPIRED` entry stays in the non-retryable table with the reworded
 copy above. The fetch path can also surface `NO_KEYCHAIN` — from
@@ -521,15 +553,22 @@ target):
     `AUTH_EXPIRED`;
   - `invalid_grant` → success (injected `persist` spy, no real write) →
     `invalid_grant` ×2: delete spy not called (streak was reset by the
-    success);
+    success). The success tokens carry `expires_at_ms: 0` — with this file's
+    usual `i64::MAX`, the later calls would take the post-lock
+    `fresh_access_token` shortcut (`mod.rs:455-459`) and never redeem, making
+    the assertion vacuous. Also assert both later calls return `AUTH_EXPIRED`
+    and that the refresh fake was invoked each time;
   - a `NETWORK` failure between `invalid_grant`s: delete spy not called,
     streak value unchanged by the transport error;
   - delete spy returning `Err` at threshold: the error propagates, and the
     streak is NOT reset (reads 3);
-  - identity check: the injected `refresh` closure adopts a different token
-    into memory (simulating a concurrent `graph_connect`) and then returns
-    `invalid_grant`, with the streak pre-set to 2: delete spy not called,
-    streak unchanged, memory still holds the new token.
+  - identity check: with the streak pre-set to 2, the injected `refresh`
+    closure writes a different token straight into
+    `session.refresh_token` (NOT through `adopt_and_persist_with`, whose
+    reset would zero the streak and make the test non-discriminating) and
+    then returns `invalid_grant`: delete spy not called, streak reads exactly
+    2, memory still holds the new token. Without the identity check the
+    streak would reach 3 and call delete.
 - The existing loopback tests of the post-lock shortcut
   (`refresh_and_adopt_does_not_shortcut_on_the_token_the_caller_just_had_rejected`,
   `refresh_and_adopt_still_takes_the_shortcut_when_memory_holds_a_different_token`,
@@ -569,10 +608,14 @@ Vitest, matching the existing files under `src/tests/`:
 
 1. Single-instance: quit any installed Meetwings first (it shares the
    identifier). Launch the built app twice. The second process exits, and the
-   first instance's dashboard opens or comes to the front.
+   first instance's dashboard opens or comes to the front. Repeat with the
+   dashboard minimized (it is restored) and with it closed (it is created).
 2. The fix's own success criterion: with a calendar connected, make the
    stored refresh token fail with `invalid_grant` (e.g. revoke sessions for
-   the account in Entra). Open the picker once: the block shows the
+   the account in Entra), then RESTART the app before the first picker open —
+   a still-valid in-memory access token (~55 minutes) would otherwise serve
+   the open without redeeming the refresh token (`mod.rs:645-653`). Open the
+   picker once: the block shows the
    sign-in-expired copy, and the Odoo page still shows the calendar connected.
    Restart the app: the block still appears and shows sign-in-expired (today
    it vanishes). Open the picker three times in one launch: the third deletes
