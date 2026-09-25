@@ -140,8 +140,8 @@ pub struct Session {
 ///    (`refresh_op` even across an `.await`; see its own doc comment), and
 ///    both are outermost with respect to `session` and `session_only`.
 ///    Where the two meet EACH OTHER the order is `refresh_op` ->
-///    `persist_op`: `refresh_and_adopt` holds `refresh_op` while calling
-///    `adopt_and_persist` or `record_invalid_grant_with`, each of which takes
+///    `persist_op`: `refresh_and_adopt_with` holds `refresh_op` while calling
+///    `adopt_and_persist_with` or `record_invalid_grant_with`, each of which takes
 ///    `persist_op`. Those are the only nestings of the two, both in the same
 ///    order, and `refresh_op` is acquired at exactly one site, so no
 ///    competing order exists for them to deadlock against.
@@ -181,7 +181,7 @@ pub struct GraphState {
     /// every `reqwest` call this module makes bounded at all, rather than
     /// merely absent from this particular lock's critical sections.
     persist_op: Mutex<()>,
-    /// Serializes `refresh_and_adopt` calls against EACH OTHER - not against
+    /// Serializes `refresh_and_adopt_with` calls against EACH OTHER - not against
     /// `persist_op`; see that field's own doc comment for why disconnect must
     /// not be made to wait on this one (Task 11 review round 2, Finding C).
     /// Entra rotates the refresh token on every redemption, so two
@@ -476,7 +476,7 @@ fn record_invalid_grant_with(
 ///
 /// Shared by two call sites for the same reason: the fast path at the top of
 /// `graph_current_meetings` (skip refreshing entirely when a valid token is
-/// already there) and the re-read inside `refresh_and_adopt`, immediately
+/// already there) and the re-read inside `refresh_and_adopt_with`, immediately
 /// after acquiring `refresh_op` (skip a redundant redemption when a
 /// concurrent call already refreshed while this one was waiting for the
 /// lock - Task 11 review round 2, Finding C).
@@ -489,12 +489,17 @@ fn fresh_access_token(state: &GraphState) -> Option<String> {
 }
 
 /// The ONE refresh path. Both call sites in `graph_current_meetings` go through
-/// it, which is what keeps the `invalid_grant` handling identical between them.
+/// it (via the `refresh_and_adopt` wrapper), which is what keeps the
+/// `invalid_grant` handling identical between them.
 ///
 /// The earlier draft special-cased AUTH_EXPIRED at the first call site and used
 /// a bare `?` at the second, so a refresh token revoked at the same moment as
-/// the access token - a password change, the single commonest cause - left the
-/// dead credential sitting in the keychain forever.
+/// the access token - a password change, the single commonest cause - skipped
+/// the `invalid_grant` handling at one of them. Both now reach the same arm,
+/// which counts the failure (`record_invalid_grant_with`) and keeps the
+/// credential until `INVALID_GRANT_FORGET_THRESHOLD` consecutive confirmed
+/// failures: a dead credential is retained deliberately until then, or until
+/// a reconnect replaces it.
 ///
 /// Held under `state.refresh_op` for the whole call, ACROSS the `.await` on
 /// the token endpoint (Task 11 review round 2, Finding C) - `refresh_op` is a
@@ -511,8 +516,8 @@ fn fresh_access_token(state: &GraphState) -> Option<String> {
 /// seconds - so `graph_disconnect` sharing this lock could still be made to
 /// wait that long instead of returning in milliseconds. See `GraphState`'s
 /// own doc comment for the full lock order, which is why this function is
-/// free to call `adopt_and_persist` (itself taking `persist_op`) while still
-/// holding `refresh_op`.
+/// free to call `adopt_and_persist_with` and `record_invalid_grant_with`
+/// (each taking `persist_op`) while still holding `refresh_op`.
 ///
 /// `stale` is the access token the caller already knows is no good - `None`
 /// at the initial call site (there is no prior token to disbelieve), and
@@ -524,13 +529,26 @@ fn fresh_access_token(state: &GraphState) -> Option<String> {
 /// mandated refresh-and-retry into a no-op that reproduces the identical 401
 /// for up to that long. See `graph_current_meetings`'s retry arm for the
 /// full consequence.
-async fn refresh_and_adopt(
+///
+/// `refresh` (the token endpoint), `persist` (the keychain write) and `delete`
+/// (the keychain delete) are injected for the same reason
+/// `adopt_and_persist_with` and `forget_refresh_token_with` inject theirs
+/// (Ruling 20, Finding A): tests drive both arms without a network and
+/// without any path to a real keychain. `stored_refresh_token` is NOT
+/// injected - it still reads the real keychain when memory is empty - so a
+/// test must seed a refresh token in memory and make no call after one that
+/// cleared memory on the normal path.
+async fn refresh_and_adopt_with<Fut>(
     state: &GraphState,
-    authority: &str,
-    client_id: &str,
     generation: u64,
     stale: Option<&str>,
-) -> Result<String, String> {
+    refresh: impl FnOnce(String) -> Fut,
+    persist: impl FnOnce(&auth::Tokens) -> Result<(), String>,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String>
+where
+    Fut: std::future::Future<Output = Result<auth::Tokens, String>>,
+{
     let _refresh_guard = state.refresh_op.lock().await;
 
     // Re-read AFTER acquiring the lock: a call that was waiting here may have
@@ -547,20 +565,41 @@ async fn refresh_and_adopt(
     }
 
     let stored = stored_refresh_token(state)?;
-    let tokens = match auth::refresh(authority, client_id, &stored, now_ms()).await {
+    // `refresh` takes the String by value; the arm below still needs `stored`.
+    let tokens = match refresh(stored.clone()).await {
         Ok(tokens) => tokens,
         Err(code) if code == AUTH_EXPIRED => {
             // A keychain failure while forgetting is surfaced, not swallowed:
             // "your credential is dead AND it is stuck on disk" is a different
             // problem from "reconnect", and the user can act on it.
-            record_invalid_grant_with(state, &stored, keychain::delete_refresh_token)?;
+            record_invalid_grant_with(state, &stored, delete)?;
             return Err(AUTH_EXPIRED.to_string());
         }
         Err(code) => return Err(code),
     };
     let access = tokens.access_token.clone();
-    adopt_and_persist(state, &tokens, generation)?;
+    adopt_and_persist_with(state, &tokens, generation, persist)?;
     Ok(access)
+}
+
+/// Called with the real token endpoint, keychain write and keychain delete.
+/// See `refresh_and_adopt_with` for the full contract this wraps.
+async fn refresh_and_adopt(
+    state: &GraphState,
+    authority: &str,
+    client_id: &str,
+    generation: u64,
+    stale: Option<&str>,
+) -> Result<String, String> {
+    refresh_and_adopt_with(
+        state,
+        generation,
+        stale,
+        |stored| async move { auth::refresh(authority, client_id, &stored, now_ms()).await },
+        auth::persist_rotated,
+        keychain::delete_refresh_token,
+    )
+    .await
 }
 
 /// MEMORY FIRST, then the keychain.
@@ -1533,5 +1572,218 @@ mod tests {
         assert_eq!(result, Ok(()));
         assert!(!delete_was_called.get());
         assert_eq!(memory_token(&state), None);
+    }
+
+    fn invalid_grant() -> std::future::Ready<Result<auth::Tokens, String>> {
+        std::future::ready(Err(AUTH_EXPIRED.to_string()))
+    }
+
+    fn generation_of(state: &GraphState) -> u64 {
+        state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    #[tokio::test]
+    async fn two_invalid_grants_keep_the_credential() {
+        let state = state_holding(Some("rt"), 0);
+        let generation = generation_of(&state);
+        let delete_calls = std::cell::Cell::new(0u32);
+        for _ in 0..2 {
+            let result = refresh_and_adopt_with(
+                &state,
+                generation,
+                None,
+                |_| invalid_grant(),
+                |_| unreachable!("a failed redemption persists nothing"),
+                || {
+                    delete_calls.set(delete_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result, Err(AUTH_EXPIRED.to_string()));
+        }
+        assert_eq!(delete_calls.get(), 0);
+        assert_eq!(streak(&state), 2);
+        assert_eq!(memory_token(&state).as_deref(), Some("rt"));
+    }
+
+    /// The third call is the LAST call: memory is cleared afterwards, and a
+    /// further call would make `stored_refresh_token` read the real keychain.
+    #[tokio::test]
+    async fn the_third_consecutive_invalid_grant_forgets_exactly_once() {
+        let state = state_holding(Some("rt"), 0);
+        let generation = generation_of(&state);
+        let delete_calls = std::cell::Cell::new(0u32);
+        for _ in 0..3 {
+            let result = refresh_and_adopt_with(
+                &state,
+                generation,
+                None,
+                |_| invalid_grant(),
+                |_| unreachable!("a failed redemption persists nothing"),
+                || {
+                    delete_calls.set(delete_calls.get() + 1);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result, Err(AUTH_EXPIRED.to_string()));
+        }
+        assert_eq!(delete_calls.get(), 1);
+        assert_eq!(memory_token(&state), None);
+    }
+
+    /// The success tokens carry `expires_at_ms: 0`. With this file's usual
+    /// `i64::MAX` the later calls would take the post-lock
+    /// `fresh_access_token` shortcut, never redeem, and pass vacuously.
+    #[tokio::test]
+    async fn a_success_between_invalid_grants_resets_the_streak() {
+        let state = state_holding(Some("rt"), 0);
+        let generation = generation_of(&state);
+        let refresh_calls = std::cell::Cell::new(0u32);
+        let delete_was_called = std::cell::Cell::new(false);
+
+        let first = refresh_and_adopt_with(
+            &state,
+            generation,
+            None,
+            |_| invalid_grant(),
+            |_| unreachable!(),
+            || {
+                delete_was_called.set(true);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(first, Err(AUTH_EXPIRED.to_string()));
+        assert_eq!(streak(&state), 1);
+
+        let persist_calls = std::cell::Cell::new(0u32);
+        let success = refresh_and_adopt_with(
+            &state,
+            generation,
+            None,
+            |_| {
+                std::future::ready(Ok(auth::Tokens {
+                    access_token: "a1".into(),
+                    expires_at_ms: 0,
+                    refresh_token: Some("rt2".into()),
+                    id_token: None,
+                }))
+            },
+            |_| {
+                persist_calls.set(persist_calls.get() + 1);
+                Ok(())
+            },
+            || unreachable!(),
+        )
+        .await;
+        assert_eq!(success, Ok("a1".to_string()));
+        assert_eq!(persist_calls.get(), 1);
+        assert_eq!(streak(&state), 0);
+
+        for _ in 0..2 {
+            let result = refresh_and_adopt_with(
+                &state,
+                generation,
+                None,
+                |stored| {
+                    assert_eq!(stored, "rt2");
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    invalid_grant()
+                },
+                |_| unreachable!(),
+                || {
+                    delete_was_called.set(true);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result, Err(AUTH_EXPIRED.to_string()));
+        }
+        assert_eq!(refresh_calls.get(), 2);
+        assert!(!delete_was_called.get());
+        assert_eq!(streak(&state), 2);
+    }
+
+    #[tokio::test]
+    async fn a_network_failure_between_invalid_grants_leaves_the_streak_alone() {
+        let state = state_holding(Some("rt"), 0);
+        let generation = generation_of(&state);
+        let delete_was_called = std::cell::Cell::new(false);
+        let outcomes = [AUTH_EXPIRED, NETWORK, AUTH_EXPIRED];
+        let expected_streaks = [1u32, 1, 2];
+        for (code, expected) in outcomes.iter().zip(expected_streaks) {
+            let result = refresh_and_adopt_with(
+                &state,
+                generation,
+                None,
+                |_| std::future::ready(Err(code.to_string())),
+                |_| unreachable!(),
+                || {
+                    delete_was_called.set(true);
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result, Err(code.to_string()));
+            assert_eq!(streak(&state), expected);
+        }
+        assert!(!delete_was_called.get());
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_at_the_threshold_is_surfaced_and_the_streak_kept() {
+        let state = state_holding(Some("rt"), 2);
+        let generation = generation_of(&state);
+        let result = refresh_and_adopt_with(
+            &state,
+            generation,
+            None,
+            |_| invalid_grant(),
+            |_| unreachable!(),
+            || Err(NO_KEYCHAIN.to_string()),
+        )
+        .await;
+        assert_eq!(result, Err(NO_KEYCHAIN.to_string()));
+        assert_eq!(streak(&state), 3);
+    }
+
+    /// The fake refresh writes the new token straight into memory - NOT via
+    /// `adopt_and_persist_with`, whose reset would zero the streak and make
+    /// this pass without any identity check. Without the check the streak
+    /// would reach 3 and call delete.
+    #[tokio::test]
+    async fn a_reconnect_during_the_redemption_is_not_counted_against_the_new_credential() {
+        let state = state_holding(Some("t-old"), 2);
+        let generation = generation_of(&state);
+        let delete_was_called = std::cell::Cell::new(false);
+        let result = refresh_and_adopt_with(
+            &state,
+            generation,
+            None,
+            |_| {
+                state
+                    .session
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .refresh_token = Some("t-new".into());
+                invalid_grant()
+            },
+            |_| unreachable!(),
+            || {
+                delete_was_called.set(true);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result, Err(AUTH_EXPIRED.to_string()));
+        assert!(!delete_was_called.get());
+        assert_eq!(streak(&state), 2);
+        assert_eq!(memory_token(&state).as_deref(), Some("t-new"));
     }
 }
