@@ -323,6 +323,7 @@ export default function Meetings() {
         readTranscript={queue.readTranscript}
         handleRetryTarget={queue.handleRetryTarget}
         handleRemoveTarget={queue.handleRemoveTarget}
+        handleRetargetTarget={queue.handleRetargetTarget}
         conversationTitles={conversationTitles}
         renamingRowId={renamingQueueRowId}
         onStartRename={handleStartQueueRename}

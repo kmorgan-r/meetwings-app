@@ -70,6 +70,8 @@ export interface QueueRowProps {
   onReloadTranscript: (row: MeetingLogListRow) => void;
   onRetryTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
   onRemoveTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
+  /** Swap one failed target for another contact. The page opens the picker. */
+  onRetargetTarget: (row: MeetingLogListRow, target: MeetingLogTarget) => void;
   /** By ROW id: two rows can share one conversation. */
   onStartRename: (rowId: string) => void;
   /**
@@ -220,6 +222,7 @@ function QueueRowInner({
   onReloadTranscript,
   onRetryTarget,
   onRemoveTarget,
+  onRetargetTarget,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -489,9 +492,34 @@ function QueueRowInner({
                     >
                       Retry this one
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => onRemoveTarget(row, t)}>
-                      Remove
-                    </Button>
+                    {/*
+                      Distinct from the ROW-level Reassign, which is hidden the
+                      moment any sibling is sent. This one re-points ONLY this
+                      target, so it is the way out when the contact it names
+                      was deleted in Odoo. Needs no message id: retargetQueueTarget
+                      refuses a target whose note may be live.
+                    */}
+                    {t.messageId === null && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={otherDatabase}
+                        onClick={() => onRetargetTarget(row, t)}
+                      >
+                        Choose a different contact
+                      </Button>
+                    )}
+                    {/*
+                      removeQueueTarget refuses any target that already made an
+                      attachment or a message (a note may be live), so offering
+                      Remove there is a button that can only say no - the same
+                      reasoning as hasSentTarget above.
+                    */}
+                    {t.attachmentId === null && t.messageId === null && (
+                      <Button size="sm" variant="ghost" onClick={() => onRemoveTarget(row, t)}>
+                        Remove
+                      </Button>
+                    )}
                   </>
                 )}
               </div>
@@ -675,6 +703,7 @@ function propsAreEqual(a: QueueRowProps, b: QueueRowProps): boolean {
     a.onReloadTranscript === b.onReloadTranscript &&
     a.onRetryTarget === b.onRetryTarget &&
     a.onRemoveTarget === b.onRemoveTarget &&
+    a.onRetargetTarget === b.onRetargetTarget &&
     a.onStartRename === b.onStartRename &&
     a.onCommitRename === b.onCommitRename &&
     a.onCancelRename === b.onCancelRename

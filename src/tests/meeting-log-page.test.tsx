@@ -35,6 +35,7 @@ const actions = vi.hoisted(() => ({
   // left undefined here would throw "not a function" the day one does.
   retryTarget: vi.fn(),
   removeQueueTarget: vi.fn(),
+  retargetMeetingLogTarget: vi.fn(),
 }));
 vi.mock("@/lib/odoo/meeting-log-actions", () => actions);
 
@@ -2406,6 +2407,7 @@ describe("QueueRow", () => {
     onReloadTranscript: vi.fn(),
     onRetryTarget: vi.fn(),
     onRemoveTarget: vi.fn(),
+    onRetargetTarget: vi.fn(),
   };
 
   it("summarises how many targets failed", () => {
