@@ -35,6 +35,7 @@ const actions = vi.hoisted(() => ({
   // left undefined here would throw "not a function" the day one does.
   retryTarget: vi.fn(),
   removeQueueTarget: vi.fn(),
+  retargetMeetingLogTarget: vi.fn(),
 }));
 vi.mock("@/lib/odoo/meeting-log-actions", () => actions);
 
@@ -1287,6 +1288,44 @@ describe("the contact map", () => {
     expect(contacts.listContacts).toHaveBeenCalledTimes(db.listActionableRows.mock.calls.length);
   });
 
+  it("swaps one failed target for another contact from the queue page", async () => {
+    contacts.listContacts.mockResolvedValue([
+      contact({ id: 57, name: "Andres Vergara", companyName: "Invest Conservation" }),
+    ]);
+    actions.retargetMeetingLogTarget.mockResolvedValue({ kind: "ok" });
+    db.listActionableRows.mockResolvedValue([
+      row({
+        id: "na",
+        status: "failed",
+        targets: [
+          { id: "t-55", rowId: "na", model: "res.partner", resId: 55, name: "Anja",
+            status: "sent", attachmentId: 1, messageId: 2, lastError: null,
+            lastErrorCode: null, createdAt: 1, sentAt: 1 },
+          { id: "t-56", rowId: "na", model: "res.partner", resId: 56, name: "Andres Vergara",
+            status: "failed", attachmentId: 3265, messageId: null, lastError: "ODOO_FAULT",
+            lastErrorCode: "ODOO_FAULT", createdAt: 1, sentAt: null },
+        ],
+      }),
+    ]);
+    await renderPage();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Expand targets" }));
+    await userEvent.click(screen.getByRole("button", { name: /choose a different contact/i }));
+    await userEvent.click(await screen.findByRole("button", { name: /add Andres Vergara/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+    await waitFor(() =>
+      expect(actions.retargetMeetingLogTarget).toHaveBeenCalledWith(
+        "na",
+        "t-56",
+        { model: "res.partner", resId: 57, name: "Andres Vergara" },
+        // providerConfig may legitimately be null on this page, so match the
+        // callback the hook always adds instead of the config.
+        expect.objectContaining({ onCommitted: expect.any(Function) })
+      )
+    );
+  });
+
   // A lead picked out of the search has NO res.partner behind it, so the row
   // carries a lead_id and no contact_id. Reading that as "No contact chosen"
   // offers to assign a meeting that is already correctly targeted - and the
@@ -1492,6 +1531,78 @@ describe("AssignDialog", () => {
       await userEvent.click(screen.getByRole("button", { name: new RegExp(`add ${n}`, "i") }));
     }
     expect(screen.getByRole("button", { name: /add F/i })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  describe("replacing one target", () => {
+    const DEAD = {
+      id: "t-56", rowId: "r1", model: "res.partner" as const, resId: 56,
+      name: "Andres Vergara", status: "failed" as const, attachmentId: 3265,
+      messageId: null, lastError: "ODOO_FAULT", lastErrorCode: "ODOO_FAULT",
+      createdAt: 1, sentAt: null,
+    };
+    const ANDRES_57 = contact({ id: 57, name: "Andres Vergara", companyName: "Invest Conservation" });
+
+    function replacingProps() {
+      return {
+        row: row({ id: "r1", status: "failed" }),
+        instance: INSTANCE,
+        replacing: DEAD,
+        onConfirm: vi.fn(),
+        onCancel: vi.fn(),
+      };
+    }
+
+    it("titles itself for the contact being replaced", async () => {
+      contacts.listContacts.mockResolvedValue([ANDRES_57]);
+      render(<AssignDialog {...replacingProps()} />);
+      await screen.findByPlaceholderText("Search contacts");
+      expect(screen.getByRole("heading", { name: /choose a different contact/i })).toBeVisible();
+    });
+
+    it("does not offer the dead contact it is replacing", async () => {
+      contacts.listContacts.mockResolvedValue([
+        contact({ id: 56, name: "Andres Vergara" }),
+        ANDRES_57,
+      ]);
+      render(<AssignDialog {...replacingProps()} />);
+      await screen.findByPlaceholderText("Search contacts");
+      // Both are named "Andres Vergara"; only the live one (57) may remain.
+      expect(screen.getAllByRole("button", { name: /add Andres Vergara/i })).toHaveLength(1);
+    });
+
+    it("keeps exactly one choice: picking a second replaces the first", async () => {
+      const BENTLEY = contact({ id: 3, name: "Bentley AS" });
+      contacts.listContacts.mockResolvedValue([ANDRES_57, BENTLEY]);
+      const props = replacingProps();
+      render(<AssignDialog {...props} />);
+      await screen.findByPlaceholderText("Search contacts");
+
+      await userEvent.click(screen.getByRole("button", { name: /add Andres Vergara/i }));
+      await userEvent.click(screen.getByRole("button", { name: /add Bentley AS/i }));
+      await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+      expect(props.onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targets: [{ model: "res.partner", resId: 3, name: "Bentley AS" }],
+        })
+      );
+    });
+
+    it("hands up the chosen contact on Confirm", async () => {
+      contacts.listContacts.mockResolvedValue([ANDRES_57]);
+      const props = replacingProps();
+      render(<AssignDialog {...props} />);
+      await screen.findByPlaceholderText("Search contacts");
+
+      await userEvent.click(screen.getByRole("button", { name: /add Andres Vergara/i }));
+      await userEvent.click(screen.getByRole("button", { name: "Log this meeting" }));
+
+      expect(props.onConfirm).toHaveBeenCalledWith(
+        expect.objectContaining({
+          targets: [{ model: "res.partner", resId: 57, name: "Andres Vergara" }],
+        })
+      );
+    });
   });
 });
 
@@ -2425,6 +2536,7 @@ describe("QueueRow", () => {
     onReloadTranscript: vi.fn(),
     onRetryTarget: vi.fn(),
     onRemoveTarget: vi.fn(),
+    onRetargetTarget: vi.fn(),
   };
 
   it("summarises how many targets failed", () => {

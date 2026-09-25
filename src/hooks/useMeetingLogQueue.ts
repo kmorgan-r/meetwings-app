@@ -27,6 +27,7 @@ import {
   deleteMeetingLog,
   removeQueueTarget,
   retryMeetingLog,
+  retargetMeetingLogTarget,
   retryTarget,
   type ActionOutcome,
   type ProviderConfigLike,
@@ -163,6 +164,9 @@ const SENT_COPY = "Sent to Odoo.";
 const ASSIGN_CONFLICT_COPY =
   "This meeting could not be reassigned — it changed in another window.";
 
+const RETARGET_CONFLICT_COPY =
+  "That contact could not be swapped in — this meeting changed in another window.";
+
 /**
  * Delete's own success line, and the negative clause is the whole point.
  *
@@ -225,6 +229,9 @@ function outcomeCopy(
       }
       return parts.join(" ");
     }
+    case "duplicate":
+      // Nothing was written, and the row still needs a contact from the user.
+      return "That contact is already on this meeting. Choose someone else.";
     case "conflict":
       return conflictCopy ?? "This meeting changed in another window.";
     case "moved-unknown":
@@ -411,6 +418,16 @@ export function useMeetingLogQueue() {
    * harmless because the CAS matches on id and status, not on this object.
    */
   const [assignRow, setAssignRow] = useState<MeetingLogListRow | null>(null);
+  /**
+   * The failed target being swapped, with its row as an OBJECT for the same
+   * reason `assignRow` is one: the CAS matches on ids, so a stale snapshot is
+   * harmless, and a re-read that dropped the row must not leave Confirm with
+   * nothing to name. `null` is the closed state.
+   */
+  const [retarget, setRetarget] = useState<{
+    row: MeetingLogListRow;
+    target: MeetingLogTarget;
+  } | null>(null);
 
   const providerConfigRef = useRef<ProviderConfigLike | null>(null);
 
@@ -720,6 +737,36 @@ export function useMeetingLogQueue() {
     setAssignRow(null);
   }, []);
 
+  const handleRetargetTarget = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget) => {
+      if (busyRef.current.has(row.id)) return;
+      setRetarget({ row, target });
+    },
+    []
+  );
+
+  /** Same shape as `handleAssignConfirm`: the dialog unmounts first, the page owns the push. */
+  const handleRetargetConfirm = useCallback(
+    (row: MeetingLogListRow, target: MeetingLogTarget, payload: AssignPayload) => {
+      setRetarget(null);
+      const next = payload.targets[0];
+      if (!next) return;
+      void runRowAction(
+        row,
+        () =>
+          retargetMeetingLogTarget(row.id, target.id, next, {
+            providerConfig: payload.providerConfig,
+            onCommitted: () => void loaderRef.current(),
+          }),
+        SENT_COPY,
+        RETARGET_CONFLICT_COPY
+      );
+    },
+    [runRowAction]
+  );
+
+  const handleRetargetCancel = useCallback(() => setRetarget(null), []);
+
   /**
    * The per-target sibling of `runRowAction`, not a call to it: neither
    * `retryTarget` nor `removeQueueTarget` ever pushes, so there is no
@@ -946,6 +993,7 @@ export function useMeetingLogQueue() {
     hasClaim,
     inlineIds,
     assignRow,
+    retarget,
     setAssignRow,
     providerConfigRef,
     setResult,
@@ -959,6 +1007,9 @@ export function useMeetingLogQueue() {
     runTargetAction,
     handleRetryTarget,
     handleRemoveTarget,
+    handleRetargetTarget,
+    handleRetargetConfirm,
+    handleRetargetCancel,
     readTranscript,
     toggleTranscript,
     reload,

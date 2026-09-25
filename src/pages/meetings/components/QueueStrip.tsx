@@ -38,6 +38,7 @@ export type QueueStripProps = Pick<
   | "readTranscript"
   | "handleRetryTarget"
   | "handleRemoveTarget"
+  | "handleRetargetTarget"
 > & {
   /**
    * Conversation id -> title, owned by the page's `useHistory` state. A map
@@ -127,6 +128,7 @@ function QueueStripInner({
   readTranscript,
   handleRetryTarget,
   handleRemoveTarget,
+  handleRetargetTarget,
   conversationTitles,
   renamingRowId,
   onStartRename,
@@ -176,6 +178,7 @@ function QueueStripInner({
           onReloadTranscript={readTranscript}
           onRetryTarget={handleRetryTarget}
           onRemoveTarget={handleRemoveTarget}
+          onRetargetTarget={handleRetargetTarget}
           onStartRename={onStartRename}
           onCommitRename={onCommitRename}
           onCancelRename={onCancelRename}

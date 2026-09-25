@@ -28,8 +28,12 @@ export const PARTNER_FIELDS = [
   "type",
 ];
 
-/** The sync domain's type leaves, shared by the page fetch and its fault-isolated re-fetches. */
-const TYPE_FILTERS: XmlRpcValue[] = [
+/**
+ * Which partner types are cached. Shared with contacts-reconcile.ts so the
+ * cache and the "is it still in Odoo" question can never disagree about it, and
+ * by the page fetch and its fault-isolated re-fetches.
+ */
+export const PARTNER_TYPE_LEAVES: XmlRpcValue[] = [
   ["type", "!=", "delivery"],
   ["type", "!=", "invoice"],
   ["type", "!=", "other"],
@@ -68,7 +72,7 @@ async function fetchRowsBisectingFaults(
   out: { rows: unknown[]; skippedIds: number[] }
 ): Promise<void> {
   if (ids.length === 0) return;
-  const domain: XmlRpcValue[] = [["id", "in", ids], ...TYPE_FILTERS];
+  const domain: XmlRpcValue[] = [["id", "in", ids], ...PARTNER_TYPE_LEAVES];
   let rows: XmlRpcValue;
   try {
     rows = await client.execute("res.partner", "search_read", [domain], {
@@ -186,7 +190,7 @@ export async function syncContacts(deps: {
       // OMITTED, not defaulted, on the first run. See the test.
       if (watermark !== null) domain.push(["write_date", ">", watermark]);
       domain.push(["id", ">", cursor]);
-      domain.push(...TYPE_FILTERS);
+      domain.push(...PARTNER_TYPE_LEAVES);
 
       let page: XmlRpcValue;
       const isolatedSkips: number[] = [];

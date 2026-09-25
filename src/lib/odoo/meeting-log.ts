@@ -311,6 +311,29 @@ function section(heading: string, items: string[] | undefined): string {
   return `<b>${heading}</b><ul>${lis}</ul>`;
 }
 
+/** The most of an Odoo fault line kept on a row. */
+const FAULT_LINE_MAX = 200;
+
+/**
+ * The one line of an Odoo fault worth keeping.
+ *
+ * faultCode 1 is an unhandled exception: faultString is a whole Python
+ * traceback and the exception is its LAST line. Codes 2-4 (UserError /
+ * MissingError, AccessDenied, AccessError) carry `str(e)`, a short sentence, so
+ * the FIRST line is the message and anything after it is record detail.
+ * `details.faultString` was already redacted when the OdooError was built.
+ */
+function faultLine(faultCode: unknown, faultString: unknown): string {
+  if (typeof faultString !== "string") return "";
+  const lines = faultString
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  if (lines.length === 0) return "";
+  const line = faultCode === 1 ? lines[lines.length - 1] : lines[0];
+  return line.length > FAULT_LINE_MAX ? `${line.slice(0, FAULT_LINE_MAX)}…` : line;
+}
+
 /**
  * The chatter note.
  *
@@ -370,40 +393,18 @@ export function buildNoteBody(
  * AI-provider errors never reach this function: summarization has its own
  * try/catch in the push module. The redactor holds [apiKey, login] only, so it
  * has no needle for an AI key.
+ *
+ * A fault's own text (details.faultString) is appended the same way as
+ * details.detail, bounded by faultLine.
  */
 export function queueErrorText(thrown: unknown): { code: string; text: string } {
   const err = toOdooError(thrown);
   if (!isRedactorInitialised()) return { code: err.code, text: err.code };
   const redact = getRedactor();
   const detail = typeof err.details.detail === "string" ? err.details.detail : "";
-  const message = detail ? `${err.message} - ${detail}` : err.message;
-  // faultString is the one detail family whose VALUE is the answer the queue
-  // row needs (the code's own message is the placeholder "Odoo fault N"). The
-  // guard is a truthiness check on the value, NOT `"faultString" in details`:
-  // a key with an empty-string value must fall back byte-identically, and an
-  // `in` check passes it.
-  const faultString =
-    typeof err.details.faultString === "string" && err.details.faultString.length > 0
-      ? err.details.faultString
-      : "";
-  let text = `${err.code}: ${redact(message)}`;
-  if (faultString) {
-    // The redactor runs on the faultString half exactly as on the rest: it is
-    // Odoo-derived server text that can embed record names, emails and keys.
-    // An INTERNAL fault (code 1) can carry a full Python traceback here, and
-    // this column is rendered verbatim in every queue group - hence the cap.
-    text = `${text} - ${redact(faultString)}`;
-    if (text.length > 400) {
-      // Cap on a code-point boundary: a lone high surrogate persisted into
-      // last_error can make the SQLite driver reject the write, and the
-      // per-target record() catch would swallow it - the target loses its
-      // error text entirely.
-      let cut = 400;
-      if (text.charCodeAt(cut - 1) >= 0xd800 && text.charCodeAt(cut - 1) <= 0xdbff) cut = 399;
-      text = `${text.slice(0, cut)}…`;
-    }
-  }
-  return { code: err.code, text };
+  const extra = detail || faultLine(err.details.faultCode, err.details.faultString);
+  const message = extra ? `${err.message} - ${extra}` : err.message;
+  return { code: err.code, text: `${err.code}: ${redact(message)}` };
 }
 
 /** Which section of the queue page a row belongs to, or null for none. */

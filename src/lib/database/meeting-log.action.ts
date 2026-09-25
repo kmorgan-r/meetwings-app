@@ -4,6 +4,7 @@ import type {
   MeetingLogListRow,
   MeetingLogStatus,
   MeetingLogTarget,
+  SelectedTarget,
   SelectedTargets,
   TranscriptEntry,
 } from "@/types";
@@ -453,6 +454,27 @@ UPDATE meeting_log_queue SET transcript = ''
   targetToFailed: `UPDATE meeting_log_targets
     SET status = 'failed', last_error_code = ?, last_error = ?
     WHERE id = ? AND status <> 'sent'`,
+  // Points a FAILED target at a different record. The two guards are the whole
+  // safety argument, not decoration:
+  //   status = 'failed'      a `sent` target is immutable, and a `pending` one
+  //                          may have a note in flight;
+  //   message_id IS NULL     message_post never returned an id we stored. A
+  //                          persistence failure AFTER a successful post lands
+  //                          `pending`, never `failed`, so failed + no id proves
+  //                          no note went out.
+  // attachment_id is cleared, not kept: it hangs off the OLD record, and a
+  // create against a deleted res_id succeeds while only message_post faults.
+  // The EXISTS is the parent gate: retryQueueRow only accepts failed/pending, so
+  // rewriting a target under any other parent would change it and then report
+  // "nothing written".
+  retargetFailedTarget: `UPDATE meeting_log_targets
+    SET model = ?, res_id = ?, name = ?, status = 'pending',
+        attachment_id = NULL, message_id = NULL, sent_at = NULL,
+        last_error = NULL, last_error_code = NULL
+    WHERE id = ? AND row_id = ? AND status = 'failed' AND message_id IS NULL
+      AND EXISTS (SELECT 1 FROM meeting_log_queue q
+                  WHERE q.id = meeting_log_targets.row_id
+                    AND q.status IN ('failed', 'pending'))`,
   // Clearing the error columns matters: a stale error rendered beside a green
   // sent target reads as a fresh failure.
   //
@@ -1067,6 +1089,38 @@ export async function assignQueueRow(id: string, targets: SelectedTargets): Prom
     }
   }
   return ok;
+}
+
+export type RetargetVerdict = "ok" | "gone" | "refused" | "duplicate";
+
+/**
+ * Re-points ONE failed target at another record; the parent row is the
+ * caller's to flip (retargetMeetingLogTarget does, via retryQueueRow).
+ *
+ * `duplicate` covers the record ANOTHER target already has and the record this
+ * target is already on. UNIQUE(row_id, model, res_id) would reject the first
+ * as a raw constraint error; the second would clear a possibly valid
+ * attachment and make a second one, so it is refused as well.
+ */
+export async function retargetQueueTarget(
+  rowId: string,
+  targetId: string,
+  next: SelectedTarget
+): Promise<RetargetVerdict> {
+  const row = await getQueueRow(rowId);
+  if (!row) return "gone";
+  if (row.status !== "pending" && row.status !== "failed") return "refused";
+  const targets = await listTargets(rowId);
+  const target = targets.find((t) => t.id === targetId);
+  if (!target) return "gone";
+  if (target.status !== "failed" || target.messageId !== null) return "refused";
+  if (targets.some((t) => t.model === next.model && t.resId === next.resId)) return "duplicate";
+
+  const db = await getDatabase();
+  const res = await db.execute(QUEUE_SQL.retargetFailedTarget, [
+    next.model, next.resId, next.name, targetId, rowId,
+  ]);
+  return (res.rowsAffected ?? 0) > 0 ? "ok" : "refused";
 }
 
 /**

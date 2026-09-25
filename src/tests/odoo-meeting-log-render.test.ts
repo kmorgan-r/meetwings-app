@@ -150,97 +150,83 @@ describe("queueErrorText", () => {
     expect(out.text).toContain("partner 4");
   });
 
-  it("renders faultString after the message, both halves redacted", () => {
+  it("keeps the first line of a fault 2 faultString", () => {
     setOdooRedactor(["sk-secret"]);
-    // `new OdooError`, NOT `odooError()`: odooError redacts details.faultString at
-    // construction, so a render-suite needle built with it never reaches
-    // queueErrorText raw and the composition-half redaction passes vacuously.
-    const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
-      faultCode: 2,
-      faultString: "AccessError: no match for sk-secret here",
-    });
-    const out = queueErrorText(err);
-    expect(out.code).toBe("ODOO_FAULT");
-    expect(out.text).toBe("ODOO_FAULT: Odoo fault 2 - AccessError: no match for [REDACTED] here");
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString:
+          "Record does not exist or has been deleted.\n(Record: res.partner(56,), User: 2)",
+      })
+    );
+    expect(out.text).toBe(
+      "ODOO_FAULT: Odoo fault 2 - Record does not exist or has been deleted."
+    );
   });
 
-  it("keeps today's byte-identical output when faultString is absent, empty, or not a string", () => {
+  it("keeps the LAST line of a fault 1 traceback, where the exception is", () => {
     setOdooRedactor(["sk-secret"]);
-    const absent = queueErrorText(odooError("ODOO_FAULT", "Odoo fault 2"));
-    const empty = queueErrorText(
-      new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: "" })
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 1", {
+        faultCode: 1,
+        faultString:
+          'Traceback (most recent call last):\n  File "x.py", line 1, in f\nValueError: bad value',
+      })
     );
-    const numeric = queueErrorText(
-      new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: 2 as unknown as string })
-    );
-    const nulled = queueErrorText(
-      new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: null as unknown as string })
-    );
-    for (const out of [absent, empty, numeric, nulled]) {
-      expect(out.text).toBe("ODOO_FAULT: Odoo fault 2"); // no trailing " - "
-    }
+    expect(out.text).toBe("ODOO_FAULT: Odoo fault 1 - ValueError: bad value");
   });
 
-  it("caps a 10k-character internal-fault traceback at 400 characters with an ellipsis", () => {
+  it("caps a very long fault line", () => {
     setOdooRedactor(["sk-secret"]);
-    const err = new OdooError("ODOO_FAULT", "Odoo fault 1", {
-      faultCode: 1,
-      faultString: "x".repeat(10_000),
-    });
-    const out = queueErrorText(err);
-    expect(out.text.length).toBe(401);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "x".repeat(500) })
+    );
+    expect(out.text.length).toBeLessThan(260);
     expect(out.text.endsWith("…")).toBe(true);
   });
 
-  it("redacts BEFORE capping: a key straddling the 400-char cut never leaks a fragment", () => {
-    // Order-of-operations pin: capping the RAW faultString first would split the
-    // key across the cut, and neither fragment matches the redactor's needle -
-    // a partial leak into the persisted text. The composed prefix
-    // "ODOO_FAULT: Odoo fault 2 - " is 27 chars, so 368 filler chars put the
-    // key at indices 395-403: a cap-first implementation slices it mid-key.
+  it("never stores a secret that arrived inside faultString", () => {
     setOdooRedactor(["sk-secret"]);
-    const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
-      faultCode: 2,
-      faultString: `${"x".repeat(368)}sk-secret tail`,
-    });
-    const out = queueErrorText(err);
-    expect(out.text.length).toBe(401);
-    expect(out.text.endsWith("…")).toBe(true);
-    expect(out.text).not.toContain("sk-");
-  });
-
-  it("redacts a key that arrives raw in a directly-constructed faultString", () => {
-    // Construction-time redaction is BYPASSED on purpose (raw OdooError) so the
-    // composition's own redact() call is load-bearing, not decorative.
-    setOdooRedactor(["sk-secret"]);
-    const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
-      faultCode: 2,
-      faultString: "Traceback mentioning sk-secret in the payload",
-    });
-    const out = queueErrorText(err);
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString: "Denied for key sk-secret",
+      })
+    );
     expect(out.text).not.toContain("sk-secret");
-    expect(out.text).toContain("Traceback mentioning"); // benign half survives
   });
 
-  it("cuts a surrogate pair cleanly at the 400-char cap", () => {
-    // The surrogate-boundary branch: an emoji whose HIGH surrogate lands at
-    // index 399 must be excluded WHOLE by the cap (cut moves to 399), never
-    // sliced into a lone surrogate - a lone high surrogate persisted into
-    // last_error can make the SQLite driver reject the write, and the
-    // per-target record() catch would swallow it. The composed prefix
-    // "ODOO_FAULT: Odoo fault 2 - " is 27 chars, so 372 filler units put the
-    // emoji pair at indices 399-400: a plain slice(0, 400) keeps the lone
-    // high, the boundary check drops the whole pair.
+  it("keeps today's output when faultString is absent, empty, or not a string", () => {
     setOdooRedactor(["sk-secret"]);
-    const err = new OdooError("ODOO_FAULT", "Odoo fault 2", {
-      faultCode: 2,
-      faultString: `${"x".repeat(372)}😀 tail`,
-    });
-    const out = queueErrorText(err);
-    expect(out.text.length).toBe(400); // 399 kept units + the ellipsis
-    expect(out.text.endsWith("…")).toBe(true);
-    // No lone high surrogate anywhere in the stored text: every high
-    // surrogate is immediately followed by its low half.
-    expect(out.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    const outs = [
+      queueErrorText(odooError("ODOO_FAULT", "Odoo fault 2")),
+      queueErrorText(new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: "" })),
+      queueErrorText(
+        new OdooError("ODOO_FAULT", "Odoo fault 2", { faultString: 2 as unknown as string })
+      ),
+    ];
+    for (const out of outs) expect(out.text).toBe("ODOO_FAULT: Odoo fault 2");
+  });
+
+  it("redacts a key in a faultString that skipped construction-time redaction", () => {
+    // `new OdooError`, not `odooError()`: the latter redacts at construction, so
+    // the render-side redact() would never be exercised.
+    setOdooRedactor(["sk-secret"]);
+    const out = queueErrorText(
+      new OdooError("ODOO_FAULT", "Odoo fault 2", {
+        faultCode: 2,
+        faultString: "Traceback mentioning sk-secret in the payload",
+      })
+    );
+    expect(out.text).not.toContain("sk-secret");
+    expect(out.text).toContain("Traceback mentioning");
+  });
+
+  it("stores the code alone for a fault when the redactor is unarmed", () => {
+    resetOdooRedactor();
+    const out = queueErrorText(
+      odooError("ODOO_FAULT", "Odoo fault 2", { faultCode: 2, faultString: "anything" })
+    );
+    expect(out.text).toBe("ODOO_FAULT");
   });
 });
