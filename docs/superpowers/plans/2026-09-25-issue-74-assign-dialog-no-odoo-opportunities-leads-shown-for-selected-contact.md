@@ -224,13 +224,9 @@ Expected: FAIL — the two whole-domain `toEqual`s, "searches the parent company
 
 - [ ] **Step 3: Implement the new `searchDomain`**
 
-In `src/lib/odoo/opportunities.ts`, add this import after line 1 (`import type { OdooContact, OdooOpportunity } from "@/types";`):
+Do the two edits below in THIS order, or anchor on text: inserting the import first shifts every later line by one, and a literal "replace lines 41-113" would then cut the blank line above the doc comment and leave the old function's closing `}` behind.
 
-```ts
-import { normalizeAddress } from "@/lib/calendar/match-attendees";
-```
-
-Then replace lines 41-113 (the `searchDomain` doc comment through its closing `}`) with:
+First, in `src/lib/odoo/opportunities.ts`, replace lines 41-113 — from the doc comment's opening `/**` followed by ` * The search domain, in Odoo PREFIX notation` through the closing `}` of `export function searchDomain` (line 113; the blank line after it and the `/**` that opens ` * The one live call the picker makes` both stay) — with:
 
 ```ts
 /**
@@ -331,6 +327,12 @@ export function searchDomain(contact: OpportunityLookupContact): XmlRpcValue[] {
 }
 ```
 
+Then add this import directly after line 1 (`import type { OdooContact, OdooOpportunity } from "@/types";`):
+
+```ts
+import { normalizeAddress } from "@/lib/calendar/match-attendees";
+```
+
 - [ ] **Step 4: Run the file to verify it passes**
 
 Run: `npx vitest run src/tests/odoo-opportunities.test.ts`
@@ -379,7 +381,7 @@ git commit -m "fix(odoo): reach a company's deals via child_of, match leads on e
 - Consumes: `searchLeads(client: OdooClient, query: string): Promise<OdooOpportunity[]>`, `LEAD_SEARCH_MIN_CHARS: number` from `@/lib/odoo/opportunities`; the dialog's existing `getClient`, `addTarget`, `removeTarget`, `query`, `replacing`, `atCap`, `targets`, `opportunities`.
 - Produces (later tasks rely on these):
   - `export const LEAD_SEARCH_DEBOUNCE_MS = 350;` in `AssignDialog.tsx`.
-  - `shownOpportunities: OdooOpportunity[] | null` — `opportunities` minus a replaced crm.lead; the deals list renders from it (Task 3 edits its empty branch).
+  - `shownOpportunities: OdooOpportunity[] | null` — `opportunities` minus a replaced crm.lead; the deals list's ROWS render from it, while its empty branch keys on `opportunities.length === 0` (Task 3 edits that empty branch).
   - Module-scope `OpportunityRow({ opp, targets, atCap, onAdd, onRemove })` component.
   - Test file `src/tests/assign-dialog-deals.test.tsx` with module mocks `storage`, `contacts`, `client`, `opportunities`, `meetwings`, and helpers `contact()`, `deal()`, `lead()`, `deferred<T>()`, `props()`, `renderReady()`, `searchBox()`, `search(value)`. Tasks 3 and 4 append `describe` blocks to this file and use these helpers.
 
@@ -404,7 +406,14 @@ const opportunities = vi.hoisted(() => ({
 }));
 ```
 
-and directly after line 329 (`opportunities.fetchOpportunities.mockResolvedValue([]);`) add:
+and, in the top-level `beforeEach`, directly after the two-line anchor below (originally lines 328-329; the replacement above shifts them down — and the second line alone is NOT unique, it recurs at line 2021 inside a test, so anchor on both):
+
+```ts
+  client.createOdooClient.mockReturnValue(CLIENT);
+  opportunities.fetchOpportunities.mockResolvedValue([]);
+```
+
+add:
 
 ```ts
   opportunities.searchLeads.mockResolvedValue([]);
@@ -656,6 +665,8 @@ describe("AssignDialog lead search (issue #74)", () => {
 
   // Review Focus 1. The in-flight search for "carron" lands after the user
   // emptied the box; painting it would show results for a query that is gone.
+  // Resolved INSIDE the new query's debounce window - before its own reset
+  // has run - which is the window a token bumped only by the timer leaves open.
   it("drops a search that lands after the box was cleared", async () => {
     const gate = deferred<OdooOpportunity[]>();
     opportunities.searchLeads.mockReturnValue(gate.promise);
@@ -664,14 +675,32 @@ describe("AssignDialog lead search (issue #74)", () => {
     search("carron");
     await waitFor(() => expect(opportunities.searchLeads).toHaveBeenCalledTimes(1));
     search("");
-    await waitFor(() => expect(screen.queryByTestId("lead-search-section")).toBeNull());
-
     await act(async () => {
       gate.resolve([lead()]);
     });
 
     expect(screen.queryByText("Partnership with ECS")).toBeNull();
-    expect(screen.queryByTestId("lead-search-section")).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("lead-search-section")).toBeNull());
+    expect(screen.queryByText("Partnership with ECS")).toBeNull();
+  });
+
+  // The REJECT path too, for the reason meeting-log-page.test.tsx's "is
+  // token-ordered on the REJECT path too" gives for the contact lookup: a stale
+  // failure must not paint over a box that has moved on.
+  it("drops a search failure that lands after the box was cleared", async () => {
+    const gate = deferred<OdooOpportunity[]>();
+    opportunities.searchLeads.mockReturnValue(gate.promise);
+    await renderReady();
+
+    search("carron");
+    await waitFor(() => expect(opportunities.searchLeads).toHaveBeenCalledTimes(1));
+    search("");
+    await act(async () => {
+      gate.reject(new Error("crm.lead blew up"));
+    });
+
+    expect(screen.queryByText(/Search failed/)).toBeNull();
+    await waitFor(() => expect(screen.queryByTestId("lead-search-section")).toBeNull());
   });
 
   it("stages a searched lead as a crm.lead target, worded neutrally", async () => {
@@ -825,6 +854,25 @@ describe("AssignDialog lead search (issue #74)", () => {
       expect(screen.queryByText("Partnership with ECS")).toBeNull();
     });
 
+    // The invariant: "No open opportunities or leads" is a claim about the
+    // CRM. Odoo just returned one - it is only hidden because it is the one
+    // being replaced - so the claim would be false.
+    it("never claims no deals when the only one is the lead being replaced", async () => {
+      opportunities.fetchOpportunities.mockResolvedValue([
+        lead({ partnerId: 7, partnerName: "Ada Lovelace" }),
+      ]);
+      await renderReady(props({ replacing: DEAD_LEAD }));
+
+      await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+      await waitFor(() => expect(opportunities.fetchOpportunities).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(screen.queryByText("Looking up opportunities & leads…")).toBeNull()
+      );
+
+      expect(screen.queryByText("No open opportunities or leads for this contact.")).toBeNull();
+      expect(screen.queryByText("Partnership with ECS")).toBeNull();
+    });
+
     it("keeps one choice: a second searched lead replaces the first", async () => {
       opportunities.searchLeads.mockResolvedValue([
         lead({ id: 91, name: "Solar retrofit" }),
@@ -850,9 +898,11 @@ describe("AssignDialog lead search (issue #74)", () => {
 - [ ] **Step 3: Run the new file to verify it fails**
 
 Run: `npx vitest run src/tests/assign-dialog-deals.test.tsx`
-Expected: FAIL — the file cannot import `LEAD_SEARCH_DEBOUNCE_MS` from `AssignDialog` (it is `undefined`), and every search test fails to find `Leads & opportunities` / the lead rows.
+Expected: FAIL — `LEAD_SEARCH_DEBOUNCE_MS` is not yet exported from `AssignDialog` (it imports as `undefined`), nothing ever calls `searchLeads`, and every test that waits for a `searchLeads` call, `Leads & opportunities`, a lead row or `Search failed` fails; "never claims no deals when the only one is the lead being replaced" fails because the unfiltered list still shows "Partnership with ECS". Exactly ONE passes already: "never searches after the dialog closes with a keystroke pending" asserts only an absence, and nothing searches yet. That is expected — Step 6's mutant S1 is what proves it pins the timer cleanup.
 
 - [ ] **Step 4: Implement the search in `AssignDialog.tsx`**
+
+Line numbers in 4a-4i are the file's BEFORE this step; each earlier sub-step shifts the later ones. Anchor every edit on the quoted text, never on the number.
 
 4a. Replace the import on line 21:
 
@@ -946,6 +996,8 @@ function OpportunityRow({
    * Its OWN token, not `selectionToken`: searches are superseded by later
    * searches, not by selections, and picking a contact while a search is in
    * flight must not discard the results the user is about to pick from.
+   * Bumped by the lead search alone - the debounce effect on every query
+   * change, and `onSearchLeads` - never by `selectContact`.
    */
   const leadSearchToken = useRef(0);
 ```
@@ -996,8 +1048,14 @@ function OpportunityRow({
    * contacts and searches Odoo's leads. The cleanup is what makes this a
    * debounce rather than a delay, and what stops a pending timer outliving
    * the dialog.
+   *
+   * One step past the overlay: the token is bumped HERE, on every query
+   * change, not only when the timer fires. Otherwise a response landing inside
+   * the 350 ms window passes `onSearchLeads`' token check and paints results
+   * for a query no longer in the box. A ref write - no setState in the effect.
    */
   useEffect(() => {
+    leadSearchToken.current += 1;
     const timer = setTimeout(() => {
       void onSearchLeads(query);
     }, LEAD_SEARCH_DEBOUNCE_MS);
@@ -1058,17 +1116,17 @@ function OpportunityRow({
             )}
 ```
 
-4i. Replace the deals list (lines 766-803, from `{opportunityError === null && opportunities !== null && (` through its closing `)}`) with:
+4i. Replace the deals list (lines 766-803, from `{opportunityError === null && opportunities !== null && (` through its closing `)}`) with the block below. The empty branch keys on `opportunities` — what Odoo RETURNED — never on `shownOpportunities`: when the contact's only open deal is the lead being replaced, Odoo did return one, and "No open opportunities" would be a false claim about the CRM (the spec's invariant). That case renders an empty list instead.
 
 ```tsx
-            {opportunityError === null && shownOpportunities !== null && (
-              shownOpportunities.length === 0 ? (
+            {opportunityError === null && opportunities !== null && (
+              opportunities.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
                   No open opportunities or leads for this contact.
                 </p>
               ) : (
                 <div className="flex flex-col gap-1">
-                  {shownOpportunities.map((opp) => (
+                  {(shownOpportunities ?? []).map((opp) => (
                     <OpportunityRow
                       key={opp.id}
                       opp={opp}
@@ -1100,6 +1158,9 @@ Apply each to `AssignDialog.tsx`, run `npx vitest run src/tests/assign-dialog-de
 | S4 | in `onSearchLeads`' `catch`, replace `setLeadSearchError(...)` with `setOpportunityError(reportOdooError(err, "search leads").code)` | "shows a failed search as its own error…" |
 | S5 | `shownLeadResults = leadResults` (drop the replaced-lead filter) | "does not offer the lead it is replacing, in either list" |
 | S6 | short-query branch sets `setLeadResults([])` instead of `null` | "does not search below two characters…" |
+| S7 | delete `leadSearchToken.current += 1;` from the debounce EFFECT (keep the one in `onSearchLeads`) | "drops a search that lands after the box was cleared" |
+| S8 | delete `if (token !== leadSearchToken.current) return;` from `onSearchLeads`' `catch` branch | "drops a search failure that lands after the box was cleared" |
+| S9 | key the deals list's empty branch on `shownOpportunities.length === 0` instead of `opportunities.length === 0` | "never claims no deals when the only one is the lead being replaced" |
 
 After the last revert, re-run: Expected PASS.
 
@@ -1127,7 +1188,7 @@ git commit -m "feat(meetings): search leads from the assign dialog" -m "Co-Autho
 - Test: `src/tests/assign-dialog-deals.test.tsx` (append two `describe` blocks)
 
 **Interfaces:**
-- Consumes: from Task 2 — `shownOpportunities`, and the test helpers `renderReady()`, `deal()`, `contact()`, module mocks `opportunities`/`contacts`.
+- Consumes: from Task 2 — the deals list's empty branch (keyed on `opportunities.length === 0`, rows from `shownOpportunities`), and the test helpers `renderReady()`, `deal()`, `contact()`, module mocks `opportunities`/`contacts`.
 - Produces: no new names. Behaviour: a contact row's `onAdd` calls `addTarget(t)` and then `selectContact(c)` (unless `selected?.id === c.id`), returning `addTarget`'s promise.
 
 - [ ] **Step 1: Append the failing tests**
@@ -1281,7 +1342,7 @@ with:
 3c. In the deals list from Task 2 Step 4i, replace the empty branch:
 
 ```tsx
-              shownOpportunities.length === 0 ? (
+              opportunities.length === 0 ? (
                 <p className="text-xs text-muted-foreground">
                   No open opportunities or leads for this contact.
                 </p>
@@ -1291,7 +1352,7 @@ with:
 with:
 
 ```tsx
-              shownOpportunities.length === 0 ? (
+              opportunities.length === 0 ? (
                 <>
                   <p className="text-xs text-muted-foreground">
                     No open opportunities or leads for this contact.
@@ -1532,10 +1593,14 @@ git commit -m "feat(meetings): log each assign-dialog deal lookup, ids and count
   Expected: PASS. The last two are untouched overlay suites, run to prove the overlay is unchanged.
 - [ ] Run: `npm run lint` — Expected: no new errors.
 - [ ] Run: `npx tsc --noEmit` — Expected: no output (exit 0).
+- [ ] Confirm no OTHER wholesale mock is starved by the new exports or the new import. Use the Grep tool on `src/tests` for `vi\.mock\("@/lib/odoo/opportunities"` and for `vi\.mock\("@/lib/calendar/match-attendees"`.
+  Expected (as of 2026-09-25): exactly one hit, `src/tests/meeting-log-page.test.tsx:91`, already updated in Task 2 Step 1, and none for `match-attendees`. Any new hit: add `searchLeads`, `LEAD_SEARCH_LIMIT` and `LEAD_SEARCH_MIN_CHARS` to that factory (or `normalizeAddress`, for a `match-attendees` mock) before going on. The five `vi.mock("@/lib/odoo", ...)` barrel mocks (`odoo-settings-page`, `odoo-target-create-contact`, `odoo-target-new-chat-entry-points`, `overlay-minimize-picker-dismiss`, `useOdooTarget`) do not render AssignDialog; the full run below covers them.
+- [ ] Run the FULL suite once: `npx vitest run`
+  Expected: PASS, except for the known full-run timeouts that also fail on `main` and pass alone — `overlay-minimize-keeps-mounted`, `meeting-log-page`'s AssignDialog tests, and `odoo-settings-page`'s calendar seed. Re-run any failing file alone (`npx vitest run <file>`). A failure that persists alone, or that is in any other file, is this change's to fix.
 
 ## Reporter verification (manual, not a task — before closing #74)
 
-The release build has no webview devtools (no `devtools` feature in `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`), so the `[assign-dialog]` line is read from a dev build, the same way #72's `[odoo-targets]` lines are: run `npm run tauri dev`, open the meetings page's devtools console, open Assign on a queued meeting, and `+ add` the contact whose deals were missing. Deals now showing closes C0/C1/C2; `rows: 0` persisting with `isCompany`/`hasEmail` recorded is the input for the C3 / record-rule follow-ups.
+The spec leaves the log line ungated because "the reporter runs the release build". That holds only for a build that can open a console. The release build has no webview devtools (no `devtools` feature in `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json`), so in practice the line is read from a dev build, as #72's `[odoo-targets]` lines are. Leaving it ungated is still right: it costs nothing, and the line is present in any build that can show a console. So verification needs a dev build. Run `npm run tauri dev`, open the meetings page's devtools console, open Assign on a queued meeting, and `+ add` the contact whose deals were missing. Deals now showing closes C0/C1/C2. If `rows: 0` persists, the `isCompany`/`hasEmail` values it records are the input for the C3 / record-rule follow-ups. Say this in the PR description too (see below), so nobody expects the reporter to read the line from the release build.
 
 ## Notes for the PR description
 
@@ -1543,3 +1608,5 @@ Two behaviour choices were made hands-off during automated spec review, between 
 
 1. **`+ add` on a contact also previews its deals** (C0). The alternative was to leave the UI and only document the candidate; there was no evidence to rule C0 out.
 2. **The lead search is driven by the existing "Search contacts" box**, not a second input inside the deals section — matching the overlay, and reachable with no contact selected.
+
+Also state: the `[assign-dialog]` line is ungated, but the release build cannot open a console, so reading it needs `npm run tauri dev` (see Reporter verification).
