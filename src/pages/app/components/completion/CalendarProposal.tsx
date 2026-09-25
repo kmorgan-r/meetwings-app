@@ -37,10 +37,12 @@ const REGION_CLASS = "h-28 overflow-y-auto border-b pb-2 flex flex-col gap-1";
 const MAX_COMPANY_ROWS = 5;
 
 /**
- * The three codes where re-running the SAME call is the correct action: a
- * transient network failure, a rate limit, or a response Graph sent this time
- * that happened to be unparseable. Every other code gets a settings pointer
- * instead - see `CALENDAR_SETTINGS_REMEDY` below.
+ * The codes where re-running the SAME call is the correct action: a
+ * transient network failure, a rate limit, a response Graph sent this time
+ * that happened to be unparseable, or a keychain read that failed this time
+ * (issue #73 - it says nothing about the connection, and the status path's
+ * retry re-reads it). Every other code gets a settings pointer instead - see
+ * `CALENDAR_SETTINGS_REMEDY` below.
  *
  * The ONE list both the runtime check and `CALENDAR_SETTINGS_REMEDY`'s key
  * type derive from - see that constant's own comment for why a second,
@@ -50,6 +52,7 @@ const RETRYABLE_CODES = [
   "GRAPH_NETWORK",
   "GRAPH_THROTTLED",
   "GRAPH_BAD_RESPONSE",
+  "GRAPH_NO_KEYCHAIN",
 ] as const satisfies readonly GraphErrorCode[];
 type RetryableGraphErrorCode = (typeof RETRYABLE_CODES)[number];
 const RETRYABLE_CODE_SET: ReadonlySet<GraphErrorCode> = new Set(RETRYABLE_CODES);
@@ -60,12 +63,13 @@ const RETRYABLE_CODE_SET: ReadonlySet<GraphErrorCode> = new Set(RETRYABLE_CODES)
  * at the boundary; this table exists so the region does not become the one
  * place that rule gets relaxed for the sake of being more specific.
  *
- * Retrying cannot fix any of these. GRAPH_AUTH_EXPIRED reaches here only
- * after mod.rs's refresh_and_adopt has already deleted the stored refresh
- * token (the AUTH_EXPIRED arm), so a second attempt just re-derives
- * GRAPH_NOT_CONNECTED - "Try again" promises a fix it cannot deliver.
- * GRAPH_NOT_CONNECTED, GRAPH_CONSENT_REQUIRED and GRAPH_NO_KEYCHAIN are
- * milder versions of the same gap. GRAPH_AUTH_REJECTED (a rejected stored
+ * Retrying cannot fix any of these. GRAPH_AUTH_EXPIRED is Entra's
+ * invalid_grant: mod.rs keeps the stored refresh token until three
+ * consecutive confirmed failures (issue #73), but a second attempt just
+ * re-redeems the same dead token and re-derives the same invalid_grant -
+ * "Try again" promises a fix it cannot deliver. GRAPH_NOT_CONNECTED and
+ * GRAPH_CONSENT_REQUIRED are milder versions of the same gap.
+ * GRAPH_AUTH_REJECTED (a rejected stored
  * config) and GRAPH_AUTH_CANCELLED (not reachable from this fetch path today
  * - it is specific to the interactive graph_connect flow, not a background
  * token refresh) get the same treatment for the same reason: nothing this
@@ -97,11 +101,23 @@ const CALENDAR_SETTINGS_REMEDY: Record<
   GRAPH_AUTH_CANCELLED:
     "The calendar connection was not completed. Reconnect from the Odoo page's Calendar section.",
   GRAPH_AUTH_EXPIRED:
-    "Your Microsoft sign-in expired, and the connection was reset. Reconnect from the Odoo page's Calendar section.",
+    "Your Microsoft sign-in expired. Reconnect from the Odoo page's Calendar section.",
   GRAPH_AUTH_REJECTED:
     "This calendar connection's settings are invalid. Reconnect from the Odoo page's Calendar section.",
+};
+
+/**
+ * Rendered under "Try again" for the retryable codes that can also be
+ * PERSISTENT. keychain.rs maps every non-NoEntry keychain error to
+ * GRAPH_NO_KEYCHAIN, access-denied included, and a retryable code renders no
+ * remedy line - so without this, a keychain that keeps failing shows a
+ * "Try again" that never works and nothing pointing at the reconnect that
+ * does (graph_connect degrades to session-only when the keychain is
+ * unusable). Static copy only, the same rule as the table above.
+ */
+const RETRYABLE_HINT: Partial<Record<RetryableGraphErrorCode, string>> = {
   GRAPH_NO_KEYCHAIN:
-    "The saved calendar connection could not be read from this device's secure storage. Reconnect from the Odoo page's Calendar section.",
+    "Couldn't read the saved calendar connection from this device's secure storage. If this keeps happening, reconnect from the Odoo page's Calendar section.",
 };
 
 /**
@@ -646,9 +662,15 @@ export function CalendarProposal({
     // The code only. Subjects, addresses and tokens were never put into the
     // error in the first place - see src/lib/calendar/errors.ts.
     const retryable = RETRYABLE_CODE_SET.has(state.code);
+    // Cast for the same reason the remedy lookup below casts: `retryable` is a
+    // Set.has boolean, not a type guard.
+    const hint = retryable
+      ? RETRYABLE_HINT[state.code as RetryableGraphErrorCode]
+      : undefined;
     return region(
       <>
         <p className="text-[11px] text-destructive">{state.code}</p>
+        {hint && <p className="text-[11px] text-muted-foreground">{hint}</p>}
         {!retryable && (
           <p className="text-[11px] text-muted-foreground">
             {
