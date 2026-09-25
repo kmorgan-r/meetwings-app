@@ -963,6 +963,19 @@ describe("queue-page per-target actions", () => {
       expect((await listTargets("r1"))[0]).toMatchObject({ resId: 57 });
     });
 
+    it("reports moved-unknown, not failed, when the parent flip throws after the target changed", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+      const t = (await listTargets("r1"))[0];
+      action.retryQueueRow.mockRejectedValueOnce(new Error("database is locked"));
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "moved-unknown" });
+      expect(push.pushQueuedRow).not.toHaveBeenCalled();
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 57 });
+    });
+
     it("reports duplicate, pushes nothing, and leaves the target alone", async () => {
       seedRow({ id: "r1", status: "failed" });
       seedTargets("r1", [

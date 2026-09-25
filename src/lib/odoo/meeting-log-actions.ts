@@ -489,8 +489,13 @@ export async function retargetMeetingLogTarget(
       // Unlike retryTarget, the target write comes FIRST and is neither
       // idempotent nor recoverable, so retargetQueueTarget gates on the parent
       // status before writing. This CAS then flips failed/pending -> pending so
-      // the push below (and the sweep) picks the target up.
-      seen.parentFlipped = await retryQueueRow(rowId);
+      // the push below (and the sweep) picks the target up. A throw here is
+      // caught: the target is already rewritten, so `failed` ("nothing
+      // changed") would be a lie; `false` maps to moved-unknown below.
+      seen.parentFlipped = await retryQueueRow(rowId).catch((err) => {
+        console.warn("[Odoo] parent flip after retarget failed:", err);
+        return false;
+      });
       return seen.parentFlipped;
     },
     deps

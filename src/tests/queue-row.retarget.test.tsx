@@ -115,6 +115,27 @@ describe("QueueRow retarget", () => {
     expect(within(group).queryByRole("button", { name: /choose a different contact/i })).toBeNull();
   });
 
+  // A retarget rewrites model/res_id/name/attachment_id/message_id under the
+  // SAME target id. The same `p` is rerendered so the memo comparator is the
+  // only thing that can let the change through (fresh callbacks would not).
+  it("re-renders a retargeted target onto a same-named record", async () => {
+    const p = props([target()]);
+    const { rerender } = render(<QueueRow {...p} />);
+    await expand();
+    rerender(<QueueRow {...p} row={{ ...p.row, targets: [target({ resId: 57 })] }} />);
+    expect(screen.getByRole("group", { name: "Andres Vergara (#57)" })).toBeVisible();
+  });
+
+  it("offers Remove once a retarget clears the attachment", async () => {
+    const p = props([target({ attachmentId: 3265 })]);
+    const { rerender } = render(<QueueRow {...p} />);
+    const group = await expand();
+    expect(within(group).queryByRole("button", { name: /^remove$/i })).toBeNull();
+    rerender(<QueueRow {...p} row={{ ...p.row, targets: [target()] }} />);
+    const after = screen.getByRole("group", { name: /Andres Vergara/ });
+    expect(within(after).getByRole("button", { name: /^remove$/i })).toBeVisible();
+  });
+
   it("disables it for a row that belongs to another database", async () => {
     render(<QueueRow {...props([target()], { instance: "http://elsewhere|odoo" })} />);
     const group = await expand();

@@ -620,12 +620,13 @@ function sameTranscript(a: TranscriptView | null, b: TranscriptView | null): boo
 }
 
 /**
- * Length plus, per target, `id`/`status`/`lastError` - the same shape as
- * `sameTranscript` above. `name` itself is not compared: it is written once
- * at insert (meeting-log.action.ts's `insertTarget`) and never updated after,
- * so an unchanged `id` already proves an unchanged `name`.
+ * Length plus, per target, every column the row renders from - the same shape
+ * as `sameTranscript` above. An unchanged `id` proves nothing else: a retarget
+ * (QUEUE_SQL.retargetFailedTarget) rewrites model/res_id/name/attachment_id/
+ * message_id under the SAME target id, and `attachmentId`/`messageId` gate the
+ * Remove button.
  *
- * The RESOLVED name is compared instead, via `targetNameOf(t, contacts)` -
+ * The name is compared RESOLVED, via `targetNameOf(t, contacts)` -
  * NOT `contacts` itself by reference. `contacts` is rebuilt into a brand-new
  * Map on every reload (index.tsx's `reload`), so comparing it directly would
  * fail on every row every time, the exact disaster this comparator exists to
@@ -648,7 +649,11 @@ function sameTargets(
     const other = listB[i];
     return (
       t.id === other.id &&
+      t.model === other.model &&
+      t.resId === other.resId &&
       t.status === other.status &&
+      t.attachmentId === other.attachmentId &&
+      t.messageId === other.messageId &&
       t.lastError === other.lastError &&
       targetNameOf(t, contactsA) === targetNameOf(other, contactsB)
     );
