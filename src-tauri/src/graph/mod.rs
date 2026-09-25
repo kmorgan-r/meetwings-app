@@ -694,18 +694,18 @@ pub async fn graph_connect(
 pub async fn graph_disconnect(app: AppHandle) -> Result<(), String> {
     let state = app.state::<GraphState>();
 
-    // Routed through the same `clear_and_delete` sequence
-    // `record_invalid_grant_with` uses at the threshold, rather than
-    // hand-copied: the two differ only in that
-    // this one also resets `session_only` to `false` afterwards, and that
-    // reset is a no-op on every path that matters. On the session-only branch
-    // `forget_refresh_token_with` returns before any delete, so there is no
-    // delete for the reset to race; on the normal branch the flag is already
-    // `false`, so setting it again after `delete()` rather than before is
-    // unobservable. Doing it after (rather than threading it through the seam)
-    // keeps the seam's contract - clear memory, then run `delete` or not -
-    // free of a disconnect-specific detail the invalid_grant threshold path
-    // has no use for.
+    // Routed through `forget_refresh_token_with`, whose `clear_and_delete`
+    // body `record_invalid_grant_with` also runs at the threshold, rather
+    // than hand-copied: the two uses of `clear_and_delete` differ only in
+    // that this one also resets `session_only` to `false` afterwards, and
+    // that reset is a no-op on every path that matters. On the session-only
+    // branch `forget_refresh_token_with` returns before any delete, so there
+    // is no delete for the reset to race; on the normal branch the flag is
+    // already `false`, so setting it again after `delete()` rather than
+    // before is unobservable. Doing it after (rather than threading it
+    // through the seam) keeps the seam's contract - clear memory, then run
+    // `delete` or not - free of a disconnect-specific detail the
+    // invalid_grant threshold path has no use for.
     let result = forget_refresh_token_with(&state, keychain::delete_refresh_token);
     *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) = false;
     result
@@ -1022,8 +1022,8 @@ mod tests {
     /// nowhere) and worse on a developer machine that DOES have a stored
     /// credential: the same missing early return would make `cargo test`
     /// delete it for real. The spy below makes "untouched" an assertion, and -
-    /// unlike the wrapper - can never reach a real keychain no matter what this
-    /// test does or doesn't catch.
+    /// unlike a call with the real `keychain::delete_refresh_token` - can never
+    /// reach a real keychain no matter what this test does or doesn't catch.
     #[test]
     fn forgetting_on_the_session_only_path_touches_no_keychain_and_clears_memory() {
         let state = GraphState::default();

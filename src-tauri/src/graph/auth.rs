@@ -1173,7 +1173,7 @@ mod tests {
         assert_eq!(result.err().as_deref(), Some(NETWORK));
     }
 
-    /// The status/body shapes `only_invalid_grant_means_the_refresh_token_is_dead`
+    /// The status/body shapes `only_invalid_grant_maps_to_auth_expired`
     /// doesn't already cover: client-error statuses other than the classified
     /// body still fall through to AUTH_REJECTED, both consent-adjacent error
     /// strings map to CONSENT_REQUIRED, and valid JSON with no `"error"` key
