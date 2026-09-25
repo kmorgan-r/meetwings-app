@@ -18,7 +18,12 @@ import { createOrAdoptContact, type CreateOrAdoptOutcome } from "@/lib/odoo/crea
 import { reportOdooError } from "@/lib/odoo/errors";
 import { MAX_TARGETS } from "@/lib/odoo/meeting-log";
 import type { ProviderConfigLike } from "@/lib/odoo/meeting-log-actions";
-import { fetchOpportunities, kindLabel } from "@/lib/odoo/opportunities";
+import {
+  fetchOpportunities,
+  kindLabel,
+  LEAD_SEARCH_MIN_CHARS,
+  searchLeads,
+} from "@/lib/odoo/opportunities";
 import { requireOdooConfig } from "@/lib/storage/odoo-config.storage";
 import type {
   MeetingLogListRow,
@@ -64,6 +69,13 @@ import { meetingDateOf } from "./QueueRow";
  * `assignQueueRow`, and a copy here could drift from it.
  */
 const MAX_CONTACT_ROWS = 100;
+
+/**
+ * The overlay picker's lead-search debounce (`ContactPicker.LEAD_SEARCH_DEBOUNCE_MS`),
+ * restated rather than imported for the reason MAX_CONTACT_ROWS above gives.
+ * One live XML-RPC round trip per keystroke is what it exists to prevent.
+ */
+export const LEAD_SEARCH_DEBOUNCE_MS = 350;
 
 /** What Confirm hands up. */
 export interface AssignPayload {
@@ -143,6 +155,51 @@ function joinWithAnd(items: string[]): string {
   return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
 }
 
+/**
+ * One crm.lead row, shared by the selected contact's deals and the lead
+ * search, so the two lists can never drift apart in what they say about a
+ * record. The kind is spelled out on the row (`kindLabel`); the destination
+ * sentence words it neutrally instead - see `describeTargetForSentence`.
+ */
+function OpportunityRow({
+  opp,
+  targets,
+  atCap,
+  onAdd,
+  onRemove,
+}: {
+  opp: OdooOpportunity;
+  targets: SelectedTargets;
+  atCap: boolean;
+  onAdd: (t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>;
+  onRemove: (model: SelectedTarget["model"], resId: number) => Promise<void>;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="flex-1 text-left text-xs">
+        <span className="text-muted-foreground">{`${kindLabel(opp.type)} · `}</span>
+        {opp.name}
+        {opp.stageName && <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>}
+        {/* Partner, or an unlinked lead free text - see ContactPicker. */}
+        {(opp.partnerName ?? opp.contactName ?? opp.email) && (
+          <span className="text-muted-foreground">
+            {` · ${opp.partnerName ?? opp.contactName ?? opp.email}`}
+          </span>
+        )}
+      </span>
+      <AddToggle
+        model="crm.lead"
+        resId={opp.id}
+        name={opp.name}
+        targets={targets}
+        atCap={atCap}
+        onAdd={onAdd}
+        onRemove={onRemove}
+      />
+    </div>
+  );
+}
+
 /** The Company filter's render cap - the same five CalendarProposal.tsx uses
  * for its own version of this control, restated rather than imported (see
  * MAX_CONTACT_ROWS above for why). */
@@ -220,6 +277,15 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
   const [opportunities, setOpportunities] = useState<OdooOpportunity[] | null>(null);
   const [opportunityError, setOpportunityError] = useState<string | null>(null);
   const [isLookingUp, setIsLookingUp] = useState(false);
+  /**
+   * The lead SEARCH - a different read from the opportunity lookup, with its
+   * own state for the reason `useOdooTarget.ts:218-227` gives: sharing one
+   * error slot would paint a failed search as a failed lookup under a contact
+   * the user already picked successfully.
+   */
+  const [leadResults, setLeadResults] = useState<OdooOpportunity[] | null>(null);
+  const [leadSearchError, setLeadSearchError] = useState<string | null>(null);
+  const [isSearchingLeads, setIsSearchingLeads] = useState(false);
   /** Task 14: the staged multi-target list. Nothing here is persisted until Confirm. */
   const [targets, setTargets] = useState<SelectedTargets>([]);
   /**
@@ -262,6 +328,14 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
 
   const clientRef = useRef<Promise<OdooClient> | null>(null);
   const selectionToken = useRef(0);
+  /**
+   * Its OWN token, not `selectionToken`: searches are superseded by later
+   * searches, not by selections, and picking a contact while a search is in
+   * flight must not discard the results the user is about to pick from.
+   * Bumped by the lead search alone - the debounce effect on every query
+   * change, and `onSearchLeads` - never by `selectContact`.
+   */
+  const leadSearchToken = useRef(0);
 
   /**
    * ONE client per dialog session, held as a PROMISE.
@@ -376,6 +450,63 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
     [getClient]
   );
 
+  /**
+   * NEVER REJECTS - the debounce effect below calls it from a timer, where a
+   * rejection is unhandled by construction. Mirrors `useOdooTarget`'s own
+   * `onSearchLeads`.
+   */
+  const onSearchLeads = useCallback(
+    async (q: string) => {
+      leadSearchToken.current += 1;
+      const token = leadSearchToken.current;
+      const trimmed = q.trim();
+
+      if (trimmed.length < LEAD_SEARCH_MIN_CHARS) {
+        // Not an empty RESULT - no search at all. `null` renders as "nothing
+        // asked for yet"; [] would say "No matches" for a query nobody ran.
+        setLeadResults(null);
+        setLeadSearchError(null);
+        setIsSearchingLeads(false);
+        return;
+      }
+
+      setLeadSearchError(null);
+      setIsSearchingLeads(true);
+      try {
+        const client = await getClient();
+        const rows = await searchLeads(client, trimmed);
+        if (token !== leadSearchToken.current) return;
+        setLeadResults(rows);
+        setIsSearchingLeads(false);
+      } catch (err) {
+        if (token !== leadSearchToken.current) return;
+        setLeadSearchError(reportOdooError(err, "search leads").code);
+        setIsSearchingLeads(false);
+      }
+    },
+    [getClient]
+  );
+
+  /**
+   * The live half of the "Search contacts" box, exactly as the overlay picker
+   * drives its own (`ContactPicker.tsx:280-285`): one box filters the cached
+   * contacts and searches Odoo's leads. The cleanup is what makes this a
+   * debounce rather than a delay, and what stops a pending timer outliving
+   * the dialog.
+   *
+   * One step past the overlay: the token is bumped HERE, on every query
+   * change, not only when the timer fires. Otherwise a response landing inside
+   * the 350 ms window passes `onSearchLeads`' token check and paints results
+   * for a query no longer in the box. A ref write - no setState in the effect.
+   */
+  useEffect(() => {
+    leadSearchToken.current += 1;
+    const timer = setTimeout(() => {
+      void onSearchLeads(query);
+    }, LEAD_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, onSearchLeads]);
+
   /** Company filter options for the "+ New contact" form - the same shape
    * CalendarProposal.tsx's own `companyOptions` uses. */
   const companyOptions = useMemo(() => {
@@ -425,6 +556,15 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
     preflight.state === "ready" && !viaMeetwingsAPI && providerConfig === null;
 
   const atCap = !replacing && targets.length >= MAX_TARGETS;
+
+  /**
+   * The crm.lead being replaced, if any - dead or wrong by definition, so it
+   * is offered in neither list, exactly as `visible` above drops a replaced
+   * res.partner.
+   */
+  const replacedLeadId = replacing?.model === "crm.lead" ? replacing.resId : null;
+  const shownOpportunities = opportunities?.filter((o) => o.id !== replacedLeadId) ?? null;
+  const shownLeadResults = leadResults?.filter((o) => o.id !== replacedLeadId) ?? null;
 
   /**
    * Purely LOCAL staging - no database write, unlike `useOdooTarget`'s own
@@ -733,6 +873,42 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                 ))
               )}
             </div>
+
+            {/*
+              THE ONLY WAY TO REACH AN UNCONVERTED LEAD from this dialog: it has
+              no res.partner, so there is no contact to select first - which is
+              why this lives here and not in the `selected !== null` section.
+            */}
+            {(isSearchingLeads || leadSearchError !== null || leadResults !== null) && (
+              <div className="flex flex-col gap-1 border-t pt-2" data-testid="lead-search-section">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Leads &amp; opportunities
+                </p>
+                {leadSearchError !== null ? (
+                  <p className="text-xs text-destructive">{`Search failed (${leadSearchError}).`}</p>
+                ) : isSearchingLeads ? (
+                  <p className="text-xs text-muted-foreground">Searching…</p>
+                ) : shownLeadResults !== null && shownLeadResults.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No matches</p>
+                ) : (
+                  <div
+                    className="flex max-h-40 flex-col gap-1 overflow-y-auto"
+                    data-testid="lead-search-results"
+                  >
+                    {(shownLeadResults ?? []).map((lead) => (
+                      <OpportunityRow
+                        key={lead.id}
+                        opp={lead}
+                        targets={targets}
+                        atCap={atCap}
+                        onAdd={addTarget}
+                        onRemove={removeTarget}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -770,33 +946,15 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                 </p>
               ) : (
                 <div className="flex flex-col gap-1">
-                  {opportunities.map((opp) => (
-                    <div key={opp.id} className="flex items-center gap-1.5">
-                      <span className="flex-1 text-left text-xs">
-                        <span className="text-muted-foreground">
-                          {`${kindLabel(opp.type)} · `}
-                        </span>
-                        {opp.name}
-                        {opp.stageName && (
-                          <span className="text-muted-foreground">{` · ${opp.stageName}`}</span>
-                        )}
-                        {/* Partner, or an unlinked lead free text - see ContactPicker. */}
-                        {(opp.partnerName ?? opp.contactName ?? opp.email) && (
-                          <span className="text-muted-foreground">
-                            {` · ${opp.partnerName ?? opp.contactName ?? opp.email}`}
-                          </span>
-                        )}
-                      </span>
-                      <AddToggle
-                        model="crm.lead"
-                        resId={opp.id}
-                        name={opp.name}
-                        targets={targets}
-                        atCap={atCap}
-                        onAdd={addTarget}
-                        onRemove={removeTarget}
-                      />
-                    </div>
+                  {(shownOpportunities ?? []).map((opp) => (
+                    <OpportunityRow
+                      key={opp.id}
+                      opp={opp}
+                      targets={targets}
+                      atCap={atCap}
+                      onAdd={addTarget}
+                      onRemove={removeTarget}
+                    />
                   ))}
                 </div>
               )

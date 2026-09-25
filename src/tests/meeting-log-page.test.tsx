@@ -82,7 +82,13 @@ vi.mock("@/lib/odoo/client", () => client);
 
 const opportunities = vi.hoisted(() => ({
   fetchOpportunities: vi.fn(),
+  // AssignDialog's lead search (issue #74). Both are read on every dialog
+  // open - the debounce effect compares against LEAD_SEARCH_MIN_CHARS - and
+  // vitest throws on a read of any export this factory omits.
+  searchLeads: vi.fn(),
   OPPORTUNITY_LIMIT: 20,
+  LEAD_SEARCH_LIMIT: 10,
+  LEAD_SEARCH_MIN_CHARS: 2,
   // NOT a spy. It is a pure string function the dialog calls during render, and
   // a `vi.fn()` returning undefined renders every row with a blank kind - the
   // one thing these rows now have to state.
@@ -327,6 +333,7 @@ beforeEach(() => {
   );
   client.createOdooClient.mockReturnValue(CLIENT);
   opportunities.fetchOpportunities.mockResolvedValue([]);
+  opportunities.searchLeads.mockResolvedValue([]);
   db.listActionableRows.mockResolvedValue([]);
   db.countActionableQueued.mockResolvedValue(0);
   db.getQueueTranscript.mockResolvedValue("");
