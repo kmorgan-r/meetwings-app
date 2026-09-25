@@ -477,19 +477,29 @@ export async function retargetMeetingLogTarget(
   next: SelectedTarget,
   deps: ActionDeps
 ): Promise<ActionOutcome> {
-  const seen: { verdict: RetargetVerdict } = { verdict: "ok" };
+  const seen: { verdict: RetargetVerdict; parentFlipped: boolean } = {
+    verdict: "gone",
+    parentFlipped: false,
+  };
   const outcome = await runAction(
     rowId,
     async () => {
       seen.verdict = await retargetQueueTarget(rowId, targetId, next);
       if (seen.verdict !== "ok") return false;
-      // Same parent CAS as retryTarget: failed/pending -> pending, so the push
-      // below (and the sweep, if it never runs) picks the target up.
-      return retryQueueRow(rowId);
+      // Unlike retryTarget, the target write comes FIRST and is neither
+      // idempotent nor recoverable, so retargetQueueTarget gates on the parent
+      // status before writing. This CAS then flips failed/pending -> pending so
+      // the push below (and the sweep) picks the target up.
+      seen.parentFlipped = await retryQueueRow(rowId);
+      return seen.parentFlipped;
     },
     deps
   );
-  if (outcome.kind === "conflict" && seen.verdict === "duplicate") return { kind: "duplicate" };
+  if (outcome.kind === "conflict") {
+    if (seen.verdict === "duplicate") return { kind: "duplicate" };
+    // The target WAS rewritten but the parent moved in between: not "nothing written".
+    if (seen.verdict === "ok" && !seen.parentFlipped) return { kind: "moved-unknown" };
+  }
   return outcome;
 }
 

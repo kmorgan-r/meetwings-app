@@ -109,6 +109,7 @@ import {
   getQueueRow,
   listTargets,
   pruneTranscripts,
+  QUEUE_SQL,
   reclaimStaleSending,
   retargetQueueTarget,
   retryQueueRow,
@@ -872,6 +873,45 @@ describe("queue-page per-target actions", () => {
     });
   });
 
+  describe("QUEUE_SQL.retargetFailedTarget guard", () => {
+    // Run the statement directly so the SQL guard is proven independently of
+    // retargetQueueTarget's JS pre-checks.
+    const run = (targetId: string, rowId = "r1") =>
+      rawExecute(QUEUE_SQL.retargetFailedTarget, ["res.partner", 57, "X", targetId, rowId]);
+
+    async function expectUntouched(
+      parent: DbMeetingLogRow["status"],
+      target: { status: "sent" | "pending" | "failed"; messageId: number | null },
+      rowIdArg = "r1"
+    ) {
+      seedRow({ id: "r1", status: parent });
+      seedTargets("r1", [{ resId: 56, attachmentId: 3265, ...target }]);
+      const before = (await listTargets("r1"))[0];
+      const res = await run(before.id, rowIdArg);
+      expect(res.rowsAffected).toBe(0);
+      expect((await listTargets("r1"))[0]).toEqual(before);
+    }
+
+    it("changes nothing for a sent target", () =>
+      expectUntouched("failed", { status: "sent", messageId: 2 }));
+    it("changes nothing for a pending target with no message id", () =>
+      expectUntouched("pending", { status: "pending", messageId: null }));
+    it("changes nothing for a failed target with a message id", () =>
+      expectUntouched("failed", { status: "failed", messageId: 9 }));
+    it("changes nothing under a deleted parent", () =>
+      expectUntouched("deleted", { status: "failed", messageId: null }));
+    it("changes nothing under a sending parent", () =>
+      expectUntouched("sending", { status: "failed", messageId: null }));
+    it("changes nothing for the wrong row_id", () =>
+      expectUntouched("failed", { status: "failed", messageId: null }, "other"));
+    it("does rewrite a failed, id-less target under a failed parent (control)", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+      const t = (await listTargets("r1"))[0];
+      expect((await run(t.id)).rowsAffected).toBe(1);
+    });
+  });
+
   describe("retargetMeetingLogTarget", () => {
     const ANDRES_57 = { model: "res.partner", resId: 57, name: "Andres Vergara" } as const;
 
@@ -888,7 +928,39 @@ describe("queue-page per-target actions", () => {
 
       expect(res).toEqual({ kind: "ok" });
       expect(push.pushQueuedRow).toHaveBeenCalledTimes(1);
+      // The parent was flipped to pending BEFORE the push saw it.
+      expect(push.pushQueuedRow.mock.calls[0][0]).toMatchObject({ id: "r1", status: "pending" });
       expect(await readRow("r1")).toMatchObject({ status: "sent" });
+    });
+
+    it.each(["deleted", "sending"] as const)(
+      "reports conflict and rewrites nothing under a %s parent",
+      async (status) => {
+        seedRow({ id: "r1", status });
+        seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+        const t = (await listTargets("r1"))[0];
+
+        const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+        expect(res).toEqual({ kind: "conflict" });
+        expect(push.pushQueuedRow).not.toHaveBeenCalled();
+        expect((await listTargets("r1"))[0]).toMatchObject({
+          resId: 56, attachmentId: 3265, status: "failed",
+        });
+      }
+    );
+
+    it("reports moved-unknown, not conflict, when the parent flip fails after the target changed", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+      const t = (await listTargets("r1"))[0];
+      action.retryQueueRow.mockResolvedValueOnce(false);
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "moved-unknown" });
+      expect(push.pushQueuedRow).not.toHaveBeenCalled();
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 57 });
     });
 
     it("reports duplicate, pushes nothing, and leaves the target alone", async () => {

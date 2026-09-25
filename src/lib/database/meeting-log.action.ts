@@ -464,11 +464,17 @@ UPDATE meeting_log_queue SET transcript = ''
   //                          no note went out.
   // attachment_id is cleared, not kept: it hangs off the OLD record, and a
   // create against a deleted res_id succeeds while only message_post faults.
+  // The EXISTS is the parent gate: retryQueueRow only accepts failed/pending, so
+  // rewriting a target under any other parent would change it and then report
+  // "nothing written".
   retargetFailedTarget: `UPDATE meeting_log_targets
     SET model = ?, res_id = ?, name = ?, status = 'pending',
         attachment_id = NULL, message_id = NULL, sent_at = NULL,
         last_error = NULL, last_error_code = NULL
-    WHERE id = ? AND row_id = ? AND status = 'failed' AND message_id IS NULL`,
+    WHERE id = ? AND row_id = ? AND status = 'failed' AND message_id IS NULL
+      AND EXISTS (SELECT 1 FROM meeting_log_queue q
+                  WHERE q.id = meeting_log_targets.row_id
+                    AND q.status IN ('failed', 'pending'))`,
   // Clearing the error columns matters: a stale error rendered beside a green
   // sent target reads as a fresh failure.
   //
@@ -1101,6 +1107,9 @@ export async function retargetQueueTarget(
   targetId: string,
   next: SelectedTarget
 ): Promise<RetargetVerdict> {
+  const row = await getQueueRow(rowId);
+  if (!row) return "gone";
+  if (row.status !== "pending" && row.status !== "failed") return "refused";
   const targets = await listTargets(rowId);
   const target = targets.find((t) => t.id === targetId);
   if (!target) return "gone";
