@@ -8,14 +8,16 @@ import {
   listTargets,
   pruneTranscripts,
   QUEUE_SQL,
+  retargetQueueTarget,
   retryQueueRow,
+  type RetargetVerdict,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import {
   instanceFingerprint,
   requireOdooConfig,
 } from "@/lib/storage/odoo-config.storage";
-import type { SelectedTargets, SummarizationResult } from "@/types";
+import type { SelectedTarget, SelectedTargets, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
 import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
@@ -48,6 +50,12 @@ export type ActionOutcome =
   | { kind: "push-partial"; sentCount: number; failedCount: number; pendingCount: number }
   | { kind: "conflict" }
   | { kind: "moved-unknown" }
+  /**
+   * The chosen record is already on this meeting, so nothing was written.
+   * Not `conflict`: the user needs to be told to pick someone else, not that
+   * another window got there first.
+   */
+  | { kind: "duplicate" }
   /**
    * Deleted, but the row had already reached Odoo (or been cancelled) before
    * the click landed. Distinct from `ok` because `ok`'s copy states that
@@ -451,6 +459,38 @@ export function assignMeetingLog(
   id: string, targets: SelectedTargets, deps: ActionDeps
 ): Promise<ActionOutcome> {
   return runAction(id, () => assignQueueRow(id, targets), deps);
+}
+
+/**
+ * Swaps ONE failed target for another record and pushes at once.
+ *
+ * Goes through runAction so it inherits the credential check, the instance
+ * check, the push and the partial-send classification. Because `attempts` is
+ * already above zero the push takes the adopt-search path and creates a fresh
+ * attachment on the new record. A holder object, not a `let`, carries the
+ * verdict out of the cas closure: TypeScript narrows a captured `let` to its
+ * initial value and would call the `duplicate` comparison unreachable.
+ */
+export async function retargetMeetingLogTarget(
+  rowId: string,
+  targetId: string,
+  next: SelectedTarget,
+  deps: ActionDeps
+): Promise<ActionOutcome> {
+  const seen: { verdict: RetargetVerdict } = { verdict: "ok" };
+  const outcome = await runAction(
+    rowId,
+    async () => {
+      seen.verdict = await retargetQueueTarget(rowId, targetId, next);
+      if (seen.verdict !== "ok") return false;
+      // Same parent CAS as retryTarget: failed/pending -> pending, so the push
+      // below (and the sweep, if it never runs) picks the target up.
+      return retryQueueRow(rowId);
+    },
+    deps
+  );
+  if (outcome.kind === "conflict" && seen.verdict === "duplicate") return { kind: "duplicate" };
+  return outcome;
 }
 
 /** No push, ever. Delete is a status flip and nothing reaches Odoo. */

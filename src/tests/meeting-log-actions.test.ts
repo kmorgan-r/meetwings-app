@@ -110,12 +110,13 @@ import {
   listTargets,
   pruneTranscripts,
   reclaimStaleSending,
+  retargetQueueTarget,
   retryQueueRow,
   sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
 import {
   assignMeetingLog, boundedSummarize, deleteMeetingLog, removeQueueTarget,
-  retryMeetingLog, retryTarget,
+  retargetMeetingLogTarget, retryMeetingLog, retryTarget,
 } from "@/lib/odoo/meeting-log-actions";
 import { MIGRATIONS, applyMigration14 } from "./helpers/migration-14";
 
@@ -767,6 +768,165 @@ describe("queue-page per-target actions", () => {
 
       expect(await retryTarget("r1", t.id)).toMatchObject({ kind: "refused" });
       expect((await listTargets("r1"))[0].status).toBe("sent");
+    });
+  });
+
+  describe("retargetQueueTarget", () => {
+    const ANDRES_57 = { model: "res.partner", resId: 57, name: "Andres Vergara" } as const;
+
+    it("re-points a failed target that still carries an orphan attachment", async () => {
+      // The real shape: Andres, res_id 56, attachment 3265 created on the dead
+      // record, no message id because message_post faulted.
+      seedRow({ id: "r1", status: "failed", attempts: 4 });
+      seedTargets("r1", [
+        { resId: 55, status: "sent", attachmentId: 3266, messageId: 22190 },
+        {
+          resId: 56, status: "failed", attachmentId: 3265,
+          lastError: "ODOO_FAULT: Odoo fault 2", lastErrorCode: "ODOO_FAULT",
+        },
+      ]);
+      const t = (await listTargets("r1")).find((x) => x.resId === 56)!;
+
+      expect(await retargetQueueTarget("r1", t.id, ANDRES_57)).toBe("ok");
+
+      const after = (await listTargets("r1")).find((x) => x.id === t.id)!;
+      expect(after).toMatchObject({
+        model: "res.partner", resId: 57, name: "Andres Vergara", status: "pending",
+        attachmentId: null, messageId: null, lastError: null, lastErrorCode: null,
+      });
+    });
+
+    it("leaves a sent sibling untouched", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [
+        { resId: 55, status: "sent", attachmentId: 3266, messageId: 22190 },
+        { resId: 56, status: "failed" },
+      ]);
+      const failed = (await listTargets("r1")).find((x) => x.resId === 56)!;
+
+      await retargetQueueTarget("r1", failed.id, ANDRES_57);
+
+      const sent = (await listTargets("r1")).find((x) => x.resId === 55)!;
+      expect(sent).toMatchObject({ status: "sent", attachmentId: 3266, messageId: 22190 });
+    });
+
+    it("refuses a sent target and changes nothing", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 55, status: "sent", attachmentId: 1, messageId: 2 }]);
+      const t = (await listTargets("r1"))[0];
+
+      expect(await retargetQueueTarget("r1", t.id, ANDRES_57)).toBe("refused");
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 55, status: "sent" });
+    });
+
+    it("refuses a pending target, whose note may already be live", async () => {
+      // A persistence failure after a successful message_post lands `pending`
+      // WITH a message id. Re-pointing it would orphan a real note.
+      seedRow({ id: "r1", status: "pending" });
+      seedTargets("r1", [{ resId: 56, status: "pending", attachmentId: 3, messageId: 9 }]);
+      const t = (await listTargets("r1"))[0];
+
+      expect(await retargetQueueTarget("r1", t.id, ANDRES_57)).toBe("refused");
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 56, messageId: 9 });
+    });
+
+    it("refuses a failed target that somehow has a message id", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3, messageId: 9 }]);
+      const t = (await listTargets("r1"))[0];
+
+      expect(await retargetQueueTarget("r1", t.id, ANDRES_57)).toBe("refused");
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 56, messageId: 9 });
+    });
+
+    it("reports a missing target as gone", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      expect(await retargetQueueTarget("r1", "no-such-target", ANDRES_57)).toBe("gone");
+    });
+
+    it("refuses a record a sibling already has, and changes nothing", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [
+        { resId: 57, status: "sent", attachmentId: 1, messageId: 2 },
+        { resId: 56, status: "failed", attachmentId: 3265 },
+      ]);
+      const t = (await listTargets("r1")).find((x) => x.resId === 56)!;
+
+      expect(await retargetQueueTarget("r1", t.id, ANDRES_57)).toBe("duplicate");
+      expect((await listTargets("r1")).find((x) => x.id === t.id)).toMatchObject({
+        resId: 56, status: "failed", attachmentId: 3265,
+      });
+    });
+
+    it("treats choosing the record it is already on as a duplicate, not a retry", async () => {
+      // A "retarget" onto the same record would clear a possibly VALID
+      // attachment and create a second one.
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+      const t = (await listTargets("r1"))[0];
+
+      expect(
+        await retargetQueueTarget("r1", t.id, { model: "res.partner", resId: 56, name: "X" })
+      ).toBe("duplicate");
+      expect((await listTargets("r1"))[0].attachmentId).toBe(3265);
+    });
+  });
+
+  describe("retargetMeetingLogTarget", () => {
+    const ANDRES_57 = { model: "res.partner", resId: 57, name: "Andres Vergara" } as const;
+
+    it("re-points the target, pushes, and reports ok when every target lands", async () => {
+      seedRow({ id: "r1", status: "failed", attempts: 4 });
+      seedTargets("r1", [
+        { resId: 55, status: "sent", attachmentId: 3266, messageId: 22190 },
+        { resId: 56, status: "failed", attachmentId: 3265 },
+      ]);
+      const t = (await listTargets("r1")).find((x) => x.resId === 56)!;
+      mockPush({ sent: [57], failed: [] });
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "ok" });
+      expect(push.pushQueuedRow).toHaveBeenCalledTimes(1);
+      expect(await readRow("r1")).toMatchObject({ status: "sent" });
+    });
+
+    it("reports duplicate, pushes nothing, and leaves the target alone", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [
+        { resId: 57, status: "sent", attachmentId: 1, messageId: 2 },
+        { resId: 56, status: "failed", attachmentId: 3265 },
+      ]);
+      const t = (await listTargets("r1")).find((x) => x.resId === 56)!;
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "duplicate" });
+      expect(push.pushQueuedRow).not.toHaveBeenCalled();
+      expect((await listTargets("r1")).find((x) => x.id === t.id)).toMatchObject({ resId: 56 });
+    });
+
+    it("reports conflict and pushes nothing when the target is not retargetable", async () => {
+      seedRow({ id: "r1", status: "failed" });
+      seedTargets("r1", [{ resId: 55, status: "sent", attachmentId: 1, messageId: 2 }]);
+      const t = (await listTargets("r1"))[0];
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "conflict" });
+      expect(push.pushQueuedRow).not.toHaveBeenCalled();
+    });
+
+    it("never pushes for a row that belongs to another Odoo database", async () => {
+      seedRow({ id: "r1", status: "failed", instance: "http://other:8069|odoo" });
+      seedTargets("r1", [{ resId: 56, status: "failed", attachmentId: 3265 }]);
+      const t = (await listTargets("r1"))[0];
+
+      const res = await retargetMeetingLogTarget("r1", t.id, ANDRES_57, deps);
+
+      expect(res).toEqual({ kind: "conflict" });
+      expect(push.pushQueuedRow).not.toHaveBeenCalled();
+      expect((await listTargets("r1"))[0]).toMatchObject({ resId: 56, attachmentId: 3265 });
     });
   });
 

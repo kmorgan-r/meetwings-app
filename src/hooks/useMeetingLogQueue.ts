@@ -225,6 +225,9 @@ function outcomeCopy(
       }
       return parts.join(" ");
     }
+    case "duplicate":
+      // Nothing was written, and the row still needs a contact from the user.
+      return "That contact is already on this meeting. Choose someone else.";
     case "conflict":
       return conflictCopy ?? "This meeting changed in another window.";
     case "moved-unknown":
