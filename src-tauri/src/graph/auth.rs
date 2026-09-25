@@ -363,10 +363,13 @@ pub fn authorize_url(
     Ok(url.to_string())
 }
 
-/// ONLY `invalid_grant` proves the refresh token is dead (revoked, expired,
-/// password changed). Everything else RETAINS it: destroying a working ~90-day
-/// credential over a transport blip can need an administrator to undo, in a
-/// consent-blocked tenant.
+/// `invalid_grant` (revoked, expired, password changed) is the ONLY code
+/// mapped to `AUTH_EXPIRED`, and even that is strong-but-not-immediate
+/// evidence: `mod.rs`'s `record_invalid_grant_with` deletes the credential
+/// only after `INVALID_GRANT_FORGET_THRESHOLD` consecutive confirmed failures.
+/// Everything else is not evidence about the refresh token at all and never
+/// counts: destroying a working ~90-day credential over a transport blip can
+/// need an administrator to undo, in a consent-blocked tenant.
 pub fn classify_token_error(status: u16, body: &str) -> &'static str {
     if status == 429 {
         return THROTTLED;
@@ -917,7 +920,7 @@ mod tests {
     // asserted "auth failure clears the token" would lock in the exact defect
     // the spec corrected.
     #[test]
-    fn only_invalid_grant_means_the_refresh_token_is_dead() {
+    fn only_invalid_grant_maps_to_auth_expired() {
         assert_eq!(
             classify_token_error(400, r#"{"error":"invalid_grant"}"#),
             AUTH_EXPIRED

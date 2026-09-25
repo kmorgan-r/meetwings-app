@@ -69,6 +69,26 @@ pub const THROTTLED: &str = "GRAPH_THROTTLED";
 pub const NETWORK: &str = "GRAPH_NETWORK";
 pub const NO_KEYCHAIN: &str = "GRAPH_NO_KEYCHAIN";
 
+/// Consecutive confirmed `invalid_grant` responses, against the SAME current
+/// credential, before that credential is deleted.
+///
+/// Why not 1 (the old behavior): one response must never destroy a ~90-day
+/// credential, and while the credential is retained `graph_status` keeps
+/// reporting connected, so the calendar block stays visible with a
+/// "sign-in expired, reconnect" remedy instead of silently vanishing.
+///
+/// Why not "never": deletion is the backstop that stops re-redeeming a dead
+/// string. Every attempt re-reads the same stored token, so a retry cannot
+/// revive it; if the cause was Entra replay detection the family is already
+/// revoked, and the at-most-2 extra redemptions change nothing about that.
+///
+/// The streak is counted per picker open (one token-endpoint call each) and
+/// lives in memory only, so it restarts every launch: a user who opens the
+/// picker fewer than 3 times per launch keeps a dead credential until they
+/// reconnect. Accepted - the Odoo page's "Connect calendar" button is always
+/// rendered, and a reconnect overwrites the entry.
+const INVALID_GRANT_FORGET_THRESHOLD: u32 = 3;
+
 /// Applied to every `reqwest::Client` this module builds (the token endpoint
 /// in `auth::post_token` and the calendarView call in
 /// `calendar::fetch_calendar_view`) so a stalled TLS handshake or a server
@@ -84,6 +104,7 @@ pub const NO_KEYCHAIN: &str = "GRAPH_NO_KEYCHAIN";
 /// merely fast in the common case.
 pub(crate) const GRAPH_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
@@ -120,9 +141,10 @@ pub struct Session {
 ///    both are outermost with respect to `session` and `session_only`.
 ///    Where the two meet EACH OTHER the order is `refresh_op` ->
 ///    `persist_op`: `refresh_and_adopt` holds `refresh_op` while calling
-///    `adopt_and_persist`, which takes `persist_op`. That is the only
-///    nesting of the two, and `refresh_op` is acquired at exactly one site,
-///    so no competing order exists for it to deadlock against.
+///    `adopt_and_persist` or `record_invalid_grant_with`, each of which takes
+///    `persist_op`. Those are the only nestings of the two, both in the same
+///    order, and `refresh_op` is acquired at exactly one site, so no
+///    competing order exists for them to deadlock against.
 ///
 /// 2. `session` and `session_only` are never held AT THE SAME TIME, so there
 ///    is no ordering between them to violate: nothing anywhere in this
@@ -131,7 +153,7 @@ pub struct Session {
 ///    `mod tests`), only `clear_session`, `adopt`, and `fresh_access_token`
 ///    bind either to a local variable for their own body; every other
 ///    acquisition is a statement-scoped temporary that drops immediately.
-///    `forget_refresh_token_with` reads `session_only` and only then takes
+///    `clear_and_delete` reads `session_only` and only then takes
 ///    `session` (via `clear_session`) - the reverse of the order an earlier
 ///    version of this comment claimed was universal - and that is harmless
 ///    for exactly this reason: the two locks are never nested, in either
@@ -142,12 +164,14 @@ pub struct GraphState {
     /// True when no keychain service was available: the connection works for
     /// this launch and NOTHING is written to disk.
     pub session_only: Mutex<bool>,
-    /// Guards the adopt-then-persist sequence in `adopt_and_persist_with` and
-    /// the clear-then-delete sequence in `forget_refresh_token_with` against
-    /// EACH OTHER, so the two can never interleave - see both functions' doc
-    /// comments for the race this closes (Task 11 review round 2, Finding B).
+    /// Guards three sequences against EACH OTHER, so none can interleave:
+    /// adopt-then-persist in `adopt_and_persist_with`, clear-then-delete in
+    /// `forget_refresh_token_with`, and check-count-and-maybe-forget in
+    /// `record_invalid_grant_with` - see their doc comments for the races this
+    /// closes (Task 11 review round 2, Finding B; issue #73). It also
+    /// serializes every write to `invalid_grant_streak`.
     ///
-    /// A `std::sync::Mutex`, not a `tokio` one, and deliberately so: neither
+    /// A `std::sync::Mutex`, not a `tokio` one, and deliberately so: no
     /// critical section contains an `.await` (adopting is in-memory; the
     /// keychain write/delete is a synchronous OS call), so a caller can only
     /// ever block here on the OTHER critical section's keychain I/O -
@@ -170,6 +194,13 @@ pub struct GraphState {
     /// `.await` on the token endpoint, which a `std::sync::MutexGuard` must
     /// never do.
     refresh_op: tokio::sync::Mutex<()>,
+    /// Consecutive confirmed `invalid_grant` responses against the CURRENT
+    /// credential. Bumped by `record_invalid_grant_with`, reset to 0 by
+    /// `adopt_and_persist_with` on any successful adoption; both run under
+    /// `persist_op`. Never persisted: each launch re-earns deletion from zero.
+    /// An atomic rather than another `Mutex`, so it adds nothing to the lock
+    /// invariant above.
+    invalid_grant_streak: AtomicU32,
 }
 
 impl GraphState {
@@ -316,6 +347,10 @@ fn adopt_and_persist_with(
     if !adopt(state, tokens, generation) {
         return Err(NOT_CONNECTED.to_string());
     }
+    // A working credential was just adopted, so evidence against the old one
+    // is void. BEFORE the session-only early return: a session-only adoption
+    // is a working credential too.
+    state.invalid_grant_streak.store(0, Ordering::Relaxed);
     if *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) {
         return Ok(());
     }
@@ -335,9 +370,10 @@ fn adopt_and_persist(
     adopt_and_persist_with(state, tokens, generation, auth::persist_rotated)
 }
 
-/// The shared clear-and-decide sequence behind both `forget_refresh_token`
-/// (called on an explicit `invalid_grant`) and `graph_disconnect` (called on a
-/// user-initiated disconnect).
+/// The clear-then-delete sequence behind `graph_disconnect` (a user-initiated
+/// disconnect). `record_invalid_grant_with` runs the same `clear_and_delete`
+/// under the same lock once confirmed `invalid_grant` failures reach
+/// `INVALID_GRANT_FORGET_THRESHOLD`.
 ///
 /// Held under `state.persist_op` for its entire body - the SAME lock
 /// `adopt_and_persist_with` holds for its own adopt-then-persist sequence
@@ -346,16 +382,6 @@ fn adopt_and_persist(
 /// of the two acquires `persist_op` first runs to completion, keychain I/O
 /// included, before the other's body even starts. See `adopt_and_persist_
 /// with`'s doc comment (rule 2) for the failure this closes.
-///
-/// Memory is cleared first and unconditionally, before `delete` - whatever the
-/// keychain does, a token this caller has decided to discard must not survive
-/// in this process. On the session-only path `delete` is never invoked at all:
-/// `available()` was false at connect, so a real keychain call would always
-/// error, and Disconnect/forget would be impossible on exactly the platform
-/// where memory holds the ONLY copy of the credential. Otherwise `delete`'s
-/// result is propagated rather than discarded with `let _ =` - a silently
-/// failed delete leaves a token on disk while memory says disconnected, so the
-/// next launch reads it straight back with nothing telling the user why.
 ///
 /// `delete` is injected rather than calling `keychain::delete_refresh_token`
 /// directly so tests can prove BOTH halves of the contract - that it runs
@@ -369,6 +395,27 @@ fn forget_refresh_token_with(
     delete: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let _persist_guard = state.persist_op.lock().unwrap_or_else(|e| e.into_inner());
+    clear_and_delete(state, delete)
+}
+
+/// The body `forget_refresh_token_with` and `record_invalid_grant_with`
+/// share. The CALLER must hold `state.persist_op`: this does not take it,
+/// because `record_invalid_grant_with` already holds it for its identity
+/// check and a `std::sync::Mutex` is not reentrant.
+///
+/// Memory is cleared first and unconditionally, before `delete` - whatever the
+/// keychain does, a token this caller has decided to discard must not survive
+/// in this process. On the session-only path `delete` is never invoked at all:
+/// `available()` was false at connect, so a real keychain call would always
+/// error, and Disconnect/forget would be impossible on exactly the platform
+/// where memory holds the ONLY copy of the credential. Otherwise `delete`'s
+/// result is propagated rather than discarded with `let _ =` - a silently
+/// failed delete leaves a token on disk while memory says disconnected, so the
+/// next launch reads it straight back with nothing telling the user why.
+fn clear_and_delete(
+    state: &GraphState,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let was_session_only = *state.session_only.lock().unwrap_or_else(|e| e.into_inner());
     state.clear_session();
     if was_session_only {
@@ -377,11 +424,52 @@ fn forget_refresh_token_with(
     delete()
 }
 
-/// Called ONLY on an explicit `invalid_grant` - the one response that proves
-/// the refresh token is genuinely dead. See `forget_refresh_token_with` for
-/// the clear-then-delete sequence this wraps with the real keychain call.
-fn forget_refresh_token(state: &GraphState) -> Result<(), String> {
-    forget_refresh_token_with(state, keychain::delete_refresh_token)
+/// Pure: whether a streak this long deletes the credential. `>=`, not `==`:
+/// after a FAILED delete the streak keeps climbing, and the next failure must
+/// retry the delete rather than wait three more.
+fn should_forget(streak: u32) -> bool {
+    streak >= INVALID_GRANT_FORGET_THRESHOLD
+}
+
+/// Record one confirmed `invalid_grant` for `failed` - the refresh token the
+/// token endpoint just rejected - and delete the credential once
+/// `INVALID_GRANT_FORGET_THRESHOLD` consecutive failures have been seen.
+///
+/// Takes `persist_op` for the whole body, so the identity check, the bump and
+/// any forget are one step with respect to `adopt_and_persist_with` (which
+/// resets the streak under the same lock). The caller must NOT hold it.
+///
+/// The identity check: `graph_connect` adopts under `persist_op` but NOT
+/// under `refresh_op`, so a reconnect can land while a refresh of the OLD
+/// token is awaiting Entra. When memory now holds a DIFFERENT refresh token,
+/// the failure is evidence about the old one only - it must neither count
+/// against nor delete the new one. An EMPTY memory (fresh launch, token read
+/// from the keychain) is still current: nothing has been adopted since.
+///
+/// The streak is deliberately NOT reset at the threshold. After a successful
+/// delete this is unreachable until a reconnect resets it; after a failed
+/// delete the dead token is still on disk, so the next refresh re-reads it,
+/// fails, and `4 >= 3` retries the delete straight away.
+fn record_invalid_grant_with(
+    state: &GraphState,
+    failed: &str,
+    delete: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let _persist_guard = state.persist_op.lock().unwrap_or_else(|e| e.into_inner());
+    let current = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .refresh_token
+        .clone();
+    if current.is_some_and(|token| token != failed) {
+        return Ok(());
+    }
+    let streak = state.invalid_grant_streak.fetch_add(1, Ordering::Relaxed) + 1;
+    if !should_forget(streak) {
+        return Ok(());
+    }
+    clear_and_delete(state, delete)
 }
 
 /// The access token already in memory, if any, and not yet expired.
@@ -465,7 +553,7 @@ async fn refresh_and_adopt(
             // A keychain failure while forgetting is surfaced, not swallowed:
             // "your credential is dead AND it is stuck on disk" is a different
             // problem from "reconnect", and the user can act on it.
-            forget_refresh_token(state)?;
+            record_invalid_grant_with(state, &stored, keychain::delete_refresh_token)?;
             return Err(AUTH_EXPIRED.to_string());
         }
         Err(code) => return Err(code),
@@ -606,8 +694,9 @@ pub async fn graph_connect(
 pub async fn graph_disconnect(app: AppHandle) -> Result<(), String> {
     let state = app.state::<GraphState>();
 
-    // Routed through the same clear-then-delete sequence `forget_refresh_token`
-    // uses, rather than hand-copied: the two functions differ only in that
+    // Routed through the same `clear_and_delete` sequence
+    // `record_invalid_grant_with` uses at the threshold, rather than
+    // hand-copied: the two differ only in that
     // this one also resets `session_only` to `false` afterwards, and that
     // reset is a no-op on every path that matters. On the session-only branch
     // `forget_refresh_token_with` returns before any delete, so there is no
@@ -615,7 +704,7 @@ pub async fn graph_disconnect(app: AppHandle) -> Result<(), String> {
     // `false`, so setting it again after `delete()` rather than before is
     // unobservable. Doing it after (rather than threading it through the seam)
     // keeps the seam's contract - clear memory, then run `delete` or not -
-    // free of a disconnect-specific detail the forget-on-invalid_grant path
+    // free of a disconnect-specific detail the invalid_grant threshold path
     // has no use for.
     let result = forget_refresh_token_with(&state, keychain::delete_refresh_token);
     *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) = false;
@@ -923,8 +1012,8 @@ mod tests {
     /// copy of the credential. Memory is cleared unconditionally and first.
     ///
     /// **Ruling 20:** this is routed through `forget_refresh_token_with` with a
-    /// spy `delete`, not through the `forget_refresh_token` wrapper. A version
-    /// that called `forget_refresh_token(&state)` directly and asserted only
+    /// spy `delete`, never with the real `keychain::delete_refresh_token`. A
+    /// version that called it with the real delete and asserted only
     /// `Ok(())` plus a cleared session - the test's original form - passes
     /// identically whether or not the `if was_session_only { return Ok(()); }`
     /// early return is even present, because `keychain::delete_refresh_token`
@@ -1011,7 +1100,7 @@ mod tests {
     /// failure: the tokens still reach memory and the call proceeds.
     ///
     /// **Finding A (Task 11 review round 2):** the same seam Ruling 20
-    /// required for `forget_refresh_token`, one level up. The pre-fix version
+    /// required for `forget_refresh_token_with`, one level up. The pre-fix version
     /// of this test called the real `adopt_and_persist(&state, &tokens,
     /// generation)` and asserted only `Ok(())` plus the two memory values -
     /// and passed identically whether or not the `if
@@ -1263,5 +1352,186 @@ mod tests {
         )
         .await;
         assert_eq!(result, Ok("adopted-by-a-concurrent-winner".to_string()));
+    }
+
+    fn state_holding(refresh_token: Option<&str>, streak: u32) -> GraphState {
+        let state = GraphState::default();
+        state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refresh_token = refresh_token.map(str::to_string);
+        state.invalid_grant_streak.store(streak, Ordering::Relaxed);
+        state
+    }
+
+    fn streak(state: &GraphState) -> u32 {
+        state.invalid_grant_streak.load(Ordering::Relaxed)
+    }
+
+    fn memory_token(state: &GraphState) -> Option<String> {
+        state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .refresh_token
+            .clone()
+    }
+
+    fn some_tokens() -> auth::Tokens {
+        auth::Tokens {
+            access_token: "fresh".into(),
+            expires_at_ms: i64::MAX,
+            refresh_token: Some("rotated".into()),
+            id_token: None,
+        }
+    }
+
+    /// `>=`, not `==`: after a FAILED delete the streak keeps climbing past 3,
+    /// and the next failure must retry the delete instead of waiting.
+    #[test]
+    fn should_forget_is_false_below_the_threshold_and_true_at_and_above_it() {
+        assert!(!should_forget(0));
+        assert!(!should_forget(1));
+        assert!(!should_forget(2));
+        assert!(should_forget(3));
+        assert!(should_forget(4));
+    }
+
+    #[test]
+    fn a_new_state_starts_with_no_invalid_grant_streak() {
+        assert_eq!(streak(&GraphState::default()), 0);
+    }
+
+    #[test]
+    fn a_successful_adoption_resets_the_invalid_grant_streak() {
+        let state = state_holding(None, 2);
+        let generation = state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        assert_eq!(
+            adopt_and_persist_with(&state, &some_tokens(), generation, |_| Ok(())),
+            Ok(())
+        );
+        assert_eq!(streak(&state), 0);
+    }
+
+    /// The reset sits BEFORE the session-only early return - a session-only
+    /// adoption is a working credential too.
+    #[test]
+    fn a_session_only_adoption_also_resets_the_invalid_grant_streak() {
+        let state = state_holding(None, 2);
+        *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let generation = state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        assert_eq!(
+            adopt_and_persist_with(&state, &some_tokens(), generation, |_| Ok(())),
+            Ok(())
+        );
+        assert_eq!(streak(&state), 0);
+    }
+
+    /// Nothing was adopted, so nothing is evidence that the credential works.
+    #[test]
+    fn an_adoption_lost_to_a_disconnect_leaves_the_streak_alone() {
+        let state = state_holding(None, 2);
+        let generation = state
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation;
+        state.clear_session();
+        assert_eq!(
+            adopt_and_persist_with(&state, &some_tokens(), generation, |_| Ok(())),
+            Err(NOT_CONNECTED.to_string())
+        );
+        assert_eq!(streak(&state), 2);
+    }
+
+    #[test]
+    fn record_invalid_grant_below_the_threshold_keeps_the_credential() {
+        let state = state_holding(Some("rt"), 0);
+        let delete_calls = std::cell::Cell::new(0u32);
+        for _ in 0..2 {
+            let result = record_invalid_grant_with(&state, "rt", || {
+                delete_calls.set(delete_calls.get() + 1);
+                Ok(())
+            });
+            assert_eq!(result, Ok(()));
+        }
+        assert_eq!(delete_calls.get(), 0);
+        assert_eq!(streak(&state), 2);
+        assert_eq!(memory_token(&state).as_deref(), Some("rt"));
+    }
+
+    #[test]
+    fn record_invalid_grant_at_the_threshold_forgets_exactly_once() {
+        let state = state_holding(Some("rt"), 2);
+        let delete_calls = std::cell::Cell::new(0u32);
+        let result = record_invalid_grant_with(&state, "rt", || {
+            delete_calls.set(delete_calls.get() + 1);
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(delete_calls.get(), 1);
+        assert_eq!(memory_token(&state), None);
+    }
+
+    /// A reconnect adopted a different credential while the failing
+    /// redemption was in flight. The failure is evidence about the OLD token
+    /// only: no count, no delete, the new token untouched.
+    #[test]
+    fn record_invalid_grant_ignores_a_failure_against_a_replaced_credential() {
+        let state = state_holding(Some("t-new"), 2);
+        let delete_was_called = std::cell::Cell::new(false);
+        let result = record_invalid_grant_with(&state, "t-old", || {
+            delete_was_called.set(true);
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert!(!delete_was_called.get());
+        assert_eq!(streak(&state), 2);
+        assert_eq!(memory_token(&state).as_deref(), Some("t-new"));
+    }
+
+    /// Fresh launch: memory is empty and the failing token came from the
+    /// keychain. Nothing was adopted since that read, so it is still current.
+    #[test]
+    fn record_invalid_grant_counts_when_memory_is_empty() {
+        let state = state_holding(None, 0);
+        let result = record_invalid_grant_with(&state, "from-keychain", || {
+            panic!("one failure must not delete")
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(streak(&state), 1);
+    }
+
+    /// "Dead AND stuck on disk" is surfaced, and the streak is NOT reset, so
+    /// the very next failure (4 >= 3) retries the delete.
+    #[test]
+    fn record_invalid_grant_surfaces_a_failed_delete_and_keeps_the_streak() {
+        let state = state_holding(Some("rt"), 2);
+        let result = record_invalid_grant_with(&state, "rt", || Err(NO_KEYCHAIN.to_string()));
+        assert_eq!(result, Err(NO_KEYCHAIN.to_string()));
+        assert_eq!(streak(&state), 3);
+    }
+
+    #[test]
+    fn record_invalid_grant_on_the_session_only_path_clears_memory_without_a_delete() {
+        let state = state_holding(Some("in-memory-only"), 2);
+        *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        let delete_was_called = std::cell::Cell::new(false);
+        let result = record_invalid_grant_with(&state, "in-memory-only", || {
+            delete_was_called.set(true);
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert!(!delete_was_called.get());
+        assert_eq!(memory_token(&state), None);
     }
 }
