@@ -95,19 +95,22 @@ if (cmd === "show") {
     console.log("no such target:", targetId);
     process.exit(1);
   }
-  // The same predicate as QUEUE_SQL.retargetFailedTarget: only a FAILED target
-  // with no message id, so a note that may already be live is never re-pointed.
+  // Only a FAILED res.partner target with no message id, so a note that may
+  // already be live is never re-pointed. Looser than
+  // QUEUE_SQL.retargetFailedTarget: no parent-status gate (a `sending` or
+  // `deleted` parent is not refused) and no row_id match. An operator tool:
+  // close the app first.
   const res = db
     .prepare(
       `UPDATE meeting_log_targets
           SET res_id = ?, name = ?, status = 'pending',
               attachment_id = NULL, message_id = NULL, sent_at = NULL,
               last_error = NULL, last_error_code = NULL
-        WHERE id = ? AND status = 'failed' AND message_id IS NULL`
+        WHERE id = ? AND model = 'res.partner' AND status = 'failed' AND message_id IS NULL`
     )
     .run(Number(resId), name, targetId);
   if (res.changes === 0) {
-    console.log("refused: that target is not a failed target without a message id");
+    console.log("refused: that target is not a failed res.partner target without a message id");
     process.exit(1);
   }
   db.prepare(
