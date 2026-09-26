@@ -534,10 +534,11 @@ fn fresh_access_token(state: &GraphState) -> Option<String> {
 /// (the keychain delete) are injected for the same reason
 /// `adopt_and_persist_with` and `forget_refresh_token_with` inject theirs
 /// (Ruling 20, Finding A): tests drive both arms without a network and
-/// without any path to a real keychain. `stored_refresh_token` is NOT
-/// injected - it still reads the real keychain when memory is empty - so a
-/// test must seed a refresh token in memory and make no call after one that
-/// cleared memory on the normal path.
+/// without any path to a real keychain write or delete.
+/// `stored_refresh_token` is NOT injected - it still reads the real
+/// keychain when memory is empty - so a test must seed a refresh token in
+/// memory and make no call after one that cleared memory on the normal
+/// path.
 async fn refresh_and_adopt_with<Fut>(
     state: &GraphState,
     generation: u64,
@@ -1639,7 +1640,9 @@ mod tests {
 
     /// The success tokens carry `expires_at_ms: 0`. With this file's usual
     /// `i64::MAX` the later calls would take the post-lock
-    /// `fresh_access_token` shortcut, never redeem, and pass vacuously.
+    /// `fresh_access_token` shortcut and return the adopted access token
+    /// without redeeming, so the streak after the success could never be
+    /// exercised.
     #[tokio::test]
     async fn a_success_between_invalid_grants_resets_the_streak() {
         let state = state_holding(Some("rt"), 0);

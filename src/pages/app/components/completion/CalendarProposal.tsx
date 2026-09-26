@@ -40,8 +40,10 @@ const MAX_COMPANY_ROWS = 5;
  * The codes where re-running the SAME call is the correct action: a
  * transient network failure, a rate limit, a response Graph sent this time
  * that happened to be unparseable, or a keychain read that failed this time
- * (issue #73 - it says nothing about the connection, and the status path's
- * retry re-reads it). Every other code gets a settings pointer instead - see
+ * (issue #73 - it says nothing about the connection, and both retries
+ * re-read it: the status path's re-runs graph_status, the fetch path's
+ * re-runs graph_current_meetings, which reads the keychain when memory is
+ * empty). Every other code gets a settings pointer instead - see
  * `CALENDAR_SETTINGS_REMEDY` below.
  *
  * The ONE list both the runtime check and `CALENDAR_SETTINGS_REMEDY`'s key
@@ -107,7 +109,7 @@ const CALENDAR_SETTINGS_REMEDY: Record<
 };
 
 /**
- * Rendered under "Try again" for the retryable codes that can also be
+ * Rendered above "Try again" for the retryable codes that can also be
  * PERSISTENT. keychain.rs maps every non-NoEntry keychain error to
  * GRAPH_NO_KEYCHAIN, access-denied included, and a retryable code renders no
  * remedy line - so without this, a keychain that keeps failing shows a

@@ -129,7 +129,9 @@ pub fn run() {
                 // comment, so it runs on the async runtime, not here.
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = window::open_dashboard(app).await;
+                    if let Err(e) = window::open_dashboard(app).await {
+                        tracing::warn!("second launch: open_dashboard failed: {e}");
+                    }
                 });
             }
         }))
