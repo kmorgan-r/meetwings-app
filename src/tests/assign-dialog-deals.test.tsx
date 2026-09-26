@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,6 +39,11 @@ vi.mock("@/contexts", () => ({
 
 import { AssignDialog, LEAD_SEARCH_DEBOUNCE_MS } from "@/pages/meetings/components/AssignDialog";
 import type { MeetingLogListRow, MeetingLogTarget, OdooContact, OdooOpportunity } from "@/types";
+
+// Most tests here wait through the REAL 350 ms search debounce inside a
+// findBy/waitFor window; the default 1000 ms leaves little slack under
+// full-suite load. Vitest isolates test files, so this stays in this file.
+configure({ asyncUtilTimeout: 3000 });
 
 const INSTANCE = "http://h:8069|odoo";
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "bob", apiKey: "sk-live-key" };
@@ -606,5 +611,31 @@ describe("[assign-dialog] lookup log (issue #74)", () => {
 
     await waitFor(() => expect(lines()).toHaveLength(1));
     expect(lines()[0][2]).toMatchObject({ hasEmail: false, rows: 0 });
+  });
+
+  it("logs nothing for a lookup superseded by a later pick", async () => {
+    const a = contact({ id: 7, name: "Ada Lovelace" });
+    const b = contact({ id: 8, name: "Grace Hopper" });
+    contacts.listContacts.mockResolvedValue([a, b]);
+    const pending = deferred<OdooOpportunity[]>();
+    opportunities.fetchOpportunities.mockImplementation((_client: unknown, c: OdooContact) =>
+      c.id === 7 ? pending.promise : Promise.resolve([])
+    );
+    await renderReady();
+
+    await userEvent.click(screen.getByRole("button", { name: "Ada Lovelace" }));
+    await userEvent.click(screen.getByRole("button", { name: "Grace Hopper" }));
+
+    await waitFor(() => expect(lines()).toHaveLength(1));
+
+    pending.resolve([]);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(lines()).toHaveLength(1);
+    for (const line of lines()) {
+      expect(line[2]).toMatchObject({ contactId: 8 });
+    }
   });
 });

@@ -434,8 +434,8 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
 
   /**
    * Previews a contact's open opportunities/leads below the list - it does
-   * NOT add anything. Adding is the row's own `AddToggle`, which also calls
-   * this, so an added contact's deals are on screen (issue #74: `+ add`
+   * NOT add anything. The contact row's `+ add` wrapper also calls this, so
+   * an added contact's deals are on screen (issue #74: `+ add`
    * used to stage a contact and show no deals at all). Previewing still
    * never adds.
    *
@@ -893,8 +893,12 @@ export function AssignDialog({ row, instance, replacing, onConfirm, onCancel }: 
                       atCap={atCap}
                       onAdd={(t) => {
                         const added = addTarget(t);
-                        // Adding previews too - see selectContact. A contact
-                        // already on screen is not fetched again.
+                        // addTarget FIRST: its result is read out of the
+                        // setTargets updater, which React only runs eagerly
+                        // while no other update is queued - selectContact
+                        // queues several, so the other order loses the cap
+                        // refusal. Adding previews too (see selectContact); a
+                        // contact already on screen is not fetched again.
                         if (selected?.id !== c.id) selectContact(c);
                         return added;
                       }}

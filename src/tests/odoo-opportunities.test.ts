@@ -285,6 +285,31 @@ describe("searchDomain", () => {
     }
   });
 
+  // One identity clause needs no "|" of its own: a lone operand under "|"
+  // would be an invalid domain.
+  it("builds the whole thing when only one identity clause exists", () => {
+    expect(searchDomain(ada({ email: null }))).toEqual([
+      ...BASE,
+      "|",
+      ["partner_id", "child_of", 1],
+      "&",
+      "&",
+      ["type", "=", "lead"],
+      ["partner_id", "=", false],
+      ["contact_name", "=ilike", "Ada Lovelace"],
+    ]);
+    expect(searchDomain(ada({ name: "   " }))).toEqual([
+      ...BASE,
+      "|",
+      ["partner_id", "child_of", 1],
+      "&",
+      "&",
+      ["type", "=", "lead"],
+      ["partner_id", "=", false],
+      ["email_normalized", "=", "ada@analytical.example"],
+    ]);
+  });
+
   // Nothing to recognise an unlinked lead BY. Widening the search on a blank
   // value would match every unlinked lead in the database.
   it("asks only for linked records when the contact has no identity at all", () => {
