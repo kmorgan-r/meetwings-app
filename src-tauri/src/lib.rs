@@ -103,6 +103,38 @@ pub fn run() {
     let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("").to_string();
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
+        // FIRST, per the plugin's own requirement: a second launch must exit
+        // before any state or window setup runs. Two processes would share one
+        // keychain refresh token and double-redeem it, tripping Entra's replay
+        // detection (graph/mod.rs, `GraphState::refresh_op`'s doc comment).
+        //
+        // `tauri dev` shares the `com.meetwings.app` identifier with the
+        // installed app, so it exits at once while the installed app runs.
+        // Deliberate: both also share the `com.meetwings.graph` keychain
+        // service, and gating this on `debug_assertions` would bring the
+        // double redemption back. Quit the installed app before `tauri dev`.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // The dashboard, not the overlay: `main` is the 54px skipTaskbar
+            // overlay whose visibility the toggle shortcut tracks in its own
+            // state (shortcuts.rs `is_hidden`), which a direct show() here
+            // would desync. An existing dashboard is restored directly -
+            // `open_dashboard` only calls set_focus then show, and on Windows
+            // neither restores a MINIMIZED window.
+            if let Some(dashboard) = app.get_webview_window("dashboard") {
+                let _ = dashboard.unminimize();
+                let _ = dashboard.show();
+                let _ = dashboard.set_focus();
+            } else {
+                // `open_dashboard` is async for the reason on its own doc
+                // comment, so it runs on the async runtime, not here.
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = window::open_dashboard(app).await {
+                        tracing::warn!("second launch: open_dashboard failed: {e}");
+                    }
+                });
+            }
+        }))
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:meetwings.db", db::migrations())

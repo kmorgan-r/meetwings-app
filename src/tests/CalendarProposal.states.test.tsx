@@ -160,18 +160,17 @@ describe("other states", () => {
   });
 
   /**
-   * IMPORTANT 3's fail-first case. By the time GRAPH_AUTH_EXPIRED reaches the
-   * webview, mod.rs's refresh_and_adopt has already deleted the stored
-   * refresh token - "Try again" re-runs the same fetch, finds nothing to
-   * refresh, and the SECOND attempt shows GRAPH_NOT_CONNECTED instead. A
-   * retry button offering a fix that cannot work is worse than none: it must
-   * be replaced by a pointer at the actual remedy.
+   * IMPORTANT 3's fail-first case, as revised by issue #73. GRAPH_AUTH_EXPIRED
+   * no longer means the stored refresh token was already deleted - it is
+   * retained until three confirmed failures - but "Try again" still cannot
+   * help: it re-redeems the same dead token and re-derives the same
+   * invalid_grant. A retry button offering a fix that cannot work is worse
+   * than none, so these get a pointer at the actual remedy instead.
    */
   it.each([
     ["GRAPH_AUTH_EXPIRED", /reconnect/i],
     ["GRAPH_NOT_CONNECTED", /connect/i],
     ["GRAPH_CONSENT_REQUIRED", /administrator|consent/i],
-    ["GRAPH_NO_KEYCHAIN", /secure storage/i],
   ] as const)("offers a settings pointer, not a retry, for %s", async (code, remedyPattern) => {
     invoke.mockClear();
     renderState({ kind: "error", code });
@@ -183,14 +182,51 @@ describe("other states", () => {
     expect(invoke).toHaveBeenCalledWith("open_dashboard");
   });
 
-  // The three codes retrying genuinely fixes stay exactly as they were -
-  // Important 3 narrows the OTHER six, not these.
-  it.each(["GRAPH_NETWORK", "GRAPH_THROTTLED", "GRAPH_BAD_RESPONSE"] as const)(
+  // Issue #73: the credential is kept below the threshold, so the copy must
+  // stop claiming the connection was reset.
+  it("says the sign-in expired without claiming the connection was reset", () => {
+    renderState({ kind: "error", code: "GRAPH_AUTH_EXPIRED" });
+    const region = screen.getByTestId("calendar-proposal-region");
+    expect(region).toHaveTextContent(
+      "Your Microsoft sign-in expired. Reconnect from the Odoo page's Calendar section."
+    );
+    expect(region).not.toHaveTextContent(/was reset/i);
+  });
+
+  // The four codes retrying can genuinely fix keep the retry control and get
+  // no settings pointer - Important 3 narrows the OTHER five, not these.
+  it.each(["GRAPH_NETWORK", "GRAPH_THROTTLED", "GRAPH_BAD_RESPONSE", "GRAPH_NO_KEYCHAIN"] as const)(
     "keeps the retry control, with no settings pointer, for %s",
     (code) => {
       renderState({ kind: "error", code });
       expect(screen.getByTestId("calendar-proposal-retry")).toBeInTheDocument();
       expect(screen.queryByTestId("calendar-proposal-open-settings")).toBeNull();
+    }
+  );
+
+  /**
+   * Issue #73: GRAPH_NO_KEYCHAIN covers persistent keychain failures too
+   * (keychain.rs maps every non-NoEntry error to it), and a retryable code
+   * renders no remedy line - so without the hint a persistently failing
+   * keychain would show a "Try again" that never works and nothing pointing
+   * at the reconnect that does.
+   */
+  it("points a keychain read failure at reconnect if retrying keeps failing", async () => {
+    const { onRetry } = renderState({ kind: "error", code: "GRAPH_NO_KEYCHAIN" });
+    expect(screen.getByTestId("calendar-proposal-region")).toHaveTextContent(
+      "Couldn't read the saved calendar connection from this device's secure storage. If this keeps happening, reconnect from the Odoo page's Calendar section."
+    );
+    await userEvent.click(screen.getByTestId("calendar-proposal-retry"));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it.each(["GRAPH_NETWORK", "GRAPH_THROTTLED", "GRAPH_BAD_RESPONSE"] as const)(
+    "shows no reconnect hint for %s",
+    (code) => {
+      renderState({ kind: "error", code });
+      expect(screen.getByTestId("calendar-proposal-region")).not.toHaveTextContent(
+        /keeps happening/i
+      );
     }
   );
 });
