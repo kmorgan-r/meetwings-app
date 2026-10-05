@@ -132,6 +132,12 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
 // if the user ends/clears the transcript without ever asking the AI a question.
 export const MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4;
 
+// A meeting capture that opens this long after the current conversation's last
+// line starts a new conversation. Measured on real data: silences inside one
+// meeting reached 13 min, and detection flapping reopens the capture 5-15 min
+// apart within the same call, while separate meetings were 36+ min apart.
+export const MEETING_CONVERSATION_GAP_MS = 30 * 60 * 1000;
+
 // Number of consecutive meeting-transcript autosave failures before the user
 // is shown a "transcript could not be saved" report. A failed save advances
 // no watermark, so the periodic autosave retries on the next segment and a

@@ -228,12 +228,18 @@ export function parseSummarizationResponse(response: string): SummarizationResul
 export async function saveSummarizationResult(
   conversationId: string,
   result: SummarizationResult,
-  exchangeCount: number
+  exchangeCount: number,
+  // The transcript span the summary was generated from. Without it the row
+  // takes the whole conversation's window, which ensureMeetingSummary cannot
+  // tell apart from the one meeting this summary is actually about.
+  span?: { startedAt: number; endedAt: number }
 ): Promise<string | null> {
   try {
     // Create the meeting summary
     const summaryInput: CreateMeetingSummaryInput = {
       conversationId,
+      meetingStartedAt: span?.startedAt,
+      meetingEndedAt: span?.endedAt,
       title: result.title || undefined,
       summary: result.summary,
       topics: result.topics,
@@ -346,22 +352,35 @@ export async function ensureMeetingSummary(
   minEntries: number = MIN_PERSIST_ENTRIES
 ): Promise<SummarizationResult | null> {
   try {
-    if (conversationId) {
-      const existing = await getMeetingSummaryByConversation(conversationId);
-      if (existing) {
-        return {
-          title: existing.title,
-          summary: existing.summary,
-          topics: existing.topics,
-          goals: existing.goals,
-          actionItems: existing.actionItems,
-          nextSteps: existing.nextSteps,
-          decisions: existing.decisions,
-          teamUpdates: existing.teamUpdates,
-          participants: existing.participants,
-          entities: [],
-        };
-      }
+    const existing = conversationId
+      ? await getMeetingSummaryByConversation(conversationId)
+      : null;
+    const timestamps = entries.map((e) => e.timestamp);
+    const span = entries.length
+      ? { startedAt: Math.min(...timestamps), endedAt: Math.max(...timestamps) }
+      : undefined;
+    // The cached row stores the span it summarized. A slice outside it is a
+    // different meeting in the same conversation - earlier or later, since
+    // Odoo rows get assigned in any order - and the cached summary would put
+    // that other meeting's content in this one's Odoo note.
+    const isOtherMeeting =
+      span !== undefined &&
+      existing?.meetingStartedAt != null &&
+      existing.meetingEndedAt != null &&
+      (span.endedAt < existing.meetingStartedAt || span.startedAt > existing.meetingEndedAt);
+    if (existing && !isOtherMeeting) {
+      return {
+        title: existing.title,
+        summary: existing.summary,
+        topics: existing.topics,
+        goals: existing.goals,
+        actionItems: existing.actionItems,
+        nextSteps: existing.nextSteps,
+        decisions: existing.decisions,
+        teamUpdates: existing.teamUpdates,
+        participants: existing.participants,
+        entities: [],
+      };
     }
 
     if (entries.length < minEntries) {
@@ -394,8 +413,10 @@ export async function ensureMeetingSummary(
       return null;
     }
 
-    if (conversationId && entries.length >= MIN_PERSIST_ENTRIES) {
-      await saveSummarizationResult(conversationId, result, entries.length);
+    // Another meeting's summary is returned but not stored: the conversation
+    // already has its one meeting_summaries row (conversation_id is UNIQUE).
+    if (conversationId && !existing && entries.length >= MIN_PERSIST_ENTRIES) {
+      await saveSummarizationResult(conversationId, result, entries.length, span);
     }
 
     return result;
