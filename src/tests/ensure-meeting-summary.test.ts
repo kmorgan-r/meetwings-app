@@ -101,6 +101,48 @@ describe("ensureMeetingSummary", () => {
     expect(fetchAIResponse).not.toHaveBeenCalled();
   });
 
+  // ENTRIES span 1000-4000; the cached row below summarized that same span.
+  const CACHED_1000_4000 = { ...EXISTING, meetingStartedAt: 1000, meetingEndedAt: 4000 };
+
+  it("reuses the cached summary for a slice overlapping the span it summarized", async () => {
+    getMeetingSummaryByConversation.mockResolvedValue(CACHED_1000_4000);
+    const result = await ensureMeetingSummary("conv-1", ENTRIES.slice(1), undefined, 1);
+    expect(result?.summary).toBe("Cached summary text");
+    expect(fetchAIResponse).not.toHaveBeenCalled();
+  });
+
+  it("does not hand a later meeting in the conversation an earlier meeting's summary", async () => {
+    getMeetingSummaryByConversation.mockResolvedValue(CACHED_1000_4000);
+    fetchAIResponse.mockImplementation(stream(['{"summary":"the later meeting"}']));
+    const later = ENTRIES.map((e) => ({ ...e, timestamp: e.timestamp + 4000 }));
+    const result = await ensureMeetingSummary("conv-1", later, undefined, 1);
+    expect(result?.summary).toBe("the later meeting");
+    // The conversation already has its one summary row (UNIQUE), so this
+    // slice's summary is returned to the caller but not written.
+    expect(createMeetingSummary).not.toHaveBeenCalled();
+  });
+
+  it("does not hand an earlier meeting a later meeting's summary", async () => {
+    // Odoo rows are often assigned after the fact and in any order, so the
+    // first summary written can come from the conversation's second meeting.
+    getMeetingSummaryByConversation.mockResolvedValue({
+      ...EXISTING,
+      meetingStartedAt: 5000,
+      meetingEndedAt: 8000,
+    });
+    fetchAIResponse.mockImplementation(stream(['{"summary":"the earlier meeting"}']));
+    const result = await ensureMeetingSummary("conv-1", ENTRIES, undefined, 1);
+    expect(result?.summary).toBe("the earlier meeting");
+  });
+
+  it("stores the span of the slice it summarized, not the whole conversation's", async () => {
+    fetchAIResponse.mockImplementation(stream(['{"summary":"full meeting"}']));
+    await ensureMeetingSummary("conv-1", ENTRIES);
+    expect(createMeetingSummary).toHaveBeenCalledWith(
+      expect.objectContaining({ meetingStartedAt: 1000, meetingEndedAt: 4000 })
+    );
+  });
+
   it("skips the AI call when entries.length is below the default minEntries (4)", async () => {
     const result = await ensureMeetingSummary("conv-1", ENTRIES.slice(0, 3));
     expect(result).toBeNull();

@@ -1,8 +1,9 @@
 import { PropsWithChildren, StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { useCompletion } from "@/hooks/useCompletion";
+import { MEETING_CONVERSATION_GAP_MS } from "@/config/constants";
 import {
   appendMessagesToConversation,
   fetchAIResponse,
@@ -672,6 +673,121 @@ describe("useCompletion meeting assist mode", () => {
     });
 
     expect(result.current.currentConversationId).toBe("chat-b");
+  });
+
+  describe("a meeting capture that opens long after the last line", () => {
+    // Only Date is faked: waitFor and the save queue still need real timers.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(2026, 9, 2, 12, 0));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function recordOneMeetingThenReopenAfter(gapMs: number) {
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+      act(() => {
+        result.current.setMeetingAssistMode(true);
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+      });
+      expect(result.current.currentConversationId).toBe("chat-a");
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      vi.setSystemTime(Date.now() + gapMs);
+      await act(async () => {
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("Next line", undefined, "microphone");
+      });
+      return result;
+    }
+
+    it("starts a new conversation, so one conversation never spans two meetings", async () => {
+      // The incident: a meeting on Fri 12:41, the app left open, and Monday's
+      // call appended to Friday's conversation - inheriting its title,
+      // summary and transcript download.
+      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS + 60_000);
+      expect(result.current.currentConversationId).toBe("chat-b");
+      expect(result.current.conversationHistory.map((m) => m.content)).toEqual(["Next line"]);
+    });
+
+    it("keeps the conversation when the capture reopens within the gap", async () => {
+      // Meeting detection flaps (meeting-ended, then meeting-detected again
+      // minutes later) and users pause the mic: both are the same meeting.
+      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS - 60_000);
+      expect(result.current.currentConversationId).toBe("chat-a");
+      expect(result.current.conversationHistory).toHaveLength(2);
+    });
+
+    it("measures the gap from the last meeting line, not a later question to the AI", async () => {
+      // A follow-up question after the meeting is stored role "user" too, with
+      // its own timestamp. Counting it would keep the next meeting in this one.
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      enableProviderGate();
+      mockStreamedResponse("ok");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      const meetingEndedAt = Date.now();
+
+      act(() => {
+        result.current.setMeetingAssistMode(true);
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+      });
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS - 5 * 60_000);
+      await act(async () => {
+        await result.current.submit("What did we agree on?");
+      });
+      expect(result.current.currentConversationId).toBe("chat-a");
+
+      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS + 60_000);
+      await act(async () => {
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("Next line", undefined, "microphone");
+      });
+
+      expect(result.current.currentConversationId).toBe("chat-b");
+      expect(result.current.conversationHistory.map((m) => m.content)).toEqual(["Next line"]);
+    });
+
+    it("starts a new conversation after a chat that had no meeting in it", async () => {
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      enableProviderGate();
+      mockStreamedResponse("ok");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+      await act(async () => {
+        await result.current.submit("Draft a LinkedIn post");
+      });
+      expect(result.current.currentConversationId).toBe("chat-a");
+
+      vi.setSystemTime(Date.now() + MEETING_CONVERSATION_GAP_MS + 60_000);
+      await act(async () => {
+        result.current.setMeetingAssistMode(true);
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("Next line", undefined, "microphone");
+      });
+
+      expect(result.current.currentConversationId).toBe("chat-b");
+    });
   });
 
   it("keeps state.currentConversationId populated after a chat-only turn", async () => {

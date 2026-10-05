@@ -9,6 +9,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL,
   AUTOSAVE_FAILURE_REPORT_THRESHOLD,
+  MEETING_CONVERSATION_GAP_MS,
 } from "@/config";
 import { useApp } from "@/contexts";
 import {
@@ -1528,6 +1529,36 @@ export const useCompletion = () => {
     // useOdooTarget's listener for "newConversationStarted".
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [summarizeCurrentConversation, meetingTranscript.length, flushUnsavedMeetingTranscript]);
+
+  // A meeting capture that opens long after this conversation's last meeting
+  // line is a new meeting. Left alone it appends to the old conversation, which
+  // then spans both meetings under the first one's title, summary and download.
+  // Gap-based rather than tied to meeting-detected: detection flaps mid-call,
+  // and pausing the mic must not split a meeting either.
+  //
+  // At the capture edge, not inside the add*Transcript functions: the autosave
+  // reads the refs when it RUNS, so startNewConversation must flush the old
+  // conversation before its refs reset, which needs an await. The first new
+  // line arrives an STT round trip after the mic opens.
+  const meetingCaptureActive = meetingAssistMode && enableVAD;
+  const wasMeetingCaptureActiveRef = useRef(meetingCaptureActive);
+  useEffect(() => {
+    const wasActive = wasMeetingCaptureActiveRef.current;
+    wasMeetingCaptureActiveRef.current = meetingCaptureActive;
+    const history = conversationHistoryRef.current;
+    if (wasActive || !meetingCaptureActive || history.length === 0) return;
+    // Meeting lines are the messages with an audioSource. Role can't tell them
+    // apart: a question typed to the AI after the meeting is role "user" too,
+    // and would hold the next meeting in this conversation. A chat with no
+    // meeting in it falls back to its last message.
+    const meetingLines = history.filter((m) => m.audioSource != null);
+    const clock = meetingLines.length > 0 ? meetingLines : history;
+    // Max, not the last element: the history is sorted newest-first in place.
+    const lastLineAt = Math.max(...clock.map((m) => m.timestamp));
+    if (Date.now() - lastLineAt > MEETING_CONVERSATION_GAP_MS) {
+      void startNewConversation();
+    }
+  }, [meetingCaptureActive, startNewConversation]);
 
   const saveCurrentConversation = useCallback(
     async (
