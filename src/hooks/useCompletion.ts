@@ -1530,9 +1530,9 @@ export const useCompletion = () => {
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
   }, [summarizeCurrentConversation, meetingTranscript.length, flushUnsavedMeetingTranscript]);
 
-  // A meeting capture that opens long after this conversation's last line is
-  // a new meeting. Left alone it appends to the old conversation, which then
-  // spans both meetings under the first one's title, summary and download.
+  // A meeting capture that opens long after this conversation's last meeting
+  // line is a new meeting. Left alone it appends to the old conversation, which
+  // then spans both meetings under the first one's title, summary and download.
   // Gap-based rather than tied to meeting-detected: detection flaps mid-call,
   // and pausing the mic must not split a meeting either.
   //
@@ -1547,8 +1547,14 @@ export const useCompletion = () => {
     wasMeetingCaptureActiveRef.current = meetingCaptureActive;
     const history = conversationHistoryRef.current;
     if (wasActive || !meetingCaptureActive || history.length === 0) return;
+    // Meeting lines are the messages with an audioSource. Role can't tell them
+    // apart: a question typed to the AI after the meeting is role "user" too,
+    // and would hold the next meeting in this conversation. A chat with no
+    // meeting in it falls back to its last message.
+    const meetingLines = history.filter((m) => m.audioSource != null);
+    const clock = meetingLines.length > 0 ? meetingLines : history;
     // Max, not the last element: the history is sorted newest-first in place.
-    const lastLineAt = Math.max(...history.map((m) => m.timestamp));
+    const lastLineAt = Math.max(...clock.map((m) => m.timestamp));
     if (Date.now() - lastLineAt > MEETING_CONVERSATION_GAP_MS) {
       void startNewConversation();
     }

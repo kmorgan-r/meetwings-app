@@ -727,6 +727,67 @@ describe("useCompletion meeting assist mode", () => {
       expect(result.current.currentConversationId).toBe("chat-a");
       expect(result.current.conversationHistory).toHaveLength(2);
     });
+
+    it("measures the gap from the last meeting line, not a later question to the AI", async () => {
+      // A follow-up question after the meeting is stored role "user" too, with
+      // its own timestamp. Counting it would keep the next meeting in this one.
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      enableProviderGate();
+      mockStreamedResponse("ok");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      const meetingEndedAt = Date.now();
+
+      act(() => {
+        result.current.setMeetingAssistMode(true);
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+      });
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS - 5 * 60_000);
+      await act(async () => {
+        await result.current.submit("What did we agree on?");
+      });
+      expect(result.current.currentConversationId).toBe("chat-a");
+
+      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS + 60_000);
+      await act(async () => {
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("Next line", undefined, "microphone");
+      });
+
+      expect(result.current.currentConversationId).toBe("chat-b");
+      expect(result.current.conversationHistory.map((m) => m.content)).toEqual(["Next line"]);
+    });
+
+    it("starts a new conversation after a chat that had no meeting in it", async () => {
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      enableProviderGate();
+      mockStreamedResponse("ok");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+      await act(async () => {
+        await result.current.submit("Draft a LinkedIn post");
+      });
+      expect(result.current.currentConversationId).toBe("chat-a");
+
+      vi.setSystemTime(Date.now() + MEETING_CONVERSATION_GAP_MS + 60_000);
+      await act(async () => {
+        result.current.setMeetingAssistMode(true);
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("Next line", undefined, "microphone");
+      });
+
+      expect(result.current.currentConversationId).toBe("chat-b");
+    });
   });
 
   it("keeps state.currentConversationId populated after a chat-only turn", async () => {
