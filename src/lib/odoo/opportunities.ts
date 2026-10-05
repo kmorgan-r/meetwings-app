@@ -1,4 +1,5 @@
 import type { OdooContact, OdooOpportunity } from "@/types";
+import { normalizeAddress } from "@/lib/calendar/match-attendees";
 import type { OdooClient } from "./client";
 import { odooError } from "./errors";
 import { many2one } from "./many2one";
@@ -46,23 +47,40 @@ export type OpportunityLookupContact = Pick<
  * A crm.lead reaches this list two ways, and they are not the same kind of
  * claim:
  *
- *  1. `partner_id` is the contact or their parent company. AUTHORITATIVE -
- *     Odoo itself says this record belongs to that partner. Both kinds of
- *     crm.lead are found this way, and it is the only way an opportunity is.
+ *  1. `partner_id` is `child_of` the contact - the contact itself or any
+ *     partner below it in Odoo's company tree - or is the contact's direct
+ *     parent company. AUTHORITATIVE - Odoo itself says this record belongs to
+ *     that partner. Both kinds of crm.lead are found this way, and it is the
+ *     only way an opportunity is.
  *
- *  2. An UNLINKED lead whose own `contact_name` or `email_from` matches the
- *     contact. A HEURISTIC, and the reason it exists is that Odoo default for
- *     an unconverted lead is exactly this: free-text contact details and NO
- *     partner at all. Rule 1 finds none of those, which is why a real Leads
+ *     `child_of` is what lets a selected COMPANY reach the deals Odoo filed on
+ *     the people under it (issue #74) - `partner_id in [company]` found none
+ *     of them. It walks DOWN only, and the parent clause names one id, so a
+ *     person's SIBLING's deals are never reached from the person: they belong
+ *     to someone else. A `child_of` on the parent would reach them.
+ *
+ *  2. An UNLINKED lead whose own `contact_name` or `email_normalized` matches
+ *     the contact. A HEURISTIC, and the reason it exists is that Odoo default
+ *     for an unconverted lead is exactly this: free-text contact details and
+ *     NO partner at all. Rule 1 finds none of those, which is why a real Leads
  *     list looked empty here the first time leads were offered.
  *
  *     Narrowed to `partner_id = false` deliberately. A lead already pointed
  *     at a DIFFERENT partner belongs to that partner whatever name it
  *     carries, and must not surface under this contact.
  *
- * `=ilike`, never `ilike`: Odoo wraps a bare `ilike` value in `%...%`, so
- * "ada@x.com" would also match "notada@x.com". `=ilike` is exact and
- * case-insensitive, which is the comparison actually wanted here.
+ * `email_normalized`, never `email_from`: Odoo fills `email_from` with the
+ * formatted `"Jane Doe" <jane@x.com>` string, which no whole-value comparison
+ * against a bare address can match. `email_normalized` is Odoo's own stored,
+ * lowercased bare address (Odoo 13+), compared with `=` against our own
+ * normalized value - NOT `=ilike`, which is SQL ILIKE with no escaping: `_`
+ * matches any character, so "jane_doe@x.com" would also match
+ * "jane.doe@x.com", a meeting posted to a stranger's lead.
+ *
+ * `=ilike` on `contact_name`, never `ilike`: Odoo wraps a bare `ilike` value
+ * in `%...%`, so "Ada" would also match "Adam Smith". `=ilike` has no
+ * wrapping `%` and is case-insensitive, which is the comparison wanted for a
+ * free-text name.
  *
  * The won filter is scoped to opportunities. `probability < 100` means "not
  * won", and a LEAD is never won - it is converted (which flips `type`) or
@@ -71,16 +89,22 @@ export type OpportunityLookupContact = Pick<
  * NULL < 100 is NULL, i.e. excluded.
  */
 export function searchDomain(contact: OpportunityLookupContact): XmlRpcValue[] {
-  const partnerIds =
-    contact.parentId === null ? [contact.id] : [contact.id, contact.parentId];
+  // PREFIX ITEMS, spread at both use sites below. The person case is three
+  // items ("|" and its two operands), not one nested element: a nested
+  // ["|", a, b] would be an invalid domain.
+  const linked: XmlRpcValue[] =
+    contact.parentId === null
+      ? [["partner_id", "child_of", contact.id]]
+      : ["|", ["partner_id", "child_of", contact.id], ["partner_id", "=", contact.parentId]];
 
   // At most two, so at most one "|" is ever needed to join them.
   const identity: XmlRpcValue[] = [];
-  if (contact.email) identity.push(["email_from", "=ilike", contact.email]);
+  // Normalized BEFORE the emptiness check: a whitespace-only address is no
+  // address, and `email_normalized = ""` must never go on the wire.
+  const email = contact.email ? normalizeAddress(contact.email) : "";
+  if (email) identity.push(["email_normalized", "=", email]);
   const name = contact.name.trim();
   if (name) identity.push(["contact_name", "=ilike", name]);
-
-  const linked: XmlRpcValue = ["partner_id", "in", partnerIds];
 
   const base: XmlRpcValue[] = [
     ["active", "=", true],
@@ -95,7 +119,7 @@ export function searchDomain(contact: OpportunityLookupContact): XmlRpcValue[] {
 
   // Nothing to recognise an unlinked lead BY. Ask only for what Odoo can
   // answer authoritatively rather than widening the search on a blank value.
-  if (identity.length === 0) return [...base, linked];
+  if (identity.length === 0) return [...base, ...linked];
 
   const identityExpr: XmlRpcValue[] =
     identity.length === 2 ? ["|", identity[0], identity[1]] : [identity[0]];
@@ -103,7 +127,7 @@ export function searchDomain(contact: OpportunityLookupContact): XmlRpcValue[] {
   return [
     ...base,
     "|",
-    linked,
+    ...linked,
     "&",
     "&",
     ["type", "=", "lead"],
