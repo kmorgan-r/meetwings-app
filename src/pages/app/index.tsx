@@ -217,11 +217,16 @@ const App = () => {
                   </div>
                 ) : null}
 
+                {/* flex-1 min-w-0, not w-full: the toolbar takes what the
+                    window controls leave, and the contact picker truncates.
+                    At min-content (meeting badge + a conversation's input
+                    padding) the row is wider than the 600px window, and
+                    overflow-hidden then clipped the LAST child: Minimize. */}
                 <div
                   className={`${
                     systemAudio?.capturing
                       ? "hidden w-full fade-out transition-all duration-300"
-                      : "w-full flex flex-row gap-2 items-center"
+                      : "flex-1 min-w-0 flex flex-row gap-1 items-center"
                   }`}
                 >
                   <Completion isHidden={isHidden} systemAudio={systemAudio} />
