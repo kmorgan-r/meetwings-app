@@ -170,6 +170,9 @@ const SEND_ACTIVE_COPY =
 
 const SEND_EMPTY_COPY = "Nothing to send - this conversation has no meeting transcript.";
 
+const SEND_ALREADY_QUEUED_COPY =
+  "This meeting was already logged for Odoo - its badge shows where it stands.";
+
 const RETARGET_CONFLICT_COPY =
   "That contact could not be swapped in — this meeting changed in another window.";
 
@@ -756,6 +759,8 @@ export function useMeetingLogQueue() {
         if (outcome.kind === "active") return SEND_ACTIVE_COPY;
         if (outcome.kind === "empty") return SEND_EMPTY_COPY;
         await loaderRef.current();
+        // The reload brings in the badge this card was missing.
+        if (outcome.kind === "already-queued") return SEND_ALREADY_QUEUED_COPY;
         const row = await getQueueRow(outcome.rowId);
         // getQueueRow reads the parent alone; a fresh manual row has no targets.
         if (row) setAssignRow({ ...row, targets: [] });

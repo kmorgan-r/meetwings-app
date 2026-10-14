@@ -119,6 +119,20 @@ describe("enqueueConversation", () => {
     expect(queue()).toEqual([]);
   });
 
+  it("refuses a conversation a live trigger has queued since the page last loaded", async () => {
+    message({ content: "said aloud", timestamp: 2000 });
+    await enqueueConversation("conv_1", NOW);
+    // Reshape it into the trigger's own row: its key namespace never collides
+    // with a manual one, so only a status check can catch it.
+    db.run("UPDATE meeting_log_queue SET session_key = 'conv_1:2000', status = 'pending'");
+
+    expect(await enqueueConversation("conv_1", NOW + 1)).toEqual({ kind: "already-queued" });
+    expect(queue()).toHaveLength(1);
+    // Another conversation's row blocks nothing.
+    message({ conversation_id: "sysaudio_conv_1", audio_source: null });
+    expect((await enqueueConversation("sysaudio_conv_1", NOW + 2)).kind).toBe("queued");
+  });
+
   it("can send a conversation again after its earlier row was deleted", async () => {
     message({ content: "said aloud" });
     await enqueueConversation("conv_1", NOW);

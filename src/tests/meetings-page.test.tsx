@@ -492,6 +492,24 @@ describe("sending an unlogged conversation to Odoo", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("swaps the button for the badge when a trigger logged the meeting first", async () => {
+    actions.enqueueConversation.mockResolvedValue({ kind: "already-queued" });
+    await renderPage();
+    await waitFor(() => expect(sendButton("c1")).not.toBeNull());
+    db.listConversationBadgeRows.mockResolvedValue([
+      { conversationId: "c1", status: "pending", instance: INSTANCE },
+    ]);
+
+    await userEvent.click(sendButton("c1")!);
+
+    expect(
+      await within(conversationCard("c1")!).findByText(/already logged for Odoo/)
+    ).toBeInTheDocument();
+    expect(conversationCard("c1")!.querySelector("[data-badge-status]")).not.toBeNull();
+    expect(sendButton("c1")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
   it("is not offered until Odoo is fully set up", async () => {
     storage.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
     await renderPage();

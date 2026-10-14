@@ -6,6 +6,7 @@ import {
   deriveRowStatus,
   getQueueRow,
   insertQueueRow,
+  listConversationBadgeRows,
   listTargets,
   pruneTranscripts,
   QUEUE_SQL,
@@ -25,6 +26,7 @@ import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
 import {
   renderTranscript,
+  resolveBadge,
   sliceTranscript,
   SUMMARIZE_TIMEOUT_MS,
   type TranscriptSlice,
@@ -534,7 +536,9 @@ export type EnqueueOutcome =
   /** No meeting lines in it - a typed-only chat, say. */
   | { kind: "empty" }
   /** The overlay still holds it - a live meeting, or a chat reopened there. */
-  | { kind: "active" };
+  | { kind: "active" }
+  /** It already has a row its badge would show - one the page had not loaded yet. */
+  | { kind: "already-queued" };
 
 /**
  * Queues a whole conversation by hand, as an `unassigned` row with no targets.
@@ -548,6 +552,12 @@ export type EnqueueOutcome =
  * logs it, and a manual row would lift the watermark over the entries that
  * trigger is about to slice.
  *
+ * Also refuses a conversation that already has a badge-worthy row. The card
+ * only offers the button on a badge-less row, but the page's badges refresh on
+ * focus, so a trigger can log the meeting in the overlay while the button is
+ * still showing. A manual key never collides with a trigger's, so without this
+ * check the meeting goes to Odoo twice.
+ *
  * ponytail: the row still counts toward the global watermark, so sending a
  * system-audio capture that overlaps a live, not-yet-logged meeting-assist span
  * makes that span's trigger skip the overlap. Exclude manual rows from the
@@ -558,10 +568,15 @@ export async function enqueueConversation(
   now: number
 ): Promise<EnqueueOutcome> {
   if (getActiveConversationId() === conversationId) return { kind: "active" };
+  const config = await requireOdooConfig();
+  const instance = instanceFingerprint(config.url, config.db);
+  const existing = (await listConversationBadgeRows()).filter(
+    (r) => r.conversationId === conversationId
+  );
+  if (resolveBadge(existing, instance)) return { kind: "already-queued" };
   const slice = sliceTranscript(await readConversationTranscript(conversationId), 0);
   if (!slice) return { kind: "empty" };
 
-  const config = await requireOdooConfig();
   const rowId = crypto.randomUUID();
   await insertQueueRow({
     id: rowId,
@@ -569,7 +584,7 @@ export async function enqueueConversation(
     // and a conversation whose earlier row was deleted must stay sendable.
     sessionKey: `manual:${conversationId}:${now}`,
     conversationId,
-    instance: instanceFingerprint(config.url, config.db),
+    instance,
     targets: [],
     transcript: renderTranscript(slice.entries),
     transcriptStartAt: slice.startAt,
