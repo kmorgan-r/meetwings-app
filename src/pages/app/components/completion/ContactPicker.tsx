@@ -348,7 +348,8 @@ export const ContactPicker = memo(function ContactPicker({
         <button
           type="button"
           data-testid="contact-picker-trigger"
-          className={`px-2 py-1 rounded-md text-xs font-medium transition-colors ${
+          title={triggerLabel}
+          className={`min-w-0 truncate px-2 py-1 rounded-md text-xs font-medium transition-colors ${
             contactId !== null || leadId !== null || targets.length > 0
               ? "bg-primary/10 text-primary"
               : "bg-muted/50 text-muted-foreground"
