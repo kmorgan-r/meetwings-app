@@ -231,6 +231,17 @@ SELECT content, timestamp, speaker, audio_source FROM messages
  WHERE conversation_id = ? AND audio_source IS NOT NULL AND timestamp > ?
  ORDER BY timestamp ASC`,
 
+  // The manual "Send to Odoo" read: a whole conversation, no watermark. A
+  // system-audio capture stores its transcriptions as plain `user` turns with
+  // no audio_source, and its AI replies as `assistant` - so for those ids alone
+  // the user turns are the transcript.
+  conversationTranscript: `
+SELECT content, timestamp, speaker, audio_source FROM messages
+ WHERE conversation_id = ?
+   AND (audio_source IS NOT NULL
+        OR (role = 'user' AND conversation_id LIKE 'sysaudio_conv_%'))
+ ORDER BY timestamp ASC`,
+
   // Startup recovery. Same predicate as meetingMessages minus the conversation
   // bound, plus the id itself so the caller can group by it. See
   // readUnloggedMessages for why there is no LIMIT.
@@ -905,6 +916,19 @@ export async function readMeetingMessages(
     conversationId,
     watermark,
   ]);
+  return rows.map(toTranscriptEntry);
+}
+
+/**
+ * Everything said in one conversation, for a manual send. Shares
+ * readMeetingMessages' audio_source rule, so typed chat stays out - plus the
+ * user turns of a system-audio capture, which never carry an audio_source.
+ */
+export async function readConversationTranscript(
+  conversationId: string
+): Promise<TranscriptEntry[]> {
+  const db = await getDatabase();
+  const rows = await db.select<MessageRow[]>(QUEUE_SQL.conversationTranscript, [conversationId]);
   return rows.map(toTranscriptEntry);
 }
 

@@ -23,6 +23,7 @@ import {
   generateMessageId,
 } from "@/lib";
 import { Message } from "@/types/completion";
+import { setCapturingConversationId } from "@/lib/storage/active-conversation.storage";
 
 // VAD Configuration interface matching Rust
 export interface VadConfig {
@@ -807,6 +808,13 @@ export function useSystemAudio() {
       invoke("stop_system_audio_capture").catch(() => {});
     };
   }, []);
+
+  // Tells the Meetings page which capture is still recording, so its "Send to
+  // Odoo" waits for the whole transcript. Runs on mount with capturing false,
+  // which also clears an id a crash left behind.
+  useEffect(() => {
+    setCapturingConversationId(capturing ? conversation.id : null);
+  }, [capturing, conversation.id]);
 
   // Debounced save to prevent race conditions and improve performance
   useEffect(() => {

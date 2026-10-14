@@ -1,3 +1,4 @@
+import { MEETING_CONVERSATION_GAP_MS } from "@/config";
 import { getDatabase } from "@/lib/database/config";
 import {
   assignQueueRow,
@@ -5,14 +6,21 @@ import {
   deleteTerminalQueueRow,
   deriveRowStatus,
   getQueueRow,
+  insertQueueRow,
+  listConversationBadgeRows,
   listTargets,
   pruneTranscripts,
   QUEUE_SQL,
+  readConversationTranscript,
   retargetQueueTarget,
   retryQueueRow,
   type RetargetVerdict,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+import {
+  getActiveConversationId,
+  getCapturingConversationId,
+} from "@/lib/storage/active-conversation.storage";
 import {
   instanceFingerprint,
   requireOdooConfig,
@@ -20,7 +28,13 @@ import {
 import type { SelectedTarget, SelectedTargets, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
-import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
+import {
+  renderTranscript,
+  resolveBadge,
+  segmentByGap,
+  SUMMARIZE_TIMEOUT_MS,
+  type TranscriptSlice,
+} from "./meeting-log";
 import { pushQueuedRow } from "./meeting-log-push";
 
 /**
@@ -519,6 +533,96 @@ export async function deleteMeetingLog(id: string): Promise<ActionOutcome> {
   // changes is only what the user is told about it.
   if (await deleteTerminalQueueRow(id)) return { kind: "deleted-after-send" };
   return { kind: "conflict" };
+}
+
+export type EnqueueOutcome =
+  /** One row per meeting in the conversation, earliest first. */
+  | { kind: "queued"; rowIds: string[] }
+  /** No meeting lines in it - a typed-only chat, say. */
+  | { kind: "empty" }
+  /** The overlay still holds it - a live meeting, a chat reopened there, or a
+   * system-audio capture still recording. */
+  | { kind: "active" }
+  /** It already has a row its badge would show - one the page had not loaded yet. */
+  | { kind: "already-queued" };
+
+/**
+ * Queues a whole conversation by hand, as one `unassigned` row per meeting in
+ * it, with no targets.
+ *
+ * The way back for a meeting no trigger ever logged: a system-audio capture,
+ * which was never wired to the queue, or the first half of a meeting whose
+ * transcript was cleared mid-call - that span sits below the global watermark,
+ * where neither the live triggers nor startup recovery will ever look again.
+ *
+ * Refuses the conversation the overlay is still writing to: its own trigger
+ * logs it, and a manual row would lift the watermark over the entries that
+ * trigger is about to slice. Refuses a system-audio capture still recording
+ * too: no trigger ever logs one, but sending it early queues only the lines so
+ * far, and the badge then hides the button that would send the rest.
+ *
+ * Also refuses a conversation that already has a badge-worthy row. The card
+ * only offers the button on a badge-less row, but the page's badges refresh on
+ * focus, so a trigger can log the meeting in the overlay while the button is
+ * still showing. A manual key never collides with a trigger's, so without this
+ * check the meeting goes to Odoo twice.
+ *
+ * ponytail: the row still counts toward the global watermark, so sending a
+ * system-audio capture that overlaps a live, not-yet-logged meeting-assist span
+ * makes that span's trigger skip the overlap. Exclude manual rows from the
+ * watermark if the two ever run side by side.
+ *
+ * ponytail: no transaction (see meeting-log.action.ts's header), so an insert
+ * that throws partway leaves the earlier meetings queued, and the badge check
+ * above then refuses a retry. Deleting those rows from the strip makes the
+ * conversation sendable again.
+ */
+export async function enqueueConversation(
+  conversationId: string,
+  now: number
+): Promise<EnqueueOutcome> {
+  if (
+    conversationId === getActiveConversationId() ||
+    conversationId === getCapturingConversationId()
+  ) {
+    return { kind: "active" };
+  }
+  const config = await requireOdooConfig();
+  const instance = instanceFingerprint(config.url, config.db);
+  const existing = (await listConversationBadgeRows()).filter(
+    (r) => r.conversationId === conversationId
+  );
+  if (resolveBadge(existing, instance)) return { kind: "already-queued" };
+  // One row per meeting, for the reason segmentByGap gives. The meeting gap,
+  // not recovery's IDLE_FLUSH_MS: a silence inside one call has run to 13
+  // minutes, and each extra row is another chatter note on the same contact.
+  const segments = segmentByGap(
+    await readConversationTranscript(conversationId),
+    MEETING_CONVERSATION_GAP_MS
+  );
+  if (segments.length === 0) return { kind: "empty" };
+
+  const rowIds: string[] = [];
+  for (const slice of segments) {
+    const id = crypto.randomUUID();
+    await insertQueueRow({
+      id,
+      // Its own namespace, and timestamped: a live trigger keys on conv:start,
+      // and a conversation whose earlier row was deleted must stay sendable.
+      sessionKey: `manual:${conversationId}:${slice.startAt}:${now}`,
+      conversationId,
+      instance,
+      targets: [],
+      transcript: renderTranscript(slice.entries),
+      transcriptStartAt: slice.startAt,
+      transcriptEndAt: slice.endAt,
+      meetingStartedAt: slice.startAt,
+      status: "unassigned",
+      createdAt: now,
+    });
+    rowIds.push(id);
+  }
+  return { kind: "queued", rowIds };
 }
 
 /**

@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { useSystemAudio } from "@/hooks/useSystemAudio";
+import { setCapturingConversationId } from "@/lib/storage/active-conversation.storage";
 
 // useSystemAudio() calls useApp() (app.context.tsx:806-808 throws outside an
 // AppProvider), plus useWindowResize/useGlobalShortcuts from "@/hooks" and a
@@ -23,6 +24,11 @@ vi.mock("@/hooks", () => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(true) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
+// setup.ts stubs localStorage with no-op mocks, so the write is what's observable.
+vi.mock("@/lib/storage/active-conversation.storage", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  setCapturingConversationId: vi.fn(),
+}));
 
 // `@/lib` is deliberately left unmocked, as meeting-log-page.test.tsx:72-77
 // does for the same reason: this test asserts two ids DIFFER, and the
@@ -46,5 +52,29 @@ describe("useSystemAudio new conversation", () => {
     const second = result.current.conversation.id;
 
     expect(second).not.toBe(first);
+  });
+});
+
+describe("the capture the Meetings page must not send yet", () => {
+  it("names the recording conversation, follows it, and clears on stop", async () => {
+    const written = () => vi.mocked(setCapturingConversationId).mock.lastCall?.[0];
+    const { result } = renderHook(() => useSystemAudio());
+    // Mount clears whatever a crash left behind.
+    expect(written()).toBeNull();
+
+    await act(async () => {
+      await result.current.startCapture();
+    });
+    expect(written()).toBe(result.current.conversation.id);
+
+    await act(async () => {
+      result.current.startNewConversation();
+    });
+    expect(written()).toBe(result.current.conversation.id);
+
+    await act(async () => {
+      await result.current.stopCapture();
+    });
+    expect(written()).toBeNull();
   });
 });

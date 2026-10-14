@@ -70,6 +70,7 @@ const actions = vi.hoisted(() => ({
   deleteMeetingLog: vi.fn(),
   retryTarget: vi.fn(),
   removeQueueTarget: vi.fn(),
+  enqueueConversation: vi.fn(),
 }));
 vi.mock("@/lib/odoo/meeting-log-actions", () => actions);
 
@@ -448,6 +449,73 @@ describe("the meetings page", () => {
     expect(badge.textContent).toContain("· Ada Lovelace");
     // c2 has no badge row at all, so it must show no "who" suffix either.
     expect(conversationCard("c2")!.querySelector("[data-badge-status]")).toBeNull();
+  });
+});
+
+describe("sending an unlogged conversation to Odoo", () => {
+  const sendButton = (id: string) =>
+    within(conversationCard(id)!).queryByRole("button", { name: "Send to Odoo" });
+
+  it("is offered only where there is no badge, and opens the dialog on the queued row", async () => {
+    db.listConversationBadgeRows.mockResolvedValue([
+      { conversationId: "c1", status: "sent", instance: INSTANCE },
+    ]);
+    actions.enqueueConversation.mockResolvedValue({ kind: "queued", rowIds: ["new"] });
+    // getQueueRow's real shape: the parent row, no `targets`.
+    const { targets: _, ...queued } = row({
+      id: "new", status: "unassigned", contact_id: null, conversation_id: "c2",
+    });
+    db.getQueueRow.mockResolvedValue(queued);
+    await renderPage();
+
+    await waitFor(() =>
+      expect(conversationCard("c1")!.querySelector("[data-badge-status]")).not.toBeNull()
+    );
+    expect(sendButton("c1")).toBeNull();
+
+    await userEvent.click(sendButton("c2")!);
+
+    expect(actions.enqueueConversation).toHaveBeenCalledWith("c2", expect.any(Number));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("says why under the card when the overlay still holds the conversation", async () => {
+    actions.enqueueConversation.mockResolvedValue({ kind: "active" });
+    await renderPage();
+    await waitFor(() => expect(sendButton("c1")).not.toBeNull());
+
+    await userEvent.click(sendButton("c1")!);
+
+    expect(
+      await within(conversationCard("c1")!).findByText(/still open in the overlay/)
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("swaps the button for the badge when a trigger logged the meeting first", async () => {
+    actions.enqueueConversation.mockResolvedValue({ kind: "already-queued" });
+    await renderPage();
+    await waitFor(() => expect(sendButton("c1")).not.toBeNull());
+    db.listConversationBadgeRows.mockResolvedValue([
+      { conversationId: "c1", status: "pending", instance: INSTANCE },
+    ]);
+
+    await userEvent.click(sendButton("c1")!);
+
+    expect(
+      await within(conversationCard("c1")!).findByText(/already logged for Odoo/)
+    ).toBeInTheDocument();
+    expect(conversationCard("c1")!.querySelector("[data-badge-status]")).not.toBeNull();
+    expect(sendButton("c1")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("is not offered until Odoo is fully set up", async () => {
+    storage.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    await renderPage();
+    await waitFor(() => expect(conversationCard("c1")).not.toBeNull());
+
+    expect(sendButton("c1")).toBeNull();
   });
 });
 
