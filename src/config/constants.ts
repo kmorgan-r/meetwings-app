@@ -61,6 +61,11 @@ export const STORAGE_KEYS = {
   // in-progress conversation from summary backfill so it isn't frozen early.
   ACTIVE_CONVERSATION_ID: "active_conversation_id",
 
+  // Id of the system-audio capture still recording, if any. Kept apart from
+  // ACTIVE_CONVERSATION_ID because the chat view and the capture write
+  // different conversations at the same time.
+  CAPTURING_CONVERSATION_ID: "capturing_conversation_id",
+
   // How far a meeting log trigger has consumed the in-memory transcript even
   // when it wrote no row for it (Odoo not fully configured, or any throw). See
   // meeting-log-watermark.storage.ts.

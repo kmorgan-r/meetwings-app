@@ -28,9 +28,10 @@ vi.mock("@/lib/storage/odoo-config.storage", () => ({
   instanceFingerprint: () => "http://h:8069|odoo",
 }));
 
-const active = vi.hoisted(() => ({ id: null as string | null }));
+const active = vi.hoisted(() => ({ id: null as string | null, capturing: null as string | null }));
 vi.mock("@/lib/storage/active-conversation.storage", () => ({
   getActiveConversationId: () => active.id,
+  getCapturingConversationId: () => active.capturing,
 }));
 
 import { enqueueConversation } from "@/lib/odoo/meeting-log-actions";
@@ -68,6 +69,7 @@ beforeEach(async () => {
     db.run("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, 't', 1, 1)", [id]);
   }
   active.id = null;
+  active.capturing = null;
 });
 
 describe("enqueueConversation", () => {
@@ -136,6 +138,15 @@ describe("enqueueConversation", () => {
     active.id = "conv_1";
 
     expect(await enqueueConversation("conv_1", NOW)).toEqual({ kind: "active" });
+    expect(queue()).toEqual([]);
+  });
+
+  it("refuses a system-audio capture that is still recording", async () => {
+    message({ conversation_id: "sysaudio_conv_1", audio_source: null });
+    active.id = "conv_1";
+    active.capturing = "sysaudio_conv_1";
+
+    expect(await enqueueConversation("sysaudio_conv_1", NOW)).toEqual({ kind: "active" });
     expect(queue()).toEqual([]);
   });
 

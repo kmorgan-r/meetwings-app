@@ -166,7 +166,7 @@ const ASSIGN_CONFLICT_COPY =
   "This meeting could not be reassigned — it changed in another window.";
 
 const SEND_ACTIVE_COPY =
-  "This conversation is still open in the overlay. End the meeting or start a new conversation there, then send it.";
+  "This conversation is still open in the overlay. Stop the recording or start a new conversation there, then send it.";
 
 const SEND_EMPTY_COPY = "Nothing to send - this conversation has no meeting transcript.";
 

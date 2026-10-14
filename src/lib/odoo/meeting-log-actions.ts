@@ -17,7 +17,10 @@ import {
   type RetargetVerdict,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
-import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
+import {
+  getActiveConversationId,
+  getCapturingConversationId,
+} from "@/lib/storage/active-conversation.storage";
 import {
   instanceFingerprint,
   requireOdooConfig,
@@ -537,7 +540,8 @@ export type EnqueueOutcome =
   | { kind: "queued"; rowIds: string[] }
   /** No meeting lines in it - a typed-only chat, say. */
   | { kind: "empty" }
-  /** The overlay still holds it - a live meeting, or a chat reopened there. */
+  /** The overlay still holds it - a live meeting, a chat reopened there, or a
+   * system-audio capture still recording. */
   | { kind: "active" }
   /** It already has a row its badge would show - one the page had not loaded yet. */
   | { kind: "already-queued" };
@@ -553,7 +557,9 @@ export type EnqueueOutcome =
  *
  * Refuses the conversation the overlay is still writing to: its own trigger
  * logs it, and a manual row would lift the watermark over the entries that
- * trigger is about to slice.
+ * trigger is about to slice. Refuses a system-audio capture still recording
+ * too: no trigger ever logs one, but sending it early queues only the lines so
+ * far, and the badge then hides the button that would send the rest.
  *
  * Also refuses a conversation that already has a badge-worthy row. The card
  * only offers the button on a badge-less row, but the page's badges refresh on
@@ -575,7 +581,12 @@ export async function enqueueConversation(
   conversationId: string,
   now: number
 ): Promise<EnqueueOutcome> {
-  if (getActiveConversationId() === conversationId) return { kind: "active" };
+  if (
+    conversationId === getActiveConversationId() ||
+    conversationId === getCapturingConversationId()
+  ) {
+    return { kind: "active" };
+  }
   const config = await requireOdooConfig();
   const instance = instanceFingerprint(config.url, config.db);
   const existing = (await listConversationBadgeRows()).filter(
