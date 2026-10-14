@@ -460,7 +460,7 @@ describe("sending an unlogged conversation to Odoo", () => {
     db.listConversationBadgeRows.mockResolvedValue([
       { conversationId: "c1", status: "sent", instance: INSTANCE },
     ]);
-    actions.enqueueConversation.mockResolvedValue({ kind: "queued", rowId: "new" });
+    actions.enqueueConversation.mockResolvedValue({ kind: "queued", rowIds: ["new"] });
     // getQueueRow's real shape: the parent row, no `targets`.
     const { targets: _, ...queued } = row({
       id: "new", status: "unassigned", contact_id: null, conversation_id: "c2",

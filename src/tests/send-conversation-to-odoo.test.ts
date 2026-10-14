@@ -82,7 +82,7 @@ describe("enqueueConversation", () => {
     expect(outcome.kind).toBe("queued");
     const [row] = queue();
     expect(row).toMatchObject({
-      id: outcome.kind === "queued" ? outcome.rowId : "",
+      id: outcome.kind === "queued" ? outcome.rowIds[0] : "",
       conversation_id: "conv_1",
       instance: "http://h:8069|odoo",
       status: "unassigned",
@@ -90,9 +90,29 @@ describe("enqueueConversation", () => {
       transcript_start_at: 2000,
       transcript_end_at: 3000,
       meeting_started_at: 2000,
-      session_key: `manual:conv_1:${NOW}`,
+      session_key: `manual:conv_1:2000:${NOW}`,
     });
     expect(rows(db, "SELECT * FROM meeting_log_targets")).toEqual([]);
+  });
+
+  it("queues each meeting in the conversation as its own row", async () => {
+    const MIN = 60_000;
+    // A 13-minute silence is still one meeting; 31 minutes starts another.
+    message({ content: "first call opens", timestamp: 2000 });
+    message({ content: "first call resumes", timestamp: 2000 + 13 * MIN });
+    message({ content: "second call", timestamp: 2000 + 44 * MIN });
+
+    const outcome = await enqueueConversation("conv_1", NOW);
+
+    expect(outcome.kind === "queued" && outcome.rowIds).toEqual(
+      rows(db, "SELECT id FROM meeting_log_queue ORDER BY transcript_start_at").map((r) => r.id)
+    );
+    expect(
+      rows(db, "SELECT transcript, transcript_start_at, transcript_end_at FROM meeting_log_queue ORDER BY transcript_start_at")
+    ).toEqual([
+      { transcript: "You: first call opens\nYou: first call resumes", transcript_start_at: 2000, transcript_end_at: 2000 + 13 * MIN },
+      { transcript: "You: second call", transcript_start_at: 2000 + 44 * MIN, transcript_end_at: 2000 + 44 * MIN },
+    ]);
   });
 
   it("takes a system-audio capture's user turns, not its AI replies", async () => {

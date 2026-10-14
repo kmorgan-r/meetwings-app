@@ -761,7 +761,8 @@ export function useMeetingLogQueue() {
         await loaderRef.current();
         // The reload brings in the badge this card was missing.
         if (outcome.kind === "already-queued") return SEND_ALREADY_QUEUED_COPY;
-        const row = await getQueueRow(outcome.rowId);
+        // The earliest meeting; any others wait under "Needs a contact".
+        const row = await getQueueRow(outcome.rowIds[0]);
         // getQueueRow reads the parent alone; a fresh manual row has no targets.
         if (row) setAssignRow({ ...row, targets: [] });
         return null;

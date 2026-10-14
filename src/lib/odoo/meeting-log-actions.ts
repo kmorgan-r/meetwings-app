@@ -1,3 +1,4 @@
+import { MEETING_CONVERSATION_GAP_MS } from "@/config";
 import { getDatabase } from "@/lib/database/config";
 import {
   assignQueueRow,
@@ -27,7 +28,7 @@ import { reportOdooError, type OdooErrorReport } from "./errors";
 import {
   renderTranscript,
   resolveBadge,
-  sliceTranscript,
+  segmentByGap,
   SUMMARIZE_TIMEOUT_MS,
   type TranscriptSlice,
 } from "./meeting-log";
@@ -532,7 +533,8 @@ export async function deleteMeetingLog(id: string): Promise<ActionOutcome> {
 }
 
 export type EnqueueOutcome =
-  | { kind: "queued"; rowId: string }
+  /** One row per meeting in the conversation, earliest first. */
+  | { kind: "queued"; rowIds: string[] }
   /** No meeting lines in it - a typed-only chat, say. */
   | { kind: "empty" }
   /** The overlay still holds it - a live meeting, or a chat reopened there. */
@@ -541,7 +543,8 @@ export type EnqueueOutcome =
   | { kind: "already-queued" };
 
 /**
- * Queues a whole conversation by hand, as an `unassigned` row with no targets.
+ * Queues a whole conversation by hand, as one `unassigned` row per meeting in
+ * it, with no targets.
  *
  * The way back for a meeting no trigger ever logged: a system-audio capture,
  * which was never wired to the queue, or the first half of a meeting whose
@@ -562,6 +565,11 @@ export type EnqueueOutcome =
  * system-audio capture that overlaps a live, not-yet-logged meeting-assist span
  * makes that span's trigger skip the overlap. Exclude manual rows from the
  * watermark if the two ever run side by side.
+ *
+ * ponytail: no transaction (see meeting-log.action.ts's header), so an insert
+ * that throws partway leaves the earlier meetings queued, and the badge check
+ * above then refuses a retry. Deleting those rows from the strip makes the
+ * conversation sendable again.
  */
 export async function enqueueConversation(
   conversationId: string,
@@ -574,26 +582,36 @@ export async function enqueueConversation(
     (r) => r.conversationId === conversationId
   );
   if (resolveBadge(existing, instance)) return { kind: "already-queued" };
-  const slice = sliceTranscript(await readConversationTranscript(conversationId), 0);
-  if (!slice) return { kind: "empty" };
+  // One row per meeting, for the reason segmentByGap gives. The meeting gap,
+  // not recovery's IDLE_FLUSH_MS: a silence inside one call has run to 13
+  // minutes, and each extra row is another chatter note on the same contact.
+  const segments = segmentByGap(
+    await readConversationTranscript(conversationId),
+    MEETING_CONVERSATION_GAP_MS
+  );
+  if (segments.length === 0) return { kind: "empty" };
 
-  const rowId = crypto.randomUUID();
-  await insertQueueRow({
-    id: rowId,
-    // Its own namespace, and timestamped: a live trigger keys on conv:start,
-    // and a conversation whose earlier row was deleted must stay sendable.
-    sessionKey: `manual:${conversationId}:${now}`,
-    conversationId,
-    instance,
-    targets: [],
-    transcript: renderTranscript(slice.entries),
-    transcriptStartAt: slice.startAt,
-    transcriptEndAt: slice.endAt,
-    meetingStartedAt: slice.startAt,
-    status: "unassigned",
-    createdAt: now,
-  });
-  return { kind: "queued", rowId };
+  const rowIds: string[] = [];
+  for (const slice of segments) {
+    const id = crypto.randomUUID();
+    await insertQueueRow({
+      id,
+      // Its own namespace, and timestamped: a live trigger keys on conv:start,
+      // and a conversation whose earlier row was deleted must stay sendable.
+      sessionKey: `manual:${conversationId}:${slice.startAt}:${now}`,
+      conversationId,
+      instance,
+      targets: [],
+      transcript: renderTranscript(slice.entries),
+      transcriptStartAt: slice.startAt,
+      transcriptEndAt: slice.endAt,
+      meetingStartedAt: slice.startAt,
+      status: "unassigned",
+      createdAt: now,
+    });
+    rowIds.push(id);
+  }
+  return { kind: "queued", rowIds };
 }
 
 /**
