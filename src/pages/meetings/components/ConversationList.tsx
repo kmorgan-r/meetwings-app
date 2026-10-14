@@ -29,6 +29,8 @@ export interface ConversationListProps {
   /** Resolves to whether the write landed - see ConversationRow. */
   onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
+  /** `null` until Odoo is fully set up - see ConversationRow. */
+  onSendToOdoo: ((id: string) => Promise<string | null>) | null;
 }
 
 interface DateBucket {
@@ -69,6 +71,7 @@ function ConversationListInner({
   onStartRename,
   onCommitRename,
   onCancelRename,
+  onSendToOdoo,
 }: ConversationListProps) {
   const dateGroups = useMemo<DateBucket[]>(() => {
     const term = search.toLowerCase();
@@ -116,6 +119,7 @@ function ConversationListInner({
           onStartRename={onStartRename}
           onCommitRename={onCommitRename}
           onCancelRename={onCancelRename}
+          onSendToOdoo={onSendToOdoo}
         />
       ))}
     </>

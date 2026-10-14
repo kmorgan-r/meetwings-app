@@ -5,14 +5,17 @@ import {
   deleteTerminalQueueRow,
   deriveRowStatus,
   getQueueRow,
+  insertQueueRow,
   listTargets,
   pruneTranscripts,
   QUEUE_SQL,
+  readConversationTranscript,
   retargetQueueTarget,
   retryQueueRow,
   type RetargetVerdict,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import {
   instanceFingerprint,
   requireOdooConfig,
@@ -20,7 +23,12 @@ import {
 import type { SelectedTarget, SelectedTargets, SummarizationResult } from "@/types";
 import { createOdooClient, type OdooClient } from "./client";
 import { reportOdooError, type OdooErrorReport } from "./errors";
-import { SUMMARIZE_TIMEOUT_MS, type TranscriptSlice } from "./meeting-log";
+import {
+  renderTranscript,
+  sliceTranscript,
+  SUMMARIZE_TIMEOUT_MS,
+  type TranscriptSlice,
+} from "./meeting-log";
 import { pushQueuedRow } from "./meeting-log-push";
 
 /**
@@ -519,6 +527,58 @@ export async function deleteMeetingLog(id: string): Promise<ActionOutcome> {
   // changes is only what the user is told about it.
   if (await deleteTerminalQueueRow(id)) return { kind: "deleted-after-send" };
   return { kind: "conflict" };
+}
+
+export type EnqueueOutcome =
+  | { kind: "queued"; rowId: string }
+  /** No meeting lines in it - a typed-only chat, say. */
+  | { kind: "empty" }
+  /** The overlay still holds it - a live meeting, or a chat reopened there. */
+  | { kind: "active" };
+
+/**
+ * Queues a whole conversation by hand, as an `unassigned` row with no targets.
+ *
+ * The way back for a meeting no trigger ever logged: a system-audio capture,
+ * which was never wired to the queue, or the first half of a meeting whose
+ * transcript was cleared mid-call - that span sits below the global watermark,
+ * where neither the live triggers nor startup recovery will ever look again.
+ *
+ * Refuses the conversation the overlay is still writing to: its own trigger
+ * logs it, and a manual row would lift the watermark over the entries that
+ * trigger is about to slice.
+ *
+ * ponytail: the row still counts toward the global watermark, so sending a
+ * system-audio capture that overlaps a live, not-yet-logged meeting-assist span
+ * makes that span's trigger skip the overlap. Exclude manual rows from the
+ * watermark if the two ever run side by side.
+ */
+export async function enqueueConversation(
+  conversationId: string,
+  now: number
+): Promise<EnqueueOutcome> {
+  if (getActiveConversationId() === conversationId) return { kind: "active" };
+  const slice = sliceTranscript(await readConversationTranscript(conversationId), 0);
+  if (!slice) return { kind: "empty" };
+
+  const config = await requireOdooConfig();
+  const rowId = crypto.randomUUID();
+  await insertQueueRow({
+    id: rowId,
+    // Its own namespace, and timestamped: a live trigger keys on conv:start,
+    // and a conversation whose earlier row was deleted must stay sendable.
+    sessionKey: `manual:${conversationId}:${now}`,
+    conversationId,
+    instance: instanceFingerprint(config.url, config.db),
+    targets: [],
+    transcript: renderTranscript(slice.entries),
+    transcriptStartAt: slice.startAt,
+    transcriptEndAt: slice.endAt,
+    meetingStartedAt: slice.startAt,
+    status: "unassigned",
+    createdAt: now,
+  });
+  return { kind: "queued", rowId };
 }
 
 /**

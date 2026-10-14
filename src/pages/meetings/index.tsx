@@ -372,6 +372,9 @@ export default function Meetings() {
             onStartRename={handleStartRename}
             onCommitRename={handleCommitRename}
             onCancelRename={handleCancelRename}
+            onSendToOdoo={
+              queue.configState === "complete" ? queue.handleSendConversation : null
+            }
           />
         </div>
       )}

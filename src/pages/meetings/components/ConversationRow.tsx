@@ -53,6 +53,12 @@ export interface ConversationRowProps {
    */
   onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
+  /**
+   * Queues this conversation for Odoo by hand, resolving to the line to show
+   * under the row, or `null` once queued. Offered only on a row with no badge -
+   * a meeting no trigger ever logged - and `null` until Odoo is fully set up.
+   */
+  onSendToOdoo: ((id: string) => Promise<string | null>) | null;
 }
 
 /**
@@ -83,6 +89,7 @@ function ConversationRowInner({
   onStartRename,
   onCommitRename,
   onCancelRename,
+  onSendToOdoo,
 }: ConversationRowProps) {
   // Transient - reset from the `title` prop every time editing starts, so it
   // never needs to survive past the commit/cancel that ends it, and does not
@@ -92,6 +99,8 @@ function ConversationRowInner({
   // and the tick button could otherwise both fire again mid-flight.
   const [savingName, setSavingName] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [summaryState, setSummaryState] = useState<
     { loading: true } | { loading: false; summary: MeetingSummary | null; entities: KnowledgeEntity[] } | null
   >(null);
@@ -139,6 +148,18 @@ function ConversationRowInner({
   const cancelName = () => {
     setNameError(null);
     onCancelRename();
+  };
+
+  const sendToOdoo = async (e: MouseEvent) => {
+    e.stopPropagation(); // the card's own onClick navigates
+    if (sending || !onSendToOdoo) return;
+    setSending(true);
+    setSendError(null);
+    try {
+      setSendError(await onSendToOdoo(id));
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -240,6 +261,14 @@ function ConversationRowInner({
               {nameError}
             </p>
           )}
+          {sendError !== null && (
+            <p
+              className="text-xs text-destructive"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {sendError}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {badgeStatus !== null && (
@@ -248,6 +277,11 @@ function ConversationRowInner({
               {badgeCount > 1 ? ` (${badgeCount})` : ""}
               {whoLabel !== null ? ` · ${whoLabel}` : ""}
             </Badge>
+          )}
+          {badgeStatus === null && onSendToOdoo && (
+            <Button size="sm" variant="outline" disabled={sending} onClick={sendToOdoo}>
+              {sending ? "Sending…" : "Send to Odoo"}
+            </Button>
           )}
           <Badge variant="outline" className="text-xs">
             {messageCount} messages

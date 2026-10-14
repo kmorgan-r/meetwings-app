@@ -15,6 +15,7 @@ export interface DateGroupProps {
   /** Resolves to whether the write landed - see ConversationRow. */
   onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
+  onSendToOdoo: ((id: string) => Promise<string | null>) | null;
 }
 
 /**
@@ -33,6 +34,7 @@ export function DateGroup({
   onStartRename,
   onCommitRename,
   onCancelRename,
+  onSendToOdoo,
 }: DateGroupProps) {
   return (
     <div className="flex flex-col gap-3">
@@ -60,6 +62,7 @@ export function DateGroup({
               onStartRename={onStartRename}
               onCommitRename={onCommitRename}
               onCancelRename={onCancelRename}
+              onSendToOdoo={onSendToOdoo}
             />
           );
         })}

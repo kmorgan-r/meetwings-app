@@ -25,6 +25,7 @@ import { groupOf, NO_CONTACT_CHOSEN, type QueueGroup } from "@/lib/odoo/meeting-
 import {
   assignMeetingLog,
   deleteMeetingLog,
+  enqueueConversation,
   removeQueueTarget,
   retryMeetingLog,
   retargetMeetingLogTarget,
@@ -163,6 +164,11 @@ const SENT_COPY = "Sent to Odoo.";
  */
 const ASSIGN_CONFLICT_COPY =
   "This meeting could not be reassigned — it changed in another window.";
+
+const SEND_ACTIVE_COPY =
+  "This conversation is still open in the overlay. End the meeting or start a new conversation there, then send it.";
+
+const SEND_EMPTY_COPY = "Nothing to send - this conversation has no meeting transcript.";
 
 const RETARGET_CONFLICT_COPY =
   "That contact could not be swapped in — this meeting changed in another window.";
@@ -737,6 +743,30 @@ export function useMeetingLogQueue() {
     setAssignRow(null);
   }, []);
 
+  /**
+   * A conversation card's "Send to Odoo". Queues it `unassigned`, then opens
+   * the dialog on the new row - the same dialog the strip's Assign opens, so a
+   * cancel leaves it waiting under "Needs a contact". Resolves to the line the
+   * card shows under itself, or `null` once the row is queued.
+   */
+  const handleSendConversation = useCallback(
+    async (conversationId: string): Promise<string | null> => {
+      try {
+        const outcome = await enqueueConversation(conversationId, Date.now());
+        if (outcome.kind === "active") return SEND_ACTIVE_COPY;
+        if (outcome.kind === "empty") return SEND_EMPTY_COPY;
+        await loaderRef.current();
+        const row = await getQueueRow(outcome.rowId);
+        // getQueueRow reads the parent alone; a fresh manual row has no targets.
+        if (row) setAssignRow({ ...row, targets: [] });
+        return null;
+      } catch (err) {
+        return describeFailure(reportOdooError(err, "send a conversation to Odoo").code);
+      }
+    },
+    []
+  );
+
   const handleRetargetTarget = useCallback(
     (row: MeetingLogListRow, target: MeetingLogTarget) => {
       if (busyRef.current.has(row.id)) return;
@@ -1004,6 +1034,7 @@ export function useMeetingLogQueue() {
     handleAssign,
     handleAssignConfirm,
     handleAssignCancel,
+    handleSendConversation,
     runTargetAction,
     handleRetryTarget,
     handleRemoveTarget,
