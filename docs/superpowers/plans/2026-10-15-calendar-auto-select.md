@@ -137,6 +137,16 @@ describe("planAutoSelect", () => {
       .toEqual({ kind: "apply", add: [CFO], create: [] });
   });
 
+  it("adds a matched contact even when a lead shares its id", () => {
+    expect(plan({ events: [meeting([person("cfo@acme.example")])], contacts: [CFO], targets: [lead(7)] }))
+      .toEqual({ kind: "apply", add: [CFO], create: [] });
+  });
+
+  it("does not create an attendee whose address has no domain", () => {
+    expect(plan({ events: [meeting([person("no-at-sign", "Some Name")])], contacts: [CFO] }))
+      .toEqual({ kind: "skip", reason: "nothing-to-do" });
+  });
+
   it("does not re-add a contact that is already a target", () => {
     const targets: SelectedTarget[] = [{ model: "res.partner", resId: 7, name: "Cleo Cfo" }];
     expect(plan({ events: [meeting([person("cfo@acme.example")])], contacts: [CFO], targets }))
@@ -556,18 +566,21 @@ git commit -m "refactor(calendar): share the current-meetings fetch" -m "Co-Auth
 
 ---
 
-### Task 3: `addTarget` waits for an in-flight new-chat clear
+### Task 3: `addTarget` waits for an in-flight new-chat clear, and Clear is announced
 
 **Files:**
 - Modify: `src/hooks/useOdooTarget.ts`:
   - `handleNewChat` (L811-829);
   - `addTarget` (L1114-1137);
+  - `clearAllTargets` (L1249-1265);
   - one new ref next to `selectionToken` (L272).
-- Test: `src/tests/useOdooTarget.test.tsx`. Add a `describe` directly after `describe("starting a new chat", ...)` (ends L1086).
+- Test: `src/tests/useOdooTarget.test.tsx`. Add two `describe`s directly after `describe("starting a new chat", ...)` (ends L1086).
 
 **Interfaces:**
-- Consumes: the existing `handleNewChat` and `addTarget`.
-- Produces: no new exports. `addTarget`'s signature is unchanged: `(t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>`.
+- Consumes: the existing `handleNewChat`, `addTarget` and `clearAllTargets`.
+- Produces:
+  - window event `odooTargetsCleared` (a `CustomEvent` with no detail), dispatched as the first statement of `clearAllTargets`, before its delete. Task 5 stops a run on it.
+  - No new exports. `addTarget`'s signature is unchanged: `(t: SelectedTarget) => Promise<{ ok: boolean; reason?: "cap" }>`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -641,12 +654,37 @@ describe("adding a target while a new chat's clear is in flight", () => {
     expect(action.addSelectedTarget).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("clearing every target", () => {
+  it("announces the Clear before it deletes, so a calendar auto-select run stops", async () => {
+    const seen: string[] = [];
+    const onCleared = () => seen.push("odooTargetsCleared");
+    window.addEventListener("odooTargetsCleared", onCleared);
+    action.clearTargets.mockImplementation(async () => {
+      seen.push("clearTargets");
+    });
+    try {
+      const { result } = mount();
+      await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+      await act(async () => {
+        await result.current.clearAllTargets();
+      });
+      expect(seen).toEqual(["odooTargetsCleared", "clearTargets"]);
+    } finally {
+      window.removeEventListener("odooTargetsCleared", onCleared);
+    }
+  });
+});
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `npx vitest run src/tests/useOdooTarget.test.tsx -t "new chat's clear is in flight"`
-Expected: "writes after the clear" FAILS at `expect(action.addSelectedTarget).not.toHaveBeenCalled()`, because today's `addTarget` does not wait. The other two may already pass; they guard the fix against hanging. If "writes after the clear" passes here, stop and report: the test is not reaching the race.
+Run: `npx vitest run src/tests/useOdooTarget.test.tsx -t "new chat's clear is in flight|clearing every target"`
+Expected:
+- "writes after the clear" FAILS at `expect(action.addSelectedTarget).not.toHaveBeenCalled()`, because today's `addTarget` does not wait. If it passes here, stop and report: the test is not reaching the race.
+- "announces the Clear" FAILS: `seen` is `["clearTargets"]`.
+- The other two may already pass; they guard the fix against hanging.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -657,13 +695,19 @@ In `src/hooks/useOdooTarget.ts`, directly below `const selectionToken = useRef(0
    * The detached clear `handleNewChat` started. `addTarget` waits for it: an
    * upsert that lands before the delete is wiped by it, which auto-select hits
    * on every rollover and a pick made right after a new chat can hit too.
-   * Never rejects - the block catches its own errors, and a superseded clear
-   * just returns.
+   * Never rejects: the block reports its own errors, a superseded clear just
+   * returns, and the trailing catch covers a throw from the reporting itself.
    */
   const clearingRef = useRef<Promise<void>>(Promise.resolve());
 ```
 
-In `handleNewChat`, change `void (async () => {` to `clearingRef.current = (async () => {`. The block body and its closing `})();` stay as they are.
+In `handleNewChat`, change `void (async () => {` to `clearingRef.current = (async () => {`, and change the block's closing `})();` to:
+
+```ts
+    })().catch((err) => console.error("Clearing targets failed:", err));
+```
+
+The block body stays as it is.
 
 In `addTarget`, make the first statement inside `try` the wait:
 
@@ -671,6 +715,14 @@ In `addTarget`, make the first statement inside `try` the wait:
       try {
         await clearingRef.current;
         const instance = await resolveInstance();
+```
+
+In `clearAllTargets`, make the dispatch the first statement of the callback, above `selectionToken.current += 1;`:
+
+```ts
+    // Before the delete, not after: a calendar auto-select run checks for this
+    // before each write, and must not re-add what the user just dropped.
+    window.dispatchEvent(new CustomEvent("odooTargetsCleared"));
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -682,7 +734,7 @@ Expected: all PASS. Then type-check `src/tests/useOdooTarget.test.tsx` (Global C
 
 ```bash
 git add src/hooks/useOdooTarget.ts src/tests/useOdooTarget.test.tsx
-git commit -m "fix(odoo): an add made during a new chat's clear survives the clear" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+git commit -m "fix(odoo): an add made during a new chat's clear survives the clear" -m "clearAllTargets also announces itself (odooTargetsCleared) before its delete, for calendar auto-select to stop on." -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
 ---
@@ -782,7 +834,7 @@ Replace the effect at `src/hooks/useCompletion.ts:1551-1567` (keep the comment b
     const wasActive = wasMeetingCaptureActiveRef.current;
     wasMeetingCaptureActiveRef.current = meetingCaptureActive;
     if (wasActive || !meetingCaptureActive) return;
-    void (async () => {
+    (async () => {
       const history = conversationHistoryRef.current;
       if (history.length > 0) {
         // Meeting lines are the messages with an audioSource. Role can't tell them
@@ -797,6 +849,9 @@ Replace the effect at `src/hooks/useCompletion.ts:1551-1567` (keep the comment b
           // Awaited: its newConversationStarted clears the Odoo targets, and
           // auto-select must land after that, not be wiped by it.
           await startNewConversation();
+          // Capture stopped during the flush (the effect re-ran and mirrored
+          // it): nobody is recording this conversation, so announce nothing.
+          if (!wasMeetingCaptureActiveRef.current) return;
         }
       }
       // Only a conversation with no meeting in it yet. A capture restart
@@ -807,7 +862,9 @@ Replace the effect at `src/hooks/useCompletion.ts:1551-1567` (keep the comment b
       if (!conversationHistoryRef.current.some((m) => m.audioSource != null)) {
         window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
       }
-    })();
+      // The flush inside startNewConversation can reject. Logged rather than
+      // left unhandled; the capture itself carries on either way.
+    })().catch((err) => console.error("Meeting capture rollover failed:", err));
   }, [meetingCaptureActive, startNewConversation]);
 ```
 
@@ -835,7 +892,7 @@ git commit -m "feat(meeting): announce a fresh meeting capture after any rollove
 - Consumes:
   - `isCalendarAutoSelectEnabled()` and `planAutoSelect(...)` (Task 1, `@/lib/calendar/auto-select`);
   - `fetchCurrentMeetings()` (Task 2, `@/lib/calendar/fetch-current-meetings`);
-  - window `meetingCaptureStarted` (Task 4) and `newConversationStarted`;
+  - window `meetingCaptureStarted` (Task 4), `odooTargetsCleared` (Task 3) and `newConversationStarted`;
   - Tauri `odoo-instance-changed`.
 - Produces:
 
@@ -1105,20 +1162,61 @@ describe("useCalendarAutoSelect", () => {
     expect(onCreateContact).toHaveBeenCalledTimes(1);
   });
 
-  it("stops before the next write when a new conversation starts mid-run", async () => {
+  it.each<[string, () => void]>([
+    ["a new conversation starts", () => window.dispatchEvent(new CustomEvent("newConversationStarted"))],
+    ["the user clears the targets", () => window.dispatchEvent(new CustomEvent("odooTargetsCleared"))],
+    [
+      "the Odoo instance changes",
+      () => {
+        for (const handler of listeners.get("odoo-instance-changed") ?? []) handler({ payload: null });
+      },
+    ],
+  ])("stops before the next write when %s mid-run", async (_label, interrupt) => {
     fetchCurrentMeetings.mockImplementation(async () => meetingWith(AT_CFO, AT_CTO));
     const first = deferred<AddResult>();
     const { addTarget } = setup();
     addTarget.mockImplementationOnce(() => first.promise);
+    await waitFor(() => expect(listeners.get("odoo-instance-changed")?.size).toBe(1));
 
     await captureStarts();
     await waitFor(() => expect(addTarget).toHaveBeenCalledTimes(1));
     await act(async () => {
-      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      interrupt();
       first.resolve({ ok: true });
     });
     await settle();
     expect(addTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes nothing when a new conversation starts during the calendar call", async () => {
+    const parked = deferred<ReturnType<typeof meetingWith>>();
+    fetchCurrentMeetings.mockImplementationOnce(() => parked.promise);
+    const { addTarget, onCreateContact } = setup();
+
+    await captureStarts();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      parked.resolve(meetingWith(AT_CFO, NEW_A));
+    });
+    await settle();
+    expect(addTarget).not.toHaveBeenCalled();
+    expect(onCreateContact).not.toHaveBeenCalled();
+  });
+
+  it("does not add a created contact when a new conversation starts during the create", async () => {
+    fetchCurrentMeetings.mockImplementation(async () => meetingWith(NEW_A));
+    const created = deferred<CreateContactResult>();
+    const { addTarget, onCreateContact } = setup();
+    onCreateContact.mockImplementationOnce(() => created.promise);
+
+    await captureStarts();
+    await waitFor(() => expect(onCreateContact).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      created.resolve({ kind: "created", contact: contact(100, NEW_A.address, "Ana Newco") });
+    });
+    await settle();
+    expect(addTarget).not.toHaveBeenCalled();
   });
 
   it("ignores a capture start while a run is in flight", async () => {
@@ -1164,7 +1262,7 @@ Expected: FAIL. The suite cannot resolve `@/hooks/useCalendarAutoSelect`.
 Create `src/hooks/useCalendarAutoSelect.ts`:
 
 ```ts
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isCalendarAutoSelectEnabled, planAutoSelect } from "@/lib/calendar/auto-select";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
@@ -1199,14 +1297,18 @@ interface AutoSelectInputs {
  */
 export function useCalendarAutoSelect(inputs: AutoSelectInputs): void {
   // The listeners below register once; they read the latest props through this.
+  // A LAYOUT effect, like useOdooTarget's mirrors: useCompletion's capture-edge
+  // effect can dispatch meetingCaptureStarted synchronously inside the same
+  // commit's passive-effect flush, before a passive sync here would have run.
   const latest = useRef(inputs);
-  useEffect(() => {
+  useLayoutEffect(() => {
     latest.current = inputs;
   });
 
   const inFlight = useRef(false);
   // Bumped by anything that moves the targets to another conversation or
-  // instance. A run stops at its next write when this changes under it.
+  // instance, or empties them (the picker's Clear). A run stops at its next
+  // write when this changes under it.
   const generation = useRef(0);
   // After an instance change the cache still holds the OUTGOING instance's rows
   // until the resync replaces the array (CalendarProposalState's `idle` doc);
@@ -1218,7 +1320,11 @@ export function useCalendarAutoSelect(inputs: AutoSelectInputs): void {
       generation.current += 1;
     };
     window.addEventListener("newConversationStarted", bump);
-    return () => window.removeEventListener("newConversationStarted", bump);
+    window.addEventListener("odooTargetsCleared", bump);
+    return () => {
+      window.removeEventListener("newConversationStarted", bump);
+      window.removeEventListener("odooTargetsCleared", bump);
+    };
   }, []);
 
   useEffect(() => {
@@ -1394,6 +1500,8 @@ In `src/pages/app/components/completion/index.tsx`, add `useCalendarAutoSelect,`
 ```
 
 Then add `useCalendarAutoSelect: vi.fn(),` to the five stub sites listed under **Files**. If line numbers have drifted, find each by searching for `useCalendarProposal:` inside a `vi.doMock("@/hooks"` factory.
+
+Before Step 4, check that the list is complete: search `src/tests` for the regex `useCalendarProposal[:,]` (Grep tool, or `git grep -nE "useCalendarProposal[:,]" -- src/tests`). As of writing it hits exactly the five stub sites plus `completion-calendar-wiring.test.tsx:106`. Every other hit is a `@/hooks` mock this plan missed: stub it the same way, and add its file to the Step 4 run and the Step 5 `git add`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

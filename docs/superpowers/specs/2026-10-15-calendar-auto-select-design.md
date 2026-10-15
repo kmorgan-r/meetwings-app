@@ -161,7 +161,9 @@ On `meetingCaptureStarted`:
    and treats the cache as stale until the `contacts` array reference changes;
    stale: stop.
 4. Record the run's generation (a counter the hook bumps on
-   `newConversationStarted` and on `odoo-instance-changed`).
+   `newConversationStarted`, on `odoo-instance-changed`, and on
+   `odooTargetsCleared`, which `useOdooTarget.clearAllTargets` dispatches
+   before its delete).
 5. Fetch with the shared `fetchCurrentMeetings()` (below). Any error: stop.
 6. `planAutoSelect`. `skip`: stop.
 7. Write **sequentially** (`for...of` with `await`, never `Promise.all` —
