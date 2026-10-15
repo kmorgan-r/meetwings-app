@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
+import type { SyncOutcome } from "@/lib/odoo";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // `vi.hoisted`, not a bare `const`. Vitest hoists every `vi.mock` call above the
@@ -48,7 +49,7 @@ vi.mock("@/lib/secure-storage", () => secureStorage);
 // graph_disconnect). Routed by command name so a test can fail one call
 // (e.g. graph_status) without affecting another in the same render.
 const tauriCore = vi.hoisted(() => ({
-  invoke: vi.fn(async (cmd: string) => {
+  invoke: vi.fn(async (cmd: string): Promise<{ connected: boolean; sessionOnly: boolean } | undefined> => {
     if (cmd === "graph_status") return { connected: false, sessionOnly: false };
     throw new Error(`odoo-settings-page.test.tsx: unexpected invoke("${cmd}")`);
   }),
@@ -58,7 +59,7 @@ vi.mock("@tauri-apps/api/core", () => tauriCore);
 const odoo = vi.hoisted(() => ({
   // SyncOutcome, not SyncResult - `ran` is what tells a skip apart from a
   // completed sync that changed nothing.
-  runSync: vi.fn(async () => ({
+  runSync: vi.fn(async (): Promise<SyncOutcome> => ({
     ran: true,
     changed: 3,
     fetched: 3,
@@ -116,7 +117,7 @@ function renderPage() {
   );
 }
 
-const SYNCED_3 = { ran: true, changed: 3, fetched: 3, skipped: 0, clampSkipped: false };
+const SYNCED_3 = { ran: true, changed: 3, fetched: 3, skipped: 0, clampSkipped: false } as const;
 
 beforeEach(() => {
   // clearAllMocks wipes the CALL LOG and leaves implementations, so a

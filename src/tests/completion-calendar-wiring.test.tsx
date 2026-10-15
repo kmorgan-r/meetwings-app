@@ -41,7 +41,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     const calendarState = { kind: "no-meeting" as const };
     const onPickCandidate = vi.fn();
     const onRetry = vi.fn();
-    const useCalendarProposal = vi.fn(() => ({
+    const useCalendarProposal = vi.fn((_args: Parameters<typeof import("@/hooks").useCalendarProposal>[0]) => ({
       present: true,
       state: calendarState,
       onPickCandidate,
