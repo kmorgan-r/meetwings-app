@@ -9,20 +9,15 @@ import {
   toGraphError,
 } from "@/lib/calendar";
 import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
+import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
 import type {
   CalendarEvent,
   CalendarProposalState,
   CandidateSummary,
-  CurrentMeetings,
   GraphErrorCode,
   GraphStatus,
   OdooContact,
 } from "@/types";
-
-/** Deliberately WIDER than the acceptance window in current-meeting.ts, so the
- * pure function sees the events either side of the boundary rather than having
- * them filtered away by the query. */
-const QUERY_WINDOW_MS = 15 * 60 * 1000;
 
 /**
  * Module scope, so the derived loading state below is referentially stable. A
@@ -370,35 +365,19 @@ export function useCalendarProposal({
     const mine = generation.current;
     setState({ kind: "loading" });
 
-    const config = await loadGraphConfigState();
-    if (config.state !== "complete") {
-      if (mine === generation.current) {
-        // Same code `readStatus` uses for the same condition: an invalid stored
-        // config is a rejected authority, not a disconnected account.
-        setState(
-          config.state === "absent"
-            ? { kind: "idle" }
-            : { kind: "error", code: "GRAPH_AUTH_REJECTED" }
-        );
-      }
+    const result = await fetchCurrentMeetings();
+    if (mine !== generation.current) return;
+    if (result.kind === "absent") {
+      setState({ kind: "idle" });
       return;
     }
-    const now = Date.now();
-    try {
-      const response = await invoke<CurrentMeetings>("graph_current_meetings", {
-        clientId: config.config.clientId,
-        authority: config.config.authority,
-        startIso: new Date(now - QUERY_WINDOW_MS).toISOString(),
-        endIso: new Date(now + QUERY_WINDOW_MS).toISOString(),
-      });
-      if (mine !== generation.current) return;
-      eventsRef.current = response.events;
-      ownAddressRef.current = response.ownAddress;
-      setState(project(response.events, response.ownAddress));
-    } catch (err) {
-      if (mine !== generation.current) return;
-      setState({ kind: "error", code: toGraphError(err).code });
+    if (result.kind === "error") {
+      setState({ kind: "error", code: result.code });
+      return;
     }
+    eventsRef.current = result.events;
+    ownAddressRef.current = result.ownAddress;
+    setState(project(result.events, result.ownAddress));
   }, [project]);
 
   /**
