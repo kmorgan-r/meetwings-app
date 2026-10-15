@@ -377,6 +377,7 @@ const mockEverything = () => {
           onPickCandidate: vi.fn(),
           onRetry: vi.fn(),
         },
+      useCalendarAutoSelect: vi.fn(),
       useMeetingLog: () => ({ holding: false, onUndo: vi.fn(), undoBlockedMessage: null }),
     };
   });
