@@ -41,6 +41,7 @@ export const Input = ({
   setMessageHistoryOpen,
   error,
   response,
+  setResponse,
   cancel,
   scrollAreaRef,
   inputRef,
@@ -199,7 +200,9 @@ export const Input = ({
                   if (isLoading) {
                     cancel();
                   } else if (xHidesPanel) {
-                    reset();
+                    // Dismiss the answer, but not reset(): that also drops a
+                    // half-typed question and its attachments.
+                    setResponse("");
                     setMeetingPanelHidden(true);
                   } else if (keepEngaged) {
                     // When keepEngaged is on, close everything and start new conversation.

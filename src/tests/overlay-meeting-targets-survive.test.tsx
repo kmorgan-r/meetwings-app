@@ -166,7 +166,7 @@ const probe = {
   renders: [] as Array<{ meetingAssistMode: boolean; enableVAD: boolean }>,
 };
 /** What the tests poke through setState, typed against the hook's public shape. */
-type PanelState = Pick<UseCompletionReturn, "response" | "isLoading">;
+type PanelState = Pick<UseCompletionReturn, "response" | "isLoading" | "attachedFiles">;
 const patchState = (patch: Partial<PanelState>) =>
   act(() => probe.completion.setState((p: PanelState) => ({ ...p, ...patch })));
 
@@ -845,6 +845,23 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
       });
       // The meeting transcript survives a new conversation; it opens the panel again.
       await waitFor(() => expect(probe.completion.isPopoverOpen).toBe(true));
+    });
+
+    it("6f. hiding keeps a half-typed question and its attachment", async () => {
+      await mountApp();
+      await startMeetingByHand();
+      const box = screen.getByPlaceholderText("Ask me anything...");
+      await user.type(box, "half a question");
+      const file = { id: "f1", name: "shot.png", type: "image/png", base64: "", size: 1 };
+      patchState({ attachedFiles: [file] });
+
+      await user.click(screen.getByTitle("Hide panel"));
+      await waitFor(() => expect(probe.completion.isPopoverOpen).toBe(false));
+      await user.click(box);
+      await screen.findByTitle("Hide panel");
+
+      expect(box).toHaveValue("half a question");
+      expect(probe.completion.attachedFiles).toEqual([file]);
     });
   });
 });
