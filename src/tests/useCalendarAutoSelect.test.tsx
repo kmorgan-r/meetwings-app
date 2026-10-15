@@ -288,6 +288,21 @@ describe("useCalendarAutoSelect", () => {
     expect(onCreateContact).not.toHaveBeenCalled();
   });
 
+  it("creates nothing when a new conversation starts during the calendar call and every attendee is new", async () => {
+    const parked = deferred<ReturnType<typeof meetingWith>>();
+    fetchCurrentMeetings.mockImplementationOnce(() => parked.promise);
+    const { addTarget, onCreateContact } = setup();
+
+    await captureStarts();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      parked.resolve(meetingWith(NEW_A));
+    });
+    await settle();
+    expect(onCreateContact).not.toHaveBeenCalled();
+    expect(addTarget).not.toHaveBeenCalled();
+  });
+
   it("does not add a created contact when a new conversation starts during the create", async () => {
     fetchCurrentMeetings.mockImplementation(async () => meetingWith(NEW_A));
     const created = deferred<CreateContactResult>();
