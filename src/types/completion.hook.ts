@@ -88,6 +88,8 @@ export interface UseCompletionReturn {
   keepEngaged: boolean;
   /** Function to toggle keep engaged mode */
   setKeepEngaged: Dispatch<SetStateAction<boolean>>;
+  /** Hide the response panel without clearing anything (the X during a meeting) */
+  setMeetingPanelHidden: Dispatch<SetStateAction<boolean>>;
 
   // Screenshot functionality
   /** Current screenshot configuration settings */
