@@ -53,6 +53,7 @@ export const STORAGE_KEYS = {
   // only ("Does not start or stop recording"), so reusing it would silently expand
   // what the user agreed to. The old key is deleted, not migrated.
   MEETING_AUTO_RECORD_ENABLED: "meeting_auto_record_enabled",
+  CALENDAR_AUTO_SELECT_ENABLED: "calendar_auto_select_enabled",
 
   // User Identity settings
   USER_IDENTITY: "user_identity",

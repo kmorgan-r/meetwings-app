@@ -98,7 +98,7 @@ export function similarContacts({
  * ordinary path, which needs at least one cached contact on that domain with a
  * parent before it proposes anything.
  */
-const FREE_MAIL: ReadonlySet<string> = new Set([
+export const FREE_MAIL: ReadonlySet<string> = new Set([
   "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
   "yahoo.com", "yahoo.co.uk", "icloud.com", "me.com", "aol.com",
   "proton.me", "protonmail.com", "gmx.com", "gmx.de", "mail.com",
@@ -106,7 +106,7 @@ const FREE_MAIL: ReadonlySet<string> = new Set([
 ]);
 
 /** The part after the LAST "@", lowercased, or null when there is none. */
-function domainOf(address: string): string | null {
+export function domainOf(address: string): string | null {
   const at = address.lastIndexOf("@");
   if (at === -1) return null;
   const domain = address.slice(at + 1).trim().toLocaleLowerCase();
