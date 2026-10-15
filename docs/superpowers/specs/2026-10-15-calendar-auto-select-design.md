@@ -61,10 +61,19 @@ when all of these hold:
    dispatches `newConversationStarted`, whose `handleNewChat` empties the
    targets; auto-select must land after it or it is wiped seconds later.
 3. The conversation has no meeting yet: no message in
-   `conversationHistoryRef.current` carries an `audioSource`, **and**
-   `meetingTranscript` is empty (lines not yet autosaved live only there). This
-   is what makes a mid-call capture restart (detection flapping, a paused mic)
-   and a back-to-back meeting inside the 30-minute window skip.
+   `conversationHistoryRef.current` carries an `audioSource`. Every transcript
+   line is pushed into that ref with its `audioSource` as soon as it arrives
+   (`addMeetingTranscript`, `addMeetingTranscriptEntries`,
+   `addSystemAudioTranscript`), autosaved or not, so this one check covers
+   unsaved lines too. This is what makes a mid-call capture restart (detection
+   flapping, a paused mic) and a back-to-back meeting inside the 30-minute
+   window skip.
+
+   Do **not** test `meetingTranscript` here: it is a session-wide buffer, never
+   cleared per conversation (`useCompletion.ts` comment on
+   `conversationTranscriptStartRef`; `startNewConversation` leaves it alone), so
+   "transcript empty" is false after the first meeting of an app session and
+   would block every rollover.
 
 Then `useCompletion` dispatches a `meetingCaptureStarted` window event. It
 carries no payload; the event firing is the decision.
@@ -98,20 +107,24 @@ Rules, in order:
    `one`. `none` and `several` skip. Never guess between overlapping meetings.
 2. **Match.** `matchAttendees` with the existing exclusions: the user's own
    address (best effort, see Limits), `isColleague` contacts, inactive contacts.
+   **Colleague domains** (used by rules 3 and 4): the domain of `ownAddress`
+   plus the domains of contacts with `isColleague === true`, with free-mail
+   domains removed from that set (one colleague on gmail must not block every
+   gmail attendee). Compared lowercased. `FREE_MAIL` and `domainOf` in
+   `similar-contacts.ts` are module-private today and get exported for this.
 3. **Add** = `matched` contacts not already in `targets` (the existing "writable"
-   rule). An already-selected match is never re-upserted — that would rewrite its
-   `selected_at` and `conversation_id`.
+   rule) and whose attendee address is not on a colleague domain. An
+   already-selected match is never re-upserted — that would rewrite its
+   `selected_at` and `conversation_id`. A coworker who has a partner record but
+   is not flagged `isColleague` is therefore left to the proposal block, not
+   auto-added (and does not use up a slot under rule 5).
 4. **Create** = `unmatched` entries with reason `no-contact` (never `archived`:
    creating one would duplicate the archived record) where all of these hold:
    - the participant has a display name that is non-blank and is not just the
      address;
    - `similarContacts({ name, address, contacts })` is empty. A similar name is
      probably the same person under another address, which is the user's call;
-   - the address domain is not a colleague domain. Colleague domains are the
-     domain of `ownAddress` plus the domains of contacts with
-     `isColleague === true`, with free-mail domains removed from that set (one
-     colleague on gmail must not block every gmail attendee). `FREE_MAIL` in
-     `similar-contacts.ts` is exported for this.
+   - the address domain is not a colleague domain.
 
    `parentId` = `inferCompany({ address, contacts })`, null when it cannot tell.
 5. **Slot rule.** If `add.length + create.length > MAX_TARGETS - targets.length`,
@@ -132,19 +145,35 @@ picker and the "Logging to" box stay in step with the database.
 
 On `meetingCaptureStarted`:
 
-1. If a run is already in flight, ignore the event (a ref, set synchronously).
+1. If a run is already in flight, ignore the event (a ref, set synchronously,
+   released in a `finally` so a run that throws cannot block later meetings).
 2. Read the setting. Off: stop.
-3. Fetch with the shared `fetchCurrentMeetings()` (below). Any error: stop.
-4. `planAutoSelect`. `skip`: stop.
-5. Write **sequentially** (`for...of` with `await`, never `Promise.all` —
+3. Contacts `null` (cache not ready) or empty: stop. Without this, every
+   attendee comes back `no-contact`, `similarContacts` has nothing to compare
+   against, and every named outside attendee would be created. The cache is
+   also stale after an Odoo instance change: `handleInstanceChanged` leaves the
+   contact rows of the OUTGOING instance in place until the resync resolves
+   (`src/types/calendar.ts`, `CalendarProposalState` `idle` doc). The hook
+   listens to `odoo-instance-changed` (same listener as `useCalendarProposal`)
+   and treats the cache as stale until the `contacts` array reference changes;
+   stale: stop.
+4. Record the run's generation (a counter the hook bumps on
+   `newConversationStarted` and on `odoo-instance-changed`).
+5. Fetch with the shared `fetchCurrentMeetings()` (below). Any error: stop.
+6. `planAutoSelect`. `skip`: stop.
+7. Write **sequentially** (`for...of` with `await`, never `Promise.all` —
    `addSelectedTarget` is a non-atomic check-then-act, see the 2026-09-01 spec's
-   "The write"):
+   "The write"). Before every write, if the generation changed (the user hit
+   Clear, a new chat started, the instance changed), stop: the targets now
+   belong to a different conversation.
    - each `add` contact: `addTarget({ model: "res.partner", resId, name })`;
    - each `create`: `onCreateContact(participant, { name, parentId })`. On
      `created` or `adopted-active`, `addTarget` the returned contact. Every
      other outcome (`adopted-archived`, `created-invisible`, `cached-failed`,
      `failed`, `abandoned`, `busy`) skips that attendee and continues.
-   - Stop at the first `{ ok: false, reason: "cap" }`.
+   - Stop at the first `addTarget` that returns `{ ok: false }`, whatever the
+     reason (`cap`, or an error with no reason). Continuing would repeat the
+     same failure, and its toast, for every remaining attendee.
 
 Matched contacts are added before any create, so an Odoo failure on a create
 cannot cost the matches that needed no Odoo write.
@@ -179,8 +208,11 @@ hit it today.
 
 `handleNewChat` stores its clear promise in a ref; `addTarget` awaits that ref
 before its own write. Fixed in the shared function, so every caller is covered.
-The clear's own error path (toast) is unchanged; `addTarget` waits on a promise
-that never rejects (the ref holds the block's settled result).
+The ref holds the whole detached `async` block, which already catches its own
+errors, so it never rejects: the clear's error path (toast) is unchanged, and
+the superseded-token early return (`if (token !== selectionToken.current)
+return;`) resolves it too. The ref starts as a resolved promise so an
+`addTarget` before any new chat does not wait.
 
 ### `useCalendarProposal` — share the fetch
 
@@ -194,20 +226,28 @@ calls the shared function. Same ±15-minute `QUERY_WINDOW_MS`.
 
 No new UI beyond the setting. The picker trigger already names the selected
 targets, and the meeting-log strip's 30-second hold still offers Cancel before
-anything posts. Failures are silent by design: the outcome of a failed run is
-exactly today's behaviour, and the confirm block is still there when the picker
-opens. (Console logging would not help: release builds have no visible
-console.)
+anything posts. Auto-select adds no messages of its own: a skipped or failed
+run leaves exactly today's behaviour, and the confirm block is still there when
+the picker opens. The handlers it reuses keep their existing error toasts
+(`addTarget` on a write error, after which the run stops; `onCreateContact` on
+`cached-failed`, after which it moves to the next attendee). (Console logging
+would not help: release builds have no visible console.)
 
 ## Limits, accepted
 
 - **Own address.** The exclusion is best effort (UPN vs SMTP, per the 2026-09-01
-  spec). If the user's own partner is in Odoo, not flagged colleague, and the
-  claim does not match the attendee address, the user's own record is
-  auto-added. The colleague-domain rule stops the user being *created*, but not
-  an existing record being *added*.
+  spec). The colleague-domain rule now covers both adds and creates, so the
+  user's own record is only auto-added when its address is on a domain that is
+  not a colleague domain (for example a personal free-mail address) and the
+  claim does not match it.
 - **Early start.** Capture started more than `EARLY_JOIN_MS` (5 min) before the
   event finds no meeting, and there is no retry.
+- **Cache not ready.** Capture that starts before the contact cache is ready
+  (auto-record at app launch) or during an instance resync is skipped, with no
+  retry.
+- **Grace windows.** `pickCurrentMeeting` also counts events that ended within
+  the last 10 minutes or start within the next 5. A meeting that ran over, or an
+  adjacent event, makes the result `several`, and the run skips.
 - **Back-to-back meetings** inside the 30-minute window share a conversation, so
   the second one is skipped by condition 3 under "When it runs".
 
@@ -217,16 +257,41 @@ console.)
   case per rule: none/several meetings, already-targeted match, archived
   unmatched, blank name, name equal to address, similar-name contact,
   own-domain and colleague-domain attendee, free-mail colleague not blocking,
-  slot overflow skipping everything, exact fit, inferred and blank company.
+  slot overflow skipping everything, exact fit, inferred and blank company,
+  a matched contact on a colleague domain not added.
+- `fetchCurrentMeetings` — `ok`, `absent` config, and a Graph error mapped to
+  its `GraphErrorCode`. The existing `useCalendarProposal` tests pass unchanged
+  after the refactor.
 - `useCalendarAutoSelect` — mocked `invoke` and handlers: no event, no run;
-  setting `"false"`, no fetch; Graph error, no writes; writes are sequential
-  (a parked first `addTarget` holds the second); a create outcome of each kind;
-  a cap rejection stops the loop; an event during a run is ignored.
-- `useCompletion` — event fires on a fresh capture; fires only after a rollover's
-  `startNewConversation` resolves; does not fire when history holds a meeting
-  line or `meetingTranscript` is non-empty.
+  setting `"false"`, no fetch; contacts `null` or empty, no fetch; stale cache
+  after `odoo-instance-changed`, no fetch; Graph error, no writes; writes are
+  sequential (a parked first `addTarget` holds the second); every `add` is
+  written before the first `onCreateContact`; one row per create outcome with
+  the expected call (`created` and `adopted-active` → `addTarget`; the other
+  six → no `addTarget`, loop continues); `{ ok: false }` from `addTarget` (with
+  `reason: "cap"`, and with no reason) stops the loop, including during the
+  create phase; `newConversationStarted` during a parked write stops the loop
+  before the next write; an event during a run is ignored; an event after a
+  completed run, and after a run that threw, is processed.
+- Setting — missing key, `"true"` and any other value read as on; only
+  `"false"` reads as off. The `/odoo` page Switch writes the key.
+- Wiring — `<Completion />` mounts `useCalendarAutoSelect`, in the style of
+  `src/tests/completion-calendar-wiring.test.tsx` (a mutant that deletes the
+  mount must fail it).
+- `useCompletion` — drive the capture edge by flipping `meetingAssistMode` /
+  `enableVAD` after mount. Event fires on a fresh capture with an empty history
+  (today's early return); fires only after a rollover's `startNewConversation`
+  resolves (park `flushUnsavedMeetingTranscript` as a deferred; assert no event
+  before it resolves, one after), with a NON-EMPTY `meetingTranscript` seeded
+  from an earlier meeting; does not fire when history holds an `audioSource`
+  line; does not fire when capture is already active at mount (no rising
+  edge).
 - `useOdooTarget` — an `addTarget` issued while `handleNewChat`'s clear is
-  parked survives the clear. Must fail on today's code.
+  parked survives the clear: assert `clearTargets` runs before
+  `addSelectedTarget` (or check the database rows), not the in-memory
+  `targets` list, which passes on today's code. Must fail on today's code. Also:
+  a rejecting `clearTargets` still lets `addTarget` write; a second
+  `handleNewChat` superseding the first still lets `addTarget` resolve.
 - Manual: a real Teams call with a matching Outlook event, setting on — targets
   appear without opening the picker; one attendee not in Odoo gets created; the
   setting off restores the confirm-only flow.
