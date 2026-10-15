@@ -103,6 +103,9 @@ It reuses, and does not copy: `pickCurrentMeeting`, `participantsOf`,
 
 Rules, in order:
 
+0. **Own address known.** `ownAddress` null: skip. Without it there is no own
+   domain, and every coworker on an internal call who has no partner record
+   would be created.
 1. **Exactly one current meeting.** `pickCurrentMeeting(events, now)` must return
    `one`. `none` and `several` skip. Never guess between overlapping meetings.
 2. **Match.** `matchAttendees` with the existing exclusions: the user's own
@@ -240,6 +243,14 @@ would not help: release builds have no visible console.)
   user's own record is only auto-added when its address is on a domain that is
   not a colleague domain (for example a personal free-mail address) and the
   claim does not match it.
+- **UPN domain ≠ mail domain.** `ownAddress` comes from the ID token's
+  `preferred_username`/`upn`. In a tenant where that domain differs from the
+  mail domain (e.g. `corp.onmicrosoft.com` vs `corp.com`) and no coworker is
+  flagged colleague, coworkers, the user included (the claim no longer
+  excludes their SMTP row), are added when they have a partner record and
+  created when they do not. Flagging
+  any one coworker as colleague puts the mail domain on the colleague list and
+  stops it.
 - **Early start.** Capture started more than `EARLY_JOIN_MS` (5 min) before the
   event finds no meeting, and there is no retry.
 - **Cache not ready.** Capture that starts before the contact cache is ready
@@ -281,11 +292,12 @@ would not help: release builds have no visible console.)
 - `useCompletion` — drive the capture edge by flipping `meetingAssistMode` /
   `enableVAD` after mount. Event fires on a fresh capture with an empty history
   (today's early return); fires only after a rollover's `startNewConversation`
-  resolves (park `flushUnsavedMeetingTranscript` as a deferred; assert no event
-  before it resolves, one after), with a NON-EMPTY `meetingTranscript` seeded
-  from an earlier meeting; does not fire when history holds an `audioSource`
-  line; does not fire when capture is already active at mount (no rising
-  edge).
+  has finished (window events arrive in the order `newConversationStarted`,
+  then `meetingCaptureStarted` — `startNewConversation` dispatches the former
+  as its last statement, after the flush), with a NON-EMPTY `meetingTranscript`
+  left from the earlier meeting; does not fire when history holds an
+  `audioSource` line. (Capture cannot be active at mount: `enableVAD` always
+  starts `false`.)
 - `useOdooTarget` — an `addTarget` issued while `handleNewChat`'s clear is
   parked survives the clear: assert `clearTargets` runs before
   `addSelectedTarget` (or check the database rows), not the in-memory
