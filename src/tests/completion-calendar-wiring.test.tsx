@@ -41,12 +41,16 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     const calendarState = { kind: "no-meeting" as const };
     const onPickCandidate = vi.fn();
     const onRetry = vi.fn();
-    const useCalendarProposal = vi.fn(() => ({
+    const useCalendarProposal = vi.fn((_args: Parameters<typeof import("@/hooks").useCalendarProposal>[0]) => ({
       present: true,
       state: calendarState,
       onPickCandidate,
       onRetry,
     }));
+    const useCalendarAutoSelect = vi.fn();
+    const targetsRef = { current: [] };
+    const addTarget = vi.fn();
+    const onCreateContact = vi.fn();
 
     // Mock @/hooks wholesale - the real useCompletion reaches for the app
     // context and the whole audio stack, same reasoning as
@@ -73,7 +77,9 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
       useMeetingAutoRecord: vi.fn(),
       useOdooTarget: () => ({
         targetRef: { current: null },
-        targetsRef: { current: [] },
+        targetsRef,
+        addTarget,
+        onCreateContact,
         pickerProps: {
           contactId: null,
           leadId: null,
@@ -104,6 +110,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         },
       }),
       useCalendarProposal,
+      useCalendarAutoSelect,
       useMeetingLog: () => ({
         holding: false,
         onUndo: vi.fn(),
@@ -178,6 +185,15 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     expect(args.contacts).toBe(contactsArray);
     expect(args.setCalendarBlockPresent).toBe(setCalendarBlockPresent);
     expect(args.isPickerOpen).toBe(true);
+
+    // Kills deleting the useCalendarAutoSelect mount, or feeding it anything
+    // but the picker's own cache rows and handlers.
+    expect(useCalendarAutoSelect).toHaveBeenCalled();
+    const auto = useCalendarAutoSelect.mock.calls[0][0];
+    expect(auto.contacts).toBe(contactsArray);
+    expect(auto.targetsRef).toBe(targetsRef);
+    expect(auto.addTarget).toBe(addTarget);
+    expect(auto.onCreateContact).toBe(onCreateContact);
 
     // Kills deletion of `calendar={calendarProps}` at the ContactPicker call
     // site, and deletion of the useCalendarProposal mount itself - either

@@ -1085,6 +1085,96 @@ describe("starting a new chat", () => {
   });
 });
 
+describe("adding a target while a new chat's clear is in flight", () => {
+  const pick: SelectedTarget = { model: "res.partner", resId: 1, name: "Ada Lovelace" };
+
+  async function startNewChat() {
+    act(() => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+    });
+    await waitFor(() => expect(action.clearTargets).toHaveBeenCalled());
+  }
+
+  it("writes after the clear, so the clear cannot wipe it", async () => {
+    let releaseClear!: () => void;
+    action.clearTargets.mockImplementation(
+      () => new Promise<void>((resolve) => { releaseClear = resolve; })
+    );
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await startNewChat();
+
+    let added!: Promise<{ ok: boolean; reason?: "cap" }>;
+    act(() => {
+      added = result.current.addTarget(pick);
+    });
+    // A macrotask, not a few microtasks: today's addTarget must have every
+    // chance to reach its write while the clear is parked.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(action.addSelectedTarget).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseClear();
+      await added;
+    });
+    expect(action.addSelectedTarget).toHaveBeenCalledTimes(1);
+    expect(action.clearTargets.mock.invocationCallOrder[0]).toBeLessThan(
+      action.addSelectedTarget.mock.invocationCallOrder[0]
+    );
+    expect(result.current.targets).toEqual([pick]);
+  });
+
+  it("still writes when the clear fails", async () => {
+    action.clearTargets.mockRejectedValue(new Error("database is locked"));
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    await startNewChat();
+
+    await act(async () => {
+      await result.current.addTarget(pick);
+    });
+    expect(action.addSelectedTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it("still writes when a second new chat supersedes the first clear", async () => {
+    const { result } = mount();
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+    act(() => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+    });
+
+    await act(async () => {
+      await result.current.addTarget(pick);
+    });
+    expect(action.addSelectedTarget).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("clearing every target", () => {
+  it("announces the Clear before it deletes, so a calendar auto-select run stops", async () => {
+    const seen: string[] = [];
+    const onCleared = () => seen.push("odooTargetsCleared");
+    window.addEventListener("odooTargetsCleared", onCleared);
+    action.clearTargets.mockImplementation(async () => {
+      seen.push("clearTargets");
+    });
+    try {
+      const { result } = mount();
+      await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+      await act(async () => {
+        await result.current.clearAllTargets();
+      });
+      expect(seen).toEqual(["odooTargetsCleared", "clearTargets"]);
+    } finally {
+      window.removeEventListener("odooTargetsCleared", onCleared);
+    }
+  });
+});
+
 /**
  * Task 14: `useMeetingLog`'s `targetRef` param now reads `targetsRef`
  * (`targets`, not `target`). Without `commit` mirroring its own add/remove

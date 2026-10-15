@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   useCalendarProposal,
+  useCalendarAutoSelect,
   useCompletion,
   useMeetingAutoRecord,
   useMeetingLog,
@@ -74,6 +75,17 @@ export const Completion = ({
     contacts:
       odoo.pickerProps.cache.kind === "ready" ? odoo.pickerProps.cache.contacts : null,
     setCalendarBlockPresent: completion.setCalendarBlockPresent,
+  });
+
+  // Beside useCalendarProposal, on the same cache rows, and writing through
+  // the picker's own handlers so the picker and "Logging to" stay in step.
+  // Runs once per fresh meeting capture - see useCompletion's capture edge.
+  useCalendarAutoSelect({
+    contacts:
+      odoo.pickerProps.cache.kind === "ready" ? odoo.pickerProps.cache.contacts : null,
+    targetsRef: odoo.targetsRef,
+    addTarget: odoo.addTarget,
+    onCreateContact: odoo.onCreateContact,
   });
 
   /**

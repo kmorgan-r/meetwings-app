@@ -26,4 +26,5 @@ export * from "./useOdooTarget";
 export * from "./useMeetingLog";
 export * from "./useMeetingLogQueue";
 export * from "./useCalendarProposal";
+export * from "./useCalendarAutoSelect";
 export * from "./usePillRecordAction";
