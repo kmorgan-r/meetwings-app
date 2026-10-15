@@ -134,6 +134,22 @@ function enableProviderGate() {
   vi.mocked(shouldUseMeetwingsAPI).mockResolvedValue(true);
 }
 
+/** The two window events the capture edge can fire, in arrival order. */
+function recordCaptureEvents() {
+  const seen: string[] = [];
+  const onNew = () => seen.push("newConversationStarted");
+  const onCapture = () => seen.push("meetingCaptureStarted");
+  window.addEventListener("newConversationStarted", onNew);
+  window.addEventListener("meetingCaptureStarted", onCapture);
+  return {
+    seen,
+    stop() {
+      window.removeEventListener("newConversationStarted", onNew);
+      window.removeEventListener("meetingCaptureStarted", onCapture);
+    },
+  };
+}
+
 describe("useCompletion meeting assist mode", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -675,6 +691,19 @@ describe("useCompletion meeting assist mode", () => {
     expect(result.current.currentConversationId).toBe("chat-b");
   });
 
+  it("announces a fresh meeting capture, even with an empty conversation", async () => {
+    const events = recordCaptureEvents();
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+
+    await act(async () => {
+      result.current.setMeetingAssistMode(true);
+      result.current.setEnableVAD(true);
+    });
+
+    await waitFor(() => expect(events.seen).toEqual(["meetingCaptureStarted"]));
+    events.stop();
+  });
+
   describe("a meeting capture that opens long after the last line", () => {
     // Only Date is faked: waitFor and the save queue still need real timers.
     beforeEach(() => {
@@ -787,6 +816,34 @@ describe("useCompletion meeting assist mode", () => {
       });
 
       expect(result.current.currentConversationId).toBe("chat-b");
+    });
+
+    it("announces the next meeting only after the rollover has started its conversation", async () => {
+      const events = recordCaptureEvents();
+      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS + 60_000);
+
+      await waitFor(() =>
+        expect(events.seen).toEqual([
+          "meetingCaptureStarted",
+          "newConversationStarted",
+          "meetingCaptureStarted",
+        ])
+      );
+      // The session-wide transcript still holds the first meeting. It must not
+      // block the announcement (spec, "When it runs", condition 3).
+      expect(result.current.meetingTranscript.length).toBeGreaterThan(0);
+      events.stop();
+    });
+
+    it("does not announce a capture that resumes the same meeting", async () => {
+      const events = recordCaptureEvents();
+      await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS - 60_000);
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(events.seen).toEqual(["meetingCaptureStarted"]);
+      events.stop();
     });
   });
 

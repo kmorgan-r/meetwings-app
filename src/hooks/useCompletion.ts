@@ -1551,19 +1551,38 @@ export const useCompletion = () => {
   useEffect(() => {
     const wasActive = wasMeetingCaptureActiveRef.current;
     wasMeetingCaptureActiveRef.current = meetingCaptureActive;
-    const history = conversationHistoryRef.current;
-    if (wasActive || !meetingCaptureActive || history.length === 0) return;
-    // Meeting lines are the messages with an audioSource. Role can't tell them
-    // apart: a question typed to the AI after the meeting is role "user" too,
-    // and would hold the next meeting in this conversation. A chat with no
-    // meeting in it falls back to its last message.
-    const meetingLines = history.filter((m) => m.audioSource != null);
-    const clock = meetingLines.length > 0 ? meetingLines : history;
-    // Max, not the last element: the history is sorted newest-first in place.
-    const lastLineAt = Math.max(...clock.map((m) => m.timestamp));
-    if (Date.now() - lastLineAt > MEETING_CONVERSATION_GAP_MS) {
-      void startNewConversation();
-    }
+    if (wasActive || !meetingCaptureActive) return;
+    (async () => {
+      const history = conversationHistoryRef.current;
+      if (history.length > 0) {
+        // Meeting lines are the messages with an audioSource. Role can't tell them
+        // apart: a question typed to the AI after the meeting is role "user" too,
+        // and would hold the next meeting in this conversation. A chat with no
+        // meeting in it falls back to its last message.
+        const meetingLines = history.filter((m) => m.audioSource != null);
+        const clock = meetingLines.length > 0 ? meetingLines : history;
+        // Max, not the last element: the history is sorted newest-first in place.
+        const lastLineAt = Math.max(...clock.map((m) => m.timestamp));
+        if (Date.now() - lastLineAt > MEETING_CONVERSATION_GAP_MS) {
+          // Awaited: its newConversationStarted clears the Odoo targets, and
+          // auto-select must land after that, not be wiped by it.
+          await startNewConversation();
+          // Capture stopped during the flush (the effect re-ran and mirrored
+          // it): nobody is recording this conversation, so announce nothing.
+          if (!wasMeetingCaptureActiveRef.current) return;
+        }
+      }
+      // Only a conversation with no meeting in it yet. A capture restart
+      // mid-call, or a back-to-back meeting inside the gap, keeps its targets.
+      // NOT meetingTranscript: that buffer is session-wide and never cleared
+      // per conversation, so it would block every rollover. Every transcript
+      // line reaches conversationHistoryRef with its audioSource on arrival.
+      if (!conversationHistoryRef.current.some((m) => m.audioSource != null)) {
+        window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
+      }
+      // The flush inside startNewConversation can reject. Logged rather than
+      // left unhandled; the capture itself carries on either way.
+    })().catch((err) => console.error("Meeting capture rollover failed:", err));
   }, [meetingCaptureActive, startNewConversation]);
 
   const saveCurrentConversation = useCallback(
