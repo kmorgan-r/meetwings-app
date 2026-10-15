@@ -99,13 +99,13 @@ interface AutoCreate {
 ```
 
 It reuses, and does not copy: `pickCurrentMeeting`, `participantsOf`,
-`matchAttendees`, `similarContacts`, `inferCompany`, `MAX_TARGETS`.
+`matchAttendees`, `normalizeName`, `similar`, `inferCompany`, `MAX_TARGETS`.
 
 Rules, in order:
 
-0. **Own address known.** `ownAddress` null: skip. Without it there is no own
-   domain, and every coworker on an internal call who has no partner record
-   would be created.
+0. **Own domain known.** `ownAddress` null, or with no domain (`domainOf` null):
+   skip. Without an own domain, every coworker on an internal call who has no
+   partner record would be created.
 1. **Exactly one current meeting.** `pickCurrentMeeting(events, now)` must return
    `one`. `none` and `several` skip. Never guess between overlapping meetings.
 2. **Match.** `matchAttendees` with the existing exclusions: the user's own
@@ -125,8 +125,14 @@ Rules, in order:
    creating one would duplicate the archived record) where all of these hold:
    - the participant has a display name that is non-blank and is not just the
      address;
-   - `similarContacts({ name, address, contacts })` is empty. A similar name is
-     probably the same person under another address, which is the user's call;
+   - no namesake under a different address: no cached contact (any `active` or
+     `isColleague` state) and no other meeting participant, the user's own row
+     included, whose name is `similar` to it. A similar name is probably the
+     same person under another address, which is the user's call. This is
+     wider than `similarContacts`, which drops archived and colleague rows
+     because it feeds the proposal block's Use buttons. It errs toward a skip:
+     two different attendees who share two name tokens (a company suffix such
+     as "(Equinor ASA)", or particles such as "van der") block each other;
    - the address domain is not a colleague domain.
 
    `parentId` = `inferCompany({ address, contacts })`, null when it cannot tell.
@@ -152,7 +158,7 @@ On `meetingCaptureStarted`:
    released in a `finally` so a run that throws cannot block later meetings).
 2. Read the setting. Off: stop.
 3. Contacts `null` (cache not ready) or empty: stop. Without this, every
-   attendee comes back `no-contact`, `similarContacts` has nothing to compare
+   attendee comes back `no-contact`, the namesake check has nothing to compare
    against, and every named outside attendee would be created. The cache is
    also stale after an Odoo instance change: `handleInstanceChanged` leaves the
    contact rows of the OUTGOING instance in place until the resync resolves
