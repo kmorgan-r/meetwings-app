@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -26,9 +26,13 @@ import {
   forwardRef,
   isValidElement,
   useContext,
+  type ComponentProps,
   type ReactElement,
   type ReactNode,
 } from "react";
+import type { UseCompletionReturn } from "@/types";
+
+type Kids = { children?: ReactNode };
 
 // Cold import of the whole app graph (useCompletion, shiki via the real
 // components, sql.js) - same reason as overlay-minimize-keeps-mounted.
@@ -89,7 +93,7 @@ const dbTargets = () => {
 // [odoo-targets] capture
 // ---------------------------------------------------------------------------
 type TargetLine = { op: string; detail: Record<string, unknown> };
-let infoSpy: ReturnType<typeof vi.spyOn>;
+let infoSpy: MockInstance<typeof console.info>;
 const targetLines = (): TargetLine[] =>
   infoSpy.mock.calls
     .filter((c) => c[0] === "[odoo-targets]")
@@ -151,12 +155,20 @@ const knobs = {
   calendar: null as null | Record<string, unknown>,
 };
 
-const real: { useCompletion: null | (() => any) } = { useCompletion: null };
+const real: { useCompletion: null | (() => UseCompletionReturn) } = { useCompletion: null };
+let liveCompletion: UseCompletionReturn | null = null;
 /** The live useCompletion return of the latest render, plus a render log. */
 const probe = {
-  completion: null as any,
+  get completion(): UseCompletionReturn {
+    if (!liveCompletion) throw new Error("useCompletion has not rendered yet");
+    return liveCompletion;
+  },
   renders: [] as Array<{ meetingAssistMode: boolean; enableVAD: boolean }>,
 };
+/** What the tests poke through setState, typed against the hook's public shape. */
+type PanelState = Pick<UseCompletionReturn, "response" | "isLoading">;
+const patchState = (patch: Partial<PanelState>) =>
+  act(() => probe.completion.setState((p: PanelState) => ({ ...p, ...patch })));
 
 let convSeq = 0;
 let msgSeq = 0;
@@ -264,26 +276,43 @@ const mockEverything = () => {
     const { AddToggle } = await import("@/components/AddToggle");
     return {
       AddToggle,
-      Card: ({ children }: any) => <div data-testid="overlay-card">{children}</div>,
+      Card: ({ children }: Kids) => <div data-testid="overlay-card">{children}</div>,
       Updater: () => null,
       DragButton: () => null,
       CustomCursor: () => null,
       WingIcon: () => null,
       CopyButton: () => null,
       SpeakerTaggingPopover: () => null,
-      Markdown: ({ children }: any) => <div>{children}</div>,
-      Button: ({ children, onClick, title, size: _s, variant: _v, ...rest }: any) => (
+      Markdown: ({ children }: Kids) => <div>{children}</div>,
+      Button: ({
+        children,
+        onClick,
+        title,
+        size: _s,
+        variant: _v,
+        ...rest
+      }: ComponentProps<"button"> & { size?: string; variant?: string }) => (
         <button type="button" onClick={onClick} title={title} {...rest}>
           {children}
         </button>
       ),
-      Input: forwardRef<HTMLInputElement, any>((props, ref) => <input ref={ref} {...props} />),
-      ScrollArea: forwardRef<HTMLDivElement, any>(({ children, className }, ref) => (
-        <div ref={ref} className={className}>
-          {children}
-        </div>
+      Input: forwardRef<HTMLInputElement, ComponentProps<"input">>((props, ref) => (
+        <input ref={ref} {...props} />
       )),
-      Switch: ({ checked, onCheckedChange }: any) => (
+      ScrollArea: forwardRef<HTMLDivElement, Kids & { className?: string }>(
+        ({ children, className }, ref) => (
+          <div ref={ref} className={className}>
+            {children}
+          </div>
+        )
+      ),
+      Switch: ({
+        checked,
+        onCheckedChange,
+      }: {
+        checked: boolean;
+        onCheckedChange: (checked: boolean) => void;
+      }) => (
         <button
           type="button"
           role="switch"
@@ -291,7 +320,11 @@ const mockEverything = () => {
           onClick={() => onCheckedChange(!checked)}
         />
       ),
-      Popover: ({ open, onOpenChange, children }: any) => (
+      Popover: ({
+        open,
+        onOpenChange,
+        children,
+      }: Kids & { open?: boolean; onOpenChange?: (open: boolean) => void }) => (
         <PopoverCtx.Provider value={{ open, onOpenChange }}>{children}</PopoverCtx.Provider>
       ),
       PopoverTrigger: ({ children }: { children: ReactNode }) => {
@@ -329,7 +362,7 @@ const mockEverything = () => {
       useGlobalShortcuts: () => GLOBAL_SHORTCUTS,
       useCompletion: () => {
         const c = real.useCompletion!();
-        probe.completion = c;
+        liveCompletion = c;
         probe.renders.push({ meetingAssistMode: c.meetingAssistMode, enableVAD: c.enableVAD });
         return c;
       },
@@ -369,7 +402,7 @@ const mockEverything = () => {
     ActiveModels: () => null,
   }));
   vi.doMock("react-error-boundary", () => ({
-    ErrorBoundary: ({ children }: any) => <>{children}</>,
+    ErrorBoundary: ({ children }: Kids) => <>{children}</>,
   }));
 };
 
@@ -517,7 +550,7 @@ beforeEach(async () => {
   knobs.autoRecord = false;
   knobs.calendar = null;
   real.useCompletion = null;
-  probe.completion = null;
+  liveCompletion = null;
   probe.renders = [];
   convSeq = 0;
   msgSeq = 0;
@@ -786,7 +819,7 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
     it("6d. X dismisses an AI answer too; a new request reopens the hidden panel", async () => {
       await mountApp();
       await startMeetingByHand();
-      act(() => probe.completion.setState((p: any) => ({ ...p, response: "Answer" })));
+      patchState({ response: "Answer" });
       await screen.findByTitle("Hide panel");
 
       await user.click(screen.getByTitle("Hide panel"));
@@ -795,11 +828,9 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
       expect(probe.completion.meetingTranscript).toHaveLength(2);
 
       // What submit/screenshot/quick-action do first: a request starts.
-      act(() => probe.completion.setState((p: any) => ({ ...p, isLoading: true })));
+      patchState({ isLoading: true });
       await waitFor(() => expect(probe.completion.isPopoverOpen).toBe(true));
-      act(() =>
-        probe.completion.setState((p: any) => ({ ...p, isLoading: false, response: "Next" }))
-      );
+      patchState({ isLoading: false, response: "Next" });
       expect(probe.completion.isPopoverOpen).toBe(true);
     });
 
