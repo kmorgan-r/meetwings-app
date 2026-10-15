@@ -271,6 +271,14 @@ export function useOdooTarget({
   const instanceRef = useRef<string | null>(null);
   const selectionToken = useRef(0);
   /**
+   * The detached clear `handleNewChat` started. `addTarget` waits for it: an
+   * upsert that lands before the delete is wiped by it, which auto-select hits
+   * on every rollover and a pick made right after a new chat can hit too.
+   * Never rejects: the block reports its own errors, a superseded clear just
+   * returns, and the trailing catch covers a throw from the reporting itself.
+   */
+  const clearingRef = useRef<Promise<void>>(Promise.resolve());
+  /**
    * Its OWN token, not `selectionToken`.
    *
    * Searches are superseded by later SEARCHES, not by selections - and a
@@ -815,7 +823,7 @@ export function useOdooTarget({
     targetRef.current = null;
     applyTargets([]);
     bumpEpoch();
-    void (async () => {
+    clearingRef.current = (async () => {
       try {
         const instance = await resolveInstance();
         if (token !== selectionToken.current) return;
@@ -825,7 +833,7 @@ export function useOdooTarget({
         const report = reportOdooError(err, "clear targets");
         toast.error(`${report.code}: ${report.message}`);
       }
-    })();
+    })().catch((err) => console.error("Clearing targets failed:", err));
   }, [applyTargets, bumpEpoch, resolveInstance]);
 
   useEffect(() => {
@@ -1114,6 +1122,7 @@ export function useOdooTarget({
   const addTarget = useCallback(
     async (t: SelectedTarget): Promise<{ ok: boolean; reason?: "cap" }> => {
       try {
+        await clearingRef.current;
         const instance = await resolveInstance();
         const result = await addSelectedTarget(instance, t, null, Date.now());
         if (result.ok) {
@@ -1249,6 +1258,9 @@ export function useOdooTarget({
   const clearAllTargets = useCallback(async (): Promise<void> => {
     selectionToken.current += 1;
     const token = selectionToken.current;
+    // Before the delete, not after: a calendar auto-select run checks for this
+    // before each write, and must not re-add what the user just dropped.
+    window.dispatchEvent(new CustomEvent("odooTargetsCleared"));
     try {
       const instance = await resolveInstance();
       await clearTargets(instance);
