@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 import { emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { CheckCircle2, Circle, XCircle } from "lucide-react";
-import { Button, Input, Label, StatusIcon } from "@/components";
+import { Button, Input, Label, StatusIcon, Switch } from "@/components";
+import { isCalendarAutoSelectEnabled, setCalendarAutoSelectEnabled } from "@/lib/calendar/auto-select";
 import { PageLayout } from "@/layouts";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
@@ -365,6 +366,8 @@ export default function OdooSettings() {
   const [graph, setGraph] = useState<GraphConfig>({ clientId: "", authority: "" });
   const [graphStatus, setGraphStatus] = useState<GraphStatus | null>(null);
   const [graphMessage, setGraphMessage] = useState<Status | null>(null);
+
+  const [autoSelect, setAutoSelect] = useState(isCalendarAutoSelectEnabled);
 
   // "Saved" is only true of the config that was actually written. The next
   // keystroke makes it stale, so it is cleared on every field edit rather
@@ -936,6 +939,25 @@ export default function OdooSettings() {
             This connection is session-only and will not survive an app restart.
           </p>
         )}
+
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <Label htmlFor="calendar-auto-select">Add meeting attendees automatically</Label>
+            <p className="text-xs text-muted-foreground mt-1">
+              When recording starts, add the current meeting's attendees as Odoo targets, and create
+              a contact for a clearly new attendee, without asking. Anything unclear still waits
+              for you in the contact picker.
+            </p>
+          </div>
+          <Switch
+            id="calendar-auto-select"
+            checked={autoSelect}
+            onCheckedChange={(checked) => {
+              setAutoSelect(checked);
+              setCalendarAutoSelectEnabled(checked);
+            }}
+          />
+        </div>
       </div>
     </PageLayout>
   );

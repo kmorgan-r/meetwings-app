@@ -1085,3 +1085,31 @@ describe("the calendar row on the checklist", () => {
     expect(screen.queryByText("Odoo Connection")).not.toBeInTheDocument();
   });
 });
+
+describe("the auto-select switch", () => {
+  beforeEach(() => {
+    vi.mocked(localStorage.getItem).mockReset();
+  });
+
+  it("is on by default, and turning it off stores \"false\"", async () => {
+    vi.mocked(localStorage.getItem).mockReturnValue(null);
+    renderPage();
+
+    const toggle = await screen.findByRole("switch", { name: "Add meeting attendees automatically" });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+
+    await userEvent.click(toggle);
+    expect(localStorage.setItem).toHaveBeenCalledWith("calendar_auto_select_enabled", "false");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("shows off when the stored value is \"false\"", async () => {
+    vi.mocked(localStorage.getItem).mockImplementation((key: string) =>
+      key === "calendar_auto_select_enabled" ? "false" : null
+    );
+    renderPage();
+
+    const toggle = await screen.findByRole("switch", { name: "Add meeting attendees automatically" });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+});
