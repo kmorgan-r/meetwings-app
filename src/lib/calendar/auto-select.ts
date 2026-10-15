@@ -9,7 +9,7 @@ import type {
 } from "@/types";
 import { pickCurrentMeeting } from "./current-meeting";
 import { matchAttendees, normalizeAddress, participantsOf } from "./match-attendees";
-import { domainOf, FREE_MAIL, inferCompany, similarContacts } from "./similar-contacts";
+import { domainOf, FREE_MAIL, inferCompany, normalizeName, similar } from "./similar-contacts";
 
 /**
  * Auto-select adds targets, and creates contacts, with no confirm click: a
@@ -58,7 +58,9 @@ export function planAutoSelect({
   now: number;
 }): AutoSelectPlan {
   // No own domain means no way to tell a coworker from a customer.
-  if (ownAddress === null) return { kind: "skip", reason: "no-own-address" };
+  if (ownAddress === null || domainOf(ownAddress) === null) {
+    return { kind: "skip", reason: "no-own-address" };
+  }
 
   const current = pickCurrentMeeting(events, now);
   if (current.kind === "none") return { kind: "skip", reason: "no-meeting" };
@@ -76,11 +78,23 @@ export function planAutoSelect({
     return domain !== null && !colleagueDomains.has(domain);
   };
 
-  const { matched, unmatched } = matchAttendees({
-    participants: participantsOf(current.event),
-    contacts,
-    ownAddress,
-  });
+  const people = participantsOf(current.event);
+  const { matched, unmatched } = matchAttendees({ participants: people, contacts, ownAddress });
+
+  // Any namesake makes a create the user's call, not only the active,
+  // non-colleague rows similarContacts offers as Use buttons: an archived
+  // record, a coworker on personal mail, or another attendee under a second
+  // address is still probably this person.
+  const hasNamesake = (name: string, address: string) => {
+    const tokens = normalizeName(name);
+    if (tokens.size === 0) return false;
+    const own = normalizeAddress(address);
+    const namesake = (otherAddress: string | null, otherName: string | null) =>
+      (otherAddress === null || normalizeAddress(otherAddress) !== own) &&
+      otherName !== null &&
+      similar(tokens, normalizeName(otherName));
+    return contacts.some((c) => namesake(c.email, c.name)) || people.some((p) => namesake(p.address, p.name));
+  };
 
   // An already-selected match is never re-upserted: that would rewrite its
   // selected_at and conversation_id.
@@ -100,8 +114,7 @@ export function planAutoSelect({
     // A name that is just the address says nothing about who this is.
     if (name === "" || normalizeAddress(name) === normalizeAddress(participant.address)) continue;
     if (!outside(participant.address)) continue;
-    // A similar name is probably the same person under another address: the user's call.
-    if (similarContacts({ name, address: participant.address, contacts }).length > 0) continue;
+    if (hasNamesake(name, participant.address)) continue;
     create.push({ participant, name, parentId: inferCompany({ address: participant.address, contacts }) });
   }
 

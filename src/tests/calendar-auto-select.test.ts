@@ -108,6 +108,28 @@ describe("planAutoSelect", () => {
       .toEqual({ kind: "skip", reason: "nothing-to-do" });
   });
 
+  it("skips with an own address that has no domain", () => {
+    expect(plan({ ownAddress: "kmorgan", events: [meeting([person("new@acme.example", "New Person")])] }))
+      .toEqual({ kind: "skip", reason: "no-own-address" });
+  });
+
+  it("does not create an attendee whose name matches an archived contact", () => {
+    const john = contact(6, "john@old.example", { active: false, name: "John Smith" });
+    expect(plan({ events: [meeting([person("john@new.example", "John Smith")])], contacts: [john] }))
+      .toEqual({ kind: "skip", reason: "nothing-to-do" });
+  });
+
+  it("does not create a coworker invited at a personal address", () => {
+    const jane = contact(4, "jane@corp.test", { isColleague: true, name: "Jane Doe" });
+    expect(plan({ events: [meeting([person("jane.doe@gmail.com", "Jane Doe")])], contacts: [jane] }))
+      .toEqual({ kind: "skip", reason: "nothing-to-do" });
+  });
+
+  it("creates neither of two attendees who share a name under different addresses", () => {
+    const events = [meeting([person("ana@newco.example", "Ana Newco"), person("ana.newco@gmail.com", "Ana Newco")])];
+    expect(plan({ events, contacts: [CFO] })).toEqual({ kind: "skip", reason: "nothing-to-do" });
+  });
+
   it("does not create an attendee on the user's own domain, whatever the case", () => {
     expect(plan({ events: [meeting([person("Al@CORP.test", "Al Coworker")])], contacts: [CFO] }))
       .toEqual({ kind: "skip", reason: "nothing-to-do" });

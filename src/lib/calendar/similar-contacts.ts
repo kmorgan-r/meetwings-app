@@ -94,9 +94,11 @@ export function similarContacts({
  * to accept a prefilled value - a confident-looking wrong guess is worse than a
  * blank field.
  *
- * Being incomplete is SAFE: an unlisted free-mail domain degrades to the
- * ordinary path, which needs at least one cached contact on that domain with a
- * parent before it proposes anything.
+ * Being incomplete is safe for the create form: an unlisted free-mail domain
+ * degrades to the ordinary path, which needs at least one cached contact on
+ * that domain with a parent before it proposes anything. Auto-select
+ * (auto-select.ts) writes the inferred company with no human look, so there an
+ * unlisted provider domain can give a new contact a stranger's company.
  */
 export const FREE_MAIL: ReadonlySet<string> = new Set([
   "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
@@ -114,8 +116,9 @@ export function domainOf(address: string): string | null {
 }
 
 /**
- * A prefill, NEVER a silent write. The user sees the result in the form and can
- * clear or change it before confirming.
+ * In the create form, a prefill the user sees and can clear or change before
+ * confirming. Auto-select (auto-select.ts) also writes it unconfirmed - see
+ * FREE_MAIL.
  */
 export function inferCompany({
   address,
