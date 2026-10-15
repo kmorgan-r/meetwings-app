@@ -47,6 +47,7 @@ export const Input = ({
   isHidden,
   keepEngaged,
   setKeepEngaged,
+  setMeetingPanelHidden,
   enableVAD,
   quickActions,
   onQuickActionClick,
@@ -79,11 +80,18 @@ export const Input = ({
   // Check if we have content that should prevent auto-reset
   const hasContent = response !== "" || (meetingAssistMode && meetingTranscript.length > 0);
 
+  // A meeting is in the panel: X only hides it (issue #72). Clearing would
+  // start a new conversation and drop the Odoo targets mid-meeting. The
+  // transcript panel's own Clear button is the explicit fresh start.
+  const xHidesPanel = !isLoading && meetingAssistMode && meetingTranscript.length > 0;
+
   return (
     <div className="relative flex-1">
       <Popover
         open={isPopoverOpen}
         onOpenChange={(open) => {
+          // Clicking the input brings back a panel the X hid.
+          if (open) setMeetingPanelHidden(false);
           // Only reset if popover is closing AND:
           // - Not loading
           // - Not in conversation mode
@@ -190,6 +198,9 @@ export const Input = ({
                 onClick={async () => {
                   if (isLoading) {
                     cancel();
+                  } else if (xHidesPanel) {
+                    reset();
+                    setMeetingPanelHidden(true);
                   } else if (keepEngaged) {
                     // When keepEngaged is on, close everything and start new conversation.
                     // Awaited in sequence: startNewConversation flushes any unsaved
@@ -214,10 +225,10 @@ export const Input = ({
                 title={
                   isLoading
                     ? "Cancel loading"
+                    : xHidesPanel
+                    ? "Hide panel"
                     : keepEngaged
                     ? "Close and start new conversation"
-                    : meetingAssistMode && meetingTranscript.length > 0
-                    ? "Clear meeting transcript"
                     : "Clear conversation"
                 }
               >

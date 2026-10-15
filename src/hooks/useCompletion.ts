@@ -160,6 +160,10 @@ export const useCompletion = () => {
   const [calendarBlockPresent, setCalendarBlockPresent] = useState(false);
   const [isScreenshotLoading, setIsScreenshotLoading] = useState(false);
   const [keepEngaged, setKeepEngaged] = useState(false);
+  // The panel's X during a meeting hides it instead of clearing the meeting
+  // (issue #72). New transcript lines keep it hidden; the input, a new
+  // request, or a new conversation shows it again.
+  const [meetingPanelHidden, setMeetingPanelHidden] = useState(false);
   // The model behind the answer in the panel. Only the panel's own requests
   // set it, so a background call (titles, translation) can't overwrite it.
   const [respondedModel, setRespondedModel] = useState<RespondedModel | null>(
@@ -822,6 +826,7 @@ export const useCompletion = () => {
     await flushUnsavedMeetingTranscript();
 
     setMeetingTranscript([]);
+    setMeetingPanelHidden(false);
     // Also clear session speaker mapping
     setSessionSpeakerMap({});
     // Also reset conversation when clearing meeting transcript. Must clear the
@@ -1504,6 +1509,7 @@ export const useCompletion = () => {
 
     // No in-progress conversation until the first exchange is saved.
     clearActiveConversationId();
+    setMeetingPanelHidden(false);
     conversationTranscriptStartRef.current = meetingTranscript.length;
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
@@ -2031,10 +2037,15 @@ export const useCompletion = () => {
   // Popover opens when there's content to show
   const isPopoverOpen =
     state.isLoading ||
-    state.response !== "" ||
-    state.error !== null ||
-    keepEngaged ||
-    hasMeetingTranscript;
+    (!meetingPanelHidden &&
+      (state.response !== "" ||
+        state.error !== null ||
+        keepEngaged ||
+        hasMeetingTranscript));
+
+  useEffect(() => {
+    if (state.isLoading) setMeetingPanelHidden(false);
+  }, [state.isLoading]);
 
   useEffect(() => {
     // targetCount is read but not otherwise used below: the "Logging to"
@@ -2468,6 +2479,7 @@ export const useCompletion = () => {
     isScreenshotLoading,
     keepEngaged,
     setKeepEngaged,
+    setMeetingPanelHidden,
     // Meeting Assist Mode
     meetingAssistMode,
     setMeetingAssistMode,
