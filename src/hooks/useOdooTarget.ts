@@ -1256,11 +1256,11 @@ export function useOdooTarget({
    * and bumping would discard any lookup in flight for no gain.
    */
   const clearAllTargets = useCallback(async (): Promise<void> => {
-    selectionToken.current += 1;
-    const token = selectionToken.current;
     // Before the delete, not after: a calendar auto-select run checks for this
     // before each write, and must not re-add what the user just dropped.
     window.dispatchEvent(new CustomEvent("odooTargetsCleared"));
+    selectionToken.current += 1;
+    const token = selectionToken.current;
     try {
       const instance = await resolveInstance();
       await clearTargets(instance);
