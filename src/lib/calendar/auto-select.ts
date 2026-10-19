@@ -79,7 +79,12 @@ export function planAutoSelect({
   };
 
   const people = participantsOf(current.event);
-  const { matched, unmatched } = matchAttendees({ participants: people, contacts, ownAddress });
+  const { matched, unmatched } = matchAttendees({
+    participants: people,
+    contacts,
+    ownAddress,
+    includeColleagues: true,
+  });
 
   // Any namesake makes a create the user's call, not only the active,
   // non-colleague rows similarContacts offers as Use buttons: an archived
@@ -96,14 +101,12 @@ export function planAutoSelect({
     return contacts.some((c) => namesake(c.email, c.name)) || people.some((p) => namesake(p.address, p.name));
   };
 
+  // Coworkers are added too: any attendee with an active partner record, on
+  // any domain. The colleague domains gate only the creates below.
   // An already-selected match is never re-upserted: that would rewrite its
   // selected_at and conversation_id.
   const add = matched
-    .filter(
-      ({ participant, contact }) =>
-        outside(participant.address) &&
-        !targets.some((t) => t.model === "res.partner" && t.resId === contact.id)
-    )
+    .filter(({ contact }) => !targets.some((t) => t.model === "res.partner" && t.resId === contact.id))
     .map(({ contact }) => contact);
 
   const create: AutoCreate[] = [];

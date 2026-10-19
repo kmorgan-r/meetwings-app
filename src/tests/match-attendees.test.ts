@@ -119,6 +119,28 @@ describe("matchAttendees", () => {
     expect(result.excluded.map((e) => e.reason)).toEqual(["colleague"]);
   });
 
+  it("matches a colleague like any other contact when includeColleagues is on", () => {
+    const result = matchAttendees({
+      participants: [participant("mate@corp.test")],
+      contacts: [contact(9, "mate@corp.test", { isColleague: true })],
+      ownAddress: own,
+      includeColleagues: true,
+    });
+    expect(result.excluded).toHaveLength(0);
+    expect(result.matched.map((m) => m.contact.id)).toEqual([9]);
+  });
+
+  it("still treats an archived colleague as archived when includeColleagues is on", () => {
+    const result = matchAttendees({
+      participants: [participant("gone@corp.test")],
+      contacts: [contact(11, "gone@corp.test", { isColleague: true, active: false })],
+      ownAddress: own,
+      includeColleagues: true,
+    });
+    expect(result.matched).toHaveLength(0);
+    expect(result.unmatched.map((u) => u.reason)).toEqual(["archived"]);
+  });
+
   // listContacts runs a bare SELECT with no `active` filter
   // (odoo-contacts.action.ts:122), so archived partners ARE in the cache.
   it("treats an archived contact as unmatched, shown and labelled", () => {

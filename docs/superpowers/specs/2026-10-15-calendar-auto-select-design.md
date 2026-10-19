@@ -108,19 +108,20 @@ Rules, in order:
    partner record would be created.
 1. **Exactly one current meeting.** `pickCurrentMeeting(events, now)` must return
    `one`. `none` and `several` skip. Never guess between overlapping meetings.
-2. **Match.** `matchAttendees` with the existing exclusions: the user's own
-   address (best effort, see Limits), `isColleague` contacts, inactive contacts.
-   **Colleague domains** (used by rules 3 and 4): the domain of `ownAddress`
+2. **Match.** `matchAttendees` with `includeColleagues: true`: the user's own
+   address is excluded (best effort, see Limits) and inactive contacts are
+   `archived`, but an `isColleague` contact matches like any other. (The
+   proposal block keeps the default, which excludes colleagues.)
+   **Colleague domains** (used by rule 4): the domain of `ownAddress`
    plus the domains of contacts with `isColleague === true`, with free-mail
    domains removed from that set (one colleague on gmail must not block every
    gmail attendee). Compared lowercased. `FREE_MAIL` and `domainOf` in
    `similar-contacts.ts` are module-private today and get exported for this.
 3. **Add** = `matched` contacts not already in `targets` (the existing "writable"
-   rule) and whose attendee address is not on a colleague domain. An
-   already-selected match is never re-upserted — that would rewrite its
-   `selected_at` and `conversation_id`. A coworker who has a partner record but
-   is not flagged `isColleague` is therefore left to the proposal block, not
-   auto-added (and does not use up a slot under rule 5).
+   rule), on any domain: coworkers with an active partner record are added
+   like customers, flagged `isColleague` or not, and use up slots under rule 5.
+   An already-selected match is never re-upserted — that would rewrite its
+   `selected_at` and `conversation_id`.
 4. **Create** = `unmatched` entries with reason `no-contact` (never `archived`:
    creating one would duplicate the archived record) where all of these hold:
    - the participant has a display name that is non-blank and is not just the
@@ -247,18 +248,17 @@ would not help: release builds have no visible console.)
 ## Limits, accepted
 
 - **Own address.** The exclusion is best effort (UPN vs SMTP, per the 2026-09-01
-  spec). The colleague-domain rule now covers both adds and creates, so the
-  user's own record is only auto-added when its address is on a domain that is
-  not a colleague domain (for example a personal free-mail address) and the
-  claim does not match it.
+  spec). Adds are not domain-gated, so whenever the claim does not match the
+  user's own SMTP row and that row has a partner record, the user's own record
+  is auto-added.
 - **UPN domain ≠ mail domain.** `ownAddress` comes from the ID token's
   `preferred_username`/`upn`. In a tenant where that domain differs from the
-  mail domain (e.g. `corp.onmicrosoft.com` vs `corp.com`) and no coworker is
-  flagged colleague, coworkers, the user included (the claim no longer
-  excludes their SMTP row), are added when they have a partner record and
-  created when they do not. Flagging
+  mail domain (e.g. `corp.onmicrosoft.com` vs `corp.com`), the claim no longer
+  excludes the user's SMTP row, so the user's own partner record is added like
+  any coworker's. With no coworker flagged colleague, coworkers without a
+  partner record, the user included, are also created. Flagging
   any one coworker as colleague puts the mail domain on the colleague list and
-  stops it.
+  stops the creates.
 - **Early start.** Capture started more than `EARLY_JOIN_MS` (5 min) before the
   event finds no meeting, and there is no retry.
 - **Cache not ready.** Capture that starts before the contact cache is ready
@@ -277,7 +277,8 @@ would not help: release builds have no visible console.)
   unmatched, blank name, name equal to address, similar-name contact,
   own-domain and colleague-domain attendee, free-mail colleague not blocking,
   slot overflow skipping everything, exact fit, inferred and blank company,
-  a matched contact on a colleague domain not added.
+  a matched contact on a colleague domain added, a flagged colleague added, an
+  archived colleague not added, the user's own contact never added.
 - `fetchCurrentMeetings` — `ok`, `absent` config, and a Graph error mapped to
   its `GraphErrorCode`. The existing `useCalendarProposal` tests pass unchanged
   after the refactor.
