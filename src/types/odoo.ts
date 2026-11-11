@@ -1,3 +1,5 @@
+import type { NotionRowStatus } from "./notion";
+
 /** Error codes for every failure this feature can surface. */
 export type OdooErrorCode =
   | "ODOO_NOT_CONFIGURED"
@@ -134,7 +136,8 @@ export type MeetingLogStatus =
   | "sent"        // terminal
   | "failed"      // terminal until a manual retry
   | "cancelled"   // undone
-  | "deleted";    // terminal. Transcript and summary blanked; the row survives.
+  | "deleted"     // terminal. Transcript and summary blanked; the row survives.
+  | "none";       // no Odoo destination (Notion-only row); every Odoo query whitelists statuses, so it is invisible to them
 
 /** The snake_case shape SQLite actually returns for a queued meeting. */
 export interface DbMeetingLogRow {
@@ -157,6 +160,8 @@ export interface DbMeetingLogRow {
   meeting_started_at: number | null;
   created_at: number;
   sent_at: number | null;
+  notion_status: NotionRowStatus | null;
+  notion_send_id: string | null;
 }
 
 /**

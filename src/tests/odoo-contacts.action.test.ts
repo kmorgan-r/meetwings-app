@@ -172,6 +172,7 @@ describe("purgeOtherInstances", () => {
   beforeEach(() => {
     db.run(readMigration("meeting-log-queue.sql"));
     db.run(readMigration("odoo-multi-target.sql"));
+    db.run(readMigration("notion-sends.sql"));
   });
 
   it("removes every trace of a switched-away instance", async () => {
@@ -203,6 +204,7 @@ describe("selected targets", () => {
   beforeEach(() => {
     db.run(readMigration("meeting-log-queue.sql"));
     db.run(readMigration("odoo-multi-target.sql"));
+    db.run(readMigration("notion-sends.sql"));
   });
 
   it("purges other instances from the new table", async () => {
@@ -368,6 +370,7 @@ describe("[odoo-targets] instrumentation (issue #72)", () => {
   beforeEach(() => {
     db.run(readMigration("meeting-log-queue.sql"));
     db.run(readMigration("odoo-multi-target.sql"));
+    db.run(readMigration("notion-sends.sql"));
     infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
   });
   afterEach(() => infoSpy.mockRestore());

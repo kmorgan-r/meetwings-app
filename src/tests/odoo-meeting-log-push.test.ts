@@ -228,6 +228,7 @@ beforeEach(async () => {
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-contacts.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-multi-target.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
   tauriFetch.mockReset();
   claimed.clear();
   failNextWrite.value = null;

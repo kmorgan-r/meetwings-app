@@ -59,6 +59,7 @@ async function freshDb() {
     "meeting-log-queue.sql",
     "odoo-lead-only-target.sql",
     "odoo-multi-target.sql",
+    "notion-sends.sql",
   ]) {
     db.exec(fs.readFileSync(path.join(MIGRATIONS, m), "utf8"));
   }

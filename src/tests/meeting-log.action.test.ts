@@ -238,6 +238,7 @@ beforeEach(async () => {
   // alone" test below, which calls the real function.
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
   await applyMigration14(db);
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
   execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
 });

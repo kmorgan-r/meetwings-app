@@ -12,3 +12,4 @@ export * from "./speaker-id";
 export * from "./user-identity";
 export * from "./odoo";
 export * from "./calendar";
+export * from "./notion";
