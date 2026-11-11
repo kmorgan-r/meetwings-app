@@ -78,7 +78,7 @@ These edits are applied to the spec in the same commit as this plan: §3.3 and �
 ## Review Focus
 
 1. **Database link shapes.** People paste the database link with a `?v=<view id>` query, a title slug (`Weekly-Team-Meetings-<id>`), a workspace path (`/p/<workspace>/<id>`), dashed UUIDs, or trailing whitespace. Expected: the database id is the last 32-hex run in the **path**, never the `v=` view id. Test in Task 5.
-2. **Two windows act on one send.** The overlay scheduler and a dashboard Retry click hit the same send within a second. Expected: exactly one attempt runs (CAS claim), and the other returns without writing. Test in Task 3.
+2. **Two attempts on one send.** The 60 s tick and a tick kicked by a dashboard Retry click (relayed to the overlay window as an event; the dashboard itself never sends) hit the same send within a second, or a zombie attempt wakes after its claim went stale. Expected: exactly one attempt runs (CAS claim), and the other returns without writing. Test in Task 3.
 3. **A teammate edits the page while it's being written.** Someone adds a block to the brand-new page (or inside the toggle) before the body or transcript append finishes. Expected: the resume check sees the last existing child doesn't match the expected block, stops with `NOTION_PAGE_CHANGED`, and doesn't duplicate or interleave. Test in Task 11.
 4. **Odd transcript lines.** Stored transcripts contain blank lines, a line of only whitespace, or a single 7,000-character line full of emoji. Expected: blank lines are dropped before indexing, so resume counts stay consistent. A long line becomes one block with several rich-text items, with no broken surrogate. Test in Task 10.
 5. **Dangling Meeting summaries provider.** The setting names a custom provider that was later deleted. Expected: treated exactly as an empty setting (fall back to today's behaviour), never a crash and never `SUMMARY_NO_PROVIDER` while a fallback exists. Test in Task 8.
@@ -129,7 +129,9 @@ These edits are applied to the spec in the same commit as this plan: §3.3 and �
 **Files:**
 - Create: `src-tauri/src/db/migrations/notion-sends.sql`, `src/types/notion.ts`, `src/tests/migration-17.test.ts`
 - Modify: `src-tauri/src/db/main.rs` (append after version 16), `src-tauri/src/db/migration_tests.rs`, `src/types/odoo.ts:129-160`, `src/types/index.ts` (barrel, if types are re-exported there)
-- Modify (schema harnesses): every test or helper that builds the current schema from a hand-listed file set. Run `grep -rln "meeting-log-queue-v2.sql\|odoo-multi-target.sql" src/tests` to find them. Today that is `meeting-log.action.test.ts`, `odoo-meeting-log-push.test.ts`, `odoo-meeting-log-sweep.test.ts`, `odoo-contacts.action.test.ts`, `overlay-meeting-targets-survive.test.tsx` and `helpers/migration-14.ts`/`migration-16.ts`. Each one appends `notion-sends.sql` after `meeting-log-queue-v2.sql`.
+- Modify (schema harnesses): every test that builds the current schema from a hand-listed file set. Run `grep -rln "meeting-log-queue-v2.sql\|odoo-multi-target.sql\|applyMigration16\|applyMigration14" src/tests` to find them. Today that is `meeting-log.action.test.ts`, `odoo-meeting-log-push.test.ts`, `odoo-meeting-log-sweep.test.ts`, `odoo-contacts.action.test.ts` and `overlay-meeting-targets-survive.test.tsx`.
+  - Each one applies `notion-sends.sql` **once, in its own `beforeEach`, after its existing migrations**. Not every harness loads `meeting-log-queue-v2.sql` (`meeting-log.action.test.ts:222-243` doesn't); the ALTERs work on either queue shape.
+  - **Never** add it inside `helpers/migration-14.ts` or `helpers/migration-16.ts`. They build pre-14/pre-16 fixtures for migration tests, and `migration-17.test.ts` would then fail re-applying it with a duplicate column.
 
 **Interfaces:**
 - Produces (SQL), with the migration header comment listing every status value:
@@ -165,7 +167,7 @@ These edits are applied to the spec in the same commit as this plan: §3.3 and �
 
 - [ ] **Step 1: Write the failing tests**
 
-`src/tests/migration-17.test.ts`. Build a pre-17 DB with the migration-16 helper's file list plus `meeting-log-queue-v2.sql`, insert two queue rows (one `sent`, one `held` with a target), then apply `notion-sends.sql`:
+`src/tests/migration-17.test.ts`. Build a pre-17 DB with the exported `seedPre16` + `applyMigration16` from `helpers/migration-16.ts` (its file list is not exported), then `meeting-log-queue-v2.sql`. Insert two queue rows (one `sent`, one `held` with a target), then apply `notion-sends.sql`:
 ```ts
 it("keeps every existing queue row and target, with an empty Notion lane", ...)
   // rows(db,"SELECT id,status,transcript FROM meeting_log_queue") deep-equals the pre-17 rows
@@ -190,7 +192,7 @@ Run: `npx vitest run src/tests/migration-17.test.ts`, which should fail with ENO
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `npx vitest run src/tests/migration-17.test.ts src/tests/meeting-log.action.test.ts src/tests/odoo-meeting-log-push.test.ts src/tests/odoo-meeting-log-sweep.test.ts` plus `cargo test --manifest-path src-tauri/Cargo.toml db::` and `npm run type-check`. Expected: all PASS.
+Run: `npx vitest run src/tests/migration-17.test.ts src/tests/migration-16.test.ts` plus **every** harness file the grep found and changed (today `meeting-log.action.test.ts`, `odoo-meeting-log-push.test.ts`, `odoo-meeting-log-sweep.test.ts`, `odoo-contacts.action.test.ts`, `overlay-meeting-targets-survive.test.tsx`), then `cargo test --manifest-path src-tauri/Cargo.toml db::` and `npm run type-check`. Expected: all PASS.
 
 - [ ] **Step 5: Commit** `feat(notion): add migration 17 for the Notion send lane`
 
@@ -204,20 +206,22 @@ Run: `npx vitest run src/tests/migration-17.test.ts src/tests/meeting-log.action
 
 **Interfaces:**
 - `NewQueueRow` gains `notionStatus: NotionRowStatus | null`, and its `status` widens to `"held" | "unassigned" | "none"`. The insert writes `notion_status`. Every existing caller passes `notionStatus: null` (grep `insertQueueRow(`).
-- `cancelHeldRow(id): Promise<boolean>`: one statement cancels whichever lanes are `held`.
+- `cancelHeldRow(id): Promise<"all" | "partial" | "none">` (was `boolean`; update its callers, grep `cancelHeldRow(`): one statement cancels whichever lanes are `held`.
   ```sql
   UPDATE meeting_log_queue
      SET status        = CASE WHEN status = 'held' THEN 'cancelled' ELSE status END,
          notion_status = CASE WHEN notion_status = 'held' THEN 'cancelled' ELSE notion_status END
    WHERE id = ? AND (status = 'held' OR notion_status = 'held')
   ```
+  - 0 rows changed → `"none"`.
+  - Otherwise it re-reads the row. `"partial"` when a lane is still live: `status NOT IN ('cancelled','none')`, or `notion_status` is neither NULL nor `'cancelled'`. That happens when the scheduler promoted the Notion lane, or the Odoo push started, just before the click. Else `"all"`.
 - `findHeldRow(instance: string | null, now: number): Promise<DbMeetingLogRow | null>` checks the in-window rows where `(instance = ? AND status = 'held') OR notion_status = 'held'`. A `null` instance drops the first arm.
 - `promoteHeldNotionRow(id: string): Promise<boolean>`: CAS `held → waiting` on `notion_status`.
 - `promoteStaleHeldNotionRows(olderThan: number): Promise<number>`: same CAS for `created_at <= olderThan`.
-- Lane-open SQL fragment, exported as `NOTION_LANE_OPEN` for reuse in Task 3:
+- Lane-open SQL fragment, exported as `NOTION_LANE_OPEN` for reuse in Task 3. It must be **two-valued**: an Odoo-only row has `notion_status` NULL, and a bare `NULL IN (…)` makes `NOT <fragment>` NULL, which would refuse every Odoo-only delete. Hence the `COALESCE`:
   ```sql
-  (notion_status IN ('held','offered','waiting')
-   OR (notion_status = 'joined' AND EXISTS (SELECT 1 FROM notion_sends s
+  (COALESCE(notion_status,'') IN ('held','offered','waiting')
+   OR (COALESCE(notion_status,'') = 'joined' AND EXISTS (SELECT 1 FROM notion_sends s
         WHERE s.id = meeting_log_queue.notion_send_id
           AND s.status NOT IN ('sent','already','cancelled'))))
   ```
@@ -229,8 +233,11 @@ Run: `npx vitest run src/tests/migration-17.test.ts src/tests/meeting-log.action
 
 - [ ] **Step 1: Write the failing tests** (sql.js harness, the existing `rawExecute` seeding)
 ```ts
-it("undo cancels a Notion-only held row (status 'none')", ...)            // cancelHeldRow → true; notion_status 'cancelled', status 'none'
-it("undo cancels both lanes of a both-held row in one call", ...)        // status 'cancelled', notion_status 'cancelled'
+it("undo cancels a Notion-only held row (status 'none')", ...)            // cancelHeldRow → "all"; notion_status 'cancelled', status 'none'
+it("undo cancels both lanes of a both-held row in one call", ...)        // "all"; status 'cancelled', notion_status 'cancelled'
+it("undo after the Notion lane was promoted reports partial", ...)       // status 'held', notion_status 'waiting' → "partial"; status 'cancelled', notion_status 'waiting'
+it("deleteRow and deleteTerminalRow still delete an Odoo-only row (notion_status NULL)", ...) // the NULL-safe fragment
+it("'none' rows (instance '') are invisible to getQueueCounts, selectSweepable, countActionableQueued and listActionableRows", ...)
 it("findHeldRow(null, now) finds an in-window Notion held row", ...)
 it("findHeldRow(instance, now) still ignores other-instance Odoo held rows", ...)
 it("promoteStaleHeldNotionRows promotes only rows older than the cutoff", ...)
@@ -242,7 +249,12 @@ it("recordErrorOnUnsent never stamps a 'none' row (Notion-only user, Odoo absent
 it("no NOTION or QUEUE statement contains BEGIN or COMMIT", ...)        // extend the existing guard over Object.values(QUEUE_SQL) to NOTION_SQL too (NOTION_SQL lands in Task 3; add the import then)
 ```
 
-- [ ] **Step 2:** Run `npx vitest run src/tests/meeting-log.action.test.ts`. Expected: the new cases FAIL.
+In `odoo-meeting-log-sweep.test.ts`:
+```ts
+it("a sweep with Odoo complete never claims, pushes or stamps a 'none' row", ...) // seed one 'none' + notion 'waiting' row beside a pending row; push spy sees only the pending one
+```
+
+- [ ] **Step 2:** Run `npx vitest run src/tests/meeting-log.action.test.ts src/tests/odoo-meeting-log-sweep.test.ts`. Expected: the new cases FAIL (the invisibility ones may already pass; that is the assertion).
 - [ ] **Step 3: Implement** the statements and signatures above.
 - [ ] **Step 4:** Run `npx vitest run src/tests/meeting-log.action.test.ts src/tests/odoo-meeting-log-push.test.ts src/tests/odoo-meeting-log-sweep.test.ts src/tests/odoo-meeting-log-recovery.test.ts` and `npm run type-check`. Expected: PASS, and the existing Odoo cases are unchanged.
 - [ ] **Step 5: Commit** `feat(notion): give queue rows an independent Notion lane`
@@ -274,7 +286,7 @@ it("no NOTION or QUEUE statement contains BEGIN or COMMIT", ...)        // exten
                    OR (status='sending' AND claimed_at <= ?staleBefore))
   ```
   It returns the `claimed_at` written on success, `null` on a lost race.
-- `restampSend(id, prevClaimedAt, now): Promise<boolean>` is a CAS on `status='sending' AND claimed_at = prevClaimedAt`. `false` means another attempt owns the send, and the caller must abort without writing.
+- `restampSend(id, prevClaimedAt, now): Promise<number | null>` is a CAS on `status='sending' AND claimed_at = prevClaimedAt` that writes `claimed_at = now`. It returns the new stamp (`now`) on success. **The caller must carry that stamp forward**: every later `restampSend`, `patchSend` and `finishSend` passes the latest one, because the old stamp no longer matches the row. `null` means another attempt owns the send, and the caller must abort without writing.
 - `patchSend(id, claimedAt, patch: SendPatch): Promise<boolean>`.
   - `SendPatch` keys are restricted to `summary_json`, `summary_failures`, `create_started_at`, `page_id`, `page_url`, `page_created_time`, `lost_to_url`, `body_done`, `toggle_block_id`, `transcript_done` and `practices_done`.
   - Columns come from a whitelist, never interpolated from caller strings.
@@ -284,17 +296,17 @@ it("no NOTION or QUEUE statement contains BEGIN or COMMIT", ...)        // exten
   - `readSendLines` reads the joined rows' `transcript` by `transcript_start_at`, splits on `\n`, and drops lines that are empty after `trim()`.
 - Page actions, each a single statement returning `boolean`:
   - `retrySend(id)`: `failed|no_summary|retry → retry`, `next_at=0`, `error_code=NULL`, and `summary_failures=0` when the send was `no_summary`.
-  - `cancelSend(id)`: only when `status IN ('retry','failed','no_summary') AND page_id IS NULL`.
+  - `cancelSend(id)`: `→ cancelled` when `(status IN ('retry','failed','no_summary') AND page_id IS NULL) OR (status = 'failed' AND page_id IS NOT NULL)`. The second arm is **Stop and keep page**: without it a send that failed after its page existed (`NOTION_PAGE_CHANGED`, a revoked token) could never close, so its rows would never prune. The page in Notion is left as it is.
   - `offerRowsToWaiting(rowIds)`: `offered → waiting`.
   - `cancelOfferedRows(rowIds)`: `offered|waiting → cancelled`, only while `notion_send_id IS NULL`.
-  - `requeueAuthFailures()`: `failed → retry` with `next_at=0` where `error_code IN ('NOTION_UNAUTHORIZED','NOTION_NO_ACCESS','NOTION_NOT_FOUND')`.
+  - `requeueAuthFailures()`: `failed → retry` with `next_at=0` where `error_code IN ('NOTION_UNAUTHORIZED','NOTION_NO_ACCESS','NOTION_NOT_FOUND','NOTION_KEYCHAIN_UNAVAILABLE','NOTION_NOT_CONFIGURED')`.
 - `listNotionItems(): Promise<NotionItem[]>` for the Meetings page:
   ```ts
   type NotionItem =
     | { kind: "rows"; conversationId: string | null; rowIds: string[]; status: "offered" | "waiting" | "held"; startAt: number; endAt: number }
     | { kind: "send"; send: DbNotionSend; rowIds: string[] };
   ```
-  It covers sends of any status except `cancelled`, plus not-yet-joined `held|offered|waiting` rows grouped by conversation.
+  It covers sends of any status except `cancelled` without a page (a stopped send that kept its page stays listed, so its link survives), plus not-yet-joined `held|offered|waiting` rows grouped by conversation.
 
 - [ ] **Step 1: Write the failing tests**
 ```ts
@@ -304,10 +316,13 @@ it("claimSend: two concurrent claims → exactly one non-null", ...)          //
 it("claimSend refuses a retry send whose next_at is in the future", ...)
 it("claimSend reclaims a sending send only once its claim is stale", ...)
 it("restampSend / patchSend / finishSend refuse a stale claimedAt (zombie writer)", ...)
+it("after restampSend, patchSend and finishSend succeed with the returned stamp and refuse the original one", ...)
 it("finishSend 'sent' is one statement and the lane reads closed for every joined row", ...)  // NOTION_LANE_OPEN false for all rows
 it("readSendLines joins rows in time order and drops blank lines", ...)
+it("one conversation with two sends (gap > 30 min): readSendLines returns only the target send's rows", ...)
 it("retrySend resets summary_failures only for no_summary", ...)
-it("cancelSend refuses a send that already has a page", ...)
+it("cancelSend refuses a retry or no_summary send that already has a page", ...)
+it("cancelSend stops a failed send that has a page; its lane reads closed and prune then blanks its rows", ...)
 it("listNotionItems groups unjoined waiting rows by conversation", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/notion-queue.action.test.ts`. Expected: FAIL (module missing).
@@ -334,7 +349,7 @@ it("listNotionItems groups unjoined waiting rows by conversation", ...)
 - TS (`src/lib/notion/token.ts`):
   - `isNotionKeychainAvailable(): Promise<boolean>`
   - `saveNotionToken(raw: string): Promise<void>`, which trims and throws `NotionError("NOTION_KEYCHAIN_UNAVAILABLE")` when the invoke fails
-  - `loadNotionToken(): Promise<string | null>`
+  - `loadNotionToken(): Promise<string | null>`. `null` only when the command returns `Ok(None)`. A failed invoke **throws** `NotionError("NOTION_KEYCHAIN_UNAVAILABLE")`; it is never collapsed into "no token", because that would silently drop a Notion-only meeting (spec anti-goal 4).
   - `clearNotionToken(): Promise<void>`
 
 - [ ] **Step 1: Write the failing test** (mock `@tauri-apps/api/core` `invoke`; spy on `@/lib/secure-storage`)
@@ -343,6 +358,7 @@ it("saveNotionToken trims and stores through the keychain command only", ...)
   // invoke called with ("notion_token_set", { token: "secret_abc" }) for "  secret_abc\n"; secureSet never called; localStorage.setItem never called with the token
 it("saveNotionToken surfaces a keychain failure as NOTION_KEYCHAIN_UNAVAILABLE without the token in message", ...)
 it("loadNotionToken returns null when the command returns null", ...)
+it("loadNotionToken throws NOTION_KEYCHAIN_UNAVAILABLE when the invoke rejects", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/notion-token.test.ts`. Expected: FAIL. This task creates `src/lib/notion/errors.ts` holding only `class NotionError` and the code `NOTION_KEYCHAIN_UNAVAILABLE`; Task 6 extends that file.
 - [ ] **Step 3: Implement the Rust and TS.** Run `cargo check --manifest-path src-tauri/Cargo.toml`.
@@ -379,6 +395,9 @@ function isNotionAutoSendEnabled(): boolean;                   // safeLocalStora
 function setNotionAutoSendEnabled(on: boolean): void;
 ```
 - `absent` means no token and no meetings link. Either one alone is `incomplete`.
+- Token presence inside `loadNotionConfigState`:
+  - `isNotionKeychainAvailable()` false (Linux) → the token counts as missing.
+  - The keychain is available but `loadNotionToken` throws → the token counts as **present**. Meetings keep being queued for Notion, and the read is retried at send time, where `buildSendDeps` surfaces `NOTION_KEYCHAIN_UNAVAILABLE` on the send (Task 14).
 - `parseNotionDatabaseId` takes the **last** run of 32 hex characters (dashes removed) in the URL **path**, ignoring the query string. It returns `null` for anything else. A dashed 8-4-4-4-12 UUID in the path also counts.
 
 - [ ] **Step 1: Write the failing tests** (fake ids only; never put a real IC id in this public repo)
@@ -394,6 +413,7 @@ it.each([
 ])("parseNotionDatabaseId(%s)", (url, id) => expect(parseNotionDatabaseId(url)).toBe(id));
 it("state is absent with no token and no link; incomplete lists what is missing; complete parses both ids", ...)
 it("knowledgeDbId is null when the Team Knowledge link is empty", ...)
+it("a keychain read that throws still reads complete when the link is set; an unavailable keychain reads incomplete ['token']", ...)
 it("auto-send defaults to on and persists off", ...)
 it("the stored blob never contains the token", ...)  // saveNotionConfig then inspect the secureSet mock's payload
 ```
@@ -432,7 +452,12 @@ it("the stored blob never contains the token", ...)  // saveNotionConfig then in
   const SUMMARY_STRIKE: ReadonlySet<SummaryErrorCode>;  // UNREADABLE, EMPTY, TIMEOUT, REJECTED
   const NOTION_SHOW_AT_ONCE: ReadonlySet<NotionErrorCode>; // UNAUTHORIZED, NO_ACCESS, NOT_FOUND, INVALID, NOT_CONFIGURED, KEYCHAIN_UNAVAILABLE, PAGE_CHANGED, INTERNAL → status 'failed'
   function notionErrorText(thrown: unknown): { code: string; text: string };
+  function outcomeFor(code: string, attempts: number, now: number, retryAfterMs?: number):
+    { status: "retry" | "failed"; nextAt: number | null };
+    // code ∈ NOTION_SHOW_AT_ONCE → { failed, null }; else { retry, now + max(retryAfterMs ?? 0, min(60_000 × 2^(attempts−1), 3_600_000)) }
   ```
+  - `outcomeFor` is the **only** place a Notion-side error becomes a send status. Every catch in Task 13 steps 2–8 and the Task 14 `buildSendDeps` error path go through it, so a code means the same thing everywhere.
+  - `NOTION_INTERNAL` (an unknown thrown error) is `failed`, matching its copy "Press Retry". A bug never loops silently in the background.
   - `notionErrorText` returns the fixed copy for a `NotionError` or `SummaryError`.
   - Anything else becomes `{ code: "NOTION_INTERNAL", text: NOTION_COPY.NOTION_INTERNAL }`. Unknown error text is never shown.
   - The `console.error` line logs `redactNotion(String(message))`, which fails closed.
@@ -450,7 +475,7 @@ it("the stored blob never contains the token", ...)  // saveNotionConfig then in
 | `NOTION_SERVER` | Notion is having problems. Trying again shortly. |
 | `NOTION_NETWORK` | Can't reach Notion. Trying again shortly. |
 | `NOTION_TIMEOUT` | Notion took too long. Trying again shortly. |
-| `NOTION_PAGE_CHANGED` | The Notion page was changed while it was being written. Check it, then press Retry. |
+| `NOTION_PAGE_CHANGED` | The Notion page was changed while it was being written. Check it, then press Retry, or Stop and keep page. |
 | `SAME_MEETING_UNDECIDED` | Checking whether a teammate already sent this meeting. Trying again shortly. |
 | `PRACTICES_UNDECIDED` | The AI couldn't check the practices against Team Knowledge. Trying again shortly. |
 | `NOTION_INTERNAL` | Something went wrong sending to Notion. Press Retry. |
@@ -477,6 +502,10 @@ it("armed redactor removes the token and the AI key from 401, 429 and 5xx bodies
   // body = `{"message":"API token secret_ntn_XYZ is invalid","request":{"Authorization":"Bearer secret_ntn_XYZ"}}`, also "sk-or-v1-KEY"
 it("notionErrorText never returns raw text for an unknown Error", ...)  // new Error("secret_ntn_XYZ leaked") → text === NOTION_COPY.NOTION_INTERNAL
 it("every NOTION_COPY string is free of the word Odoo", ...)
+it.each([[1, 60_000], [2, 120_000], [7, 3_600_000], [20, 3_600_000]])
+  ("outcomeFor a retry code at attempt %i waits %i ms", ...)          // NOTION_SERVER, now = 0
+it("outcomeFor: a retryAfterMs longer than the backoff wins", ...)    // attempt 1, retryAfterMs 90_000 → nextAt 90_000
+it("outcomeFor: every NOTION_SHOW_AT_ONCE code, NOTION_INTERNAL included, is failed with no nextAt", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/notion-errors.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -530,6 +559,11 @@ it("honours Retry-After seconds, capped at 60 s", ...)               // header "
 it("backs off 2 s then 4 s on a 429 without Retry-After, then throws NOTION_RATE_LIMITED", ...)
 it("a 429 that then succeeds returns the body, no error", ...)
 it("401 and 403 throw at once with no retry", ...)                  // fetch called once
+it.each([[400,"NOTION_INVALID"],[404,"NOTION_NOT_FOUND"],[409,"NOTION_INVALID"],[422,"NOTION_INVALID"]])
+  ("%i → %s with no retry", ...)
+it("three 5xx in a row → NOTION_SERVER after 3 fetches", ...)
+it("a thrown fetch → NOTION_NETWORK; the timeout timer aborting → NOTION_TIMEOUT", ...)
+it("the final 429 throws NOTION_RATE_LIMITED carrying retryAfterMs from the last header, capped", ...)
 it("an error body echoing the token never reaches the thrown message", ...)
 it("spaces consecutive calls at least 350 ms apart", ...)           // fake now/sleep
 it("queryAll follows next_cursor until has_more is false", ...)
@@ -852,10 +886,10 @@ interface NotionSendDeps {
 type SendOutcome = "sent" | "already" | "retry" | "failed" | "no_summary" | "lost-claim" | "not-claimed";
 function runNotionSend(sendId: string, deps: NotionSendDeps): Promise<SendOutcome>;
 function buildSendDeps(fallback?: ProviderConfig): Promise<NotionSendDeps | { error: NotionErrorCode }>;
-  // loadNotionConfigState complete? else NOTION_NOT_CONFIGURED; loadNotionToken; resolveSummaryProvider(fallback);
+  // loadNotionConfigState complete? else NOTION_NOT_CONFIGURED; loadNotionToken (a throw or null → NOTION_KEYCHAIN_UNAVAILABLE / NOTION_NOT_CONFIGURED); resolveSummaryProvider(fallback);
   // armNotionRedactor([token, ...summarySecrets(resolved)]); createNotionClient; createNotionAi
 ```
-`runNotionSend` runs these steps in order. Every step after the claim uses the claim's `claimedAt`. A refused `restampSend`, `patchSend` or `finishSend` makes the function return `"lost-claim"` at once, with no further writes.
+`runNotionSend` runs these steps in order. It holds the current stamp in one local variable: the claim's `claimedAt`, replaced by each successful `restampSend`'s return value. Every `patchSend`/`finishSend` passes that latest stamp. A refused `restampSend` (`null`), `patchSend` or `finishSend` makes the function return `"lost-claim"` at once, with no further writes.
 
 0. **Claim:** `claimSend(id, now, now − STALE_CLAIM_MS)`. A `null` claim → `"not-claimed"`.
 1. **Summary:**
@@ -865,6 +899,8 @@ function buildSendDeps(fallback?: ProviderConfig): Promise<NotionSendDeps | { er
      - a final code → `finishSend('no_summary', code)`;
      - a strike code → increment `summary_failures`; once it reaches `SUMMARY_STRIKES`, `finishSend('no_summary', 'SUMMARY_STRIKES_OUT')`, otherwise `retry`;
      - any other code → `retry`.
+
+     Each `retry` here takes its `nextAt` from `outcomeFor(code, attempts, now)`.
 
    No page is created on any of these paths.
 2. **Me:** `client.me()`, then the recorder name: `config.yourName`, else `client.userName(ownerUserId)`, else `"You"`.
@@ -885,7 +921,8 @@ function buildSendDeps(fallback?: ProviderConfig): Promise<NotionSendDeps | { er
    - Any other `isOwnPage` candidate (not `page_id`) is an orphan from a create whose response was lost and that the query hadn't shown yet. Trash it; it is never a competitor.
    - The set is this page plus every non-own candidate passing `sameMeeting` → `pickWinner`.
    - If this page didn't win: `patchSend({ lost_to_url })`, then `trashPage(page_id)`, then `finishSend('already')`.
-   - A trash failure → `retry` (the next attempt goes straight to the trash step). The loser never runs step 7.
+   - A loser-trash failure finishes through `outcomeFor` (a 5xx or network error → `retry`; the next attempt goes straight to the trash step). The loser never runs step 7.
+   - An orphan-trash failure also finishes through `outcomeFor`. The next attempt redoes step 6, which finds the orphan again.
 7. **Transcript and practices, independently.** Each is in its own try/catch, and the error of each is kept.
    - **(a)** If `!transcript_done`, run `appendResumable(toggle_block_id, transcriptBlocks(lines, name))`, then `patchSend({ transcript_done: 1 })`.
    - **(b)** If `!practices_done`:
@@ -893,10 +930,10 @@ function buildSendDeps(fallback?: ProviderConfig): Promise<NotionSendDeps | { er
      - otherwise `readKnowledge` → `addPractices`, then `patchSend({ practices_done: 1 })`.
 8. **Finish:**
    - Both done → `finishSend('sent', sentAt: now)`.
-   - Else the outcome is `failed` if either error's code is in `NOTION_SHOW_AT_ONCE`, otherwise `retry` with `nextAt` from Global Constraints.
+   - Else `outcomeFor` the transcript error's code, else the practices one (`failed` wins if either code is in `NOTION_SHOW_AT_ONCE`).
    - `practicesErrorCode` gets the practices error's code. `errorCode` gets the transcript error's code, else the practices one.
 
-Every `onBatch`/`onRow`, and the point before each AI call, calls `restampSend`. Any thrown non-`NotionError`/`SummaryError` is logged through `redactNotion` and finishes `retry` with `NOTION_INTERNAL`. It never throws to the caller.
+A `NotionError` thrown in steps 2–6 finishes with `outcomeFor(err.code, attempts, now, err.retryAfterMs)` and that code as `errorCode`. Every `onBatch`/`onRow`, and the point before each AI call, calls `restampSend`. Any thrown non-`NotionError`/`SummaryError` is logged through `redactNotion` and finishes through `outcomeFor("NOTION_INTERNAL")`, which is `failed`. It never throws to the caller.
 
 - [ ] **Step 1: Write the failing tests** (sql.js harness from Task 3, plus a fake client and AI)
 ```ts
@@ -914,7 +951,12 @@ it.each(["after create, before page_id saved", "after page_id saved", "after bod
   ("crash %s → the next run adopts its own page instead of skipping it", ...)
 it("transcript failure does not stop practices, and vice versa; send stays open until both", ...)
 it("a 401 during the transcript → failed at once with NOTION_UNAUTHORIZED", ...)
-it("a lost claim mid-send stops all further writes", ...)        // restampSend → false
+it("a NOTION_SERVER at the mapping step → retry with next_at from outcomeFor, no page created", ...)
+it("an unknown thrown error → failed with NOTION_INTERNAL, never thrown to the caller", ...)
+it("NOTION_PAGE_CHANGED after the page exists → failed, and cancelSend can then close it", ...)
+it("two sends in one conversation: each summary prompt holds only its own send's lines", ...) // fake ai.ask records userMessage
+it("a lost claim mid-send stops all further writes", ...)        // restampSend → null
+it("a send with several batches succeeds end to end (stamp carried across restamps)", ...)
 it("all joined rows read closed only when the send is sent", ...) // NOTION_LANE_OPEN before/after
 it("the AI key and the token never appear in error_code or practices_error_code", ...)
 ```
@@ -940,32 +982,40 @@ function isQuiet(lastLineAt: number, now: number): boolean; // now − lastLineA
 interface SchedulerDeps { now: () => number; liveLastLineAt: (conversationId: string) => number | null;
   fallbackProvider: () => ProviderConfig | undefined }
 const NOTION_TICK_MS = 60_000;
+const NOTION_KICK_EVENT = "notion-kick";
 function runNotionTick(deps: SchedulerDeps): Promise<void>;
-function ensureNotionScheduler(deps: SchedulerDeps): void; // module-level single flight: first call runs a tick and starts setInterval; later calls only replace deps
+function ensureNotionScheduler(deps: SchedulerDeps): void;
+  // module-level single flight: first call runs a tick, starts setInterval and listen(NOTION_KICK_EVENT) → runNotionTick(current deps); later calls only replace deps
+function isNotionSchedulerStarted(): boolean;
 function resetNotionSchedulerForTests(): void;
 // actions.ts (used by the Meetings page; none touches Odoo config)
 function sendConversationToNotion(conversationId: string, now: number): Promise<"queued" | "already" | "active" | "empty" | "not-configured" | "system-audio">;
-function sendRowsToNotion(rowIds: string[]): Promise<void>;       // offerRowsToWaiting + kick a tick
-function retryNotionSend(sendId: string): Promise<void>;          // retrySend + kick a tick
-function dontSendToNotion(item: NotionItem): Promise<boolean>;    // cancelOfferedRows or cancelSend
+function sendRowsToNotion(rowIds: string[]): Promise<void>;       // offerRowsToWaiting, then emit(NOTION_KICK_EVENT)
+function retryNotionSend(sendId: string): Promise<void>;          // retrySend, then emit(NOTION_KICK_EVENT)
+function dontSendToNotion(item: NotionItem): Promise<boolean>;    // cancelOfferedRows or cancelSend (incl. Stop and keep page)
 ```
+**Only the overlay window ever runs a tick or a send.** The Meetings page lives in the dashboard window, a separate JS context with no `liveLastLineAt` (in-memory lines are autosaved only every `MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL` segments, so a dashboard tick could judge a live meeting quiet) and no chat `fallbackProvider`. So every action only writes the DB and then `emit`s `NOTION_KICK_EVENT` from `@tauri-apps/api/event`, the same cross-window pattern `pages/odoo/index.tsx` uses. The overlay's listener (registered once by `ensureNotionScheduler`) runs the tick with its own deps. If the overlay isn't running, the next 60 s tick after it starts picks the work up.
+
 `runNotionTick` steps:
 1. Return unless `isNotionConfigured()`.
-2. `promoteStaleHeldNotionRows(now − HOLD_MS)`.
+2. `promoteStaleHeldNotionRows(now − HOLD_MS − NOTION_TICK_MS)`. The extra tick of margin keeps the scheduler off rows whose undo strip is still up: those are promoted by the overlay's own hold timer, and this pass only rescues rows whose timer died.
 3. `live = conversationsWithLiveSend(now − STALE_CLAIM_MS)`.
 4. For each set from `joinSets(listWaitingRows())`:
    - skip it if its conversation is in `live`;
    - `last = max(lastSpokenLineAt(conv) ?? 0, deps.liveLastLineAt(conv) ?? 0, max row end)`;
    - if `isQuiet(last, now)`, call `createSendAndLink`. Its id is the earliest row's id and its span is the set's min start and max end.
-5. For each `listDueSends`, run sequentially: `buildSendDeps(deps.fallbackProvider())`, then `runNotionSend`. If `buildSendDeps` returns an error, stop the tick.
+5. If `listDueSends` is non-empty, call `buildSendDeps(deps.fallbackProvider())` once.
+   - On `{ error }`: for each due send, `claimSend`, then `finishSend` with `outcomeFor(error, attempts, now)` and `errorCode: error`, then stop the tick. The Meetings page then shows the reason (for example `NOTION_KEYCHAIN_UNAVAILABLE`) instead of a silent "Sending to Notion".
+   - Otherwise run each due send sequentially through `runNotionSend`.
 
-The tick takes a module-level in-flight lock, so overlapping ticks join instead of running twice.
+The tick takes a module-level in-flight lock, so overlapping ticks (interval, kick, startup) join instead of running twice.
 
-`sendConversationToNotion`:
-- It returns `system-audio` for `sysaudio_conv_%` ids, and `active` for the active or capturing conversation (the same checks as `enqueueConversation`).
-- If the conversation has queue rows that are not `cancelled`/`deleted` and whose `notion_status` is NULL or `offered`, they become `waiting`.
-- Otherwise it segments `readConversationTranscript` by `MEETING_CONVERSATION_GAP_MS` and inserts rows with `status: 'none'` and `notionStatus: 'waiting'`. The session key is `notion:${conversationId}:${startAt}:${now}`, and the instance is `""`.
-- A conversation whose Notion lane is already open or sent → `already`.
+`sendConversationToNotion` runs these checks in this order:
+1. `system-audio` for `sysaudio_conv_%` ids; `active` for the active or capturing conversation (the same checks as `enqueueConversation`); `not-configured` unless `isNotionConfigured()`.
+2. `already` when any of its rows has `NOTION_LANE_OPEN`, or is joined to a send that is `sent`/`already`, or `cancelled` with a page.
+3. The candidates are its rows that are not `cancelled`/`deleted` and whose `notion_status` is NULL or `offered`. If there is at least one, and **every** candidate's `transcript` is non-blank, they become `waiting`.
+4. Otherwise (no candidates, or some were pruned blank by `pruneTranscripts`), it ignores those rows. It segments `readConversationTranscript` by `MEETING_CONVERSATION_GAP_MS` and inserts rows with `status: 'none'` and `notionStatus: 'waiting'`. The session key is `notion:${conversationId}:${startAt}:${now}`, and the instance is `""`. A pruned row would otherwise turn into a `SUMMARY_TOO_SHORT` or a truncated page.
+5. `empty` when the transcript has no lines; else `queued`, then `emit(NOTION_KICK_EVENT)`.
 
 - [ ] **Step 1: Write the failing tests**
 ```ts
@@ -975,11 +1025,19 @@ it("flap flush at minute 10 + 40 min of unbroken talk → nothing until 30 min a
   // rows: one at 0–10 min; messages through minute 50; ticks at 45, 79, 80 → send created only at 80
 it("live transcript keeps a conversation open even with no new saved messages", ...)
 it("a conversation with a live sending send is skipped", ...)
-it("stale held Notion rows are promoted to waiting", ...)
+it("stale held Notion rows are promoted to waiting only after HOLD_MS + NOTION_TICK_MS", ...) // a row at HOLD_MS + 1 s stays held
 it("ensureNotionScheduler starts once however many times it is called", ...)
+it("two overlapping ticks run runNotionSend once", ...)          // Promise.all([runNotionTick(d), runNotionTick(d)])
+it("a NOTION_KICK_EVENT runs a tick with the overlay's latest deps", ...) // mock listen; fire the handler
+it("not configured → the tick reads and writes nothing", ...)
+it("buildSendDeps error → each due send is finished with that code (failed for KEYCHAIN_UNAVAILABLE) and runNotionSend is not called", ...)
+it("rows with a null conversation id each form their own set", ...)
+it.each(["saved message", "live line", "row end"])("quiet is measured from the latest of the three sources (%s latest)", ...)
 it("a restart mid-meeting: recovered rows join the pre-crash rows into one send", ...)
 it("sendConversationToNotion refuses system audio and converts offered rows", ...)
 it("sendConversationToNotion with no Odoo config writes status 'none' rows", ...)
+it("sendConversationToNotion on a conversation whose Odoo rows were pruned blank writes fresh 'none' rows from the saved transcript", ...)
+it("page actions never call runNotionSend; they emit NOTION_KICK_EVENT", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/notion-scheduler.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -1027,7 +1085,7 @@ Hook changes:
   - if `notion_status === 'held'` → `promoteHeldNotionRow(id)`;
   - then, only if `status === 'held'`, the existing Odoo push.
 - **The rehydrate** uses `findHeldRow(complete ? fingerprint : null, now)` with no Odoo gate.
-- **`onUndo`'s blocked copy** becomes **"This meeting is already being sent."**
+- **`onUndo`'s blocked copy** becomes **"This meeting is already being sent."** It shows for `cancelHeldRow` → `"none"` (as today's `false`) **and** for `"partial"`, where one lane had already left; `"all"` is today's success.
 - **The startup chain:** after `.then(() => runMeetingRecovery())`, add `.then(() => ensureNotionScheduler(depsRef.current))`.
   - Deps: `liveLastLineAt = (c) => c === conversationIdRef.current && transcriptRef.current.length ? Math.max(...timestamps) : null`, and `fallbackProvider = () => providerConfigRef.current`.
   - On every render, refresh the deps via `ensureNotionScheduler` only once it has started (export `isNotionSchedulerStarted()`).
@@ -1048,7 +1106,12 @@ it("Odoo set up: rescued meetings stay unassigned with no Notion lane", ...)
 // hook (meeting-log-entry-points.test.tsx)
 it("Notion-only, no Odoo config: pill-off queues a held Notion row and shows the undo strip", ...)
 it("undo during the hold cancels the Notion row", ...)
+it("undo on a both-held row cancels both lanes through the hook", ...)
+it("undo after the Notion lane was promoted shows 'This meeting is already being sent.'", ...) // cancelHeldRow → "partial"
 it("hold expiry promotes the Notion row to waiting and makes no Odoo call", ...)
+it("hold expiry on a both-held row promotes Notion and pushes Odoo exactly once", ...)
+it("an Odoo push that rejects at hold expiry still leaves the Notion lane promoted", ...)
+it("rehydrate with Odoo absent finds the in-window Notion held row and shows the undo strip", ...) // findHeldRow(null, now)
 it("Notion-only user never sees Odoo in the trigger toast or the undo-blocked message", ...)
 it("the scheduler starts only after recovery finished", ...)     // order spy: runMeetingRecovery resolves before ensureNotionScheduler
 ```
@@ -1062,7 +1125,7 @@ it("the scheduler starts only after recovery finished", ...)     // order spy: r
 ### Task 16: Overlay picker, Notion settings, Meeting summaries setting
 
 **Files:**
-- Create: `src/lib/notion/check.ts`, `src/pages/odoo/components/NotionSettingsCard.tsx`, `src/pages/dev/components/ai-configs/SummaryProviderCard.tsx`, `src/tests/notion-check.test.ts`, `src/tests/notion-settings-card.test.tsx`
+- Create: `src/lib/notion/check.ts`, `src/hooks/useNotionConfigured.ts`, `src/pages/odoo/components/NotionSettingsCard.tsx`, `src/pages/dev/components/ai-configs/SummaryProviderCard.tsx`, `src/tests/notion-check.test.ts`, `src/tests/notion-settings-card.test.tsx`
 - Modify:
   - `src/pages/app/components/completion/ContactPicker.tsx`: props `:109-202`, the "Logging to" block `:395-466`
   - `src/pages/app/components/completion/index.tsx:265`
@@ -1071,6 +1134,7 @@ it("the scheduler starts only after recovery finished", ...)     // order spy: r
 - Test: `src/tests/odoo-contact-picker.test.tsx` (extend)
 
 **Interfaces:**
+- `useNotionConfigured(): boolean | null` (`null` while loading). It reads `isNotionConfigured()` on mount, behind a `cancelled` guard. It re-reads on window focus and on `NOTION_CONFIG_CHANGED_EVENT = "notion-config-changed"`, received with `listen` from `@tauri-apps/api/event` and unlistened on unmount. The event is a **Tauri** event because the settings card lives in the dashboard window and the overlay is a separate JS context; a `window` event would never reach it. `completion/index.tsx` calls this hook rather than loading the flag itself, and passes the derived booleans down. `useNotionQueue` (Task 17) uses the same event and focus pattern.
 - `ContactPicker` gains three stable props: `notionAvailable: boolean`, `notionSelected: boolean` and `onToggleNotion: () => void` (from `useNotionPick`, wrapped in `useCallback`).
   - With `notionAvailable`, the popover shows a checkbox row labelled **"Notion: Weekly Team Meetings"** above "Logging to".
   - `notionAvailable` is true only when Odoo is set up **and** Notion is configured.
@@ -1097,8 +1161,8 @@ it("the scheduler starts only after recovery finished", ...)     // order spy: r
   - "Your name" (used only when Notion can't give the name);
   - a Check button that renders `CheckResult`.
 
-  On Linux (`isNotionKeychainAvailable()` false) the token field is disabled with `NOTION_COPY.NOTION_KEYCHAIN_UNAVAILABLE`. It emits `notion-config-changed` after a save.
-- On the Integrations page, while Notion is configured and Odoo is `absent`, `OdooSetupCard` sits behind a "Show other integrations" button.
+  On Linux (`isNotionKeychainAvailable()` false) the token field is disabled with `NOTION_COPY.NOTION_KEYCHAIN_UNAVAILABLE`. After every save or token clear it calls `emit(NOTION_CONFIG_CHANGED_EVENT)` (Tauri, like `odoo-instance-changed` at `pages/odoo/index.tsx:112`).
+- On the Integrations page, while Notion is configured and Odoo is `absent`, **everything Odoo- or calendar-related** sits behind a "Show other integrations" button: the `OdooSetupCard` (`:790-799`), the URL/Database/Login/API key form with Test connection and Sync Contacts (`:801-861`), the stranded and queue blocks, and the Calendar card (`:898-961`). The `PageLayout` description (`:786`) becomes "Connect Notion to send your meeting notes to your team." in that state, and stays as today otherwise. `NotionSettingsCard` renders first.
 - `SummaryProviderCard` (title "Meeting summaries", description "The AI that writes every meeting summary, for Notion and Odoo. Leave empty to use your chat model.") renders the existing `Providers` component with its own state, backed by `loadSummaryProvider`/`saveSummaryProvider` and `variables = extractVariables(provider.curl)`. A "Clear" button saves `null`. It is mounted on API Setup.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1111,6 +1175,8 @@ it("settings card disables the token field when the keychain is unavailable", ..
 it("Notion-only: Integrations page shows no 'Odoo' text until 'Show other integrations' is pressed", ...)
 it("picker shows the Notion row only when Odoo and Notion are both set up", ...)
 it("Notion-only: the overlay renders no contact picker", ...)
+it("useNotionConfigured re-reads when the Tauri notion-config-changed event fires, and unlistens on unmount", ...) // mock listen
+it("settings card save emits notion-config-changed through @tauri-apps/api/event", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/notion-check.test.ts src/tests/notion-settings-card.test.tsx src/tests/odoo-contact-picker.test.tsx`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -1130,12 +1196,13 @@ it("Notion-only: the overlay renders no contact picker", ...)
   - `src/hooks/useMeetingLogQueue.ts:461-512`, so `reload` with a non-complete Odoo config still sets `stranded` only from `countActionableQueued()`. That function already ignores `'none'` rows; this is asserted, not changed.
 
 **Interfaces:**
-- `useNotionQueue(): { configured: boolean; items: NotionItem[]; byConversation: Map<string, NotionBadge>; reload(); onSendRows(rowIds); onRetry(sendId); onDontSend(item); onSendConversation(id) }`. It reloads on window focus and on `notion-config-changed`, and is independent of Odoo config.
+- `useNotionQueue(): { configured: boolean; items: NotionItem[]; byConversation: Map<string, NotionBadge>; reload(); onSendRows(rowIds); onRetry(sendId); onDontSend(item); onSendConversation(id) }`. It reloads on window focus and on the Tauri `NOTION_CONFIG_CHANGED_EVENT` (Task 16), and is independent of Odoo config. Its actions only write the DB and emit `NOTION_KICK_EVENT` (Task 14); the dashboard never runs a send.
 - `type NotionBadge = { label: string; url: string | null; tone: "attention" | "waiting" | "done" }`. It is resolved per conversation, worst first:
 
 | Item state | Label | Tone | Link |
 |---|---|---|---|
 | send `failed` | Notion failed | attention | `page_url` |
+| send `cancelled` with a page (Stop and keep page) | In Notion | done | `page_url` |
 | send `no_summary` | Couldn't summarise | attention | none |
 | send `retry`/`sending` with `error_code` SUMMARY_* | Waiting for summary | waiting | none |
 | send with `page_id`, `practices_done=0` and `practices_error_code` | Practices not added yet | waiting | `page_url` |
@@ -1148,12 +1215,13 @@ it("Notion-only: the overlay renders no contact picker", ...)
 - `NotionSection`, titled "Notion", lists every item that isn't `sent`/`already`, with the label, the reason (`NOTION_COPY[error_code]`, never raw text) and these actions:
   - `offered` → **Send to Notion** and **Don't send**;
   - `failed`/`no_summary`/`retry` → **Retry**;
-  - **Don't send** while there's no page.
+  - **Don't send** while there's no page;
+  - `failed` with a page → **Stop and keep page** (`dontSendToNotion` → `cancelSend`).
 
   External links open with `@tauri-apps/plugin-opener` (or the app's existing link helper; grep `openUrl`).
 - `ConversationRow`:
-  - gains `notionBadge: NotionBadge | null`, rendered next to the Odoo badge as a small link;
-  - gains `onSendToNotion: ((id: string) => Promise<string | null>) | null`, a button **"Send to Notion"** shown when Notion is configured, the conversation isn't system audio, and `notionBadge` is null.
+  - gains the badge **flattened to primitives**: `notionLabel: string | null`, `notionUrl: string | null` and `notionTone: NotionBadge["tone"] | null`, rendered next to the Odoo badge as a small link. Never the `NotionBadge` object: `byConversation` is rebuilt on every reload, and the row's default shallow `memo` relies on primitive props (`ConversationRow.tsx:64-78`). `ConversationList`/`DateGroup` pass the three through the same way.
+  - gains `onSendToNotion: ((id: string) => Promise<string | null>) | null`, a button **"Send to Notion"** shown when Notion is configured, the conversation isn't system audio, and `notionLabel` is null. The page wraps it in `useCallback` with stable deps, like `onSendToOdoo`.
 - Page description:
   - Odoo set up and Notion → "Your conversations, and the meetings waiting to reach Odoo and Notion."
   - Notion only → "Your conversations, and the meetings waiting to reach Notion."
@@ -1168,7 +1236,10 @@ it("an already send shows 'Already in Notion' linking to the winner page", ...)
 it("practices pending shows 'Practices not added yet' with the page link and the reason", ...)
 it("a 429-coded send is shown as waiting, not as a failure", ...)
 it("offered rows show Send to Notion; pressing it calls offerRowsToWaiting with the group's row ids", ...)
+it("a failed send with a page offers Stop and keep page, which calls cancelSend and then shows 'In Notion'", ...)
 it("the Notion section renders with no Odoo config at all", ...)
+it("a reload with unchanged Notion state does not re-render ConversationRow", ...) // render-count spy on the memoised row
+it("a 'none' row gets no Odoo badge from groupOf/resolveBadge", ...)
 ```
 - [ ] **Step 2:** Run `npx vitest run src/tests/meetings-page.notion.test.tsx`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
@@ -1212,7 +1283,7 @@ it("the Notion section renders with no Odoo config at all", ...)
 | Race | Task 13 |
 | Transcript batches | Tasks 10, 11 |
 | Summary | Task 13 (reuse, never reads `meeting_summaries`, codes, Retry), Task 9 (codes) |
-| Retries | Task 7 (Retry-After, cap, no header), Task 17 (429 not a failure), Task 13 (401 at once) |
+| Retries | Task 7 (Retry-After, cap, no header, status mapping), Task 6 (`outcomeFor` backoff table), Task 17 (429 not a failure), Task 13 (401 at once), Task 14 (`buildSendDeps` error written to sends) |
 | Secrets | Tasks 4, 6, 7, 9, 13 |
 | Migration | Task 1 (Rust registration plus sql.js survival) |
 | Team Knowledge plumbing | Task 12 |
