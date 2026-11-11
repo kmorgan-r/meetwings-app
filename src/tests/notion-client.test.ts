@@ -166,7 +166,7 @@ describe("createNotionClient.request", () => {
   it.each([
     [400, "NOTION_INVALID"],
     [404, "NOTION_NOT_FOUND"],
-    [409, "NOTION_INVALID"],
+    [405, "NOTION_INTERNAL"],
     [422, "NOTION_INVALID"],
   ])("%i → %s with no retry", async (status, code) => {
     const h = makeHarness([jsonBody({}, status)]);
@@ -177,6 +177,16 @@ describe("createNotionClient.request", () => {
 
   it("three 5xx in a row → NOTION_SERVER after 3 fetches", async () => {
     const h = makeHarness([jsonBody({}, 500), jsonBody({}, 502), jsonBody({}, 503)]);
+    const thrown = await thrownBy(() => h.client.me());
+    expect(thrown).toEqual({ code: "NOTION_SERVER", retryAfterMs: undefined });
+    expect(h.sendTimes).toHaveLength(3);
+    expect(h.sleeps).toEqual([2000, 4000]);
+  });
+
+  it("three 409s are retried like 5xx → NOTION_SERVER after 3 fetches", async () => {
+    // Notion's conflict_error docs say "try again": 409 gets the same waits
+    // and the same give-up code as a 5xx.
+    const h = makeHarness([jsonBody({}, 409), jsonBody({}, 409), jsonBody({}, 409)]);
     const thrown = await thrownBy(() => h.client.me());
     expect(thrown).toEqual({ code: "NOTION_SERVER", retryAfterMs: undefined });
     expect(h.sendTimes).toHaveLength(3);
@@ -223,6 +233,57 @@ describe("createNotionClient.request", () => {
     await assertion;
   });
 
+  it("the timer covers a stalled body read: pending at 29_999 ms, NOTION_TIMEOUT at 30_000", async () => {
+    vi.useFakeTimers();
+    // Headers have arrived (fetch resolved ok) but text() never settles - how
+    // a stalled plugin-http body stream looks to the client.
+    const stalledBody: Response = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({}),
+      text: (): Promise<string> => new Promise<string>(() => {}),
+    } as unknown as Response;
+    let time = 0;
+    const client = createNotionClient({
+      token: TOKEN,
+      fetch: (): Promise<Response> => Promise.resolve(stalledBody),
+      now: () => time,
+      sleep: (ms: number) => { time += ms; return Promise.resolve(); },
+    });
+    const pending = client.me();
+    const assertion = expect(pending).rejects.toMatchObject({ code: "NOTION_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(NOTION_HTTP_TIMEOUT_MS - 1);
+    const settled = await Promise.race([
+      pending.then(() => "settled" as const, () => "settled" as const),
+      Promise.resolve("pending" as const),
+    ]);
+    expect(settled).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+  });
+
+  it("clears the timeout timer once the body is read: getTimerCount() is 0", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness([jsonBody(BOT_BODY)]);
+    await h.client.me();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("an abort that does NOT come from the timer → NOTION_NETWORK, not NOTION_TIMEOUT", async () => {
+    const rejectsAsAbort = (): Promise<Response> =>
+      Promise.reject(new DOMException("x", "AbortError"));
+    let time = 0;
+    const client = createNotionClient({
+      token: TOKEN,
+      fetch: rejectsAsAbort as unknown as typeof tauriFetch,
+      now: () => time,
+      sleep: (ms: number) => { time += ms; return Promise.resolve(); },
+    });
+    const thrown = await thrownBy(() => client.me());
+    expect(thrown).toEqual({ code: "NOTION_NETWORK" });
+  });
+
   it("the final 429 throws NOTION_RATE_LIMITED carrying retryAfterMs from the last header, capped", async () => {
     const h = makeHarness([
       jsonBody({}, 429, { "Retry-After": "5" }),
@@ -235,11 +296,11 @@ describe("createNotionClient.request", () => {
     expect(h.sendTimes).toHaveLength(3);
   });
 
-  it("ignores a non-integer Retry-After (HTTP-date) and falls back to the 2 s/4 s waits", async () => {
+  it("ignores a non-integer Retry-After (empty, HTTP-date, exponent) and falls back to the 2 s/4 s waits", async () => {
     const h = makeHarness([
+      jsonBody({}, 429, { "Retry-After": "" }),
       jsonBody({}, 429, { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }),
-      jsonBody({}, 429, { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }),
-      jsonBody({}, 429, { "Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT" }),
+      jsonBody({}, 429, { "Retry-After": "1e3" }),
     ]);
     const thrown = await thrownBy(() => h.client.me());
     expect(thrown).toEqual({ code: "NOTION_RATE_LIMITED" });
@@ -269,18 +330,18 @@ describe("createNotionClient.request", () => {
     expect(read).toBe(false);
   });
 
-  it("a success body whose json() throws → NOTION_INVALID", async () => {
+  it("a success body that is not JSON (JSON.parse throws) → NOTION_INVALID", async () => {
     let time = 0;
-    const badJson: Response = {
+    const notJson: Response = {
       ok: true,
       status: 200,
       headers: new Headers(),
       json: async () => { throw new Error("invalid json"); },
-      text: async () => { throw new Error("invalid json"); },
+      text: async () => "<html>502 Bad Gateway</html>",
     } as unknown as Response;
     const client = createNotionClient({
       token: TOKEN,
-      fetch: (): Promise<Response> => Promise.resolve(badJson),
+      fetch: (): Promise<Response> => Promise.resolve(notJson),
       now: () => time,
       sleep: (ms: number) => { time += ms; return Promise.resolve(); },
     });
@@ -296,18 +357,14 @@ describe("createNotionClient.request", () => {
     expect(h.calls).toHaveLength(0);
   });
 
-  it("spaces concurrent consecutive calls at least 350 ms apart", async () => {
-    const h = makeHarness([jsonBody(BOT_BODY), jsonBody(BOT_BODY)]);
-    // Sending concurrently is what exercises the shared promise chain: with
-    // only two 200 responses, the ONE sleep that can separate two fetches is
-    // the pacing gap itself. (Fetching by sendTimes is not usable here: the
-    // second call's sleep advances the fake clock before the first call's
-    // suspended fetch records its timestamp, so both would appear to send at
-    // the same instant - measure the wait instead.)
-    await Promise.all([h.client.me(), h.client.me()]);
-    expect(h.sendTimes).toHaveLength(2);
-    expect(h.sleeps).toEqual([NOTION_MIN_GAP_MS]);
-    expect(h.sendTimes[1] - h.sendTimes[0]).toBeGreaterThanOrEqual(0);
+  it("paces the chain: three concurrent requests sleep exactly [350, 350]", async () => {
+    // Three calls through the shared chain: the first sends at once, the
+    // second and third each wait NOTION_MIN_GAP_MS after the previous send.
+    // Removing the chain collapses this to [350]; removing pacing to [].
+    const h = makeHarness([jsonBody(BOT_BODY), jsonBody(BOT_BODY), jsonBody(BOT_BODY)]);
+    await Promise.all([h.client.me(), h.client.me(), h.client.me()]);
+    expect(h.sendTimes).toHaveLength(3);
+    expect(h.sleeps).toEqual([NOTION_MIN_GAP_MS, NOTION_MIN_GAP_MS]);
   });
 
   it("a retry also waits for pacing: two fetch attempts are never closer than 350 ms", async () => {

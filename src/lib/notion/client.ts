@@ -13,12 +13,17 @@ import { NotionError, type NotionErrorCode } from "./errors";
  *   the previous attempt's send time, and concurrent calls serialise through
  *   one promise chain. A failed request never breaks the chain for later
  *   calls.
- * - Error bodies are NEVER read: no json()/text() on a non-ok response. The
- *   thrown message is NOTION_COPY[code] by construction, so a Notion response
- *   body echoing the token has no path to a log or a toast.
- * - The timeout discriminator is our own timer flag, not error.error: naming.
- *   plugin-http surfaces an abort through its own Rust channel, so an aborted
- *   request and a network failure both arrive as a thrown value.
+ * - Error bodies are NEVER read: no text() on a non-ok response. The thrown
+ *   message is NOTION_COPY[code] by construction, so a Notion response body
+ *   echoing the token has no path to a log or a toast.
+ * - The timeout discriminator is our own timer flag, not error.name or
+ *   error.error: naming. plugin-http surfaces an abort through its own Rust
+ *   channel, so an aborted request and a network failure both arrive as a
+ *   thrown value.
+ * - ONE timer per attempt, covering the WHOLE attempt: fetch AND the success
+ *   body read. plugin-http streams the body, so a stalled body can hang
+ *   forever - the timer races the body read too, and is cleared in a finally
+ *   only once the body has been fully read.
  */
 
 export const NOTION_MIN_GAP_MS = 350;
@@ -30,8 +35,7 @@ export const NOTION_VERSION = "2025-09-03";
 /**
  * Minimal structural types holding only what later tasks read. Every one keeps
  * a `[key: string]: unknown` index signature, so a later task that needs one
- * more field (rich_text inside blocks, created_by.id on pages) reads it with a
- * cast instead of widening this file.
+ * more field reads it with a cast instead of widening this file.
  */
 export interface NotionProperty {
   id?: string;
@@ -52,6 +56,7 @@ export interface NotionBlock {
   id?: string;
   type?: string;
   has_children?: boolean;
+  rich_text?: { plain_text?: string; text?: { content?: string } }[];
   [key: string]: unknown;
 }
 
@@ -87,36 +92,48 @@ export interface NotionClient {
 
 const MAX_ATTEMPTS = 3;
 
-/** Non-retryable statuses map by name; everything else is "Notion refused it". */
+/**
+ * Non-retryable statuses map by name. 400/422 are "Notion refused the body";
+ * anything else we never anticipated (405, 413, ...) is on us to look at, so
+ * NOTION_INTERNAL - not the user-facing "Notion refused the page" copy.
+ */
 function codeForStatus(status: number): NotionErrorCode {
   switch (status) {
+    case 400:
+      return "NOTION_INVALID";
     case 401:
       return "NOTION_UNAUTHORIZED";
     case 403:
       return "NOTION_NO_ACCESS";
     case 404:
       return "NOTION_NOT_FOUND";
-    default:
+    case 422:
       return "NOTION_INVALID";
+    default:
+      return "NOTION_INTERNAL";
   }
 }
 
 /**
- * Seconds → ms, honouring only an integer number of seconds (an HTTP-date
- * parses to NaN) and capping at RETRY_AFTER_CAP_MS. Not usable → undefined, so
- * the caller falls back to its own waits and the error carries no value.
+ * Seconds → ms, honouring ONLY an integer number of seconds and capping at
+ * RETRY_AFTER_CAP_MS. "", "0x10", "1e3" and an HTTP-date all fail /^\d+$/ (so
+ * an HTTP-date parses to NaN, and a decimal or exponent form is refused), fall
+ * back to undefined, and the caller falls back to its own waits; the error
+ * carries no value.
  */
 function parseRetryAfterMs(headers: Headers): number | undefined {
   const raw = headers.get("retry-after");
   if (raw === null) return undefined;
-  const seconds = Number(raw);
-  if (!Number.isInteger(seconds) || seconds < 0) return undefined;
-  return Math.min(seconds * 1000, RETRY_AFTER_CAP_MS);
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  return Math.min(Number(trimmed) * 1000, RETRY_AFTER_CAP_MS);
 }
 
 export function createNotionClient(deps: NotionClientDeps): NotionClient {
   const doFetch = deps.fetch ?? tauriFetch;
-  const now = deps.now ?? Date.now;
+  // performance.now, not Date.now: Date jumps (NTP sync, clock changes) would
+  // break the "at least 350 ms after the previous send" guarantee.
+  const now = deps.now ?? ((): number => performance.now());
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   // Pacing chain (per instance, never module-global). Serialise concurrent
@@ -135,34 +152,76 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
     return run;
   }
 
-  /** One paced fetch attempt. Throws NOTION_TIMEOUT / NETWORK / a status code. */
+  /** What one attempt leaves behind: a status to classify, or the parsed body. */
+  type AttemptResult = { ok: true; parsed: unknown } | { ok: false; status: number; headers: Headers };
+
+  /**
+   * One paced attempt. The per-attempt timer covers the fetch AND, on a
+   * success, the body read; the flag is set ONLY in the timer callback, then
+   * the controller aborted and the raced promise rejected — the timer is the
+   * single source of the timeout code.
+   */
   async function send(
     method: "GET" | "POST" | "PATCH",
     path: string,
     body?: unknown,
-  ): Promise<Response> {
+  ): Promise<AttemptResult> {
+    // Built ABOVE the try: a body JSON.stringify chokes on, or a header value
+    // that is not a string, is a programmer error — it propagates as-is, never
+    // mapped onto a transport code.
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${deps.token}`,
+      "Notion-Version": NOTION_VERSION,
+      // Content-Type only when there is something to type.
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    };
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
+
     await pace();
     const controller = new AbortController();
-    // The flag is set ONLY in the timer callback, then aborted: the timer is
-    // the single source of the timeout code.
     let timedOut = false;
+    let rejectTimer: (reason: unknown) => void = () => undefined;
+    const timerPromise = new Promise<never>((_resolve, reject) => {
+      rejectTimer = reject;
+    });
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
+      rejectTimer(new Error("notion request timed out"));
     }, NOTION_HTTP_TIMEOUT_MS);
     try {
-      return await doFetch(`${NOTION_API_BASE}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${deps.token}`,
-          "Notion-Version": NOTION_VERSION,
-          // Content-Type only when there is something to type.
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-    } catch {
+      const response = (await Promise.race([
+        doFetch(`${NOTION_API_BASE}${path}`, {
+          method,
+          headers,
+          body: payload,
+          signal: controller.signal,
+        }),
+        timerPromise,
+      ])) as Response;
+      if (!response.ok) {
+        // Error bodies are NEVER read.
+        return { ok: false, status: response.status, headers: response.headers };
+      }
+      let text: string;
+      try {
+        text = await Promise.race([response.text(), timerPromise]);
+      } catch {
+        // The timer firing mid-body is the timeout; a mid-stream failure with
+        // the timer NOT fired is the network.
+        throw new NotionError(timedOut ? "NOTION_TIMEOUT" : "NOTION_NETWORK");
+      }
+      try {
+        return { ok: true, parsed: JSON.parse(text) as unknown };
+      } catch {
+        // A success the client cannot read: the caller treats it as Notion
+        // refusing the request, not as a transport failure.
+        throw new NotionError("NOTION_INVALID");
+      }
+    } catch (thrown) {
+      // A NotionError from above passes through; anything the attempt itself
+      // threw (fetch, mid-body) is classified by the timer flag.
+      if (thrown instanceof NotionError) throw thrown;
       throw timedOut ? new NotionError("NOTION_TIMEOUT") : new NotionError("NOTION_NETWORK");
     } finally {
       clearTimeout(timer);
@@ -179,19 +238,13 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
       throw new Error(`Notion client: path must start with "/v1/" (got ${path})`);
     }
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const response = await send(method, path, body);
-      if (response.ok) {
-        try {
-          return (await response.json()) as T;
-        } catch {
-          // A success the client cannot read: the caller treats it as Notion
-          // refusing the request, not as a transport failure.
-          throw new NotionError("NOTION_INVALID");
-        }
-      }
-      const status = response.status;
-      if (status === 429 || (status >= 500 && status < 600)) {
-        const retryAfterMs = parseRetryAfterMs(response.headers);
+      const result = await send(method, path, body);
+      if (result.ok) return result.parsed as T;
+      const status = result.status;
+      if (status === 429 || status === 409 || (status >= 500 && status < 600)) {
+        // 409 joins 5xx: Notion's conflict_error docs say "try again", so it
+        // gets the same in-call retries and waits.
+        const retryAfterMs = parseRetryAfterMs(result.headers);
         if (attempt === MAX_ATTEMPTS) {
           if (status === 429) {
             throw new NotionError(
@@ -201,8 +254,8 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
           }
           throw new NotionError("NOTION_SERVER");
         }
-        // A mix of 429 and 5xx still just means "wait and try again"; the code
-        // of the LAST response decides the final error.
+        // A mix of retryable statuses still just means "wait and try again";
+        // the code of the LAST response decides the final error.
         await sleep(retryAfterMs ?? (attempt === 1 ? 2000 : 4000));
         continue;
       }
