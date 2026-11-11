@@ -137,8 +137,8 @@ Transcript details:
   characters must never cut a character in half (emoji and other surrogate pairs).
 - **Partial failure:** if the transcript append fails, the page and summary stay. Only the transcript
   is retried, and nothing already written is duplicated. Notion has no idempotency key, so this needs
-  saved progress: the page ID and the number of transcript lines appended are stored on the send's
-  earliest queue row (section 5) after every batch. A retry first reads back the toggle's existing children and continues after
+  saved progress: the page ID and the send's progress are stored on the send record (section 5,
+  keyed by the set's earliest queue row) after every batch. A retry first reads back the toggle's existing children and continues after
   the last line already there, so a batch whose response was lost isn't appended twice. The queue
   row stays open (not `sent`) until the whole transcript is in; see section 8.
 
@@ -216,8 +216,9 @@ crash alone, and the rescued rest would become a second page. Today nothing does
 idle flush fires once at 5 minutes and the retry sweep runs once per app start.
 
 One send covers a whole joined set of rows (*my call* on the mechanics):
-- The set is claimed as one unit, and every row in it is re-stamped together.
-- The set's earliest row carries the page ID, the transcript progress and the stored summary.
+- The set is claimed as one unit, through one send record whose ID is the set's earliest row's ID
+  (plan: a `notion_sends` table). The claim and its re-stamps live on that record.
+- The send record carries the page ID, the transcript progress and the stored summary.
 - The join and the background check skip any conversation that already has a row in `sending`.
   Otherwise an unclaimed sibling row would start a second send that adopts the same page and
   appends the transcript again.
@@ -271,7 +272,7 @@ key. So:
 1. Check for a matching page, using the same-meeting rule above. If someone else's page matches,
    skip.
 2. Otherwise create the page with its properties and body, but no transcript or practices yet. Save
-   the new page's ID on the send's earliest queue row straight away.
+   the new page's ID on the send record straight away.
 3. Wait a few seconds, then check again with the **full** same-meeting rule (overlap and AI
    agreement, not overlap alone, or a teammate in a different call at the same time would trash
    their own page). If more than one page matches, the earliest `created_time` wins; ties go to the
@@ -294,8 +295,9 @@ step 3. The Odoo push handles the same case by adopting what it already created
 
 The send runs for minutes (summary, duplicate check, three sub-table searches, create, recheck, Team
 Knowledge, many transcript batches), longer than the queue's stale-claim limit (`STALE_CLAIM_MS`, 5
-minutes). Every row's `claimed_at` in the set is re-stamped after each step and each transcript batch, as the
-Odoo push does per target, or the sweep reclaims a live send and makes a second page. The Notion
+minutes). The send record's claim is re-stamped (compare-and-set) after each step and each transcript
+batch, as the Odoo push does per target, or a stale-claim reclaim takes over a live send and makes a
+second page. The Odoo sweep never reads the Notion lane, so row-level claims would protect nothing. The Notion
 path adds its own time limit to every AI call (the summary and the same-meeting check), and the
 timeout reason code comes from that limit. `ensureMeetingSummary` has no timeout of its own: the
 60-second `SUMMARIZE_TIMEOUT_MS` lives only in the Meetings-page wrapper, and the hook and sweep
@@ -413,18 +415,20 @@ each is a place where a plausible bug loses a meeting, leaks a secret or makes d
 - **Transcript batches:** exactly 2,000 characters and one more; exactly 100 blocks and one more; more
   than 1,000 blocks; no split surrogate pairs; a failure at batch N resumes at N with no duplicate
   lines, including a batch whose response was lost.
-- **Summary:** a cache hit returns topic sections and practices; an old cached summary without them
-  is regenerated; a cached summary of one piece isn't used for a joined page; a conversation spanning
-  two meetings summarises only this meeting; each failure code lands in "Waiting for summary" or
-  "Couldn't summarise" with no page created; Retry works after the cause is fixed.
+- **Summary:** the summary stored on the send is reused on every retry, with its topic sections and
+  practices; the Notion path never reads the `meeting_summaries` cache, so an old field-less summary
+  or one piece's summary can't reach a joined page; a conversation spanning two meetings summarises
+  only this meeting; each failure code lands in "Waiting for summary" or "Couldn't summarise" with
+  no page created; Retry works after the cause is fixed.
 - **Retries:** `Retry-After` honoured, capped, and a 429 with no header backs off; a 429 isn't shown
   as a failure; 401 and 403 show at once.
 - **Secrets:** the Notion token and the AI key never appear in `last_error`, toasts or thrown errors,
   including 401, 429 and 5xx bodies that echo request details; the redactor fails closed when unarmed
   (as `odoo-redact.test.ts` does for Odoo); the token is stored through the keychain, never the
   plugin store.
-- **Migration:** a Rust test in `src-tauri/src/db/migration_tests.rs` that existing queue rows survive
-  any new migration.
+- **Migration:** a Rust test in `src-tauri/src/db/migration_tests.rs` that the new migration is
+  registered at its version, plus a sql.js test that existing queue rows survive it (the Rust crate
+  has no SQLite test executor).
 - **Team Knowledge plumbing,** with the model mocked: rows the model marks as duplicates are skipped;
   no Topic options are ever created; existing rows are never edited; Status is always `Proposed`.
 
@@ -440,7 +444,8 @@ Mocks pass whatever their author assumed, so these are run once with a real pers
 against throwaway databases (a test copy of the meetings database with the same three sub-tables,
 and the test Team Knowledge database), and the results are written in the PR. Checks 1, 2 and 5
 decide the design (the "Created by" or "Recorded by" column, the Notion name or a "Your name" field,
-the tie-break), so they run **before building**. The rest run before merge.
+the tie-break). The build handles both outcomes of each, so all six run **before merge**, by Kevin
+with a real token (plan Task 18); a result neither outcome covers changes the code before merge.
 1. What "Created by" shows for a page made with a personal token: the person or a bot (section 3.2).
 2. Whether the token can read its owner's name (`bot.owner.user` → `GET /v1/users/{id}`).
 3. A page created with a `data_source_id` parent lands in the right sub-table, with a datetime-range
@@ -510,16 +515,15 @@ Current Meetwings code that assumes Odoo. Each spot has to change, or teammates 
 - Migrations are **never edited after release** (sqlx checksums them; see the header of
   `src-tauri/src/db/migrations/odoo-multi-target.sql`). Any schema change is a new migration file.
 - `ensureMeetingSummary` (`src/lib/functions/meeting-summarizer.ts`) returns a **cached** summary per
-  conversation, rebuilt from stored columns. The new fields (topic sections, team practices) have to
-  be stored and returned there too, or every cached path loses them. A conversation can span more
+  conversation, rebuilt from stored columns. The new fields (topic sections, team practices) are not
+  in that cache, so the Notion path doesn't use it (see the end of this bullet). A conversation can span more
   than one meeting (see `meetingTranscript` notes in the codebase), and the Notion page must
   summarise this meeting's whole joined span. The cache doesn't guarantee that. It returns any
   stored summary whose span *overlaps*, not one that *covers* it, and the first piece to be
   summarised wins. For Kevin, Odoo may already have summarised the first 5-minute piece. The Odoo
   push also stores a span built from fake per-line timestamps (`transcript_start_at + i`). So the
-  Notion path reuses a cached summary only when it has the new fields **and** its span covers the
-  whole joined span; otherwise it summarises the whole joined transcript afresh, with real
-  timestamps or an explicit span.
+  Notion path never reads the cache: it summarises the whole joined transcript itself, with its own
+  prompt, and stores the result on the send record (section 5).
 - `ensureMeetingSummary` never throws and returns `null` for every failure, and the Odoo push keeps AI
   errors out of `last_error` on purpose (the redactor has no needle for an AI key). The Notion path
   needs the typed reason codes in section 5.
