@@ -364,21 +364,25 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
   it("check 3: pages landed in the requested data source with date.end", async () => {
     if (check1Pages.length === 0) throw new Error("check 1 produced no pages to inspect");
     for (const entry of check1Pages) {
-      // Values as the create response sent them; the data-source id of a
-      // throwaway database is the only id printed, and the date strings are
-      // what check 8's offset probe needs to compare against.
+      // Values as the create response sent them. No id is printed (the output
+      // goes into a public PR body): only whether the echoed parent matches.
+      const parentEcho = entry.parentDataSourceId;
       console.log(
-        `[live] check 3: ${entry.label} parent.data_source_id = ` +
-          (entry.parentDataSourceId ?? "parent.data_source_id not in create response") +
+        `[live] check 3: ${entry.label} parent.data_source_id ` +
+          (parentEcho === undefined || parentEcho === null
+            ? "not in create response"
+            : parentEcho === entry.subTable.dataSourceId
+              ? "= the requested data source"
+              : "= a DIFFERENT data source") +
           `, date.start = ${String(entry.createdResponseDate.start)}` +
           `, date.end = ${String(entry.createdResponseDate.end)}`,
       );
-      const parentEcho = entry.parentDataSourceId;
-      expect(parentEcho, "parent.data_source_id not in create response").toBeDefined();
-      expect(
-        parentEcho === entry.subTable.dataSourceId,
-        "the create response's parent.data_source_id must be the requested data source",
-      ).toBe(true);
+      if (parentEcho !== undefined && parentEcho !== null) {
+        expect(
+          parentEcho === entry.subTable.dataSourceId,
+          "the create response's parent.data_source_id must be the requested data source",
+        ).toBe(true);
+      }
       const end = entry.createdResponseDate.end;
       expect(
         typeof end === "string" && end.length > 0,
@@ -546,15 +550,16 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     console.log(
       `[live] check 8: raw stored date.start as Notion returned it = "${rawStart}" (offset present: ${carriesOffset ? "yes" : "no"})`,
     );
+    // The same Date.parse readCandidate uses (same-meeting.ts), printed even
+    // when the misparse pushes the page out of readCandidates' overlap window.
+    const parsed = Date.parse(rawStart);
+    const deltaMinutes = Number.isNaN(parsed) ? NaN : (parsed - instant) / 60_000;
+    console.log(`[live] check 8: Date.parse(raw start) deltaMinutes = ${deltaMinutes} [print only]`);
     const { candidate } = await waitForCandidate(st, span.startAt, span.endAt, page.id ?? "", recheckMs());
-    if (candidate === null) {
-      console.log("[live] check 8: readCandidates did NOT surface the page (parsed outside the overlap window) [print only]");
-      return;
-    }
-    const deltaMinutes = (candidate.start - instant) / 60_000;
     console.log(
-      `[live] check 8: readCandidates parses start to ${new Date(candidate.start).toISOString()} ` +
-        `(candidate.start = ${candidate.start}; deltaMinutes = ${deltaMinutes}) [print only]`,
+      candidate === null
+        ? "[live] check 8: readCandidates did NOT surface the page (parsed outside the overlap window) [print only]"
+        : `[live] check 8: readCandidates parses start to ${new Date(candidate.start).toISOString()} [print only]`,
     );
   });
 

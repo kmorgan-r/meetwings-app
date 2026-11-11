@@ -182,9 +182,9 @@ merge.
   or the bold title mismatches → `isThisSendsPage`'s 60 s or title rule
   changes before merge.
 - **Check 8** is print-only: `deltaMinutes !== 0` (against a fixed UTC
-  instant, written with a `time_zone` that is never the machine's own) means
-  `readCandidates`' date parsing must change before merge, so it honours
-  `time_zone`. Watch "offset present" too: a no-offset raw `date.start` is
+  instant, written with a `time_zone` that is never the machine's own), or
+  "readCandidates did NOT surface the page", means `readCandidates`' date
+  parsing must change before merge, so it honours `time_zone`. Watch "offset present" too: a no-offset raw `date.start` is
   what ECMAScript `Date.parse` reads in the *machine's* zone, even though a
   `time_zone` was given — that is exactly the misparse this probe looks for.
 
