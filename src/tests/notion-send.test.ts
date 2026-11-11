@@ -327,13 +327,16 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
-  if (!logsExpected) {
-    expect(errorSpy).not.toHaveBeenCalled();
+  try {
+    if (!logsExpected) {
+      expect(errorSpy).not.toHaveBeenCalled();
+    }
+    expect(warnSpy).not.toHaveBeenCalled();
+  } finally {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+    resetNotionRedactor();
   }
-  expect(warnSpy).not.toHaveBeenCalled();
-  errorSpy.mockRestore();
-  warnSpy.mockRestore();
-  resetNotionRedactor();
 });
 
 describe("summary step", () => {
@@ -652,6 +655,33 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
     expect(other.trashed).toBe(false);
     expect(world.pages.get("pg-1")?.trashed).toBe(true);
     expect(asks(world, "same").length).toBeGreaterThan(0);
+  });
+
+  it("a page by a third person with our title and exact range after a lost create is a competitor: not adopted, not trashed", async () => {
+    await seedSend();
+    db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = 's1'");
+    world.sameAnswer = false;
+    const stranger = addRival(world, { id: "stranger-1", created_by: { id: "person-2" } }, "Weekly sync");
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+    expect((await sendOf()).page_id).toBe("pg-1");
+    expect(stranger.trashed).toBe(false);
+    expect(asks(world, "same").length).toBeGreaterThan(0);
+  });
+
+  it("a step-4 competitor with an empty url stores the derived url", async () => {
+    await seedSend();
+    addRival(world, { url: "" });
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+    expect((await sendOf()).lost_to_url).toBe("https://www.notion.so/aaarival");
+  });
+
+  it("lost_to_url set with no page → finished already at once: no create, no model call, no trash", async () => {
+    await seedSend();
+    db.run("UPDATE notion_sends SET lost_to_url = 'https://notion.invalid/rival' WHERE id = 's1'");
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+    expect(await sendOf()).toMatchObject({ status: "already", page_id: null });
+    expect(world.calls).toEqual({});
+    expect(world.asks).toHaveLength(0);
   });
 
   it("an empty winner url stores a derived url, and the loser does not carry on", async () => {

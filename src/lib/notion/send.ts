@@ -59,6 +59,9 @@ export type SendOutcome =
   | "lost-claim"
   | "not-claimed";
 
+/** The competitor's link; an empty url must never leave lost_to_url empty. */
+const linkOf = (c: Candidate) => c.url || `https://www.notion.so/${c.pageId.replace(/-/g, "")}`;
+
 /** Thrown when a restamp, patch or finish is refused: another attempt owns the send. */
 class LostClaim extends Error {}
 
@@ -125,7 +128,8 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
       await deps.client.trashPage(s.page_id as string);
       return await finish("already");
     };
-    if (s.lost_to_url && s.page_id) return await trashLoser();
+    // A loser's finish was refused or crashed: no page means nothing to trash.
+    if (s.lost_to_url) return s.page_id ? await trashLoser() : await finish("already");
 
     if (lines.length === 0 && !s.page_id) {
       return await finish("no_summary", { errorCode: "SUMMARY_TOO_SHORT" });
@@ -200,7 +204,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
           if (isThisSendsPage(c)) continue;
           await stamp();
           if (await sameMeeting(deps.ai, c, summary)) {
-            await patch({ lost_to_url: c.url });
+            await patch({ lost_to_url: linkOf(c) });
             return await finish("already");
           }
         }
@@ -251,10 +255,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
         ...rivals.map((c) => ({ pageId: c.pageId, createdTime: c.createdTime })),
       ]);
       if (winner !== pageId) {
-        const url =
-          rivals.find((c) => c.pageId === winner)?.url ||
-          `https://www.notion.so/${winner.replace(/-/g, "")}`;
-        await patch({ lost_to_url: url });
+        await patch({ lost_to_url: linkOf(rivals.find((c) => c.pageId === winner) as Candidate) });
       }
     }
     if (s.lost_to_url) return await trashLoser();
