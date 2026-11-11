@@ -137,8 +137,8 @@ Transcript details:
   characters must never cut a character in half (emoji and other surrogate pairs).
 - **Partial failure:** if the transcript append fails, the page and summary stay. Only the transcript
   is retried, and nothing already written is duplicated. Notion has no idempotency key, so this needs
-  saved progress: the page ID and the number of transcript lines appended are stored on the queue
-  row after every batch. A retry first reads back the toggle's existing children and continues after
+  saved progress: the page ID and the number of transcript lines appended are stored on the send's
+  earliest queue row (section 5) after every batch. A retry first reads back the toggle's existing children and continues after
   the last line already there, so a batch whose response was lost isn't appended twice. The queue
   row stays open (not `sent`) until the whole transcript is in; see section 8.
 
@@ -196,6 +196,9 @@ appear.
 
 The rule instead: a Notion send waits until **30 minutes have passed with nothing new said** in that
 conversation. Thirty minutes is the codebase's own meeting boundary, `MEETING_CONVERSATION_GAP_MS`.
+"Nothing new said" is measured from the newest spoken line of the conversation (its saved messages
+or the live transcript), never from the newest queue row. During unbroken talk no queue row is
+written, so a check keyed on queue rows would send the first piece mid-meeting.
 Pill-off and `meeting-ended` still flush rows into the queue as today; they just don't start a
 Notion send. The rows of that conversation are then joined into one page if each of them is:
 - within 30 minutes of the previous one,
@@ -206,8 +209,18 @@ Notion send. The rows of that conversation are then joined into one page if each
 
 While the app runs, a background check (once a minute is enough) looks for conversations that have
 gone quiet for 30 minutes and for sends whose retry time has come. If the app was closed, the same
-check runs at the next start. Today nothing does this: the idle flush fires once at 5 minutes and
-the retry sweep runs once per app start.
+check runs at the next start, but only after startup recovery (`runMeetingRecovery`) has finished.
+Recovery is last in today's startup chain because nothing used to push the `unassigned` rows it
+writes. Section 6 changes that, so a check that ran first would send the pieces queued before a
+crash alone, and the rescued rest would become a second page. Today nothing does this check: the
+idle flush fires once at 5 minutes and the retry sweep runs once per app start.
+
+One send covers a whole joined set of rows (*my call* on the mechanics):
+- The set is claimed as one unit, and every row in it is re-stamped together.
+- The set's earliest row carries the page ID, the transcript progress and the stored summary.
+- The join and the background check skip any conversation that already has a row in `sending`.
+  Otherwise an unclaimed sibling row would start a second send that adopts the same page and
+  appends the transcript again.
 
 Ceiling: every page arrives about 30 minutes after the call ends, even when the recording was
 stopped by hand. The Google Calendar project can make it exact with the event's end time. Odoo
@@ -229,6 +242,12 @@ The transcript stays safe on the computer while it waits.
   Retry button stay.
 - The reason shown is fixed wording per code, never the provider's own error text, which can echo
   the key.
+- Once a summary succeeds, it is stored with the send (new fields and span included) and every
+  retry of that send reuses it: the recheck in step 3, a crash resume, a practices retry. Without
+  that, each retry would spend the shared key again and could produce a different title, topics and
+  practices from what is already on the page. The existing cache doesn't cover this: it never
+  stores a fresh summary for a conversation that already has one (`conversation_id` is UNIQUE),
+  which is Kevin's usual case once Odoo has summarised a piece.
 
 **Same meeting (this project, *my call*):**
 - Search all three sub-tables, not only the one this meeting maps to. People in different time
@@ -252,7 +271,7 @@ key. So:
 1. Check for a matching page, using the same-meeting rule above. If someone else's page matches,
    skip.
 2. Otherwise create the page with its properties and body, but no transcript or practices yet. Save
-   the new page's ID on the queue row straight away.
+   the new page's ID on the send's earliest queue row straight away.
 3. Wait a few seconds, then check again with the **full** same-meeting rule (overlap and AI
    agreement, not overlap alone, or a teammate in a different call at the same time would trash
    their own page). If more than one page matches, the earliest `created_time` wins; ties go to the
@@ -261,9 +280,11 @@ key. So:
    the page-ID tie-break does the work; and a query straight after a create may not yet see the
    other recorder's page, which is what the wait is for.
 4. The winner appends the transcript and adds the practices to Team Knowledge. The two are
-   independent: each is retried on its own, and a failure in one never stops the other. A retried
-   practices step relies on the duplicate check (section 4), so rows already added aren't added
-   twice.
+   independent: each is retried on its own, and a failure in one never stops the other. The send
+   stays open until both are done (section 8). A retried practices step first skips rules already
+   in Team Knowledge with this page's URL as `Meeting link`, then applies the duplicate check
+   (section 4), so rows already added aren't added twice. While practices wait, the Meetings page
+   shows the meeting as in Notion with a link, plus "Practices not added yet" and the reason.
 
 A crash or a lost response between steps 2 and 4 must not strand the page. A retry never skips its
 own page: it finds it by the saved page ID or, if the create response was lost before the ID was
@@ -273,9 +294,12 @@ step 3. The Odoo push handles the same case by adopting what it already created
 
 The send runs for minutes (summary, duplicate check, three sub-table searches, create, recheck, Team
 Knowledge, many transcript batches), longer than the queue's stale-claim limit (`STALE_CLAIM_MS`, 5
-minutes). The row's `claimed_at` is re-stamped after each step and each transcript batch, as the
-Odoo push does per target, or the sweep reclaims a live send and makes a second page. AI calls keep
-a time limit, like `SUMMARIZE_TIMEOUT_MS` (60 seconds).
+minutes). Every row's `claimed_at` in the set is re-stamped after each step and each transcript batch, as the
+Odoo push does per target, or the sweep reclaims a live send and makes a second page. The Notion
+path adds its own time limit to every AI call (the summary and the same-meeting check), and the
+timeout reason code comes from that limit. `ensureMeetingSummary` has no timeout of its own: the
+60-second `SUMMARIZE_TIMEOUT_MS` lives only in the Meetings-page wrapper, and the hook and sweep
+call it unbounded.
 
 Known ceiling: two pages can exist for a few seconds. Whoever's recording finishes first wins, even
 if someone else's is longer.
@@ -345,16 +369,17 @@ Key handling:
 
 ## 8. Reliability requirements (from the anti-goals)
 
-- **Nothing Notion-related runs while a meeting is being recorded.** All Notion work starts after
-  the meeting ends, runs in the background, and never blocks the overlay or the transcription
-  pipeline. A slow or broken Notion can't freeze the app.
+- **Notion work never gets in the way of recording.** A meeting's Notion send starts only after
+  that meeting is over (section 5). All Notion work runs in the background and never blocks the
+  overlay or the transcription pipeline, even when an earlier meeting's send or retry runs while a
+  later meeting is being recorded. A slow or broken Notion can't freeze the app.
 - **Save first, send second.** The transcript is written to the local queue before any network call,
   as the Odoo queue already does. If Notion is down or rejects the token, the meeting waits and
   retries, honouring Notion's `Retry-After` on HTTP 429. Nothing is deleted because sending failed.
-  A meeting is marked sent only after Notion confirms the page **and** the whole transcript is
-  appended. Until then the row stays open: only pending and held rows are swept for retry, and the
+  A meeting is marked sent only after Notion confirms the page, the whole transcript is appended
+  **and** the practices step is done. Until then the row stays open: only pending and held rows are swept for retry, and the
   30-day retention blanks the transcript of `sent` rows, so marking it sent early would lose the
-  transcript retry.
+  transcript or practices retry.
 - **Failures are visible.** A meeting that couldn't be sent shows on the Meetings page with a plain
   reason and a Retry button, as Odoo failures do. No silent failures. A rejected token or lost
   access (HTTP 401 or 403, or a database Meetwings can no longer see) shows at once. It doesn't wait
@@ -371,7 +396,10 @@ The test tooling is the builder's (section 10), but each of these needs an autom
 each is a place where a plausible bug loses a meeting, leaks a secret or makes duplicates:
 - **Joining:** gaps of 29:59 (joined) and 30:00 (not joined); rows from different conversations
   never joined; cancelled rows and rows not bound for Notion left out; a restart mid-meeting
-  followed by recovery and then the join; all joined rows marked sent together, or none.
+  followed by recovery and then the join; all joined rows marked sent together, or none; a flap
+  flush at minute 10 followed by 40 minutes of unbroken talk sends nothing until 30 minutes after
+  the last spoken line; the startup check waits for recovery; a conversation with a row in
+  `sending` is skipped.
 - **Who sends where:** the section 6 table as a test over (Notion only, Odoo only, both, neither) ×
   (setting on, off), asserting queued or not and what is picked. Render tests that a Notion-only
   user sees no Odoo wording: menu, Meetings page labels, overlay toasts, undo strip, error text,
@@ -408,9 +436,11 @@ Rejected row.
 
 ### 8.2 Live checks with a real token
 
-Mocks pass whatever their author assumed, so these are run once with a real personal access token
-before merge, against throwaway databases (a test copy of the meetings database with the same three
-sub-tables, and the test Team Knowledge database), and the results are written in the PR:
+Mocks pass whatever their author assumed, so these are run once with a real personal access token,
+against throwaway databases (a test copy of the meetings database with the same three sub-tables,
+and the test Team Knowledge database), and the results are written in the PR. Checks 1, 2 and 5
+decide the design (the "Created by" or "Recorded by" column, the Notion name or a "Your name" field,
+the tie-break), so they run **before building**. The rest run before merge.
 1. What "Created by" shows for a page made with a personal token: the person or a bot (section 3.2).
 2. Whether the token can read its owner's name (`bot.owner.user` → `GET /v1/users/{id}`).
 3. A page created with a `data_source_id` parent lands in the right sub-table, with a datetime-range
@@ -455,10 +485,12 @@ Current Meetwings code that assumes Odoo. Each spot has to change, or teammates 
 - Queue reads and the Meetings page compare `instance` with the live Odoo fingerprint.
   - `groupOf` files any row with a different instance under "other-database" and refuses Retry on
     it, and `resolveBadge` shows such rows only once `sent` (`src/lib/odoo/meeting-log.ts`).
-  - `getQueueCounts`, `listActionableRows`, `selectSweepable` and `findHeldRow` all filter on the
-    current instance (`src/lib/database/meeting-log.action.ts`).
-  - `recordErrorOnUnsent` has no destination filter, so an Odoo outage would stamp an Odoo error on
-    Notion rows.
+  - `getQueueCounts`, `selectSweepable` and `findHeldRow` filter on the current instance
+    (`src/lib/database/meeting-log.action.ts`). `listActionableRows` only orders by it, leaving the
+    classification to `groupOf`.
+  - `recordErrorOnUnsent` has no destination filter and runs whenever the Odoo config is missing or
+    half-filled. That is a Notion-only user's normal state, so it would stamp `ODOO_NOT_CONFIGURED`
+    on their rows at every start.
 
   A Notion-only user has no Odoo fingerprint, so their rows would be misfiled or invisible. The
   builder decides what `instance` holds for Notion rows, but nothing may depend on Odoo config.
