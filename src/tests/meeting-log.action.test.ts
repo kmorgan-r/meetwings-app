@@ -269,11 +269,11 @@ describe("no JS transactions", () => {
     // alongside QUEUE_SQL: it is a sibling exported statement object, and this
     // is the only place either one gets checked.
     const NOTION_STATEMENTS: Record<string, string> = { NOTION_LANE_OPEN, ...NOTION_SQL };
-    for (const [name, sql] of Object.entries({
-      ...QUEUE_SQL, ...SELECTED_TARGET_SQL, ...NOTION_STATEMENTS,
-    })) {
-      expect(sql, `${name} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
-      expect(sql, `${name} must not commit`).not.toMatch(/\bCOMMIT\b/i);
+    for (const [g, o] of Object.entries({ QUEUE_SQL, SELECTED_TARGET_SQL, NOTION_STATEMENTS })) {
+      for (const [k, sql] of Object.entries(o)) {
+        expect(sql, `${g}.${k} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
+        expect(sql, `${g}.${k} must not commit`).not.toMatch(/\bCOMMIT\b/i);
+      }
     }
   });
 

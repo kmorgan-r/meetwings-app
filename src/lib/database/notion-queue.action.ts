@@ -177,12 +177,12 @@ const PATCH_COLUMNS: ReadonlySet<string> = new Set([
 ]);
 
 export async function patchSend(id: string, claimedAt: number, patch: SendPatch): Promise<boolean> {
-  const keys = Object.keys(patch);
+  const keys = Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined);
   for (const k of keys) {
     if (!PATCH_COLUMNS.has(k)) throw new Error(`patchSend: column not allowed: ${k}`);
   }
-  // An empty patch still runs as a pure ownership check.
-  const set = keys.length ? keys.map((k) => `${k} = ?`).join(", ") : "claimed_at = claimed_at";
+  if (keys.length === 0) return false; // nothing defined: no write
+  const set = keys.map((k) => `${k} = ?`).join(", ");
   const db = await getDatabase();
   const r = await db.execute(
     `UPDATE notion_sends SET ${set} WHERE id = ? AND status = 'sending' AND claimed_at = ?`,

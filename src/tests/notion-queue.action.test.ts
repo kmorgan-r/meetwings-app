@@ -24,7 +24,6 @@ vi.mock("@/lib/database/config", () => ({
 }));
 
 import {
-  NOTION_SQL,
   cancelOfferedRows,
   cancelSend,
   claimSend,
@@ -44,10 +43,11 @@ import {
   retrySend,
 } from "@/lib/database/notion-queue.action";
 import { NOTION_LANE_OPEN, pruneTranscripts } from "@/lib/database/meeting-log.action";
+import { STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { MIGRATIONS, applyMigration14 } from "./helpers/migration-14";
 
 const NOW = 1_700_000_000_000;
-const STALE = 5 * 60_000;
+const STALE = STALE_CLAIM_MS;
 
 function seedRow(over: Record<string, unknown>) {
   const row = {
@@ -94,7 +94,14 @@ describe("createSendAndLink", () => {
   it("links rows even when the send already exists (crash between insert and link)", async () => {
     seedRow({ id: "r1" });
     seedRow({ id: "r2" });
+    const order: string[] = [];
+    execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      order.push(sql);
+      return rawExecute(sql, args);
+    });
     await createSendAndLink(sendInit(), ["r1"]);
+    expect(order[0]).toMatch(/INSERT INTO notion_sends/);
+    expect(order[1]).toMatch(/UPDATE meeting_log_queue/);
     await createSendAndLink(sendInit(), ["r1", "r2"]);
     expect((await rowOf("r2")).notion_send_id).toBe("r1");
     expect((await rowOf("r2")).notion_status).toBe("joined");
@@ -159,6 +166,14 @@ describe("zombie writers", () => {
     expect(await finishSend("r1", s2!, { status: "sent" })).toBe(false);
     expect(await finishSend("r1", s3!, { status: "sent", sentAt: NOW + 30 })).toBe(true);
     expect(await sendOf("r1")).toMatchObject({ status: "sent", page_id: "p", body_done: 1, claimed_at: null, sent_at: NOW + 30 });
+  });
+
+  it("patchSend skips undefined values", async () => {
+    await claimed();
+    await patchSend("r1", NOW, { page_id: "keep" });
+    expect(await patchSend("r1", NOW, { page_id: undefined, body_done: 1 })).toBe(true);
+    expect(await sendOf("r1")).toMatchObject({ page_id: "keep", body_done: 1 });
+    expect(await patchSend("r1", NOW, { page_id: undefined })).toBe(false);
   });
 
   it("patchSend rejects a column outside the whitelist", async () => {
@@ -306,9 +321,11 @@ describe("reads", () => {
     seedRow({ id: "n1", conversation_id: null, notion_status: "offered" });
     seedRow({ id: "n2", conversation_id: null, notion_status: "offered" });
     seedRow({ id: "h", conversation_id: "c1", notion_status: "held", transcript_start_at: 20, transcript_end_at: 21 });
+    seedRow({ id: "w2", conversation_id: "c2", transcript_start_at: 30, transcript_end_at: 31 });
     const items = await listNotionItems();
     const rows = items.filter((i) => i.kind === "rows");
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(5);
+    expect(rows).toContainEqual({ kind: "rows", conversationId: "c2", rowIds: ["w2"], status: "waiting", startAt: 30, endAt: 31 });
     expect(rows).toContainEqual({ kind: "rows", conversationId: "c1", rowIds: ["a", "b"], status: "waiting", startAt: 1, endAt: 9 });
     expect(rows).toContainEqual(expect.objectContaining({ conversationId: "c1", rowIds: ["h"], status: "held" }));
   });
@@ -324,15 +341,6 @@ describe("reads", () => {
     db.run("UPDATE notion_sends SET status='cancelled', page_id='p' WHERE id='s3'");
     const sends = (await listNotionItems()).filter((i) => i.kind === "send");
     expect(sends.map((s) => (s as { send: { id: string } }).send.id).sort()).toEqual(["s1", "s3"]);
-    expect(sends[0]).toMatchObject({ rowIds: expect.any(Array) });
-  });
-});
-
-describe("NOTION_SQL", () => {
-  it("has no BEGIN and no COMMIT", () => {
-    for (const [name, sql] of Object.entries(NOTION_SQL)) {
-      expect(sql, `${name} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
-      expect(sql, `${name} must not commit`).not.toMatch(/\bCOMMIT\b/i);
-    }
+    expect(sends[0]).toMatchObject({ rowIds: ["s1"] });
   });
 });
