@@ -25,6 +25,14 @@ SELECT id, conversation_id, transcript_start_at, transcript_end_at, created_at
  WHERE notion_status = 'waiting' AND notion_send_id IS NULL
  ORDER BY conversation_id, transcript_start_at`,
 
+  // A deleted conversation's unjoined rows must never become a send. NULL
+  // conversation_id rows are left alone.
+  cancelOrphans: `
+UPDATE meeting_log_queue SET notion_status = 'cancelled'
+ WHERE notion_status IN ('waiting', 'offered') AND notion_send_id IS NULL
+   AND conversation_id IS NOT NULL
+   AND conversation_id NOT IN (SELECT id FROM conversations)`,
+
   lastSpoken: `SELECT MAX(timestamp) FROM messages WHERE conversation_id = ? AND audio_source IS NOT NULL`,
 
   liveSends: `
@@ -73,11 +81,12 @@ UPDATE notion_sends
        summary_failures = CASE WHEN status = 'no_summary' THEN 0 ELSE summary_failures END
  WHERE id = ? AND status IN ('failed', 'no_summary', 'retry')`,
 
-  // Second arm is "Stop and keep page": a failed send with a page must still be closable.
+  // Second arm is "Stop and keep page": a failed or retrying send with a page must
+  // still be closable. Never `sending`: a worker holds the claim.
   cancel: `
 UPDATE notion_sends SET status = 'cancelled', error_code = NULL
  WHERE id = ? AND ((status IN ('retry', 'failed', 'no_summary') AND page_id IS NULL)
-                   OR (status = 'failed' AND page_id IS NOT NULL))`,
+                   OR (status IN ('failed', 'retry') AND page_id IS NOT NULL))`,
 
   offerPrefix: `
 UPDATE meeting_log_queue SET notion_status = 'waiting'
@@ -136,6 +145,8 @@ export async function listWaitingRows(): Promise<WaitingRow[]> {
   const db = await getDatabase();
   return db.select<WaitingRow[]>(NOTION_SQL.waitingRows);
 }
+
+export const cancelOrphanedWaitingRows = () => one(NOTION_SQL.cancelOrphans, []);
 
 export async function lastSpokenLineAt(conversationId: string): Promise<number | null> {
   const db = await getDatabase();

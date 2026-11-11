@@ -95,12 +95,12 @@ export function NotionSection({ items, onSendRows, onRetry, onDontSend }: Notion
                     Retry
                   </Button>
                 )}
-                {!hasPage && (item.kind === "send" ? status !== "sending" : status === "offered") && (
+                {!hasPage && (item.kind === "send" ? status !== "sending" : status === "offered" || status === "waiting") && (
                   <Button size="sm" variant="ghost" disabled={pending} onClick={() => void run(key, () => onDontSend(item))}>
                     Don't send
                   </Button>
                 )}
-                {item.kind === "send" && status === "failed" && hasPage && (
+                {item.kind === "send" && (status === "failed" || status === "retry") && hasPage && (
                   <Button size="sm" variant="ghost" disabled={pending} onClick={() => void run(key, () => onDontSend(item))}>
                     Stop and keep page
                   </Button>

@@ -380,6 +380,7 @@ const mockEverything = () => {
         },
       useCalendarAutoSelect: vi.fn(),
       useMeetingLog: () => ({ holding: false, onUndo: vi.fn(), undoBlockedMessage: null }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: () => {}, clear: () => {} }),
     };
   });
   vi.doMock("@/pages/app/components", async (orig) => ({

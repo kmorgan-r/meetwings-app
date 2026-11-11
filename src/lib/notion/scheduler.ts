@@ -1,5 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
+  cancelOrphanedWaitingRows,
   claimSend,
   conversationsWithLiveSend,
   createSendAndLink,
@@ -35,6 +36,7 @@ async function tick(deps: SchedulerDeps): Promise<void> {
   const now = deps.now();
   await promoteStaleHeldNotionRows(now - HOLD_MS - NOTION_TICK_MS);
   const live = await conversationsWithLiveSend(now - STALE_CLAIM_MS);
+  await cancelOrphanedWaitingRows();
   for (const set of joinSets(await listWaitingRows())) {
     const first = set[0];
     const conv = first.conversation_id;

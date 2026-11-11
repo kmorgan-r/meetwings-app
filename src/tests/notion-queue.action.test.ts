@@ -25,6 +25,7 @@ vi.mock("@/lib/database/config", () => ({
 
 import {
   cancelOfferedRows,
+  cancelOrphanedWaitingRows,
   cancelSend,
   claimSend,
   conversationsWithLiveSend,
@@ -232,13 +233,22 @@ describe("page actions", () => {
     expect(await retrySend("nope")).toBe(false);
   });
 
-  it("cancelSend refuses a retry or no_summary send that already has a page", async () => {
+  it("cancelSend stops a retry send that has a page and keeps its page fields", async () => {
+    await claimed("r1");
+    db.run("UPDATE notion_sends SET status='retry', page_id='p', page_url='u', claimed_at=NULL WHERE id='r1'");
+    expect(await cancelSend("r1")).toBe(true);
+    expect(await sendOf("r1")).toMatchObject({ status: "cancelled", page_id: "p", page_url: "u" });
+  });
+
+  it("cancelSend refuses a no_summary or sending send that already has a page", async () => {
     await claimed("r1");
     await claimed("r2");
-    db.run("UPDATE notion_sends SET status='retry', page_id='p', claimed_at=NULL WHERE id='r1'");
+    db.run("UPDATE notion_sends SET status='sending', page_id='p' WHERE id='r1'");
     db.run("UPDATE notion_sends SET status='no_summary', page_id='p', claimed_at=NULL WHERE id='r2'");
+    const before = await sendOf("r1");
     expect(await cancelSend("r1")).toBe(false);
     expect(await cancelSend("r2")).toBe(false);
+    expect(await sendOf("r1")).toEqual(before);
   });
 
   it("cancelSend stops a failed send that has a page; its lane reads closed and prune then blanks its rows", async () => {
@@ -258,6 +268,19 @@ describe("page actions", () => {
     seedRow({ id: "r1" });
     await createSendAndLink(sendInit(), ["r1"]);
     expect(await cancelSend("r1")).toBe(true);
+  });
+
+  it("cancelOrphanedWaitingRows cancels unjoined rows of a deleted conversation only", async () => {
+    db.run("INSERT INTO conversations (id,title,created_at,updated_at) VALUES ('c1','t',1,1)");
+    seedRow({ id: "gone", conversation_id: "deleted" });
+    seedRow({ id: "offered", conversation_id: "deleted", notion_status: "offered" });
+    seedRow({ id: "kept", conversation_id: "c1" });
+    seedRow({ id: "nul", conversation_id: null });
+    await cancelOrphanedWaitingRows();
+    expect((await rowOf("gone")).notion_status).toBe("cancelled");
+    expect((await rowOf("offered")).notion_status).toBe("cancelled");
+    expect((await rowOf("kept")).notion_status).toBe("waiting");
+    expect((await rowOf("nul")).notion_status).toBe("waiting");
   });
 
   it("offerRowsToWaiting / cancelOfferedRows move only unjoined rows in the right state", async () => {

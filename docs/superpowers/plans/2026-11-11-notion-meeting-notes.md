@@ -34,7 +34,7 @@
   - practices judge `PRACTICES_TIMEOUT_MS = 60_000`
   - each Notion HTTP call `NOTION_HTTP_TIMEOUT_MS = 30_000`
 - **Retries:**
-  - Inside one call, up to 3 tries on 429/5xx. `Retry-After` (seconds) is honoured and capped at `RETRY_AFTER_CAP_MS = 60_000`. A 429 without the header backs off 2 s, then 4 s.
+  - Inside one call, up to 3 tries on 429/5xx (writes that can commit and lose the response, `createPage` and `appendChildren`, retry in-call on 429/409 only; their 5xx throws `NOTION_SERVER` at once so the outer backoff and read-back run, final-review ruling I2). `Retry-After` (seconds) is honoured and capped at `RETRY_AFTER_CAP_MS = 60_000`. A 429 without the header backs off 2 s, then 4 s.
   - Between attempts, `nextAt = now + max(retryAfterMs ?? 0, min(60_000 × 2^(attempts−1), 3_600_000))`.
 - Summary strikes: `SUMMARY_STRIKES = 3` consecutive strike-coded failures end in `no_summary`.
 - Team Knowledge property names are fixed: `Rule` (title), `Status` (status, option `Proposed`), `Topic` (select), `Meeting link` (URL). Meetwings never creates select options and never PATCHes an existing Knowledge row.
@@ -551,7 +551,7 @@ How `request` behaves:
   - 429 → retry
   - 5xx → retry
   - any thrown fetch → `NOTION_NETWORK`
-- **Retries:** up to 3 tries on 429/5xx with the waits in Global Constraints. After the last 429, throw `NotionError("NOTION_RATE_LIMITED")` with `retryAfterMs` set to the last header value (capped). After the last 5xx, throw `NOTION_SERVER`.
+- **Retries:** up to 3 tries on 429/5xx with the waits in Global Constraints. After the last 429, throw `NotionError("NOTION_RATE_LIMITED")` with `retryAfterMs` set to the last header value (capped). After the last 5xx, throw `NOTION_SERVER`. Exception (final-review ruling I2): `createPage` and `appendChildren` never retry a 5xx in-call; one 5xx throws `NOTION_SERVER` after exactly one fetch.
 - The response body is read only to parse JSON on success. Error bodies are never put in a message.
 
 - [ ] **Step 1: Write the failing tests** (inject a fake `fetch` returning `{ ok, status, headers: new Headers(...), json, text }`, and a fake `sleep` that records waits)

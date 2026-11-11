@@ -396,6 +396,14 @@ describe("addPractices", () => {
     expect(onRow).toHaveBeenCalledOnce();
   });
 
+  it("a decision that omits topic reads as topic null: written with no Topic key", async () => {
+    const { client, creations } = fakeNotionClient();
+    const { ai } = fakeAi(() => '{"results":[{"index":0,"duplicate":false}]}');
+    await addPractices(client, ai, knowledgeDb(), [practice("Standups are recorded daily", "Process")], PAGE_URL, recordingOnRow());
+    expect(creations).toHaveLength(1);
+    expect(creations[0]?.properties.Topic).toBeUndefined();
+  });
+
   it("candidates that repeat an earlier candidate in the list are dropped before the model", async () => {
     const { client, creations } = fakeNotionClient();
     const { ai, ask } = fakeAi(() => okReply([{ index: 0, duplicate: false, topic: null }]));

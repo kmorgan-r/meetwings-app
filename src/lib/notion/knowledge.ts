@@ -168,8 +168,10 @@ function parseDecisions(
     // First valid entry per index wins.
     if (decisions.has(index)) continue;
     if (typeof cast.duplicate !== "boolean") continue;
-    if (cast.topic !== null && typeof cast.topic !== "string") continue;
-    decisions.set(index, { duplicate: cast.duplicate, topic: cast.topic });
+    // An omitted topic reads as null; a topic of any other type is invalid.
+    const topic = cast.topic ?? null;
+    if (topic !== null && typeof topic !== "string") continue;
+    decisions.set(index, { duplicate: cast.duplicate, topic });
   }
   for (let index = 0; index < count; index++) {
     if (!decisions.has(index)) {

@@ -294,6 +294,20 @@ describe("the Meetings page, Notion side", () => {
     expect(within(section()).getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  it("a retrying send waiting for a summary shows its reason; a sending one shows none", async () => {
+    current = () => [send({ status: "retry", error_code: "SUMMARY_SPENDING_LIMIT" })];
+    const first = await renderPage();
+    await within(card("c1")).findByText("Waiting for summary");
+    expect(within(section()).getByText(NOTION_COPY.SUMMARY_SPENDING_LIMIT)).toBeInTheDocument();
+    first.unmount();
+
+    // A claim keeps the previous attempt's code: no reason while sending.
+    current = () => [send({ status: "sending", error_code: "SUMMARY_SPENDING_LIMIT" })];
+    const second = await renderPage();
+    await within(card("c1")).findByText("Waiting for summary");
+    expect(second.container.textContent).not.toContain(NOTION_COPY.SUMMARY_SPENDING_LIMIT);
+  });
+
   it("offered rows show Send to Notion; pressing it calls offerRowsToWaiting with the group's row ids", async () => {
     current = () => [rows({ rowIds: ["r1", "r2"] })];
     await renderPage();
@@ -311,6 +325,28 @@ describe("the Meetings page, Notion side", () => {
 
     await userEvent.click(await within(await screen.findByRole("region", { name: "Notion" })).findByRole("button", { name: "Don't send" }));
     await waitFor(() => expect(notionQueue.cancelOfferedRows).toHaveBeenCalledWith(["r1", "r2"]));
+  });
+
+  it("a waiting rows item shows Don't send and clicking it drops its rows; a held one shows none", async () => {
+    current = () => [rows({ rowIds: ["r1", "r2"], status: "waiting" })];
+    const view = await renderPage();
+
+    await userEvent.click(await within(await screen.findByRole("region", { name: "Notion" })).findByRole("button", { name: "Don't send" }));
+    await waitFor(() => expect(notionQueue.cancelOfferedRows).toHaveBeenCalledWith(["r1", "r2"]));
+    view.unmount();
+
+    current = () => [rows({ status: "held" })];
+    await renderPage();
+    await within(card("c1")).findByText("Waiting for the meeting to end");
+    expect(screen.queryByRole("button", { name: "Don't send" })).toBeNull();
+  });
+
+  it("a retrying send with a page offers Stop and keep page", async () => {
+    current = () => [send({ id: "s6", status: "retry", page_id: "p", page_url: PAGE })];
+    await renderPage();
+
+    await userEvent.click(await within(await screen.findByRole("region", { name: "Notion" })).findByRole("button", { name: "Stop and keep page" }));
+    await waitFor(() => expect(notionQueue.cancelSend).toHaveBeenCalledWith("s6"));
   });
 
   it("a failed send with a page offers Stop and keep page, which calls cancelSend; the row badge then reads 'In Notion' and the Notion section no longer lists it", async () => {

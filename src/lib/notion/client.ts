@@ -56,7 +56,6 @@ export interface NotionBlock {
   id?: string;
   type?: string;
   has_children?: boolean;
-  rich_text?: { plain_text?: string; text?: { content?: string } }[];
   [key: string]: unknown;
 }
 
@@ -78,6 +77,7 @@ export interface NotionClient {
     method: "GET" | "POST" | "PATCH",
     path: string,
     body?: unknown,
+    opts?: { retry5xx?: boolean },
   ): Promise<T>; // path starts with "/v1/"
   me(): Promise<{ id: string; ownerUserId: string | null }>;
   userName(id: string): Promise<string | null>;
@@ -232,7 +232,11 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
     method: "GET" | "POST" | "PATCH",
     path: string,
     body?: unknown,
+    opts?: { retry5xx?: boolean },
   ): Promise<T> {
+    // Writes pass retry5xx: false: a 502/504 may have committed, and a retry
+    // would duplicate the page or the appended batch.
+    const retry5xx = opts?.retry5xx ?? true;
     if (!path.startsWith("/v1/")) {
       // Programmer error, not a Notion outcome: a plain Error, no NotionError.
       throw new Error(`Notion client: path must start with "/v1/" (got ${path})`);
@@ -241,6 +245,7 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
       const result = await send(method, path, body);
       if (result.ok) return result.parsed as T;
       const status = result.status;
+      if (!retry5xx && status >= 500 && status < 600) throw new NotionError("NOTION_SERVER");
       if (status === 429 || status === 409 || (status >= 500 && status < 600)) {
         // 409 joins 5xx: Notion's conflict_error docs say "try again", so it
         // gets the same in-call retries and waits.
@@ -339,7 +344,7 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
     },
 
     async createPage(body) {
-      return request<NotionPage>("POST", "/v1/pages", body);
+      return request<NotionPage>("POST", "/v1/pages", body, { retry5xx: false });
     },
 
     async listChildren(blockId) {
@@ -365,6 +370,7 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
         "PATCH",
         `/v1/blocks/${encodeURIComponent(blockId)}/children`,
         { children },
+        { retry5xx: false },
       );
       return body.results ?? [];
     },

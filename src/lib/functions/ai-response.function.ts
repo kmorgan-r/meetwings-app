@@ -508,11 +508,6 @@ export async function* fetchAIResponse(params: {
               return;
             }
 
-            // Log the first chunk to see structure
-            if (!capturedUsage) {
-              console.log("[Cost Tracking] Sample chunk structure:", JSON.stringify(parsed).substring(0, 500));
-            }
-
             const delta = getStreamingContent(
               parsed,
               provider?.responseContentPath || ""

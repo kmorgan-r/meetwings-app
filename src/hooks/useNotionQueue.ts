@@ -137,9 +137,13 @@ export function buildBadgeMap(items: readonly NotionItem[]): Map<string, NotionB
 export function reasonFor(item: NotionItem): string | null {
   if (item.kind !== "send") return null;
   const state = notionBadgeFor(item)?.state;
-  // retry/sending show no reason: requeueAuthFailures leaves a stale auth code behind.
+  // A plain retry/sending shows no reason: requeueAuthFailures leaves a stale auth
+  // code behind. "Waiting for summary" on a retry shows its code (the summary is
+  // why it waits); while sending, the claim keeps the previous attempt's code.
   const code =
-    state === "failed" || state === "no_summary"
+    state === "failed" ||
+    state === "no_summary" ||
+    (state === "summary_wait" && item.send.status === "retry")
       ? item.send.error_code
       : state === "practices_pending"
         ? item.send.practices_error_code

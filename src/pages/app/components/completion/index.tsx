@@ -57,7 +57,8 @@ export const Completion = ({
   const notionAvailable = notionConfigured === true && odooSetup === "complete";
   // Notion alone: nothing to pick. A null (still loading) keeps today's picker.
   const hidePicker = notionConfigured === true && odooSetup === "absent";
-  const onToggleNotion = useCallback(() => notionPick.toggle(), [notionPick.toggle]);
+  const toggleNotionPick = notionPick.toggle;
+  const onToggleNotion = useCallback(() => toggleNotionPick(), [toggleNotionPick]);
   const odoo = useOdooTarget({
     meetingAssistMode: completion.meetingAssistMode,
     isPickerOpen: completion.isContactPickerOpen,

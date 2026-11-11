@@ -69,7 +69,7 @@ export const SummaryProviderCard = () => {
     <div id="summary-provider" className="space-y-3">
       <Header
         title="Meeting summaries"
-        description="The AI that writes every meeting summary, for Notion and Odoo. Leave empty to use your chat model."
+        description="The AI that writes every meeting summary. Leave empty to use your chat model."
         isMainTitle
       />
       <Providers

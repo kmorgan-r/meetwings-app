@@ -67,7 +67,12 @@ const GAP = MEETING_CONVERSATION_GAP_MS;
 const MIN = 60_000;
 const T0 = 1_700_000_000_000;
 
-function seedRow(over: Record<string, unknown>) {
+function seedRow(over: Record<string, unknown>, orphan = false) {
+  // A waiting row's conversation exists unless the test is about a deleted one.
+  const conv = over.conversation_id === undefined ? "c1" : (over.conversation_id as string | null);
+  if (!orphan && conv !== null) {
+    db.run("INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, 't', 1, 1)", [conv]);
+  }
   const row = {
     id: "r1", session_key: `k-${over.id ?? "r1"}`, conversation_id: "c1", instance: "",
     contact_id: null, lead_id: null, transcript: "t", transcript_start_at: T0,
@@ -167,6 +172,15 @@ describe("runNotionTick", () => {
     seedRow({ id: "d", notion_status: "held", created_at: T0 + 10 * MIN + 2 * GAP });
     await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
     expect(await sends()).toEqual([]);
+  });
+
+  it("a waiting row whose conversation was deleted is cancelled and creates no send; one whose conversation exists still joins", async () => {
+    seedRow({ id: "gone", conversation_id: "deleted" }, true);
+    seedRow({ id: "kept", conversation_id: "c1" });
+    await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
+    expect((await rowOf("gone")).notion_status).toBe("cancelled");
+    expect((await rowOf("gone")).notion_send_id).toBeNull();
+    expect((await sends()).map((s) => s.id)).toEqual(["kept"]);
   });
 
   it("flap flush at minute 10 + 40 min of unbroken talk → nothing until 30 min after the last spoken line", async () => {
@@ -420,6 +434,15 @@ describe("page actions", () => {
     expect(m.emit).toHaveBeenCalledTimes(3);
     expect(m.emit.mock.calls.every((c) => c[0] === NOTION_KICK_EVENT)).toBe(true);
     expect(m.runNotionSend).not.toHaveBeenCalled();
+  });
+
+  it("dontSendToNotion on a waiting rows item cancels the rows, and the next tick creates no send", async () => {
+    seedRow({ id: "w1" });
+    const item = { kind: "rows", conversationId: "c1", rowIds: ["w1"], status: "waiting", startAt: T0, endAt: T0 + 10 * MIN } as unknown as NotionItem;
+    expect(await dontSendToNotion(item)).toBe(true);
+    expect((await rowOf("w1")).notion_status).toBe("cancelled");
+    await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
+    expect(await sends()).toEqual([]);
   });
 
   it("dontSendToNotion on a send item cancels the send", async () => {

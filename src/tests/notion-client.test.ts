@@ -183,6 +183,26 @@ describe("createNotionClient.request", () => {
     expect(h.sleeps).toEqual([2000, 4000]);
   });
 
+  it("createPage 502 → NOTION_SERVER after 1 fetch (a write may have committed)", async () => {
+    const h = makeHarness([jsonBody({}, 502), jsonBody({ id: "P" })]);
+    const thrown = await thrownBy(() => h.client.createPage({}));
+    expect(thrown).toEqual({ code: "NOTION_SERVER", retryAfterMs: undefined });
+    expect(h.sendTimes).toHaveLength(1);
+  });
+
+  it("appendChildren 502 → NOTION_SERVER after 1 fetch", async () => {
+    const h = makeHarness([jsonBody({}, 502), jsonBody({ results: [] })]);
+    const thrown = await thrownBy(() => h.client.appendChildren("B", []));
+    expect(thrown).toEqual({ code: "NOTION_SERVER", retryAfterMs: undefined });
+    expect(h.sendTimes).toHaveLength(1);
+  });
+
+  it("appendChildren 429 then success → returns the body after 2 fetches", async () => {
+    const h = makeHarness([jsonBody({}, 429), jsonBody({ results: [{ id: "X" }] })]);
+    expect(await h.client.appendChildren("B", [])).toEqual([{ id: "X" }]);
+    expect(h.sendTimes).toHaveLength(2);
+  });
+
   it("three 409s are retried like 5xx → NOTION_SERVER after 3 fetches", async () => {
     // Notion's conflict_error docs say "try again": 409 gets the same waits
     // and the same give-up code as a 5xx.
