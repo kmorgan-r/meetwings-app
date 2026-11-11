@@ -5,6 +5,9 @@ import {
   type UnloggedTranscriptEntry,
 } from "@/lib/database/meeting-log.action";
 import { IDLE_FLUSH_MS, renderTranscript, segmentByGap, sessionKeyFor } from "./meeting-log";
+import { decideDestinations } from "@/lib/notion/destinations";
+import { notionErrorText } from "@/lib/notion/errors";
+import { isNotionAutoSendEnabled, isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
 
 /**
@@ -72,8 +75,9 @@ export function resetMeetingRecoveryGuard(): void {
  * does: <Completion /> remounts mid-session, and a per-mount recovery would
  * re-read the whole span on every remount.
  *
- * Every recovered row is `unassigned` with NO targets, so nothing here reaches
- * Odoo on its own. The contact that was selected when the meeting was said is
+ * Every recovered row has NO targets, so nothing here reaches Odoo on its own:
+ * it is `unassigned` when Odoo is set up, and `none` (with a Notion lane) when
+ * only Notion is. The contact that was selected when the meeting was said is
  * long gone by the time this runs; guessing one would post a stranger's words
  * into a customer's chatter, which is the mis-post the whole watermark design
  * exists to prevent. `unassigned` puts the row in the strip under "Needs a
@@ -88,7 +92,15 @@ export async function runMeetingRecovery(): Promise<number> {
     // BEFORE the read, so an unconfigured install consumes nothing: the
     // entries stay above every watermark and a later run still finds them.
     const state = await loadOdooConfigState();
-    if (state.state !== "complete") return 0;
+    // An unreadable Notion config counts as "Notion off": Odoo-only recovery
+    // must not die with it. The code is logged, never the thrown text.
+    let notion = false;
+    try {
+      notion = await isNotionConfigured();
+    } catch (e) {
+      console.warn("[meeting-log] notion config unreadable:", notionErrorText(e).code);
+    }
+    if (state.state !== "complete" && !notion) return 0;
 
     // Latched HERE, on the outcome, not on entry - the same rule the sweep
     // effect spells out at useMeetingLog.ts:515-523. Latching before the
@@ -106,7 +118,18 @@ export async function runMeetingRecovery(): Promise<number> {
     // and latching later would open a window where two remounts run the whole
     // read-and-insert pass concurrently, with no single flight to join them.
     recoveryRan = true;
-    const instance = instanceFingerprint(state.config.url, state.config.db);
+    // No Odoo instance to key a row to unless Odoo is fully set up.
+    const instance =
+      state.state === "complete" ? instanceFingerprint(state.config.url, state.config.db) : "";
+    const decision = decideDestinations({
+      source: "recovery",
+      odoo: state.state,
+      notion,
+      autoSend: isNotionAutoSendEnabled(),
+      odooTargets: 0,
+      notionPicked: false,
+    });
+    if (!decision.queue) return 0;
 
     // The QUEUE watermark only, floored at the age limit.
     //
@@ -155,8 +178,8 @@ export async function runMeetingRecovery(): Promise<number> {
             transcriptStartAt: slice.startAt,
             transcriptEndAt: slice.endAt,
             meetingStartedAt: slice.startAt,
-            status: "unassigned",
-            notionStatus: null,
+            status: decision.odooStatus,
+            notionStatus: decision.notionStatus,
             createdAt: Date.now(),
           });
           // `false` is ON CONFLICT(session_key) DO NOTHING - the row was

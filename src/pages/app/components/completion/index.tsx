@@ -11,6 +11,7 @@ import {
   type MeetingAutoRecordAudio,
 } from "@/hooks";
 import { useApp } from "@/contexts";
+import { useNotionPick } from "@/hooks/useNotionPick";
 import { shouldUseMeetwingsAPI } from "@/lib";
 import { setPillData } from "@/lib/overlay-minimize.store";
 import { Screenshot } from "./Screenshot";
@@ -49,6 +50,7 @@ export const Completion = ({
   // effect can see the picker open, exactly like isFilesPopoverOpen already
   // does for Files.tsx. The main window is 600x54 and non-resizable; without
   // this the popover has no way to make the window grow around it.
+  const notionPick = useNotionPick();
   const odoo = useOdooTarget({
     meetingAssistMode: completion.meetingAssistMode,
     isPickerOpen: completion.isContactPickerOpen,
@@ -60,6 +62,8 @@ export const Completion = ({
     // file even though useOdooTarget's param list gained a new required
     // field; without this the call here would not compile.
     setTargetCount: completion.setTargetCount,
+    // The Notion pick is per meeting: it clears wherever the targets do.
+    onTargetsCleared: notionPick.clear,
   });
 
   // Mounted HERE, not inside ContactPicker: a hook there would re-run on every
@@ -159,6 +163,7 @@ export const Completion = ({
     // Task 14: the flat multi-target list, not the single-select flow's own
     // ref - see useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
     targetRef: odoo.targetsRef,
+    notionPickedRef: notionPick.pickedRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     meetingAssistMode: completion.meetingAssistMode,

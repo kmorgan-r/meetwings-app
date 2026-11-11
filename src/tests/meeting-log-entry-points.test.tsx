@@ -148,3 +148,336 @@ describe("the Meetings menu entry", () => {
     expect(result.current.menu.find((item) => item.label === "Chats")).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// (c) who sends where: the overlay hook's Notion lane (Task 15).
+//
+// The queue, config and scheduler modules are replaced with stateful doubles;
+// everything else in useMeetingLog (timers, holds, snapshots) runs for real.
+// ---------------------------------------------------------------------------
+
+import { act, waitFor } from "@testing-library/react";
+import { useRef } from "react";
+import { useMeetingLog, resetMeetingLogSweepGuard } from "@/hooks/useMeetingLog";
+import { HOLD_MS } from "@/lib/odoo/meeting-log";
+import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
+import type { SelectedTargets, TranscriptEntry } from "@/types";
+
+const hookListeners = new Map<string, (event: unknown) => void>();
+const tauri = vi.hoisted(() => ({ listen: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => tauri);
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ label: "main" }) }));
+
+const toastMock = vi.hoisted(() => ({ error: vi.fn(), info: vi.fn(), warning: vi.fn(), success: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toastMock }));
+
+const queue = vi.hoisted(() => ({
+  getTranscriptWatermark: vi.fn(async () => 0),
+  insertQueueRow: vi.fn(async () => true),
+  readMeetingMessages: vi.fn(async () => []),
+  findHeldRow: vi.fn(async () => null as unknown),
+  cancelHeldRow: vi.fn(async () => "all" as "all" | "partial" | "none"),
+  promoteHeldNotionRow: vi.fn(async () => true),
+  getQueueRow: vi.fn(async () => null as unknown),
+  pruneTranscripts: vi.fn(async () => 0),
+  sweepOrphanTargets: vi.fn(async () => 0),
+  readUnloggedMessages: vi.fn(async () => []),
+}));
+vi.mock("@/lib/database/meeting-log.action", () => queue);
+
+const push = vi.hoisted(() => ({
+  pushQueuedRow: vi.fn(async () => {}),
+  runMeetingLogSweep: vi.fn(async () => ({ ran: true, pushed: 0 })),
+  claimed: new Set<string>(),
+}));
+vi.mock("@/lib/odoo/meeting-log-push", () => push);
+
+const recovery = vi.hoisted(() => ({ runMeetingRecovery: vi.fn(async () => 0) }));
+vi.mock("@/lib/odoo/meeting-log-recovery", () => recovery);
+
+const scheduler = vi.hoisted(() => ({
+  ensureNotionScheduler: vi.fn(),
+  isNotionSchedulerStarted: vi.fn(() => false),
+}));
+vi.mock("@/lib/notion/scheduler", () => scheduler);
+
+const odooConfig = vi.hoisted(() => ({
+  loadOdooConfigState: vi.fn(),
+  requireOdooConfig: vi.fn(),
+  instanceFingerprint: vi.fn((url: string, db: string) => `${url}|${db}`),
+}));
+vi.mock("@/lib/storage/odoo-config.storage", () => odooConfig);
+
+const notionConfig = vi.hoisted(() => ({
+  isNotionConfigured: vi.fn(async () => true),
+  isNotionAutoSendEnabled: vi.fn(() => true),
+}));
+vi.mock("@/lib/storage/notion-config.storage", () => notionConfig);
+
+vi.mock("@/lib/functions/meeting-summarizer", () => ({ ensureMeetingSummary: vi.fn(async () => null) }));
+const skipMark = vi.hoisted(() => ({ value: 0 }));
+vi.mock("@/lib/storage/meeting-log-watermark.storage", () => ({
+  getSkipWatermark: () => skipMark.value,
+  setSkipWatermark: (n: number) => void (skipMark.value = n),
+}));
+vi.mock("@/lib/storage/active-conversation.storage", () => ({
+  getActiveConversationId: () => null,
+}));
+
+const ODOO = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
+const ONE_TARGET: SelectedTargets = [{ model: "res.partner", resId: 42, name: null }];
+
+function said(timestamp: number): TranscriptEntry {
+  return { original: "hello", timestamp, audioSource: "microphone" };
+}
+
+function renderLog(opts: { targets?: SelectedTargets; picked?: boolean; pill?: boolean } = {}) {
+  return renderHook(
+    (props: { pill: boolean }) => {
+      const targetRef = useRef<SelectedTargets>(opts.targets ?? []);
+      const notionPickedRef = useRef(opts.picked ?? false);
+      return useMeetingLog({
+        targetRef,
+        notionPickedRef,
+        meetingTranscript: [said(1000)],
+        currentConversationId: "conv-1",
+        meetingAssistMode: props.pill,
+      });
+    },
+    { initialProps: { pill: opts.pill ?? true } }
+  );
+}
+
+function endMeeting() {
+  hookListeners.get("meeting-ended")?.({ payload: null });
+}
+
+const bodyOf = (call: unknown[]) => call[0] as Record<string, unknown>;
+
+describe("the hook: who sends where", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(
+      "row-1" as `${string}-${string}-${string}-${string}-${string}`
+    );
+    resetMeetingLogSweepGuard();
+    resetTranscriptPruneGuard();
+    hookListeners.clear();
+    skipMark.value = 0;
+    tauri.listen.mockImplementation(async (name: string, handler: (e: unknown) => void) => {
+      hookListeners.set(name, handler);
+      return () => void hookListeners.delete(name);
+    });
+    queue.insertQueueRow.mockResolvedValue(true);
+    queue.findHeldRow.mockResolvedValue(null);
+    queue.cancelHeldRow.mockResolvedValue("all");
+    queue.promoteHeldNotionRow.mockResolvedValue(true);
+    queue.getQueueRow.mockResolvedValue(null);
+    push.pushQueuedRow.mockResolvedValue(undefined);
+    push.runMeetingLogSweep.mockResolvedValue({ ran: true, pushed: 0 });
+    recovery.runMeetingRecovery.mockResolvedValue(0);
+    scheduler.isNotionSchedulerStarted.mockReturnValue(false);
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    odooConfig.requireOdooConfig.mockResolvedValue(ODOO);
+    notionConfig.isNotionConfigured.mockResolvedValue(true);
+    notionConfig.isNotionAutoSendEnabled.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("Notion-only, no Odoo config: pill-off queues a held Notion row and shows the undo strip", async () => {
+    const { result, rerender } = renderLog({ pill: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    rerender({ pill: false });
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(bodyOf(queue.insertQueueRow.mock.calls[0])).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "held",
+      targets: [],
+    });
+  });
+
+  it("undo during the hold cancels the Notion row", async () => {
+    const { result } = renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(result.current.holding).toBe(true));
+
+    act(() => result.current.onUndo());
+
+    await waitFor(() => expect(queue.cancelHeldRow).toHaveBeenCalledWith("row-1"));
+    await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    expect(queue.promoteHeldNotionRow).not.toHaveBeenCalled();
+    expect(result.current.undoBlockedMessage).toBeNull();
+  });
+
+  it("undo on a both-held row cancels both lanes through the hook", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
+    const { result } = renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(bodyOf(queue.insertQueueRow.mock.calls[0])).toMatchObject({
+      instance: "http://h:8069|odoo",
+      status: "held",
+      notionStatus: "held",
+    });
+
+    act(() => result.current.onUndo());
+
+    await waitFor(() => expect(queue.cancelHeldRow).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    expect(push.pushQueuedRow).not.toHaveBeenCalled();
+    expect(queue.promoteHeldNotionRow).not.toHaveBeenCalled();
+  });
+
+  it("undo after the Notion lane was promoted shows 'This meeting is already being sent.'", async () => {
+    queue.cancelHeldRow.mockResolvedValue("partial");
+    const { result } = renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(result.current.holding).toBe(true));
+
+    act(() => result.current.onUndo());
+
+    await waitFor(() =>
+      expect(result.current.undoBlockedMessage).toBe("This meeting is already being sent.")
+    );
+  });
+
+  it("hold expiry promotes the Notion row to waiting and makes no Odoo call", async () => {
+    queue.getQueueRow.mockResolvedValue({ id: "row-1", status: "none", notion_status: "held" });
+    renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
+
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+
+    await waitFor(() => expect(queue.promoteHeldNotionRow).toHaveBeenCalledWith("row-1"));
+    expect(push.pushQueuedRow).not.toHaveBeenCalled();
+    // Odoo is absent: reading its config here would throw and blame Odoo.
+    expect(odooConfig.requireOdooConfig).not.toHaveBeenCalled();
+  });
+
+  it("hold expiry on a both-held row promotes Notion and pushes Odoo exactly once", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
+    queue.getQueueRow.mockResolvedValue({ id: "row-1", status: "held", notion_status: "held" });
+    renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
+
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+
+    await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
+    expect(queue.promoteHeldNotionRow).toHaveBeenCalledTimes(1);
+  });
+
+  it("an Odoo push that rejects at hold expiry still leaves the Notion lane promoted", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
+    queue.getQueueRow.mockResolvedValue({ id: "row-1", status: "held", notion_status: "held" });
+    push.pushQueuedRow.mockRejectedValue(new Error("odoo down"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
+
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+
+    await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
+    expect(queue.promoteHeldNotionRow).toHaveBeenCalledWith("row-1");
+    err.mockRestore();
+  });
+
+  it("a promotion failure still lets a both-held row's Odoo push run", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
+    queue.getQueueRow.mockResolvedValue({ id: "row-1", status: "held", notion_status: "held" });
+    queue.promoteHeldNotionRow.mockRejectedValue(new Error("db busy"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
+
+    await vi.advanceTimersByTimeAsync(HOLD_MS);
+
+    await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
+    err.mockRestore();
+  });
+
+  it("rehydrate with Odoo absent finds the in-window Notion held row and shows the undo strip", async () => {
+    queue.findHeldRow.mockResolvedValue({ id: "row-9", created_at: Date.now() - 5_000 });
+    const { result } = renderLog();
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(queue.findHeldRow).toHaveBeenCalledWith(null, expect.any(Number));
+  });
+
+  it("Notion-only user never sees Odoo in the trigger toast", async () => {
+    // A failing config read hits the trigger's catch toast.
+    notionConfig.isNotionConfigured.mockRejectedValueOnce(new Error("unreadable"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalled());
+    for (const call of toastMock.error.mock.calls) expect(String(call[0])).not.toMatch(/odoo/i);
+    err.mockRestore();
+  });
+
+  it("Notion-only user never sees Odoo in the undo-blocked message", async () => {
+    queue.cancelHeldRow.mockResolvedValue("none");
+    const { result } = renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    act(() => result.current.onUndo());
+    await waitFor(() => expect(result.current.undoBlockedMessage).not.toBeNull());
+    expect(result.current.undoBlockedMessage).not.toMatch(/odoo/i);
+  });
+
+  it("an isNotionConfigured throw in trigger shows 'This meeting could not be queued.' and inserts no row", async () => {
+    notionConfig.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+
+    await waitFor(() =>
+      expect(toastMock.error).toHaveBeenCalledWith("This meeting could not be queued.")
+    );
+    expect(queue.insertQueueRow).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  it("the scheduler starts only after recovery finished", async () => {
+    const order: string[] = [];
+    let finishRecovery: (n: number) => void = () => {};
+    recovery.runMeetingRecovery.mockImplementation(
+      () =>
+        new Promise<number>((resolve) => {
+          order.push("recovery-started");
+          finishRecovery = (n) => {
+            order.push("recovery-finished");
+            resolve(n);
+          };
+        })
+    );
+    scheduler.ensureNotionScheduler.mockImplementation(() => void order.push("scheduler"));
+    renderLog();
+
+    await waitFor(() => expect(order).toContain("recovery-started"));
+    expect(scheduler.ensureNotionScheduler).not.toHaveBeenCalled();
+    finishRecovery(0);
+
+    await waitFor(() => expect(scheduler.ensureNotionScheduler).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["recovery-started", "recovery-finished", "scheduler"]);
+  });
+});

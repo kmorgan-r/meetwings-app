@@ -69,6 +69,17 @@ const config = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
+// Task 15: the hook now also reads Notion config and starts the Notion
+// scheduler. Both are off here so these suites keep testing the Odoo path.
+vi.mock("@/lib/storage/notion-config.storage", () => ({
+  isNotionConfigured: vi.fn(async () => false),
+  isNotionAutoSendEnabled: vi.fn(() => true),
+}));
+vi.mock("@/lib/notion/scheduler", () => ({
+  ensureNotionScheduler: vi.fn(),
+  isNotionSchedulerStarted: vi.fn(() => false),
+}));
+
 const summarizer = vi.hoisted(() => ({
   ensureMeetingSummary: vi.fn(async () => null),
 }));

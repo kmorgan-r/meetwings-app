@@ -13,6 +13,12 @@ const config = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
+const notion = vi.hoisted(() => ({
+  isNotionConfigured: vi.fn(async () => false),
+  isNotionAutoSendEnabled: vi.fn(() => true),
+}));
+vi.mock("@/lib/storage/notion-config.storage", () => notion);
+
 // Stateful for the same reason useMeetingLog.enqueue.test.tsx's is: setup.ts
 // swaps the global localStorage for an inert stub, so the real module would
 // silently read 0 forever and the skip-watermark case would pass against an
@@ -48,6 +54,8 @@ beforeEach(() => {
   action.readUnloggedMessages.mockResolvedValue([]);
   action.insertQueueRow.mockResolvedValue(true);
   config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
+  notion.isNotionConfigured.mockResolvedValue(false);
+  notion.isNotionAutoSendEnabled.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -273,5 +281,70 @@ describe("runMeetingRecovery", () => {
     // rejection there is an unhandled promise, not an error anyone sees.
     action.readUnloggedMessages.mockRejectedValue(new Error("db down"));
     await expect(runMeetingRecovery()).resolves.toBe(0);
+  });
+});
+
+describe("runMeetingRecovery with Notion", () => {
+  beforeEach(() => {
+    notion.isNotionConfigured.mockResolvedValue(true);
+    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+  });
+
+  it("a Notion-only crash with no Odoo config rescues the meeting as status 'none', notion 'waiting'", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+
+    expect(await runMeetingRecovery()).toBe(1);
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "waiting",
+      targets: [],
+    });
+  });
+
+  it("Notion-only with auto-send off rescues as 'offered'", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.isNotionAutoSendEnabled.mockReturnValue(false);
+
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "none",
+      notionStatus: "offered",
+    });
+  });
+
+  it("Odoo set up: rescued meetings stay unassigned with no Notion lane", async () => {
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: INSTANCE,
+      status: "unassigned",
+      notionStatus: null,
+    });
+  });
+
+  it("Odoo half-filled with Notion on rescues as 'none' + 'offered' under no instance", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "incomplete", missing: ["apiKey"] });
+
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "offered",
+    });
+  });
+
+  it("treats a throw from isNotionConfigured as Notion off", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await runMeetingRecovery()).toBe(0);
+
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    err.mockRestore();
   });
 });
