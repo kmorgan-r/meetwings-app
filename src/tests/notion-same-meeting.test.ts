@@ -47,19 +47,19 @@ const DAY_MS = 86_400_000;
 
 let fakeCounter = 0;
 
-function subTable(dataSourceId: string): SubTable {
+function subTable(dataSourceId: string, dateProp = "Meeting Date"): SubTable {
   return {
     dataSourceId,
     name: "Monday Meetings",
     titleProp: "Name",
-    dateProp: "Meeting Date",
+    dateProp,
     recordedByProp: "Recorded by",
   };
 }
 
 function page(
   pageId: string,
-  date: { start: string; end: string | null },
+  date: { start: string; end: string | number | null },
   extra: { createdTime?: string; createdById?: string; recordedByIds?: string[] } = {},
 ): NotionPage {
   const properties: Record<string, unknown> = {
@@ -98,6 +98,21 @@ function paragraph(text: string, bold = false): NotionBlock {
     type: "paragraph",
     paragraph: {
       rich_text: [{ plain_text: text, ...(bold ? { annotations: { bold: true } } : {}) }],
+    },
+  };
+}
+
+/** A title line with two rich-text items: the first bold, the second not. */
+function halfBoldParagraph(): NotionBlock {
+  fakeCounter += 1;
+  return {
+    id: `fake-block-${fakeCounter}`,
+    type: "paragraph",
+    paragraph: {
+      rich_text: [
+        { plain_text: "Weekly ", annotations: { bold: true } },
+        { plain_text: "sync" },
+      ],
     },
   };
 }
@@ -190,12 +205,18 @@ describe("readCandidates", () => {
     expect(listChildrenCalls).toEqual(["fake-page-1"]);
   });
 
-  it("an all-day page (no T) and a page without end are ignored; listChildren never runs for them", async () => {
+  it("an all-day page (no T), a page with a null end and a page with a numeric end are ignored; listChildren never runs for them", async () => {
     const { client, listChildrenCalls } = fakeNotion({
       pages: {
         "ds-a": [
-          page("fake-page-allday", { start: "2026-11-09", end: null }),
+          // All-day WITH an end: the full day contains our meeting, so only
+          // the "no T" rule can reject this fixture.
+          page("fake-page-allday", { start: "2026-11-09", end: "2026-11-10" }),
           page("fake-page-noend", { start: ISO_START, end: null }),
+          // A non-string end the date parser would still coerce into a valid
+          // far-future date (Date.parse(12345) reads as year 12345): only the
+          // "end must be a string" rule rejects this fixture.
+          page("fake-page-numend", { start: ISO_START, end: 12345 }),
         ],
       },
     });
@@ -215,22 +236,47 @@ describe("readCandidates", () => {
     expect(listChildrenCalls).toEqual([]);
   });
 
-  it("a match in a different sub-table is found", async () => {
+  it("a match in a different sub-table is found, each query on that sub-table's own dateProp", async () => {
     const { client, queries, listChildrenCalls } = fakeNotion({
       pages: {
-        "ds-other": [],
+        // A decoy carrying only a "Meeting Date" column while ds-other is
+        // queried on "Date": the page read must use each sub-table's own prop.
+        "ds-other": [page("fake-decoy-1", { start: ISO_START, end: ISO_END })],
         "ds-monday": [page("fake-page-3", { start: ISO_START, end: ISO_END })],
       },
       bodies: { "fake-page-3": NOTES_BODY },
     });
     const candidates = await readCandidates(
       client,
-      [subTable("ds-other"), subTable("ds-monday")],
+      [subTable("ds-other", "Date"), subTable("ds-monday")],
       START,
       END,
     );
 
-    expect(queries.map((q) => q.dataSourceId)).toEqual(["ds-other", "ds-monday"]);
+    expect(queries).toEqual([
+      {
+        dataSourceId: "ds-other",
+        body: {
+          filter: {
+            and: [
+              { property: "Date", date: { on_or_after: new Date(START - DAY_MS).toISOString() } },
+              { property: "Date", date: { on_or_before: new Date(END + DAY_MS).toISOString() } },
+            ],
+          },
+        },
+      },
+      {
+        dataSourceId: "ds-monday",
+        body: {
+          filter: {
+            and: [
+              { property: "Meeting Date", date: { on_or_after: new Date(START - DAY_MS).toISOString() } },
+              { property: "Meeting Date", date: { on_or_before: new Date(END + DAY_MS).toISOString() } },
+            ],
+          },
+        },
+      },
+    ]);
     expect(candidates).toHaveLength(1);
     expect(candidates[0].pageId).toBe("fake-page-3");
     expect(listChildrenCalls).toEqual(["fake-page-3"]);
@@ -262,6 +308,18 @@ describe("readCandidates", () => {
       pages: { "ds-a": [page("fake-page-5", { start: ISO_START, end: ISO_END })] },
       bodies: {
         "fake-page-5": [heading2("Meeting Notes"), paragraph("someone typed this"), heading3("Launch")],
+      },
+    });
+    const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
+    expect(candidates[0].boldTitle).toBe("");
+    expect(candidates[0].headings).toEqual(["Launch"]);
+  });
+
+  it("a title paragraph with ONE plain item among bold ones → boldTitle \"\"", async () => {
+    const { client } = fakeNotion({
+      pages: { "ds-a": [page("fake-page-6", { start: ISO_START, end: ISO_END })] },
+      bodies: {
+        "fake-page-6": [heading2("Meeting Notes"), halfBoldParagraph(), heading3("Launch")],
       },
     });
     const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
@@ -306,12 +364,12 @@ describe("sameMeeting", () => {
     expect(timeoutMs).toBe(SAME_MEETING_TIMEOUT_MS);
     expect(timeoutMs).toBe(30_000);
     // Both records are present, clearly labelled as data.
-    expect(userMessage).toContain("MEETING A");
-    expect(userMessage).toContain("MEETING B");
-    expect(userMessage).toContain("title: Weekly sync");
-    expect(userMessage).toContain("section headings: Launch");
-    expect(userMessage).toContain("bold title: Weekly sync");
-    expect(userMessage).toContain("headings: Launch, Wrap-up");
+    expect(userMessage).toContain("THIS MEETING: ");
+    expect(userMessage).toContain("OTHER PAGE: ");
+    expect(userMessage).toContain(JSON.stringify({ title: "Weekly sync", headings: ["Launch"] }));
+    expect(userMessage).toContain(
+      JSON.stringify({ title: "Weekly sync", headings: ["Launch", "Wrap-up"] }),
+    );
   });
 
   it("overlapping ranges the AI calls different → not same", async () => {
@@ -363,32 +421,106 @@ describe("sameMeeting", () => {
     expect(caught).not.toBeInstanceOf(NotionError);
   });
 
-  it("SAME_MEETING_PROMPT demands JSON only, treats the records as data, and explains the bar for true", () => {
+  it("a heading containing a newline and \"}\" stays inside its record - JSON.parse of the label strips it cleanly", async () => {
+    const trickyHeading = 'Launch\n} and "more"';
+    const ai = aiOf(async () => '{"same": true}');
+    await sameMeeting(ai, candidate(), {
+      title: "Weekly sync",
+      actionItems: [],
+      sections: [{ heading: trickyHeading, bullets: [] }],
+      practices: [],
+    });
+
+    const [systemPrompt, userMessage] = (ai.ask as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      string,
+      number,
+    ];
+    expect(systemPrompt).toBe(SAME_MEETING_PROMPT);
+    // The newline must be INSIDE the stringified record, not a line break.
+    const records = userMessage.split("\n");
+    expect(records).toHaveLength(2);
+    expect(records[0].startsWith("THIS MEETING: ")).toBe(true);
+    expect(records[1].startsWith("OTHER PAGE: ")).toBe(true);
+    expect(JSON.parse(records[0].slice("THIS MEETING: ".length))).toEqual({
+      title: "Weekly sync",
+      headings: [trickyHeading],
+    });
+    expect(JSON.parse(records[1].slice("OTHER PAGE: ".length))).toEqual({
+      title: "Weekly sync",
+      headings: ["Launch", "Wrap-up"],
+    });
+  });
+
+  it("SAME_MEETING_PROMPT demands JSON only, treats the records as data, judges the seen text, and leans false when unsure", () => {
     expect(SAME_MEETING_PROMPT).toContain('{"same": true|false}');
     expect(SAME_MEETING_PROMPT.toLowerCase()).toContain("data");
     expect(SAME_MEETING_PROMPT.toLowerCase()).toContain("instructions");
     expect(SAME_MEETING_PROMPT.toLowerCase()).toContain("ignored");
     expect(SAME_MEETING_PROMPT).toContain("only");
+    // The model is shown no dates: overlap is settled upstream, so the prompt
+    // must not condition the answer on a day it can never see.
+    expect(SAME_MEETING_PROMPT).not.toContain("same day");
+    expect(SAME_MEETING_PROMPT.toLowerCase()).toContain("overlap");
+    expect(SAME_MEETING_PROMPT).toContain("title");
+    expect(SAME_MEETING_PROMPT).toContain("section headings");
+    expect(SAME_MEETING_PROMPT.toLowerCase()).toContain("unsure");
+    expect(SAME_MEETING_PROMPT).toContain("false");
   });
 });
 
 describe("pickWinner", () => {
-  it("the earliest created_time wins", () => {
+  const EARLY = "2026-11-09T09:10:00.000Z";
+  const LATE = "2026-11-09T09:11:00.000Z";
+
+  it("the earliest created_time wins - even FIRST in the list with the HIGHER id", () => {
     expect(
       pickWinner([
-        { pageId: "fake-p2", createdTime: "2026-11-09T09:11:00.000Z" },
-        { pageId: "fake-p1", createdTime: "2026-11-09T09:10:00.000Z" },
+        { pageId: "fake-p9", createdTime: EARLY },
+        { pageId: "fake-p1", createdTime: LATE },
+      ]),
+    ).toBe("fake-p9");
+  });
+
+  it("the earliest created_time also wins from the END of the list with the lower id", () => {
+    expect(
+      pickWinner([
+        { pageId: "fake-p2", createdTime: LATE },
+        { pageId: "fake-p1", createdTime: EARLY },
       ]),
     ).toBe("fake-p1");
   });
 
-  it("an equal created_time → the lowest pageId by string compare", () => {
+  it("an equal created_time → the lowest pageId, first or last", () => {
+    // Lowest id first:
     expect(
       pickWinner([
-        { pageId: "fake-p9", createdTime: "2026-11-09T09:10:00.000Z" },
-        { pageId: "fake-p3", createdTime: "2026-11-09T09:10:00.000Z" },
+        { pageId: "fake-p2", createdTime: EARLY },
+        { pageId: "fake-p9", createdTime: EARLY },
+      ]),
+    ).toBe("fake-p2");
+    // Lowest id last:
+    expect(
+      pickWinner([
+        { pageId: "fake-p9", createdTime: EARLY },
+        { pageId: "fake-p3", createdTime: EARLY },
       ]),
     ).toBe("fake-p3");
+  });
+
+  it("an unparsable or missing created_time sorts LAST (+Infinity): it never beats a parsable page, in either order", () => {
+    expect(
+      pickWinner([
+        { pageId: "fake-p1", createdTime: "" },
+        { pageId: "fake-p2", createdTime: LATE },
+      ]),
+    ).toBe("fake-p2");
+    expect(
+      pickWinner([
+        { pageId: "fake-p2", createdTime: LATE },
+        { pageId: "fake-p1", createdTime: "" },
+      ]),
+    ).toBe("fake-p2");
   });
 
   it("an empty list throws a plain Error", () => {

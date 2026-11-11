@@ -34,6 +34,27 @@ function dividerBlock(): NotionBlock {
   return { id: `fake-block-${fakeCounter}`, type: "divider", divider: {} };
 }
 
+function heading3Block(text: string): NotionBlock {
+  fakeCounter += 1;
+  return {
+    id: `fake-block-${fakeCounter}`,
+    type: "heading_3",
+    heading_3: { rich_text: [{ plain_text: text }] },
+  };
+}
+
+/** A returned block in Notion's REAL shape: `plain_text`, never `text.content`. */
+function returnedBlock(block: NotionBlockInput): NotionBlock {
+  fakeCounter += 1;
+  const payload = block[block.type] as { rich_text?: { text?: { content?: string } }[] } | undefined;
+  const richText = payload?.rich_text;
+  const out = { id: `fake-block-${fakeCounter}`, type: block.type } as unknown as NotionBlock;
+  (out as unknown as Record<string, unknown>)[block.type] = Array.isArray(richText)
+    ? { rich_text: richText.map((item) => ({ plain_text: item.text?.content ?? "" })) }
+    : {};
+  return out;
+}
+
 function inputText(block: NotionBlockInput): string {
   const payload = block[block.type] as { rich_text?: { text?: { content?: string } }[] };
   return (payload.rich_text ?? []).map((item) => item.text?.content ?? "").join("");
@@ -69,10 +90,7 @@ function fakeClient(
       if (state.appendCount >= failFromAppend) {
         throw new NotionError("NOTION_SERVER");
       }
-      const created: NotionBlock[] = batch.map((block) => {
-        fakeCounter += 1;
-        return { id: `fake-block-${fakeCounter}`, type: block.type, ...block } as NotionBlock;
-      });
+      const created: NotionBlock[] = batch.map(returnedBlock);
       state.children.push(...created);
       return created;
     }),
@@ -82,6 +100,10 @@ function fakeClient(
 
 function onBatchOf(state: FakeState): () => Promise<void> {
   return async () => {
+    // A real claim re-stamp does async work: with the `await onBatch()` in
+    // appendResumable, "onBatch" is recorded before the next append starts -
+    // without it, the next append slips in before this microtask lands.
+    await Promise.resolve();
     state.callLog.push("onBatch");
   };
 }
@@ -154,6 +176,18 @@ describe("appendResumable", () => {
 
     expect(state.appendCount).toBe(0);
     expect(result).toHaveLength(2);
+  });
+
+  it("a same-text last child of a DIFFERENT type → NOTION_PAGE_CHANGED, nothing appended", async () => {
+    // Equal text, different block type: the type check must fire on its own.
+    const existing: NotionBlock[] = ALL_BLOCKS.map((block) => paraBlock(inputText(block)));
+    existing[existing.length - 1] = heading3Block("line-250");
+    const { client, state } = fakeClient(existing);
+    const outcome = await appendResumable(client, PARENT, ALL_BLOCKS, onBatchOf(state))
+      .then(() => null, (thrown: unknown) => thrown);
+    expect(outcome).toBeInstanceOf(NotionError);
+    expect((outcome as NotionError).code).toBe("NOTION_PAGE_CHANGED");
+    expect(state.appendCount).toBe(0);
   });
 
   it("a last child that doesn't match → NOTION_PAGE_CHANGED, nothing appended", async () => {
