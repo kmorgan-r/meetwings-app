@@ -203,6 +203,11 @@ export async function addPractices(
     throw new NotionError("NOTION_INVALID");
   }
 
+  // The samePage drop itself is also covered by `known` below, which
+  // normalises every row regardless of link. The set's real job is the
+  // existing_rules filter: keeping this page's own rows out of what the model
+  // sees, so a retry after a lost claim judges the remaining candidates
+  // exactly as the first attempt did (task-12-worker.md ruling 5).
   const samePage = new Set(
     db.rules
       .filter((row) => row.meetingLink === pageUrl)

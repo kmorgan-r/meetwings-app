@@ -108,6 +108,8 @@ function fakeNotionClient(opts: FakeClientOpts = {}): {
         return opts.queryPages ?? [];
       },
       createPage: async (body: object) => {
+        // Records on a later tick, like the real client's HTTP call.
+        await Promise.resolve();
         record("createPage", body);
         const cast = body as { parent?: unknown; properties?: Record<string, unknown> };
         creations.push({ parent: cast.parent, properties: cast.properties ?? {} });
@@ -196,7 +198,7 @@ function knowledgeRow(
 
 describe("readKnowledge", () => {
   it("returns the exact KnowledgeDb from the first data source", async () => {
-    const { client } = fakeNotionClient({
+    const { client, calls } = fakeNotionClient({
       dataSources: [
         { id: DATA_SOURCE_ID, name: "Team Knowledge" },
         { id: "ds-second", name: "Other" },
@@ -210,6 +212,9 @@ describe("readKnowledge", () => {
       ],
     });
     const db = await readKnowledge(client, DB_ID);
+    // No Status filter: every row comes back, or accepted rules would stop
+    // deduping future sends.
+    expect(calls).toContainEqual({ method: "queryAll", args: [DATA_SOURCE_ID, {}] });
     expect(db).toEqual({
       dataSourceId: DATA_SOURCE_ID,
       topicOptions: ["Reports", "Process"],
@@ -391,6 +396,34 @@ describe("addPractices", () => {
     expect(onRow).toHaveBeenCalledOnce();
   });
 
+  it("candidates that repeat an earlier candidate in the list are dropped before the model", async () => {
+    const { client, creations } = fakeNotionClient();
+    const { ai, ask } = fakeAi(() => okReply([{ index: 0, duplicate: false, topic: null }]));
+    const onRow = recordingOnRow();
+    await addPractices(
+      client,
+      ai,
+      knowledgeDb(),
+      [
+        practice("Standups are recorded daily", null),
+        // Same practice after case, whitespace and trailing-period changes.
+        practice("  STANDUPS  are recorded daily.  ", null),
+      ],
+      PAGE_URL,
+      onRow,
+    );
+    // The model sees only the first spelling, under one index.
+    const payload = askUserMessage(ask);
+    expect(payload.candidates).toEqual([
+      { index: 0, rule: "Standups are recorded daily", topic: null },
+    ]);
+    expect(creations).toHaveLength(1);
+    expect(creations[0]?.properties.Rule).toEqual({
+      title: [{ type: "text", text: { content: "Standups are recorded daily" } }],
+    });
+    expect(onRow).toHaveBeenCalledOnce();
+  });
+
   it("Status is always { status: { name: 'Proposed' } }", async () => {
     const { client, creations } = fakeNotionClient();
     const { ai } = fakeAi(() => okReply([{ index: 0, duplicate: false, topic: "Reports" }]));
@@ -448,7 +481,10 @@ describe("addPractices", () => {
         { index: 1, duplicate: false, topic: null },
       ]),
     );
+    // both fakes record on a later tick, like real async calls, so this pins
+    // the true sequencing: each onRow finishes before the next createPage.
     const onRow = vi.fn(async () => {
+      await Promise.resolve();
       order.push("onRow");
     });
     await addPractices(
@@ -462,6 +498,33 @@ describe("addPractices", () => {
     expect(creations).toHaveLength(2);
     expect(onRow).toHaveBeenCalledTimes(2);
     expect(order).toEqual(["createPage", "onRow", "createPage", "onRow"]);
+  });
+
+  it("a throwing onRow stops the loop and propagates, with no further createPage", async () => {
+    const { client, creations, calls } = fakeNotionClient();
+    const { ai } = fakeAi(() =>
+      okReply([
+        { index: 0, duplicate: false, topic: "Reports" },
+        { index: 1, duplicate: false, topic: null },
+      ]),
+    );
+    const rowError = new Error("row lost");
+    const onRow = vi.fn(async () => {
+      throw rowError;
+    });
+    await expect(
+      addPractices(
+        client,
+        ai,
+        knowledgeDb(),
+        [practice("Weekly reports go out on Friday", "Reports"), practice("Standups are recorded daily", "Process")],
+        PAGE_URL,
+        onRow,
+      ),
+    ).rejects.toBe(rowError);
+    expect(calls.filter((call) => call.method === "createPage")).toHaveLength(1);
+    expect(creations).toHaveLength(1);
+    expect(onRow).toHaveBeenCalledOnce();
   });
 
   it("repeated indices keep the first valid entry and out-of-range indices are ignored", async () => {
@@ -505,7 +568,16 @@ describe("addPractices", () => {
   });
 
   it("an unparsable or shapeless reply → PRACTICES_UNDECIDED and nothing written", async () => {
-    for (const reply of ["I cannot read that file.", '{"verdicts":[{"index":0}]}', '{"results":[{"index":0}]}']) {
+    for (const reply of [
+      "I cannot read that file.",
+      '{"verdicts":[{"index":0}]}',
+      '{"results":[{"index":0}]}',
+      // A non-string, non-null topic is not a valid entry, so the index is
+      // unjudged rather than written with a bogus topic.
+      '{"results":[{"index":0,"duplicate":false,"topic":5}]}',
+      // Same when `duplicate` is not a boolean.
+      '{"results":[{"index":0,"duplicate":"false","topic":null}]}',
+    ]) {
       const { client, creations } = fakeNotionClient();
       const { ai } = fakeAi(() => reply);
       await expect(
@@ -542,25 +614,22 @@ describe("addPractices", () => {
 
   it("a plain Error from ask propagates unchanged", async () => {
     const { client, creations } = fakeNotionClient();
+    const err = new Error("provider socket closed");
     const { ai } = fakeAi(() => {
-      throw new Error("provider socket closed");
+      throw err;
     });
-    let caught: unknown;
-    try {
-      await addPractices(
+    // Identity, not just message: a rewrap like new Error(e.message) must fail.
+    await expect(
+      addPractices(
         client,
         ai,
         knowledgeDb(),
         [practice("Standups are recorded daily", null)],
         PAGE_URL,
         recordingOnRow(),
-      );
-    } catch (thrown) {
-      caught = thrown;
-    }
-    expect(caught).toBeInstanceOf(Error);
-    expect(caught).not.toBeInstanceOf(NotionError);
-    expect((caught as Error).message).toBe("provider socket closed");
+      ),
+    ).rejects.toBe(err);
+    expect(err).not.toBeInstanceOf(NotionError);
     expect(creations).toEqual([]);
   });
 
