@@ -618,6 +618,7 @@ export async function enqueueConversation(
       transcriptEndAt: slice.endAt,
       meetingStartedAt: slice.startAt,
       status: "unassigned",
+      notionStatus: null,
       createdAt: now,
     });
     rowIds.push(id);

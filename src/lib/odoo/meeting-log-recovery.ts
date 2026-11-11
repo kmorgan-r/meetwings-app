@@ -156,6 +156,7 @@ export async function runMeetingRecovery(): Promise<number> {
             transcriptEndAt: slice.endAt,
             meetingStartedAt: slice.startAt,
             status: "unassigned",
+            notionStatus: null,
             createdAt: Date.now(),
           });
           // `false` is ON CONFLICT(session_key) DO NOTHING - the row was

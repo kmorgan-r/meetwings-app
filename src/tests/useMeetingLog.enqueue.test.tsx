@@ -29,7 +29,7 @@ const action = vi.hoisted(() => ({
   insertQueueRow: vi.fn(async () => true),
   readMeetingMessages: vi.fn(async () => []),
   findHeldRow: vi.fn(async () => null),
-  cancelHeldRow: vi.fn(async () => true),
+  cancelHeldRow: vi.fn(async () => "all"),
   claimRow: vi.fn(async () => true),
   getQueueRow: vi.fn(async () => null),
   pruneTranscripts: vi.fn(async () => 0),
@@ -218,7 +218,7 @@ beforeEach(() => {
   action.insertQueueRow.mockResolvedValue(true);
   action.readMeetingMessages.mockResolvedValue([]);
   action.findHeldRow.mockResolvedValue(null);
-  action.cancelHeldRow.mockResolvedValue(true);
+  action.cancelHeldRow.mockResolvedValue("all");
   action.claimRow.mockResolvedValue(true);
   action.getQueueRow.mockResolvedValue(null);
   action.pruneTranscripts.mockResolvedValue(0);

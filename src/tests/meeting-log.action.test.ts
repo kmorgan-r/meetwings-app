@@ -70,6 +70,7 @@ const spyOnSelect = () => {
 };
 
 import {
+  NOTION_LANE_OPEN,
   QUEUE_SQL,
   assignQueueRow,
   cancelHeldRow,
@@ -90,6 +91,8 @@ import {
   listConversationBadgeRows,
   listTargets,
   markSent,
+  promoteHeldNotionRow,
+  promoteStaleHeldNotionRows,
   pruneTranscripts,
   readMeetingMessages,
   readUnloggedMessages,
@@ -121,6 +124,7 @@ function newRow(over: Record<string, unknown> = {}) {
     transcriptEndAt: 2000,
     meetingStartedAt: 1000,
     status: "held",
+    notionStatus: null,
     createdAt: NOW,
     ...over,
   } as Parameters<typeof insertQueueRow>[0];
@@ -134,6 +138,7 @@ function seed(over: Record<string, unknown>) {
     transcript_end_at: 2, attachment_id: null, message_id: null,
     status: "pending", attempts: 0, claimed_at: null, last_error: null,
     last_error_code: null, meeting_started_at: 1, created_at: NOW, sent_at: null,
+    notion_status: null, notion_send_id: null,
     ...over,
   };
   db.run(
@@ -262,7 +267,11 @@ describe("no JS transactions", () => {
     // SELECTED_TARGET_SQL (odoo-contacts.action.ts, Task 4) is scanned
     // alongside QUEUE_SQL: it is a sibling exported statement object, and this
     // is the only place either one gets checked.
-    for (const [name, sql] of Object.entries({ ...QUEUE_SQL, ...SELECTED_TARGET_SQL })) {
+    // Task 3 appends NOTION_SQL to NOTION_STATEMENTS.
+    const NOTION_STATEMENTS: Record<string, string> = { NOTION_LANE_OPEN };
+    for (const [name, sql] of Object.entries({
+      ...QUEUE_SQL, ...SELECTED_TARGET_SQL, ...NOTION_STATEMENTS,
+    })) {
       expect(sql, `${name} must not open a transaction`).not.toMatch(/\bBEGIN\b/i);
       expect(sql, `${name} must not commit`).not.toMatch(/\bCOMMIT\b/i);
     }
@@ -432,7 +441,7 @@ describe("claimRow", () => {
 describe("cancelHeldRow", () => {
   it("cancels a held row", async () => {
     await insertQueueRow(newRow());
-    expect(await cancelHeldRow("row-1")).toBe(true);
+    expect(await cancelHeldRow("row-1")).toBe("all");
     expect(await getQueueRow("row-1")).toMatchObject({ status: "cancelled" });
   });
 
@@ -441,7 +450,7 @@ describe("cancelHeldRow", () => {
     // clicked Undo and the meeting is posting anyway.
     await insertQueueRow(newRow());
     await claimRow("row-1", NOW);
-    expect(await cancelHeldRow("row-1")).toBe(false);
+    expect(await cancelHeldRow("row-1")).toBe("none");
   });
 });
 
@@ -1616,5 +1625,108 @@ describe("migration 14 backfill", () => {
       rows(db, "SELECT row_id, status FROM meeting_log_targets").map((r) => [r.row_id, r.status]),
     );
     expect(byRow).toEqual({ a: "sent", b: "failed", c: "pending" });
+  });
+});
+
+describe("the Notion lane on queue rows", () => {
+  const nrow = async (id: string) =>
+    (await rawSelect("SELECT status, notion_status, transcript FROM meeting_log_queue WHERE id = ?", [id]))[0];
+  const seedSend = (id: string, status: string) =>
+    rawExecute(
+      `INSERT INTO notion_sends (id, status, span_start_at, span_end_at, summary_json, created_at)
+       VALUES (?, ?, 1, 2, '{}', ?)`,
+      [id, status, NOW - RETENTION_MS - 1]
+    );
+  const OLD = NOW - RETENTION_MS - 1;
+
+  it("undo cancels a Notion-only held row (status 'none')", async () => {
+    await insertQueueRow(newRow({ status: "none", notionStatus: "held" }));
+    expect(await cancelHeldRow("row-1")).toBe("all");
+    expect(await nrow("row-1")).toMatchObject({ status: "none", notion_status: "cancelled" });
+  });
+
+  it("undo cancels both lanes of a both-held row in one call", async () => {
+    await insertQueueRow(newRow({ notionStatus: "held" }));
+    expect(await cancelHeldRow("row-1")).toBe("all");
+    expect(await nrow("row-1")).toMatchObject({ status: "cancelled", notion_status: "cancelled" });
+  });
+
+  it("undo after the Notion lane was promoted reports partial", async () => {
+    seed({ id: "r", session_key: "r", status: "held", notion_status: "waiting" });
+    expect(await cancelHeldRow("r")).toBe("partial");
+    expect(await nrow("r")).toMatchObject({ status: "cancelled", notion_status: "waiting" });
+  });
+
+  it("deleteRow and deleteTerminalRow still delete an Odoo-only row (notion_status NULL)", async () => {
+    seed({ id: "a", session_key: "a", status: "failed" });
+    seed({ id: "b", session_key: "b", status: "sent" });
+    expect(await deleteQueueRow("a")).toBe(true);
+    expect(await deleteTerminalQueueRow("b")).toBe(true);
+  });
+
+  it("'none' rows are invisible to getQueueCounts, selectSweepable, countActionableQueued and listActionableRows", async () => {
+    seed({ id: "n1", session_key: "n1", status: "none", instance: "", notion_status: "waiting" });
+    seed({ id: "n2", session_key: "n2", status: "none", instance: INSTANCE, notion_status: "waiting" });
+    expect(await getQueueCounts(INSTANCE)).toMatchObject({
+      waiting: 0, needsAttention: 0, unassigned: 0, otherInstance: 0,
+    });
+    expect(await selectSweepable(INSTANCE, NOW)).toEqual([]);
+    expect(await countActionableQueued()).toBe(0);
+    expect(await listActionableRows(INSTANCE)).toEqual([]);
+  });
+
+  it("findHeldRow(null, now) finds an in-window Notion held row", async () => {
+    seed({ id: "n", session_key: "n", status: "none", instance: "", notion_status: "held", created_at: NOW - 1000 });
+    expect((await findHeldRow(null, NOW))?.id).toBe("n");
+  });
+
+  it("findHeldRow(instance, now) still ignores other-instance Odoo held rows", async () => {
+    seed({ id: "o", session_key: "o", status: "held", instance: OTHER, created_at: NOW - 1000 });
+    expect(await findHeldRow(INSTANCE, NOW)).toBeNull();
+    expect(await findHeldRow(null, NOW)).toBeNull();
+  });
+
+  it("promoteStaleHeldNotionRows promotes only rows older than the cutoff", async () => {
+    seed({ id: "old", session_key: "old", status: "none", notion_status: "held", created_at: 100 });
+    seed({ id: "new", session_key: "new", status: "none", notion_status: "held", created_at: 900 });
+    expect(await promoteStaleHeldNotionRows(500)).toBe(1);
+    expect((await nrow("old")).notion_status).toBe("waiting");
+    expect((await nrow("new")).notion_status).toBe("held");
+    expect(await promoteHeldNotionRow("new")).toBe(true);
+    expect(await promoteHeldNotionRow("new")).toBe(false);
+  });
+
+  it("deleteRow refuses a row whose Notion lane is waiting", async () => {
+    seed({ id: "r", session_key: "r", status: "failed", notion_status: "waiting", transcript: "keep" });
+    expect(await deleteQueueRow("r")).toBe(false);
+    expect((await nrow("r")).transcript).toBe("keep");
+  });
+
+  it("deleteTerminalRow refuses an Odoo-sent row joined to a send in retry", async () => {
+    await seedSend("s1", "retry");
+    seed({ id: "r", session_key: "r", status: "sent", notion_status: "joined", notion_send_id: "s1", transcript: "keep" });
+    expect(await deleteTerminalQueueRow("r")).toBe(false);
+    expect((await nrow("r")).transcript).toBe("keep");
+  });
+
+  it("prune never blanks an Odoo-sent row whose Notion lane is waiting", async () => {
+    seed({ id: "r", session_key: "r", status: "sent", notion_status: "waiting", created_at: OLD });
+    expect(await pruneTranscripts(NOW)).toBe(0);
+    expect((await nrow("r")).transcript).toBe("t");
+  });
+
+  it("prune blanks a 'none' row joined to a sent send, and nulls that send's summary_json", async () => {
+    await seedSend("s1", "sent");
+    seed({ id: "r", session_key: "r", status: "none", notion_status: "joined", notion_send_id: "s1", created_at: OLD });
+    expect(await pruneTranscripts(NOW)).toBe(2);
+    expect((await nrow("r")).transcript).toBe("");
+    const sends = await rawSelect("SELECT summary_json FROM notion_sends WHERE id = 's1'");
+    expect(sends[0].summary_json).toBeNull();
+  });
+
+  it("recordErrorOnUnsent never stamps a 'none' row (Notion-only user, Odoo absent)", async () => {
+    seed({ id: "n", session_key: "n", status: "none", notion_status: "waiting" });
+    await recordErrorOnUnsent("X", "y");
+    expect((await readRow("n")).last_error_code).toBeNull();
   });
 });

@@ -380,6 +380,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         transcriptEndAt: slice.endAt,
         meetingStartedAt: slice.startAt,
         status: targets.length ? "held" : "unassigned",
+        notionStatus: null,
         createdAt: Date.now(),
       });
 
@@ -645,7 +646,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // CAS. Whichever writer wins, the loser's rowsAffected is 0 - and the
         // loser here is the USER, who clicked Undo and whose meeting posts
         // anyway. Saying so is the whole point of the window.
-        if (await cancelHeldRow(rowId)) {
+        if ((await cancelHeldRow(rowId)) === "all") {
           // Only if nothing newer has taken the ref since this undo started -
           // a hold that started while this cancel was in flight owns it now,
           // and clearing unconditionally would lie about THAT row's state.
