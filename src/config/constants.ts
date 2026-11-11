@@ -79,6 +79,11 @@ export const STORAGE_KEYS = {
   // Per-provider configuration storage (remembers API keys when switching providers)
   AI_PROVIDER_CONFIGS: "ai_provider_configs",
   STT_PROVIDER_CONFIGS: "stt_provider_configs",
+
+  // Notion meeting notes (see notion-config.storage.ts). NOTION_PICKED selects
+  // which queued meeting the Notion panel is focused on.
+  NOTION_AUTO_SEND: "notion_auto_send",
+  NOTION_PICKED: "notion_picked",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the
