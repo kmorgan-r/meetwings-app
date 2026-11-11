@@ -54,7 +54,7 @@ export function splitRichText(text: string, max = 2000): string[] {
  * The one rich-text builder every text field in this file goes through: the
  * 2,000-character cap per item, and an optional bold annotation.
  */
-function richText(text: string, bold = false): RichTextItem[] {
+export function richText(text: string, bold = false): RichTextItem[] {
   return splitRichText(text).map((content) => ({
     type: "text",
     text: { content },
