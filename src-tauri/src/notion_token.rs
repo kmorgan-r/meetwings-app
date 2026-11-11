@@ -53,7 +53,9 @@ pub fn notion_token_set(token: String) -> Result<(), String> {
 #[tauri::command(async)]
 pub fn notion_token_set(token: String) -> Result<(), String> {
     let t = clean(&token)?;
-    entry()?.set_password(t).map_err(|_| NO_KEYCHAIN.to_string())
+    entry()?
+        .set_password(t)
+        .map_err(|_| NO_KEYCHAIN.to_string())
 }
 
 #[cfg(target_os = "linux")]

@@ -415,16 +415,20 @@ export interface SummaryProviderSetting {
 export async function loadSummaryProvider(): Promise<SummaryProviderSetting | null> {
   const raw = await secureGet(SUMMARY_PROVIDER_KEY);
   if (!raw) return null;
-  let v: any;
+  let parsed: unknown;
   try {
-    v = JSON.parse(raw);
+    parsed = JSON.parse(raw);
   } catch {
     throw new Error("SUMMARY_PROVIDER_UNREADABLE");
   }
-  if (typeof v?.provider !== "string" || !v.provider || !v.variables || typeof v.variables !== "object") {
+  const v = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
+    provider?: unknown;
+    variables?: unknown;
+  };
+  if (typeof v.provider !== "string" || !v.provider || !v.variables || typeof v.variables !== "object") {
     throw new Error("SUMMARY_PROVIDER_UNREADABLE");
   }
-  return { provider: v.provider, variables: v.variables };
+  return { provider: v.provider, variables: v.variables as Record<string, string> };
 }
 
 /** null clears the override. The API key goes to the secure store only. */
