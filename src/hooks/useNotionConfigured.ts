@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
 import {
@@ -13,19 +13,26 @@ import { notionErrorText } from "@/lib/notion/errors";
  * overlay). A throw KEEPS the previous value: null on the first read, the last
  * good one afterwards. Never an unhandled rejection.
  */
-function useReread<T>(read: () => Promise<T>, eventName: string): T | null {
+function useReread<T>(
+  read: () => Promise<T>,
+  eventName: string,
+  onError: (thrown: unknown) => void,
+): T | null {
   const [value, setValue] = useState<T | null>(null);
+  // Only the latest read may set state: a slow earlier read must not overwrite.
+  const latest = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     const reread = () => {
+      const id = ++latest.current;
       void read().then(
         (next) => {
-          if (!cancelled) setValue(next);
+          if (!cancelled && id === latest.current) setValue(next);
         },
         (thrown) => {
-          // Logs the code only; the previous value stays.
-          notionErrorText(thrown);
+          // The previous value stays.
+          onError(thrown);
         },
       );
     };
@@ -41,20 +48,27 @@ function useReread<T>(read: () => Promise<T>, eventName: string): T | null {
       window.removeEventListener("focus", reread);
       un?.();
     };
-  }, [read, eventName]);
+  }, [read, eventName, onError]);
 
   return value;
 }
 
 const readNotion = (): Promise<boolean> => isNotionConfigured();
+// Module-scope so the effect's deps stay stable. Name only: never the message.
+const logNotion = (thrown: unknown): void => {
+  notionErrorText(thrown);
+};
+const logOdoo = (thrown: unknown): void => {
+  console.error("[odoo] setup unreadable:", thrown instanceof Error ? thrown.name : typeof thrown);
+};
 const readOdoo = async () => (await loadOdooConfigState()).state;
 
 /** `null` while loading (or while every read has failed). */
 export function useNotionConfigured(): boolean | null {
-  return useReread(readNotion, NOTION_CONFIG_CHANGED_EVENT);
+  return useReread(readNotion, NOTION_CONFIG_CHANGED_EVENT, logNotion);
 }
 
 /** The overlay has no other Odoo-setup reader; same pattern as above. */
 export function useOdooSetupState(): "absent" | "incomplete" | "complete" | null {
-  return useReread(readOdoo, "odoo-instance-changed");
+  return useReread(readOdoo, "odoo-instance-changed", logOdoo);
 }

@@ -99,7 +99,12 @@ vi.mock("@/lib/storage/odoo-verification.storage", () => verification);
 // repo's own settings-page test does exactly this stub; see
 // src/tests/settings-page.meeting-auto-record.test.tsx:21-23.
 vi.mock("@/layouts", () => ({
-  PageLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  PageLayout: ({ children, description }: { children: React.ReactNode; description?: string }) => (
+    <div>
+      <p data-testid="page-description">{description}</p>
+      {children}
+    </div>
+  ),
 }));
 
 // The Notion card's Check pulls in the Notion queue, which needs more of the
@@ -109,11 +114,9 @@ vi.mock("@/lib/notion/check", () => ({ checkNotionSetup: vi.fn() }));
 // The Notion-only state is steered per test; null (still loading) is today's page.
 const setupHooks = vi.hoisted(() => ({
   notion: null as boolean | null,
-  odoo: null as "absent" | "incomplete" | "complete" | null,
 }));
 vi.mock("@/hooks/useNotionConfigured", () => ({
   useNotionConfigured: () => setupHooks.notion,
-  useOdooSetupState: () => setupHooks.odoo,
 }));
 
 import { odooError, OdooError } from "@/lib/odoo/errors";
@@ -136,7 +139,6 @@ const SYNCED_3 = { ran: true, changed: 3, fetched: 3, skipped: 0, clampSkipped: 
 
 beforeEach(() => {
   setupHooks.notion = null;
-  setupHooks.odoo = null;
   // clearAllMocks wipes the CALL LOG and leaves implementations, so a
   // mockResolvedValue / mockRejectedValue set by one test is still in force for
   // every test after it. Re-establish the defaults explicitly rather than reach
@@ -1136,10 +1138,13 @@ describe("the auto-select switch", () => {
 describe("Notion-only Integrations page", () => {
   it("Notion-only: Integrations page shows no 'Odoo' text until 'Show other integrations' is pressed", async () => {
     setupHooks.notion = true;
-    setupHooks.odoo = "absent";
+    storage.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
     const { container } = renderPage();
 
     expect(await screen.findByTestId("notion-card")).toBeInTheDocument();
+    expect(screen.getByTestId("page-description")).toHaveTextContent(
+      "Connect Notion to send your meeting notes to your team.",
+    );
     expect(container.textContent?.toLowerCase()).not.toContain("odoo");
     expect(screen.queryByText("Calendar")).toBeNull();
     expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
@@ -1152,9 +1157,9 @@ describe("Notion-only Integrations page", () => {
 
   it("keeps the full page, and the Odoo description, when Odoo is set up", async () => {
     setupHooks.notion = true;
-    setupHooks.odoo = "complete";
     renderPage();
     expect(await screen.findByRole("button", { name: "Test connection" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show other integrations" })).toBeNull();
+    expect(screen.getByTestId("page-description")).toHaveTextContent(/^Connect Odoo to pick contacts/);
   });
 });

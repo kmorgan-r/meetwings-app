@@ -89,7 +89,7 @@ describe("NotionSettingsCard", () => {
     await renderCard();
     expect(screen.getByLabelText("Notion token")).toBeDisabled();
     expect(
-      screen.getByText(/can't use the system keychain for the Notion token/i),
+      screen.getByText(/This computer has no system keychain/),
     ).toBeInTheDocument();
   });
 
@@ -202,6 +202,61 @@ describe("NotionSettingsCard", () => {
     await waitFor(() => expect(h.store.get(SECURE_NOTION_CONFIG_KEY)).toBeDefined());
     expect(h.store.get(SECURE_NOTION_CONFIG_KEY)).not.toContain(TOKEN);
     expect(JSON.stringify([...h.mem])).not.toContain(TOKEN);
+  });
+
+  it("Remove token clears the keychain, emits, and re-reads the stored state", async () => {
+    h.keychain.token = TOKEN;
+    await renderCard();
+    await userEvent.click(screen.getByRole("button", { name: "Remove token" }));
+    await waitFor(() => expect(h.emit).toHaveBeenCalledWith("notion-config-changed"));
+    expect(h.keychain.token).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Remove token" })).toBeNull());
+  });
+
+  it("shows 'Saved in your system keychain' once after a token save", async () => {
+    await renderCard();
+    await userEvent.type(screen.getByLabelText("Notion token"), TOKEN);
+    await userEvent.click(screen.getByRole("button", { name: "Save token" }));
+    await screen.findByText("Remove token");
+    expect(screen.getAllByText("Saved in your system keychain")).toHaveLength(1);
+  });
+
+  it("explains the Linux case without telling the user to paste into the disabled field", async () => {
+    h.keychain.available = false;
+    await renderCard();
+    expect(
+      screen.getByText(
+        "This computer has no system keychain Meetwings can use, so the Notion token can't be saved here.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/paste the token again/i)).toBeNull();
+  });
+
+  it("the Your name help line says it is the recorder", async () => {
+    await renderCard();
+    expect(
+      screen.getByText("Shown as the recorder on each page. Leave empty to use your Notion name."),
+    ).toBeInTheDocument();
+  });
+
+  it("editing a database link clears the Check result but editing Your name does not", async () => {
+    h.keychain.token = TOKEN;
+    h.checkNotionSetup.mockResolvedValue({
+      ok: true,
+      mapping: "Monday, other days",
+      recorder: "Ada",
+      warnings: [],
+      weekdays: ["monday"],
+    });
+    await renderCard();
+    await userEvent.click(screen.getByRole("button", { name: "Check" }));
+    await screen.findByLabelText(/Monday: usual start time/);
+
+    await userEvent.type(screen.getByLabelText("Your name"), "K");
+    expect(screen.getByLabelText(/Monday: usual start time/)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("Meetings database link"), "x");
+    expect(screen.queryByLabelText(/Monday: usual start time/)).toBeNull();
   });
 
   it("the auto-send switch saves immediately and emits", async () => {

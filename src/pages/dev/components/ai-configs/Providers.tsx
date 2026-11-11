@@ -23,7 +23,8 @@ export const Providers = ({
   selectedAIProvider,
   onSetSelectedAIProvider,
   variables,
-}: UseSettingsReturn) => {
+  showVerification = true,
+}: UseSettingsReturn & { showVerification?: boolean }) => {
   const [localSelectedProvider, setLocalSelectedProvider] =
     useState<ResultJSON | null>(null);
   const [, forceUpdate] = useState({});
@@ -299,7 +300,7 @@ export const Providers = ({
       </div>
 
       {/* Verification Checkbox */}
-      {selectedAIProvider?.provider && (
+      {showVerification && selectedAIProvider?.provider && (
         <ProviderVerification
           type="ai"
           provider={currentProvider}

@@ -71,4 +71,22 @@ describe("useNotionConfigured", () => {
     expect(h.configured).toHaveBeenCalledTimes(2);
     spy.mockRestore();
   });
+
+  it("only the latest read may set state: a slow first read cannot overwrite a fast second one", async () => {
+    let resolveSlow: (v: boolean) => void = () => {};
+    h.configured.mockImplementationOnce(() => new Promise<boolean>((r) => (resolveSlow = r)));
+    const { result } = renderHook(() => useNotionConfigured());
+    await waitFor(() => expect(h.handlers.has("notion-config-changed")).toBe(true));
+
+    h.configured.mockResolvedValue(true);
+    await act(async () => {
+      h.handlers.get("notion-config-changed")!();
+    });
+    await waitFor(() => expect(result.current).toBe(true));
+
+    await act(async () => {
+      resolveSlow(false);
+    });
+    expect(result.current).toBe(true);
+  });
 });

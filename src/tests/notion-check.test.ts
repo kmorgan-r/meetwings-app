@@ -175,6 +175,17 @@ describe("checkNotionSetup", () => {
     spy.mockRestore();
   });
 
+  it("arms the redactor before the first client call", async () => {
+    wire({});
+    let armedAtFirstCall = -1;
+    h.client.me.mockImplementationOnce(async () => {
+      armedAtFirstCall = h.arm.mock.calls.length;
+      return { id: "bot", ownerUserId: null };
+    });
+    await checkNotionSetup("secret-token", cfg());
+    expect(armedAtFirstCall).toBe(1);
+  });
+
   it("still succeeds when the requeue throws", async () => {
     wire({});
     h.requeueAuthFailures.mockRejectedValueOnce(new Error("db down"));

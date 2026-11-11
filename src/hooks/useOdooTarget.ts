@@ -135,6 +135,9 @@ function isNotConfigured(err: unknown): boolean {
   return err instanceof OdooError && err.code === "ODOO_NOT_CONFIGURED";
 }
 
+/** Everything the picker takes from this hook; the Notion row comes from completion/index.tsx. */
+type OdooPickerProps = Omit<ContactPickerProps, "notionAvailable" | "notionSelected" | "onToggleNotion">;
+
 /**
  * Owns the Odoo selection for <Completion />.
  *
@@ -146,9 +149,6 @@ function isNotConfigured(err: unknown): boolean {
  * vanish silently and slice 2 would file the meeting as unassigned while the
  * user believes they picked someone.
  */
-/** Everything the picker takes from this hook; the Notion row comes from completion/index.tsx. */
-type OdooPickerProps = Omit<ContactPickerProps, "notionAvailable" | "notionSelected" | "onToggleNotion">;
-
 export interface UseOdooTargetReturn {
   /**
    * The single-select flow's own ref, used ONLY by this hook's internal

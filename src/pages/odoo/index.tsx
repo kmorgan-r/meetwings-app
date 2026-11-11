@@ -6,7 +6,7 @@ import { CheckCircle2, Circle, XCircle } from "lucide-react";
 import { Button, Input, Label, StatusIcon, Switch } from "@/components";
 import { isCalendarAutoSelectEnabled, setCalendarAutoSelectEnabled } from "@/lib/calendar/auto-select";
 import { PageLayout } from "@/layouts";
-import { useNotionConfigured, useOdooSetupState } from "@/hooks/useNotionConfigured";
+import { useNotionConfigured } from "@/hooks/useNotionConfigured";
 import { NotionSettingsCard } from "./components/NotionSettingsCard";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
@@ -373,7 +373,8 @@ export default function OdooSettings() {
 
   // Notion alone: everything Odoo- or calendar-related waits behind a button.
   const notionConfigured = useNotionConfigured();
-  const odooSetup = useOdooSetupState();
+  // Filled by the Odoo state read the queue effect below already does.
+  const [odooSetup, setOdooSetup] = useState<"absent" | "incomplete" | "complete" | null>(null);
   const [showOther, setShowOther] = useState(false);
   const notionOnly = notionConfigured === true && odooSetup === "absent";
   const hideOther = notionOnly && !showOther;
@@ -457,6 +458,7 @@ export default function OdooSettings() {
         // renders nothing. loadOdooConfigState returns a state instead of
         // throwing.
         const state = await loadOdooConfigState();
+        if (!cancelled) setOdooSetup(state.state);
         if (state.state === "complete") {
           const instance = instanceFingerprint(state.config.url, state.config.db);
           const counts = await getQueueCounts(instance);

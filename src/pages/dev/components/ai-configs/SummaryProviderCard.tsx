@@ -21,6 +21,8 @@ export const SummaryProviderCard = () => {
   const { allAiProviders } = useApp();
   const [selected, setSelected] = useState<SummaryProviderSetting>(NONE);
   const [saveFailed, setSaveFailed] = useState(false);
+  const [unreadable, setUnreadable] = useState(false);
+  const [incomplete, setIncomplete] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,7 +31,8 @@ export const SummaryProviderCard = () => {
         if (!cancelled && loaded) setSelected(loaded);
       },
       () => {
-        // An unreadable stored blob shows as empty; the next change overwrites it.
+        // Not "empty": the user is told, and Clear resets it.
+        if (!cancelled) setUnreadable(true);
       },
     );
     return () => {
@@ -44,12 +47,22 @@ export const SummaryProviderCard = () => {
 
   const persist = (next: SummaryProviderSetting | null) => {
     setSaveFailed(false);
-    saveSummaryProvider(next).catch(() => setSaveFailed(true));
+    saveSummaryProvider(next).then(
+      () => {
+        if (next === null) setUnreadable(false);
+      },
+      () => setSaveFailed(true),
+    );
   };
 
   const onChange = (next: SummaryProviderSetting) => {
     setSelected(next);
-    persist(next);
+    // A half-filled override would stop every summary, so save only a full one.
+    const provider = allAiProviders.find((p) => p.id === next.provider);
+    const needed = provider ? extractVariables(provider.curl) : [];
+    const full = needed.every((v) => (next.variables[v.key] ?? "").trim() !== "");
+    setIncomplete(!full);
+    if (full) persist(next);
   };
 
   return (
@@ -65,20 +78,32 @@ export const SummaryProviderCard = () => {
           selectedAIProvider: selected,
           onSetSelectedAIProvider: onChange,
           variables,
-        } as UseSettingsReturn)}
+          showVerification: false,
+        } as UseSettingsReturn & { showVerification: boolean })}
       />
       <Button
         type="button"
         variant="outline"
         size="sm"
-        disabled={selected.provider === ""}
+        disabled={selected.provider === "" && !unreadable}
         onClick={() => {
           setSelected(NONE);
+          setIncomplete(false);
           persist(null);
         }}
       >
         Clear
       </Button>
+      {unreadable && (
+        <p className="text-sm text-destructive">
+          Can't read the saved meeting summaries setting. Press Clear to reset it.
+        </p>
+      )}
+      {incomplete && (
+        <p className="text-sm text-muted-foreground">
+          Fill in every field to use this provider for summaries.
+        </p>
+      )}
       {saveFailed && (
         <p className="text-sm text-destructive">Couldn't save the meeting summaries setting.</p>
       )}

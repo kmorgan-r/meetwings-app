@@ -90,7 +90,8 @@ export function NotionSettingsCard() {
   function edit(patch: Partial<NotionConfig>) {
     setForm((f) => ({ ...f, ...patch }));
     setMessage(null);
-    setResult(null);
+    // Only a database link changes what Check saw.
+    if ("meetingsDbUrl" in patch || "knowledgeDbUrl" in patch) setResult(null);
   }
 
   async function handleSaveToken() {
@@ -101,7 +102,7 @@ export function NotionSettingsCard() {
       return;
     }
     setTokenInput("");
-    setMessage({ ok: true, text: "Saved in your system keychain" });
+    setMessage(null); // the stored line below is the one confirmation
     await refreshStored();
     await notifyOtherWindows();
   }
@@ -190,7 +191,9 @@ export function NotionSettingsCard() {
           </Button>
         </div>
         {!keychainAvailable && (
-          <p className="text-xs text-destructive">{NOTION_COPY.NOTION_KEYCHAIN_UNAVAILABLE}</p>
+          <p className="text-xs text-destructive">
+            This computer has no system keychain Meetwings can use, so the Notion token can't be saved here.
+          </p>
         )}
         {tokenStored && (
           <div className="flex items-center gap-2">
@@ -227,7 +230,9 @@ export function NotionSettingsCard() {
           value={form.yourName}
           onChange={(e) => edit({ yourName: e.target.value })}
         />
-        <p className="text-xs text-muted-foreground">Used only when Notion can't give your name.</p>
+        <p className="text-xs text-muted-foreground">
+          Shown as the recorder on each page. Leave empty to use your Notion name.
+        </p>
       </div>
 
       {result?.ok === true && result.weekdays.length > 0 && (

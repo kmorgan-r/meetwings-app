@@ -100,6 +100,12 @@ describe("<Completion /> and the Notion picker row", () => {
     expect(incomplete.pickerSpy.mock.calls[0][0].notionAvailable).toBe(false);
   });
 
+  it("Notion off and Odoo absent still renders today's picker", async () => {
+    const { pickerSpy } = await renderCompletion({ notion: false, odoo: "absent" });
+    expect(pickerSpy).toHaveBeenCalled();
+    expect(pickerSpy.mock.calls[0][0].notionAvailable).toBe(false);
+  });
+
   it("keeps today's picker while either setup read is still loading", async () => {
     const loading = await renderCompletion({ notion: null, odoo: null });
     expect(loading.pickerSpy).toHaveBeenCalled();
