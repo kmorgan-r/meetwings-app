@@ -311,9 +311,11 @@ export default function Meetings() {
 
       {queue.configState !== "loading" &&
         queue.configState !== "complete" &&
-        // A Notion-only user has no Odoo backlog: "0 meetings are waiting. Finish
-        // setting Odoo up" would be Odoo copy they never asked for.
-        (queue.stranded > 0 || !notion.configured) && (
+        // Hidden for a user with no Odoo backlog while Notion is on or its setup is
+        // still being read: "0 meetings are waiting. Finish setting Odoo up" would be
+        // Odoo copy a Notion-only user never asked for. An incomplete Odoo setup keeps
+        // its nudge either way.
+        (queue.stranded > 0 || queue.configState === "incomplete" || notion.configured === false) && (
         <p className="text-sm">
           {`${plural(queue.stranded)} Finish setting Odoo up on the `}
           <Link to="/integrations" className="underline">
@@ -398,7 +400,7 @@ export default function Meetings() {
               queue.configState === "complete" ? queue.handleSendConversation : null
             }
             notionBadges={notion.byConversation}
-            onSendToNotion={notion.configured ? notion.onSendConversation : null}
+            onSendToNotion={notion.configured === true ? notion.onSendConversation : null}
           />
         </div>
       )}

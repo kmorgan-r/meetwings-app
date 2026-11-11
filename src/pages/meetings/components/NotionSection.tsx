@@ -95,7 +95,7 @@ export function NotionSection({ items, onSendRows, onRetry, onDontSend }: Notion
                     Retry
                   </Button>
                 )}
-                {!hasPage && (item.kind === "send" || status === "offered") && (
+                {!hasPage && (item.kind === "send" ? status !== "sending" : status === "offered") && (
                   <Button size="sm" variant="ghost" disabled={pending} onClick={() => void run(key, () => onDontSend(item))}>
                     Don't send
                   </Button>

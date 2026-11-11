@@ -17,8 +17,8 @@ export interface DateGroupProps {
   onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
   onSendToOdoo: ((id: string) => Promise<string | null>) | null;
-  notionBadges?: ReadonlyMap<string, NotionBadge>;
-  onSendToNotion?: ((id: string) => Promise<string | null>) | null;
+  notionBadges: ReadonlyMap<string, NotionBadge>;
+  onSendToNotion: ((id: string) => Promise<string | null>) | null;
 }
 
 /**
@@ -52,7 +52,7 @@ export function DateGroup({
           // - both get a new identity on every reload.
           const badge = badges.get(doc.id) ?? null;
           const whoLabel = whoNames.get(doc.id) ?? null;
-          const notion = notionBadges?.get(doc.id) ?? null;
+          const notion = notionBadges.get(doc.id) ?? null;
           return (
             <ConversationRow
               key={doc.id}
@@ -72,7 +72,7 @@ export function DateGroup({
               notionLabel={notion?.label ?? null}
               notionUrl={notion?.url ?? null}
               notionTone={notion?.tone ?? null}
-              onSendToNotion={onSendToNotion ?? null}
+              onSendToNotion={onSendToNotion}
             />
           );
         })}

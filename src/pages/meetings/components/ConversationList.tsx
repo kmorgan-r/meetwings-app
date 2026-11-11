@@ -33,9 +33,9 @@ export interface ConversationListProps {
   /** `null` until Odoo is fully set up - see ConversationRow. */
   onSendToOdoo: ((id: string) => Promise<string | null>) | null;
   /** Conversation id -> Notion badge; DateGroup flattens it to primitives per row. */
-  notionBadges?: ReadonlyMap<string, NotionBadge>;
+  notionBadges: ReadonlyMap<string, NotionBadge>;
   /** `null` until Notion is set up - see ConversationRow. */
-  onSendToNotion?: ((id: string) => Promise<string | null>) | null;
+  onSendToNotion: ((id: string) => Promise<string | null>) | null;
 }
 
 interface DateBucket {

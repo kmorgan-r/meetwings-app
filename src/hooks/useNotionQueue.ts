@@ -16,6 +16,19 @@ export interface NotionBadge {
   tone: "attention" | "waiting" | "done";
 }
 
+/** Which table row an item matched: the discriminator `reasonFor` reads, never the label. */
+export type NotionBadgeState =
+  | "failed"
+  | "no_summary"
+  | "summary_wait"
+  | "practices_pending"
+  | "sending"
+  | "offered"
+  | "waiting"
+  | "already"
+  | "sent"
+  | "stopped";
+
 const badge = (label: string, tone: NotionBadge["tone"], url: string | null = null): NotionBadge => ({
   label,
   url,
@@ -28,46 +41,76 @@ const badge = (label: string, tone: NotionBadge["tone"], url: string | null = nu
  * its lowest-ranked item, so a stopped send's "In Notion" (last) can never hide
  * a later send's problem.
  */
-const RANKED: ReadonlyArray<(item: NotionItem) => NotionBadge | null> = [
-  (i) => (i.kind === "send" && i.send.status === "failed" ? badge("Notion failed", "attention", i.send.page_url) : null),
-  (i) => (i.kind === "send" && i.send.status === "no_summary" ? badge("Couldn't summarise", "attention") : null),
-  (i) =>
-    i.kind === "send" &&
-    (i.send.status === "retry" || i.send.status === "sending") &&
-    (i.send.error_code?.startsWith("SUMMARY_") ?? false)
-      ? badge("Waiting for summary", "waiting")
-      : null,
-  // A stopped send keeps its page and is "In Notion", whatever the practices said.
-  (i) =>
-    i.kind === "send" &&
-    i.send.status !== "cancelled" &&
-    i.send.page_id !== null &&
-    i.send.practices_done === 0 &&
-    i.send.practices_error_code !== null
-      ? badge("Practices not added yet", "waiting", i.send.page_url)
-      : null,
-  (i) =>
-    i.kind === "send" && (i.send.status === "retry" || i.send.status === "sending")
-      ? badge("Sending to Notion", "waiting", i.send.page_url)
-      : null,
-  (i) => (i.kind === "rows" && i.status === "offered" ? badge("Send to Notion", "waiting") : null),
-  (i) =>
-    i.kind === "rows" && (i.status === "held" || i.status === "waiting")
-      ? badge("Waiting for the meeting to end", "waiting")
-      : null,
-  (i) => (i.kind === "send" && i.send.status === "already" ? badge("Already in Notion", "done", i.send.lost_to_url) : null),
-  (i) => (i.kind === "send" && i.send.status === "sent" ? badge("In Notion", "done", i.send.page_url) : null),
-  (i) =>
-    i.kind === "send" && i.send.status === "cancelled" && i.send.page_id !== null
-      ? badge("In Notion", "done", i.send.page_url)
-      : null,
+const RANKED: ReadonlyArray<{ state: NotionBadgeState; match: (item: NotionItem) => NotionBadge | null }> = [
+  {
+    state: "failed",
+    match: (i) => (i.kind === "send" && i.send.status === "failed" ? badge("Notion failed", "attention", i.send.page_url) : null),
+  },
+  {
+    state: "no_summary",
+    match: (i) => (i.kind === "send" && i.send.status === "no_summary" ? badge("Couldn't summarise", "attention") : null),
+  },
+  {
+    state: "summary_wait",
+    match: (i) =>
+      i.kind === "send" &&
+      (i.send.status === "retry" || i.send.status === "sending") &&
+      (i.send.error_code?.startsWith("SUMMARY_") ?? false)
+        ? badge("Waiting for summary", "waiting")
+        : null,
+  },
+  {
+    // A stopped send keeps its page and is "In Notion", whatever the practices said:
+    // "Stop and keep page" means the user accepted the page as it is.
+    state: "practices_pending",
+    match: (i) =>
+      i.kind === "send" &&
+      i.send.status !== "cancelled" &&
+      i.send.page_id !== null &&
+      i.send.practices_done === 0 &&
+      i.send.practices_error_code !== null
+        ? badge("Practices not added yet", "waiting", i.send.page_url)
+        : null,
+  },
+  {
+    state: "sending",
+    match: (i) =>
+      i.kind === "send" && (i.send.status === "retry" || i.send.status === "sending")
+        ? badge("Sending to Notion", "waiting", i.send.page_url)
+        : null,
+  },
+  { state: "offered", match: (i) => (i.kind === "rows" && i.status === "offered" ? badge("Send to Notion", "waiting") : null) },
+  {
+    state: "waiting",
+    match: (i) =>
+      i.kind === "rows" && (i.status === "held" || i.status === "waiting")
+        ? badge("Waiting for the meeting to end", "waiting")
+        : null,
+  },
+  {
+    state: "already",
+    match: (i) => (i.kind === "send" && i.send.status === "already" ? badge("Already in Notion", "done", i.send.lost_to_url) : null),
+  },
+  {
+    state: "sent",
+    match: (i) => (i.kind === "send" && i.send.status === "sent" ? badge("In Notion", "done", i.send.page_url) : null),
+  },
+  {
+    state: "stopped",
+    match: (i) =>
+      i.kind === "send" && i.send.status === "cancelled" && i.send.page_id !== null
+        ? badge("In Notion", "done", i.send.page_url)
+        : null,
+  },
 ];
 
 /** The first table row the item matches, with its rank, or null for none. */
-export function notionBadgeFor(item: NotionItem): { rank: number; badge: NotionBadge } | null {
+export function notionBadgeFor(
+  item: NotionItem,
+): { rank: number; state: NotionBadgeState; badge: NotionBadge } | null {
   for (let rank = 0; rank < RANKED.length; rank++) {
-    const b = RANKED[rank](item);
-    if (b) return { rank, badge: b };
+    const b = RANKED[rank].match(item);
+    if (b) return { rank, state: RANKED[rank].state, badge: b };
   }
   return null;
 }
@@ -93,15 +136,18 @@ export function buildBadgeMap(items: readonly NotionItem[]): Map<string, NotionB
 /** The reason line for an item, or null. Always fixed copy, never a raw code or text. */
 export function reasonFor(item: NotionItem): string | null {
   if (item.kind !== "send") return null;
-  const { status, error_code, practices_error_code } = item.send;
+  const state = notionBadgeFor(item)?.state;
+  // retry/sending show no reason: requeueAuthFailures leaves a stale auth code behind.
   const code =
-    status === "failed" || status === "no_summary"
-      ? error_code
-      : notionBadgeFor(item)?.badge.label === "Practices not added yet"
-        ? practices_error_code
+    state === "failed" || state === "no_summary"
+      ? item.send.error_code
+      : state === "practices_pending"
+        ? item.send.practices_error_code
         : null;
   if (code === null) return null;
-  return (NOTION_COPY as Record<string, string>)[code] ?? NOTION_COPY.NOTION_INTERNAL;
+  return Object.prototype.hasOwnProperty.call(NOTION_COPY, code)
+    ? NOTION_COPY[code as keyof typeof NOTION_COPY]
+    : NOTION_COPY.NOTION_INTERNAL;
 }
 
 const SEND_OUTCOME_MESSAGE = {
@@ -116,19 +162,24 @@ const SEND_OUTCOME_MESSAGE = {
 /**
  * The dashboard's view of the Notion queue. Independent of Odoo config. Every
  * action only writes the DB and kicks the overlay (through `@/lib/notion/actions`);
- * the dashboard never runs a send. Actions await, then re-read, and let a
- * rejection reach the caller, except `onSendConversation`, which reports it as
- * the row's message.
+ * the dashboard never runs a send. Actions await, then re-read (even when they
+ * throw) and let a rejection reach the caller, except `onSendConversation`,
+ * which reports it as the row's message.
+ *
+ * `configured` is `null` until a config read settles, and stays `null` while the
+ * first read keeps throwing: the page must not show Odoo copy to a Notion-only
+ * user in that window.
  */
 export function useNotionQueue() {
-  const [configured, setConfigured] = useState(false);
+  const [configured, setConfigured] = useState<boolean | null>(null);
   const [items, setItems] = useState<NotionItem[]>([]);
-  // Only the latest read may set state.
+  // Only the latest read may set state, and none may once unmounted.
   const token = useRef(0);
+  const alive = useRef(true);
 
   const reload = useCallback(async (): Promise<void> => {
     const id = ++token.current;
-    // Independent reads: one failing keeps the other's fresh value.
+    // Independent reads: one failing keeps the other's previous value.
     const [isConfigured, list] = await Promise.all([
       isNotionConfigured().then(
         (v) => v,
@@ -145,12 +196,13 @@ export function useNotionQueue() {
         },
       ),
     ]);
-    if (id !== token.current) return;
+    if (!alive.current || id !== token.current) return;
     if (isConfigured !== null) setConfigured(isConfigured);
     if (list !== null) setItems(list);
   }, []);
 
   useEffect(() => {
+    alive.current = true;
     let cancelled = false;
     const run = () => {
       if (!cancelled) void reload();
@@ -169,6 +221,7 @@ export function useNotionQueue() {
     );
     return () => {
       cancelled = true;
+      alive.current = false;
       window.removeEventListener("focus", run);
       unlisten?.();
     };
@@ -178,34 +231,43 @@ export function useNotionQueue() {
 
   const onSendRows = useCallback(
     async (rowIds: string[]) => {
-      await sendRowsToNotion(rowIds);
-      await reload();
+      try {
+        await sendRowsToNotion(rowIds);
+      } finally {
+        await reload();
+      }
     },
     [reload],
   );
   const onRetry = useCallback(
     async (sendId: string) => {
-      await retryNotionSend(sendId);
-      await reload();
+      try {
+        await retryNotionSend(sendId);
+      } finally {
+        await reload();
+      }
     },
     [reload],
   );
   const onDontSend = useCallback(
     async (item: NotionItem) => {
-      // `false`: the item already moved on, so the re-read is the whole answer.
-      await dontSendToNotion(item);
-      await reload();
+      try {
+        // `false`: the item already moved on, so the re-read is the whole answer.
+        await dontSendToNotion(item);
+      } finally {
+        await reload();
+      }
     },
     [reload],
   );
   const onSendConversation = useCallback(
     async (id: string): Promise<string | null> => {
       try {
-        const outcome = await sendConversationToNotion(id, Date.now());
-        await reload();
-        return SEND_OUTCOME_MESSAGE[outcome];
+        return SEND_OUTCOME_MESSAGE[await sendConversationToNotion(id, Date.now())];
       } catch (err) {
         return notionErrorText(err).text;
+      } finally {
+        await reload();
       }
     },
     [reload],

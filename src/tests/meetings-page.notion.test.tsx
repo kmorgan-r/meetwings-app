@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { memo } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Every module-level mock is `vi.hoisted`, for the reason meetings-page.test.tsx
 // states: vitest hoists `vi.mock` above the imports.
@@ -158,6 +158,11 @@ async function renderPage() {
 
 const card = (id: string) => document.querySelector(`[data-conversation-id="${id}"]`) as HTMLElement;
 const section = () => screen.getByRole("region", { name: "Notion" });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.mocked(localStorage.getItem).mockReset();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -451,5 +456,204 @@ describe("the Odoo badge resolver", () => {
     const none = { status: "none", instance: "i", attempts: 0 };
     expect(groupOf(none as never, "i")).toBeNull();
     expect(resolveBadge([none], "i")).toBeNull();
+  });
+});
+
+describe("while the Notion read settles, and when it fails", () => {
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("a Notion-only user sees no Odoo text while the Notion read is pending", async () => {
+    notionStorage.isNotionConfigured.mockReturnValue(new Promise(() => {}));
+    const { container } = await renderPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toMatch(/odoo/i);
+  });
+
+  it("a Notion-only user sees no Odoo text when the Notion read rejects", async () => {
+    quiet();
+    notionStorage.isNotionConfigured.mockRejectedValue(new Error("keychain"));
+    const { container } = await renderPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toMatch(/odoo/i);
+    expect(screen.queryByRole("button", { name: "Send to Notion" })).toBeNull();
+  });
+
+  it("an Odoo user sees today's description while the Notion read is pending", async () => {
+    odooStorage.loadOdooConfigState.mockResolvedValue({
+      state: "complete",
+      config: { url: "http://h:8069", db: "odoo", login: "bob", apiKey: "k" },
+    });
+    notionStorage.isNotionConfigured.mockReturnValue(new Promise(() => {}));
+    await renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("page-description").textContent).toBe(
+        "Your conversations, and the meetings waiting to reach Odoo.",
+      ),
+    );
+  });
+
+  it("incomplete Odoo plus Notion at 0 stranded still shows the nudge", async () => {
+    odooStorage.loadOdooConfigState.mockResolvedValue({ state: "incomplete", config: null, missing: ["apiKey"] });
+    await renderPage();
+
+    expect(await screen.findByText(/Finish setting Odoo up on the/)).toBeInTheDocument();
+  });
+
+  it("stranded rows with Notion configured show the line", async () => {
+    db.countActionableQueued.mockResolvedValue(2);
+    await renderPage();
+
+    expect(await screen.findByText(/^2 meetings are waiting\./)).toBeInTheDocument();
+  });
+
+  it("an Odoo-only user (Notion read settled false) sees today's line at 0", async () => {
+    notionStorage.isNotionConfigured.mockResolvedValue(false);
+    await renderPage();
+
+    expect(await screen.findByText(/^0 meetings are waiting\./)).toBeInTheDocument();
+  });
+
+  it("keeps the previous values when the reads throw", async () => {
+    quiet();
+    current = () => [send({ status: "failed", error_code: "NOTION_NO_ACCESS" })];
+    await renderPage();
+    await within(card("c1")).findByText("Notion failed");
+
+    notionStorage.isNotionConfigured.mockRejectedValue(new Error("x"));
+    notionQueue.listNotionItems.mockRejectedValue(new Error("y"));
+    const reads = notionQueue.listNotionItems.mock.calls.length;
+    fireEvent(window, new Event("focus"));
+    await waitFor(() => expect(notionQueue.listNotionItems.mock.calls.length).toBeGreaterThan(reads));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(within(card("c1")).getByText("Notion failed")).toBeInTheDocument();
+    expect(within(card("c2")).getByRole("button", { name: "Send to Notion" })).toBeInTheDocument();
+  });
+
+  it("reloads on the config-changed event and unlistens on unmount", async () => {
+    const unlisten = vi.fn();
+    tauriEvent.listen.mockResolvedValue(unlisten);
+    const { unmount } = await renderPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const call = tauriEvent.listen.mock.calls.find((c) => (c as unknown[])[0] === "notion-config-changed");
+    expect(call).toBeDefined();
+    const reads = notionQueue.listNotionItems.mock.calls.length;
+    await act(async () => {
+      ((call as unknown[])[1] as () => void)();
+    });
+    await waitFor(() => expect(notionQueue.listNotionItems.mock.calls.length).toBeGreaterThan(reads));
+
+    unmount();
+    expect(unlisten).toHaveBeenCalled();
+  });
+});
+
+describe("the Notion section, more", () => {
+  it("a second click on Retry while the first is pending makes no second call", async () => {
+    current = () => [send({ id: "s7", status: "failed", error_code: "NOTION_NO_ACCESS" })];
+    let release: (v: boolean) => void = () => {};
+    notionQueue.retrySend.mockImplementation(() => new Promise<boolean>((r) => (release = r)));
+    await renderPage();
+
+    const button = await within(await screen.findByRole("region", { name: "Notion" })).findByRole("button", { name: "Retry" });
+    await userEvent.click(button);
+    await waitFor(() => expect(notionQueue.retrySend).toHaveBeenCalledTimes(1));
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(notionQueue.retrySend).toHaveBeenCalledTimes(1);
+
+    await act(async () => release(true));
+  });
+
+  it("an unknown error_code shows the internal copy, never the code", async () => {
+    current = () => [
+      send({ id: "s1", conversation_id: "c1", status: "failed", error_code: "WHO_KNOWS" }),
+      send({ id: "s2", conversation_id: "c2", status: "failed", error_code: "constructor" }),
+    ];
+    const { container } = await renderPage();
+
+    await screen.findByRole("region", { name: "Notion" });
+    expect(within(section()).getAllByText(NOTION_COPY.NOTION_INTERNAL)).toHaveLength(2);
+    expect(container.textContent).not.toContain("WHO_KNOWS");
+  });
+
+  it("lists a send with no conversation, and gives no row a badge for it", async () => {
+    current = () => [send({ conversation_id: null, status: "failed", error_code: "NOTION_NO_ACCESS" })];
+    await renderPage();
+
+    await screen.findByRole("region", { name: "Notion" });
+    expect(document.querySelector("[data-notion-tone]")).toBeNull();
+  });
+
+  it("hides Don't send on a send that is being sent right now", async () => {
+    current = () => [send({ status: "sending" })];
+    await renderPage();
+
+    await screen.findByRole("region", { name: "Notion" });
+    expect(within(section()).queryByRole("button", { name: "Don't send" })).toBeNull();
+  });
+
+  it("still offers Don't send on a failed send with no page", async () => {
+    current = () => [send({ status: "failed", error_code: "NOTION_NO_ACCESS" })];
+    await renderPage();
+
+    expect(await within(await screen.findByRole("region", { name: "Notion" })).findByRole("button", { name: "Don't send" })).toBeInTheDocument();
+  });
+
+  it("an action that rejects shows notionErrorText's copy, not the message, and still reloads", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    current = () => [send({ id: "s8", status: "failed", error_code: "NOTION_NO_ACCESS" })];
+    notionQueue.retrySend.mockRejectedValue(new Error("raw db text"));
+    const { container } = await renderPage();
+
+    const region = await screen.findByRole("region", { name: "Notion" });
+    const reads = notionQueue.listNotionItems.mock.calls.length;
+    await userEvent.click(within(region).getByRole("button", { name: "Retry" }));
+
+    expect(await within(region).findByText(NOTION_COPY.NOTION_INTERNAL, { selector: "p" })).toBeInTheDocument();
+    expect(container.textContent).not.toContain("raw db text");
+    await waitFor(() => expect(notionQueue.listNotionItems.mock.calls.length).toBeGreaterThan(reads));
+  });
+
+  it("the badge's tone is visible", async () => {
+    current = () => [
+      send({ id: "a", conversation_id: "c1", status: "failed" }),
+      send({ id: "b", conversation_id: "c2", status: "retry" }),
+    ];
+    await renderPage();
+
+    const tone = async (id: string, label: string) =>
+      (await within(card(id)).findByText(label)).closest("[data-notion-tone]") as HTMLElement;
+    expect((await tone("c1", "Notion failed")).className).toContain("text-destructive");
+    expect((await tone("c2", "Sending to Notion")).className).toContain("text-muted-foreground");
+  });
+
+  it("the 'active' outcome says the conversation is still going", async () => {
+    // setup.ts replaces localStorage with spies: answer the one key the action reads.
+    vi.mocked(localStorage.getItem).mockImplementation((k: string) => (k === "active_conversation_id" ? "c1" : null));
+    await renderPage();
+
+    await userEvent.click(await within(card("c1")).findByRole("button", { name: "Send to Notion" }));
+    expect(await within(card("c1")).findByText("This conversation is still going. Send it once it ends.")).toBeInTheDocument();
+  });
+});
+
+describe("a stopped send", () => {
+  it("reads 'In Notion' even when it carries a practices error code", () => {
+    const stopped = send({
+      status: "cancelled", page_id: "p", page_url: PAGE, practices_done: 0, practices_error_code: "PRACTICES_UNDECIDED",
+    });
+    expect(buildBadgeMap([stopped]).get("c1")).toEqual({ label: "In Notion", url: PAGE, tone: "done" });
   });
 });

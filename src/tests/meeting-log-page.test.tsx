@@ -26,7 +26,7 @@ vi.mock("@/lib/database/meeting-log.action", () => db);
 // This suite is about the Odoo queue: Notion is not set up, and the real hook
 // would reach Tauri's event bus and the database under jsdom.
 const inertNotion = vi.hoisted(() => ({
-  configured: false,
+  configured: false, // settled, not configured
   items: [],
   byConversation: new Map(),
   reload: async () => {},

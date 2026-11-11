@@ -6,6 +6,7 @@ import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotionBadge } from "@/hooks/useNotionQueue";
 import { getMeetingSummaryByConversation, getEntitiesForSummary } from "@/lib/database";
+import { cn } from "@/lib/utils";
 import { SummaryContent } from "@/pages/context-memory/components/SummaryContent";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
 
@@ -321,7 +322,15 @@ function ConversationRowInner({
             </Button>
           )}
           {notionLabel !== null && (
-            <Badge data-notion-tone={notionTone ?? undefined} variant="outline" className="text-xs">
+            <Badge
+              data-notion-tone={notionTone ?? undefined}
+              variant="outline"
+              className={cn(
+                "text-xs",
+                notionTone === "attention" && "text-destructive",
+                notionTone === "waiting" && "text-muted-foreground",
+              )}
+            >
               {notionUrl !== null ? (
                 <a
                   href={notionUrl}
