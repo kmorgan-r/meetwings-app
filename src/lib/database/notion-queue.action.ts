@@ -181,8 +181,8 @@ export async function patchSend(id: string, claimedAt: number, patch: SendPatch)
   for (const k of keys) {
     if (!PATCH_COLUMNS.has(k)) throw new Error(`patchSend: column not allowed: ${k}`);
   }
-  if (keys.length === 0) return false; // nothing defined: no write
-  const set = keys.map((k) => `${k} = ?`).join(", ");
+  // Nothing defined: still run as a pure ownership check (false = lost the claim).
+  const set = keys.length ? keys.map((k) => `${k} = ?`).join(", ") : "claimed_at = claimed_at";
   const db = await getDatabase();
   const r = await db.execute(
     `UPDATE notion_sends SET ${set} WHERE id = ? AND status = 'sending' AND claimed_at = ?`,

@@ -173,7 +173,9 @@ describe("zombie writers", () => {
     await patchSend("r1", NOW, { page_id: "keep" });
     expect(await patchSend("r1", NOW, { page_id: undefined, body_done: 1 })).toBe(true);
     expect(await sendOf("r1")).toMatchObject({ page_id: "keep", body_done: 1 });
-    expect(await patchSend("r1", NOW, { page_id: undefined })).toBe(false);
+    expect(await patchSend("r1", NOW, { page_id: undefined })).toBe(true);
+    expect(await patchSend("r1", NOW, {})).toBe(true);
+    expect(await patchSend("r1", NOW - 1, { page_id: undefined })).toBe(false);
   });
 
   it("patchSend rejects a column outside the whitelist", async () => {
