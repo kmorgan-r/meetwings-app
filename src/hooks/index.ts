@@ -24,6 +24,7 @@ export * from "./useMeetingDetection";
 export * from "./useMeetingAutoRecord";
 export * from "./useOdooTarget";
 export * from "./useMeetingLog";
+export * from "./useNotionPick";
 export * from "./useMeetingLogQueue";
 export * from "./useCalendarProposal";
 export * from "./useCalendarAutoSelect";

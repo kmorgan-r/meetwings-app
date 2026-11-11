@@ -1153,6 +1153,49 @@ describe("adding a target while a new chat's clear is in flight", () => {
   });
 });
 
+describe("onTargetsCleared", () => {
+  it("is called when a new chat clears the targets", async () => {
+    const onTargetsCleared = vi.fn();
+    renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: false,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount: vi.fn(),
+        onTargetsCleared,
+      })
+    );
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("newConversationStarted"));
+      await Promise.resolve();
+    });
+
+    expect(onTargetsCleared).toHaveBeenCalledTimes(1);
+  });
+
+  it("is called when the explicit clear-all succeeds", async () => {
+    const onTargetsCleared = vi.fn();
+    const { result } = renderHook(() =>
+      useOdooTarget({
+        meetingAssistMode: false,
+        isPickerOpen: false,
+        setIsPickerOpen: vi.fn(),
+        setTargetCount: vi.fn(),
+        onTargetsCleared,
+      })
+    );
+    await waitFor(() => expect(action.listContacts).toHaveBeenCalled());
+
+    await act(async () => {
+      await result.current.clearAllTargets();
+    });
+
+    expect(onTargetsCleared).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("clearing every target", () => {
   it("announces the Clear before it deletes, so a calendar auto-select run stops", async () => {
     const seen: string[] = [];

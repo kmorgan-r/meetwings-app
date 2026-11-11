@@ -37,6 +37,7 @@ vi.mock("@/lib/storage/helper", () => ({ safeLocalStorage: ls.safeLocalStorage }
 import {
   SECURE_NOTION_CONFIG_KEY,
   isNotionAutoSendEnabled,
+  getNotionSetupAt,
   isNotionConfigured,
   loadNotionConfig,
   loadNotionConfigState,
@@ -108,6 +109,32 @@ describe("loadNotionConfigState", () => {
     tokenModule.loadNotionToken.mockResolvedValue(null);
     await expect(loadNotionConfigState()).resolves.toEqual({ state: "absent" });
     await expect(isNotionConfigured()).resolves.toBe(false);
+  });
+
+  it("records the setup time once, on complete only, and never overwrites it", async () => {
+    // Not complete: nothing recorded.
+    await loadNotionConfigState();
+    expect(getNotionSetupAt()).toBeNull();
+    store.secureGet.mockResolvedValue(JSON.stringify(FULL_CONFIG));
+    tokenModule.loadNotionToken.mockResolvedValue(null);
+    await loadNotionConfigState();
+    expect(ls.map.has("notion_setup_at")).toBe(false);
+
+    tokenModule.loadNotionToken.mockResolvedValue("secret_SENTINEL");
+    await loadNotionConfigState();
+    const first = getNotionSetupAt();
+    expect(first).toBeGreaterThan(0);
+
+    ls.map.set("notion_setup_at", "1234");
+    await loadNotionConfigState();
+    expect(getNotionSetupAt()).toBe(1234);
+  });
+
+  it("reads a garbage setup time as null", () => {
+    ls.map.set("notion_setup_at", "soon");
+    expect(getNotionSetupAt()).toBeNull();
+    ls.map.set("notion_setup_at", "-5");
+    expect(getNotionSetupAt()).toBeNull();
   });
 
   it("is incomplete and lists the missing token when the meetings link is set", async () => {

@@ -16,6 +16,7 @@ vi.mock("@/lib/storage/odoo-config.storage", () => config);
 const notion = vi.hoisted(() => ({
   isNotionConfigured: vi.fn(async () => false),
   isNotionAutoSendEnabled: vi.fn(() => true),
+  getNotionSetupAt: vi.fn(() => null as number | null),
 }));
 vi.mock("@/lib/storage/notion-config.storage", () => notion);
 
@@ -56,6 +57,7 @@ beforeEach(() => {
   config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
   notion.isNotionConfigured.mockResolvedValue(false);
   notion.isNotionAutoSendEnabled.mockReturnValue(true);
+  notion.getNotionSetupAt.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -287,8 +289,15 @@ describe("runMeetingRecovery", () => {
 describe("runMeetingRecovery with Notion", () => {
   beforeEach(() => {
     notion.isNotionConfigured.mockResolvedValue(true);
+    notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
     action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
   });
+
+  /** A reader that honours the floor, like the real query. */
+  function storeHolds(...entries: ReturnType<typeof said>[]) {
+    action.readUnloggedMessages.mockImplementation((async (floor: number) =>
+      entries.filter((e) => e.timestamp > floor)) as never);
+  }
 
   it("a Notion-only crash with no Odoo config rescues the meeting as status 'none', notion 'waiting'", async () => {
     config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
@@ -337,14 +346,86 @@ describe("runMeetingRecovery with Notion", () => {
     });
   });
 
-  it("treats a throw from isNotionConfigured as Notion off", async () => {
-    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+  it("treats a throw from isNotionConfigured as Notion off, so Odoo recovery still runs", async () => {
     notion.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    expect(await runMeetingRecovery()).toBe(0);
+    expect(await runMeetingRecovery()).toBe(1);
 
-    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: INSTANCE,
+      status: "unassigned",
+      notionStatus: null,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "[meeting-log] notion config unreadable:",
+      "NOTION_INTERNAL"
+    );
+    warn.mockRestore();
     err.mockRestore();
+  });
+
+  it("does not backfill a Notion-only meeting that predates the Notion setup", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(NOW);
+    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(0);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("rescues a crash-lost meeting that happened after the Notion setup", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
+    storeHolds(said("conv-1", NOW - 30 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(1);
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "none",
+      notionStatus: "waiting",
+    });
+  });
+
+  it("rescues nothing when no setup time is stored", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(null);
+    storeHolds(said("conv-1", NOW - 30 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(0);
+  });
+
+  it("keeps today's floor for an Odoo-complete row with no Notion lane", async () => {
+    notion.getNotionSetupAt.mockReturnValue(NOW);
+    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(1);
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "unassigned",
+      notionStatus: null,
+    });
+  });
+
+  it("is single-flight: a concurrent call joins the first and resolves after its inserts", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const finished: string[] = [];
+    action.insertQueueRow.mockImplementation((async () => {
+      await gate;
+      finished.push("insert");
+      return true;
+    }) as never);
+
+    const first = runMeetingRecovery();
+    const second = runMeetingRecovery();
+    void second.then(() => finished.push("second"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(finished).toEqual([]);
+
+    release();
+    expect(await first).toBe(1);
+    expect(await second).toBe(1);
+    expect(finished).toEqual(["insert", "second"]);
+    expect(await runMeetingRecovery()).toBe(0);
   });
 });

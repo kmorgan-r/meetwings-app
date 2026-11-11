@@ -85,6 +85,8 @@ export const STORAGE_KEYS = {
   // (useNotionPick boolean); cleared together with the Odoo targets.
   NOTION_AUTO_SEND: "notion_auto_send",
   NOTION_PICKED: "notion_picked",
+  // When Notion first read as fully set up (ms epoch); floors crash recovery.
+  NOTION_SETUP_AT: "notion_setup_at",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the

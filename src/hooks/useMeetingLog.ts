@@ -190,23 +190,24 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     transcriptRef.current = meetingTranscript;
     conversationIdRef.current = currentConversationId;
     providerConfigRef.current = options.providerConfig;
+    depsRef.current = {
+      now: () => Date.now(),
+      liveLastLineAt: (c) =>
+        c === conversationIdRef.current && transcriptRef.current.length
+          ? Math.max(...transcriptRef.current.map((e) => e.timestamp))
+          : null,
+      fallbackProvider: () => providerConfigRef.current,
+    };
   });
 
-  // What the Notion scheduler reads about the live meeting, refreshed every
-  // render so a scheduler started once keeps seeing current values.
+  // What the Notion scheduler reads about the live meeting. Rewritten in the
+  // layout effect below (never during render), so a scheduler started once
+  // keeps seeing current values.
   const depsRef = useRef<SchedulerDeps>({
     now: () => Date.now(),
     liveLastLineAt: () => null,
     fallbackProvider: () => undefined,
   });
-  depsRef.current = {
-    now: () => Date.now(),
-    liveLastLineAt: (c) =>
-      c === conversationIdRef.current && transcriptRef.current.length
-        ? Math.max(...transcriptRef.current.map((e) => e.timestamp))
-        : null,
-    fallbackProvider: () => providerConfigRef.current,
-  };
   useEffect(() => {
     if (isOwner && isNotionSchedulerStarted()) ensureNotionScheduler(depsRef.current);
   });
@@ -347,7 +348,14 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // throw lands in the catch below (toast, skip-mark) and startup recovery
       // rescues the meeting later from the saved messages.
       const state = await loadOdooConfigState();
-      const notion = await isNotionConfigured();
+      // An unreadable Notion config means "Notion off", the same rule recovery
+      // uses: an Odoo user with a corrupt Notion blob keeps logging to Odoo.
+      let notion = false;
+      try {
+        notion = await isNotionConfigured();
+      } catch (err) {
+        console.warn("[notion] config unreadable:", notionErrorText(err).code);
+      }
       const decision = decideDestinations({
         source: "live",
         odoo: state.state,
@@ -613,7 +621,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // credentials, which it checks itself. Last in the chain because it is
       // the only leg that WRITES rows - running it ahead of the sweep would
       // hand that sweep a queue it has just changed, for no benefit, since
-      // every row recovery writes is `unassigned` and no sweep pushes those.
+      // no sweep pushes a recovered row: it is `unassigned`, or Notion-only
+      // (`none`), whose lane the Notion scheduler owns.
       // Carries its own try/catch, so no trailing .catch here either.
       .then(() => runMeetingRecovery())
       // The Notion scheduler starts only once recovery has written its rows, so

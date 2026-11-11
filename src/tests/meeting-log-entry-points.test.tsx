@@ -13,6 +13,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 //
 // No suite in this repo already exercised routes/index.tsx or useMenuItems -
 // this file is new.
+//
+// Section (c) at the bottom is different in kind: it drives the real
+// useMeetingLog hook (who sends where - Odoo, Notion, both, neither) against
+// hoisted doubles for the queue actions, push, recovery, the Notion scheduler
+// and the Odoo/Notion config storage. Those vi.mock calls apply file-wide but
+// only the hook describe imports anything they replace.
 
 // ---------------------------------------------------------------------------
 // (a) the /meeting-log route resolves to the page.
@@ -311,7 +317,9 @@ describe("the hook: who sends where", () => {
     act(() => result.current.onUndo());
 
     await waitFor(() => expect(queue.cancelHeldRow).toHaveBeenCalledWith("row-1"));
-    await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    });
     expect(queue.promoteHeldNotionRow).not.toHaveBeenCalled();
     expect(result.current.undoBlockedMessage).toBeNull();
   });
@@ -331,7 +339,9 @@ describe("the hook: who sends where", () => {
     act(() => result.current.onUndo());
 
     await waitFor(() => expect(queue.cancelHeldRow).toHaveBeenCalledTimes(1));
-    await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS * 2);
+    });
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
     expect(queue.promoteHeldNotionRow).not.toHaveBeenCalled();
   });
@@ -357,7 +367,9 @@ describe("the hook: who sends where", () => {
     endMeeting();
     await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
 
-    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS);
+    });
 
     await waitFor(() => expect(queue.promoteHeldNotionRow).toHaveBeenCalledWith("row-1"));
     expect(push.pushQueuedRow).not.toHaveBeenCalled();
@@ -373,7 +385,9 @@ describe("the hook: who sends where", () => {
     endMeeting();
     await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
 
-    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS);
+    });
 
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
     expect(queue.promoteHeldNotionRow).toHaveBeenCalledTimes(1);
@@ -389,7 +403,9 @@ describe("the hook: who sends where", () => {
     endMeeting();
     await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
 
-    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS);
+    });
 
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
     expect(queue.promoteHeldNotionRow).toHaveBeenCalledWith("row-1");
@@ -406,7 +422,9 @@ describe("the hook: who sends where", () => {
     endMeeting();
     await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalled());
 
-    await vi.advanceTimersByTimeAsync(HOLD_MS);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HOLD_MS);
+    });
 
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
     err.mockRestore();
@@ -422,7 +440,7 @@ describe("the hook: who sends where", () => {
 
   it("Notion-only user never sees Odoo in the trigger toast", async () => {
     // A failing config read hits the trigger's catch toast.
-    notionConfig.isNotionConfigured.mockRejectedValueOnce(new Error("unreadable"));
+    odooConfig.loadOdooConfigState.mockRejectedValue(new Error("unreadable"));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     renderLog();
     await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
@@ -443,8 +461,42 @@ describe("the hook: who sends where", () => {
     expect(result.current.undoBlockedMessage).not.toMatch(/odoo/i);
   });
 
-  it("an isNotionConfigured throw in trigger shows 'This meeting could not be queued.' and inserts no row", async () => {
+  it("an isNotionConfigured throw means Notion off: an Odoo user keeps logging to Odoo", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
     notionConfig.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(bodyOf(queue.insertQueueRow.mock.calls[0])).toMatchObject({
+      status: "held",
+      notionStatus: null,
+      targets: ONE_TARGET,
+    });
+    expect(toastMock.error).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("an isNotionConfigured throw with Odoo absent queues nothing and shows no Odoo toast", async () => {
+    notionConfig.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderLog();
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+
+    await waitFor(() => expect(notionConfig.isNotionConfigured).toHaveBeenCalled());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(queue.insertQueueRow).not.toHaveBeenCalled();
+    for (const call of toastMock.error.mock.calls) expect(String(call[0])).not.toMatch(/odoo/i);
+    warn.mockRestore();
+  });
+
+  it("a failing Odoo config read still shows 'This meeting could not be queued.'", async () => {
+    odooConfig.loadOdooConfigState.mockRejectedValue(new Error("unreadable"));
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     renderLog();
     await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
@@ -455,6 +507,39 @@ describe("the hook: who sends where", () => {
     );
     expect(queue.insertQueueRow).not.toHaveBeenCalled();
     err.mockRestore();
+  });
+
+  it("incomplete Odoo + picked Notion queues none/held and shows the incomplete toast", async () => {
+    odooConfig.loadOdooConfigState.mockResolvedValue({ state: "incomplete", missing: ["apiKey"] });
+    const { result } = renderLog({ targets: ONE_TARGET, picked: true });
+    await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
+    endMeeting();
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(bodyOf(queue.insertQueueRow.mock.calls[0])).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "held",
+      targets: [],
+    });
+    expect(toastMock.error).toHaveBeenCalledWith(expect.stringContaining("apiKey"));
+  });
+
+  it("a started scheduler gets fresh deps on every re-render", async () => {
+    scheduler.isNotionSchedulerStarted.mockReturnValue(true);
+    const { rerender } = renderLog();
+    await waitFor(() => expect(scheduler.ensureNotionScheduler).toHaveBeenCalled());
+    scheduler.ensureNotionScheduler.mockClear();
+
+    // Same props: a plain re-render, no pill-off trigger.
+    rerender({ pill: true });
+
+    expect(scheduler.ensureNotionScheduler).toHaveBeenCalledTimes(1);
+    const deps = scheduler.ensureNotionScheduler.mock.calls[0][0] as {
+      liveLastLineAt: (c: string) => number | null;
+    };
+    expect(deps.liveLastLineAt("conv-1")).toBe(1000);
+    expect(deps.liveLastLineAt("other")).toBeNull();
   });
 
   it("the scheduler starts only after recovery finished", async () => {

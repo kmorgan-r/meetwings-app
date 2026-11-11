@@ -7,7 +7,11 @@ import {
 import { IDLE_FLUSH_MS, renderTranscript, segmentByGap, sessionKeyFor } from "./meeting-log";
 import { decideDestinations } from "@/lib/notion/destinations";
 import { notionErrorText } from "@/lib/notion/errors";
-import { isNotionAutoSendEnabled, isNotionConfigured } from "@/lib/storage/notion-config.storage";
+import {
+  getNotionSetupAt,
+  isNotionAutoSendEnabled,
+  isNotionConfigured,
+} from "@/lib/storage/notion-config.storage";
 import { instanceFingerprint, loadOdooConfigState } from "@/lib/storage/odoo-config.storage";
 
 /**
@@ -54,10 +58,14 @@ export const RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const RECOVERY_STARTED_AT = Date.now();
 
 let recoveryRan = false; // module scope: survives a <Completion /> remount
+// A second call while the first is still inserting joins it, so nothing (the
+// scheduler start above all) can proceed mid-recovery.
+let inFlight: Promise<number> | null = null;
 
 /** Test-only. Lets a suite start each case from a clean process state. */
 export function resetMeetingRecoveryGuard(): void {
   recoveryRan = false;
+  inFlight = null;
 }
 
 /**
@@ -85,9 +93,17 @@ export function resetMeetingRecoveryGuard(): void {
  *
  * NEVER REJECTS. The only production caller is a `void` inside a React effect.
  */
-export async function runMeetingRecovery(): Promise<number> {
-  if (recoveryRan) return 0;
+export function runMeetingRecovery(): Promise<number> {
+  if (inFlight) return inFlight;
+  if (recoveryRan) return Promise.resolve(0);
+  const run = recover().finally(() => {
+    if (inFlight === run) inFlight = null;
+  });
+  inFlight = run;
+  return run;
+}
 
+async function recover(): Promise<number> {
   try {
     // BEFORE the read, so an unconfigured install consumes nothing: the
     // entries stay above every watermark and a later run still finds them.
@@ -144,8 +160,9 @@ export async function runMeetingRecovery(): Promise<number> {
     // (meeting-log-watermark.storage.ts:15-25). The live trigger picks a
     // contact, so it must keep honouring it.
     //
-    // Recovery picks none. Every row below is `unassigned` with NO targets and
-    // reaches no contact until a human chooses one, so there is no mis-post
+    // Recovery picks none. Every row below has NO Odoo targets, so none reaches
+    // an Odoo contact until a human chooses one (a Notion lane, when present,
+    // goes to the team database and names no contact), so there is no mis-post
     // here to prevent - and honouring the mark would cost the entire feature.
     // `skipUnwritten` fires on the absent, incomplete AND catch branches
     // (useMeetingLog.ts:308/314/406), i.e. on precisely the meetings that were
@@ -159,7 +176,16 @@ export async function runMeetingRecovery(): Promise<number> {
     // row written before recovery next runs, that row's watermark buries the
     // earlier unlogged span for good. That is the pre-existing cost of a global
     // watermark, not something this floor introduces.
-    const floor = Math.max(await getTranscriptWatermark(), Date.now() - RECOVERY_MAX_AGE_MS);
+    let floor = Math.max(await getTranscriptWatermark(), Date.now() - RECOVERY_MAX_AGE_MS);
+    // A row with a Notion lane is only rescued from when Notion was first set
+    // up: older meetings were never Notion-bound, and sending them would be a
+    // backfill into the team database. No stored time means nothing is
+    // rescued. ponytail: a user who disconnects and later reconnects keeps the
+    // FIRST setup time, so meetings recorded while disconnected can be rescued
+    // on reconnect.
+    if (decision.notionStatus !== null) {
+      floor = Math.max(floor, getNotionSetupAt() ?? Date.now());
+    }
 
     const entries = await readUnloggedMessages(floor, RECOVERY_STARTED_AT);
     if (entries.length === 0) return 0;

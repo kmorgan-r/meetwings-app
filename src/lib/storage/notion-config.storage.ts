@@ -156,6 +156,12 @@ export async function loadNotionConfigState(): Promise<NotionConfigState> {
     return { state: "incomplete", missing: ["meetingsDbUrl"] };
   }
 
+  // First time Notion reads as set up: remember when, so crash recovery never
+  // backfills meetings that predate the setup. Never overwritten.
+  if (safeLocalStorage.getItem(STORAGE_KEYS.NOTION_SETUP_AT) === null) {
+    safeLocalStorage.setItem(STORAGE_KEYS.NOTION_SETUP_AT, String(Date.now()));
+  }
+
   return {
     state: "complete",
     config: stored,
@@ -191,6 +197,12 @@ export async function saveNotionConfig(config: NotionConfig): Promise<void> {
       yourName: config.yourName.trim(),
     })
   );
+}
+
+/** When Notion first read as set up, or null if it never has. */
+export function getNotionSetupAt(): number | null {
+  const n = Number(safeLocalStorage.getItem(STORAGE_KEYS.NOTION_SETUP_AT));
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Default TRUE when the key is unset: sending to Notion is opt-out. */

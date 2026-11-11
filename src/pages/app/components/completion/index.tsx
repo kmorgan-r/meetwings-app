@@ -5,13 +5,13 @@ import {
   useCompletion,
   useMeetingAutoRecord,
   useMeetingLog,
+  useNotionPick,
   useOdooTarget,
   usePillRecordAction,
   useQuickActions,
   type MeetingAutoRecordAudio,
 } from "@/hooks";
 import { useApp } from "@/contexts";
-import { useNotionPick } from "@/hooks/useNotionPick";
 import { shouldUseMeetwingsAPI } from "@/lib";
 import { setPillData } from "@/lib/overlay-minimize.store";
 import { Screenshot } from "./Screenshot";
