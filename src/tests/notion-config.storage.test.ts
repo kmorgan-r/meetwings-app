@@ -50,7 +50,9 @@ import type { NotionConfig } from "@/lib/storage/notion-config.storage";
 const ID = "0123456789abcdef0123456789abcdef";
 const VIEW = "fedcba9876543210fedcba9876543210";
 const MEETINGS_URL = `https://www.notion.so/acme/Weekly-Team-Meetings-${ID}?v=${VIEW}`;
-const KNOWLEDGE_URL = `https://www.notion.so/acme/Team-Knowledge-${ID}?v=${VIEW}`;
+// A DIFFERENT id from the meetings link, so the complete-state test proves the
+// two ids are parsed separately (the view id in the query must be ignored).
+const KNOWLEDGE_URL = `https://www.notion.so/acme/Team-Knowledge-${VIEW}?v=${ID}`;
 
 const FULL_CONFIG: NotionConfig = {
   meetingsDbUrl: MEETINGS_URL,
@@ -80,6 +82,14 @@ describe("parseNotionDatabaseId", () => {
     [`https://www.notion.so/acme/Weekly-Team-Meetings-${ID}?v=${VIEW}&pvs=4`, ID],
     [`https://www.notion.so/${ID}`, ID],
     [`  https://www.notion.so/acme/01234567-89ab-cdef-0123-456789abcdef \n`, ID],
+    // The LAST run in the path wins: a first run from an earlier path segment
+    // must not shadow the id.
+    [`https://www.notion.so/p/${VIEW}/${ID}`, ID],
+    // "Meetings-2026" runs together with the id into one 36-char run; its LAST
+    // 32 characters are the id.
+    [`https://www.notion.so/acme/Meetings-2026-${ID}`, ID],
+    // Case-insensitive: an uppercase (dashed) URL still yields the lowercase id.
+    [`https://www.notion.so/acme/01234567-89AB-CDEF-0123-456789ABCDEF`, ID],
     ["https://www.notion.so/acme/no-id-here", null],
     ["not a url", null],
   ])("parseNotionDatabaseId(%s) -> %s", (url, id) => {
@@ -135,10 +145,33 @@ describe("loadNotionConfigState", () => {
     await expect(loadNotionConfigState()).resolves.toEqual({
       state: "complete",
       config: FULL_CONFIG,
+      // The two links carry DIFFERENT ids (see KNOWNLEDGE_URL): each id is
+      // parsed, not one shared value.
       meetingsDbId: ID,
-      knowledgeDbId: ID,
+      knowledgeDbId: VIEW,
     });
     await expect(isNotionConfigured()).resolves.toBe(true);
+  });
+
+  it("rejects when the stored read fails, for state and configured checks", async () => {
+    store.secureGet.mockRejectedValue(new Error("keychain went away"));
+    await expect(loadNotionConfigState()).rejects.toThrow("NOTION_CONFIG_UNREADABLE");
+    await expect(isNotionConfigured()).rejects.toThrow("NOTION_CONFIG_UNREADABLE");
+  });
+
+  it("rejects when the stored blob is corrupt JSON", async () => {
+    store.secureGet.mockResolvedValue('{"meetingsDbUrl": ');
+    await expect(loadNotionConfigState()).rejects.toThrow("NOTION_CONFIG_UNREADABLE");
+  });
+
+  it("rejects when the stored blob is the JSON text null", async () => {
+    store.secureGet.mockResolvedValue("null");
+    await expect(loadNotionConfigState()).rejects.toThrow("NOTION_CONFIG_UNREADABLE");
+  });
+
+  it("rejects when the stored blob is a JSON array", async () => {
+    store.secureGet.mockResolvedValue(`["${ID}"]`);
+    await expect(loadNotionConfigState()).rejects.toThrow("NOTION_CONFIG_UNREADABLE");
   });
 
   it("reads knowledgeDbId as null when the Team Knowledge link is empty", async () => {
@@ -191,11 +224,30 @@ describe("loadNotionConfig", () => {
     await expect(loadNotionConfig()).resolves.toEqual(FULL_CONFIG);
   });
 
-  it("returns null for a blob whose meetings link has no database id", async () => {
-    store.secureGet.mockResolvedValue(
-      JSON.stringify({ ...FULL_CONFIG, meetingsDbUrl: "https://www.notion.so/acme/no-id-here" })
-    );
-    await expect(loadNotionConfig()).resolves.toBeNull();
+  it("returns the stored config even when the meetings link holds no id", async () => {
+    // The settings card prefills what the user saved - the "missing
+    // meetingsDbUrl" decision belongs to loadNotionConfigState, not here.
+    const blob = { ...FULL_CONFIG, meetingsDbUrl: "https://www.notion.so/acme/no-id-here" };
+    store.secureGet.mockResolvedValue(JSON.stringify(blob));
+    await expect(loadNotionConfig()).resolves.toEqual(blob);
+  });
+
+  it("drops non-weekday and non-string teamTimes entries", async () => {
+    const blob = {
+      ...FULL_CONFIG,
+      teamTimes: { monday: 9, tuesday: "10:00", foo: "x" },
+    };
+    store.secureGet.mockResolvedValue(JSON.stringify(blob));
+    await expect(loadNotionConfig()).resolves.toEqual({
+      ...FULL_CONFIG,
+      teamTimes: { tuesday: "10:00" },
+    });
+    // state still reads complete: a junk teamTimes is a filter, not damage.
+    tokenModule.loadNotionToken.mockResolvedValue("secret_SENTINEL");
+    await expect(loadNotionConfigState()).resolves.toMatchObject({
+      state: "complete",
+      meetingsDbId: ID,
+    });
   });
 });
 
@@ -208,6 +260,12 @@ describe("saveNotionConfig", () => {
     expect(key).toBe(SECURE_NOTION_CONFIG_KEY);
     expect(payload).not.toContain("secret_SENTINEL");
     expect(JSON.parse(payload)).toEqual(FULL_CONFIG);
+
+    // Even a config HAND-CONTAMINATED with a token field loses it: the blob
+    // shape is built by saveNotionConfig, not passed through.
+    await saveNotionConfig({ ...FULL_CONFIG, token: "secret_SENTINEL" } as unknown as NotionConfig);
+    const [, secondPayload] = store.secureSet.mock.calls[1] as [string, string];
+    expect(secondPayload).not.toContain("secret_SENTINEL");
   });
 
   it("trims the string fields before storing", async () => {

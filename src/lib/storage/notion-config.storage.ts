@@ -40,12 +40,33 @@ export type NotionConfigState =
       knowledgeDbId: string | null;
     };
 
+const WEEKDAY_NAMES: readonly Weekday[] = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+];
+
+/** Keeps only weekday keys with string values; everything else is dropped. */
+function parseTeamTimes(value: unknown): Partial<Record<Weekday, string>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  const teamTimes: Partial<Record<Weekday, string>> = {};
+  for (const day of WEEKDAY_NAMES) {
+    if (typeof record[day] === "string") teamTimes[day] = record[day] as string;
+  }
+  return teamTimes;
+}
+
 /**
- * The database id is the LAST run of 32 lowercase hex characters (dashes
- * removed) in the URL path, ignoring the query string; a dashed
- * 8-4-4-4-12 UUID counts. The dashes are removed first, so the run can span
- * dash separators in either form. Lowercase hex only: an all-uppercase
- * fragment is not accepted.
+ * The database id is the LAST run of 32 hex characters (dashes removed) in
+ * the URL path, ignoring the query string; a dashed 8-4-4-4-12 UUID counts.
+ * The dashes are removed first, so the run can span dash separators in either
+ * form. Matching is case-insensitive: an uppercase page URL yields the same
+ * id as Notion's canonical lowercase form.
  */
 export function parseNotionDatabaseId(url: string): string | null {
   let path: string;
@@ -54,48 +75,51 @@ export function parseNotionDatabaseId(url: string): string | null {
   } catch {
     return null;
   }
-  const runs = path.replace(/-/g, "").match(/[0-9a-f]{32,}/g);
+  const runs = path.replace(/-/g, "").match(/[0-9a-f]{32,}/gi);
   if (!runs) return null;
   // `slice(-32)`: the id ends the run's tail, which keeps a hex-rich page
   // title that ran together with the id harmless. The query string was never
-  // in here, so a view id cannot be picked up.
-  return runs[runs.length - 1].slice(-32);
+  // in here, so a view id cannot be picked up. Lowercase is the canonical
+  // stored form, so an uppercase URL does not read as a different database.
+  return runs[runs.length - 1].slice(-32).toLowerCase();
 }
 
-async function parseStoredBlob(): Promise<
-  { config: NotionConfig; meetingsDbId: string } | null
-> {
+/**
+ * Throws NOTION_CONFIG_UNREADABLE on a failed secure read or a blob that is
+ * not a JSON object: a stored setup that cannot be read is a broken setup,
+ * NOT "not set up" - only `!raw` means nothing is stored. The meetings link
+ * is NOT validated here: a stored config always comes back, so the settings
+ * card can prefill what the user saved; whether the link parses is decided in
+ * loadNotionConfigState.
+ */
+async function parseStoredBlob(): Promise<NotionConfig | null> {
   let raw: string | null;
   try {
     raw = await secureGet(SECURE_NOTION_CONFIG_KEY);
   } catch {
-    return null;
+    throw new Error("NOTION_CONFIG_UNREADABLE");
   }
   if (!raw) return null;
 
-  let parsed: Partial<NotionConfig>;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as Partial<NotionConfig>;
+    parsed = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error("NOTION_CONFIG_UNREADABLE");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("NOTION_CONFIG_UNREADABLE");
   }
 
+  const blob = parsed as Partial<NotionConfig>;
   const meetingsDbUrl =
-    typeof parsed.meetingsDbUrl === "string" ? parsed.meetingsDbUrl.trim() : "";
-  const meetingsDbId = parseNotionDatabaseId(meetingsDbUrl);
-  // A link with no database id counts as missing, not as a broken config.
-  if (meetingsDbId === null) return null;
-
+    typeof blob.meetingsDbUrl === "string" ? blob.meetingsDbUrl.trim() : "";
   const knowledgeDbUrl =
-    typeof parsed.knowledgeDbUrl === "string" ? parsed.knowledgeDbUrl.trim() : "";
-  const yourName = typeof parsed.yourName === "string" ? parsed.yourName.trim() : "";
-  const teamTimes =
-    parsed.teamTimes && typeof parsed.teamTimes === "object" ? parsed.teamTimes : {};
+    typeof blob.knowledgeDbUrl === "string" ? blob.knowledgeDbUrl.trim() : "";
+  const yourName = typeof blob.yourName === "string" ? blob.yourName.trim() : "";
+  const teamTimes = parseTeamTimes(blob.teamTimes);
 
-  return {
-    config: { meetingsDbUrl, knowledgeDbUrl, teamTimes, yourName },
-    meetingsDbId,
-  };
+  return { meetingsDbUrl, knowledgeDbUrl, teamTimes, yourName };
 }
 
 /**
@@ -116,27 +140,38 @@ async function isTokenPresent(): Promise<boolean> {
   }
 }
 
+/** Throws on an unreadable blob; never throws for "not set up". */
 export async function loadNotionConfigState(): Promise<NotionConfigState> {
   const tokenPresent = await isTokenPresent();
   const stored = await parseStoredBlob();
+  const meetingsDbId =
+    stored === null ? null : parseNotionDatabaseId(stored.meetingsDbUrl);
 
   // "absent" is neither piece present at all; either one alone is "incomplete".
-  if (!tokenPresent && !stored) return { state: "absent" };
+  // A stored blob whose meetings link holds no id is still "no meetings link".
+  if (!tokenPresent && meetingsDbId === null) return { state: "absent" };
   // Only the token is on file (absent above ruled out the other case).
-  if (!stored) return { state: "incomplete", missing: ["meetingsDbUrl"] };
   if (!tokenPresent) return { state: "incomplete", missing: ["token"] };
+  if (meetingsDbId === null || stored === null) {
+    return { state: "incomplete", missing: ["meetingsDbUrl"] };
+  }
 
   return {
     state: "complete",
-    config: stored.config,
-    meetingsDbId: stored.meetingsDbId,
-    knowledgeDbId: parseNotionDatabaseId(stored.config.knowledgeDbUrl),
+    config: stored,
+    meetingsDbId,
+    knowledgeDbId: parseNotionDatabaseId(stored.knowledgeDbUrl),
   };
 }
 
+/**
+ * Returns null ONLY when nothing is stored: a stored config always comes
+ * back, even when the meetings link holds no database id - the settings card
+ * prefills what the user saved. Throws NOTION_CONFIG_UNREADABLE when the
+ * blob is unreadable.
+ */
 export async function loadNotionConfig(): Promise<NotionConfig | null> {
-  const stored = await parseStoredBlob();
-  return stored?.config ?? null;
+  return parseStoredBlob();
 }
 
 export async function isNotionConfigured(): Promise<boolean> {

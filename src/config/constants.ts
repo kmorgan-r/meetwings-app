@@ -80,8 +80,9 @@ export const STORAGE_KEYS = {
   AI_PROVIDER_CONFIGS: "ai_provider_configs",
   STT_PROVIDER_CONFIGS: "stt_provider_configs",
 
-  // Notion meeting notes (see notion-config.storage.ts). NOTION_PICKED selects
-  // which queued meeting the Notion panel is focused on.
+  // Notion meeting notes (see notion-config.storage.ts).
+  // NOTION_PICKED: whether the user picked Notion for the current meeting
+  // (useNotionPick boolean); cleared together with the Odoo targets.
   NOTION_AUTO_SEND: "notion_auto_send",
   NOTION_PICKED: "notion_picked",
 } as const;
