@@ -13,6 +13,7 @@ import type { ProviderConfig } from "@/lib/functions/summary-provider";
 import { HOLD_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { outcomeFor, notionErrorText } from "./errors";
+import { NOTION_KICK_EVENT } from "./events";
 import { isQuiet, joinSets } from "./join";
 import { buildSendDeps, runNotionSend } from "./send";
 
@@ -23,9 +24,11 @@ export interface SchedulerDeps {
 }
 
 export const NOTION_TICK_MS = 60_000;
-export const NOTION_KICK_EVENT = "notion-kick";
+export { NOTION_KICK_EVENT };
 
 let inFlight: Promise<void> | null = null;
+// A request that lands mid-tick is not lost: one more tick runs when this one ends.
+let rerun: SchedulerDeps | null = null;
 
 async function tick(deps: SchedulerDeps): Promise<void> {
   if (!(await isNotionConfigured())) return;
@@ -73,11 +76,18 @@ async function tick(deps: SchedulerDeps): Promise<void> {
 
 /** Never rejects; overlapping callers share one run. */
 export function runNotionTick(deps: SchedulerDeps): Promise<void> {
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    rerun = deps;
+    return inFlight;
+  }
   const p: Promise<void> = tick(deps)
     .catch((err) => void notionErrorText(err))
     .finally(() => {
-      if (inFlight === p) inFlight = null;
+      if (inFlight !== p) return;
+      inFlight = null;
+      const next = rerun;
+      rerun = null;
+      if (next) void runNotionTick(next);
     });
   inFlight = p;
   return p;
@@ -116,4 +126,5 @@ export function resetNotionSchedulerForTests(): void {
   currentDeps = null;
   started = false;
   inFlight = null;
+  rerun = null;
 }

@@ -17,7 +17,7 @@ import {
 } from "@/lib/storage/active-conversation.storage";
 import { isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { notionErrorText } from "./errors";
-import { NOTION_KICK_EVENT } from "./scheduler";
+import { NOTION_KICK_EVENT } from "./events";
 
 /** Only the overlay runs sends; every action writes the DB then kicks it. A failed kick only delays to the next 60 s tick. */
 async function kick(): Promise<void> {
@@ -72,6 +72,7 @@ export async function sendConversationToNotion(
     MEETING_CONVERSATION_GAP_MS,
   );
   if (segments.length === 0) return "empty";
+  const superseded = candidates.filter((r) => r.notion_status === "offered").map((r) => r.id);
   for (const slice of segments) {
     await insertQueueRow({
       id: crypto.randomUUID(),
@@ -88,6 +89,8 @@ export async function sendConversationToNotion(
       createdAt: now,
     });
   }
+  // The offered rows this replaces would otherwise put the same span on a second page.
+  await cancelOfferedRows(superseded);
   await kick();
   return "queued";
 }

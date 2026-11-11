@@ -26,6 +26,7 @@ const m = vi.hoisted(() => ({
   runNotionSend: vi.fn(),
   buildSendDeps: vi.fn(),
   isConfigured: vi.fn(),
+  unlisten: vi.fn(),
   active: { id: null as string | null, capturing: null as string | null },
 }));
 
@@ -59,6 +60,7 @@ import {
   runNotionTick,
   type SchedulerDeps,
 } from "@/lib/notion/scheduler";
+import { outcomeFor } from "@/lib/notion/errors";
 import { MIGRATIONS, applyMigration14 } from "./helpers/migration-14";
 
 const GAP = MEETING_CONVERSATION_GAP_MS;
@@ -113,7 +115,8 @@ beforeEach(async () => {
   m.active.capturing = null;
   m.isConfigured.mockResolvedValue(true);
   m.emit.mockResolvedValue(undefined);
-  m.listen.mockResolvedValue(() => {});
+  m.unlisten = vi.fn();
+  m.listen.mockResolvedValue(m.unlisten);
   m.runNotionSend.mockResolvedValue({});
   m.buildSendDeps.mockResolvedValue({ client: "c" });
   const wasmBinary = fs.readFileSync(path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm"));
@@ -424,5 +427,95 @@ describe("page actions", () => {
     const item = { kind: "send", send: (await sends())[0], rowIds: [] } as unknown as NotionItem;
     expect(await dontSendToNotion(item)).toBe(true);
     expect((await sends())[0].status).toBe("cancelled");
+  });
+});
+
+describe("fix round 1", () => {
+  const insertSend = (id: string, status: string, extra = "") =>
+    db.run(
+      `INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at${extra ? ", " + extra.split("=")[0] : ""}) VALUES (?, ?, ?, 0, 1, 2, 1${extra ? ", " + extra.split("=")[1] : ""})`,
+      [id, id, status]
+    );
+
+  it("one blank and one non-blank candidate → fresh insert, not a conversion", async () => {
+    seedRow({ id: "blank", notion_status: null, status: "sent", transcript: "" });
+    seedRow({ id: "full", notion_status: null, status: "sent", transcript: "words", transcript_start_at: T0 + 2 * GAP, transcript_end_at: T0 + 2 * GAP + MIN });
+    message("c1", T0 + 5 * MIN, { content: "saved words" });
+    expect(await sendConversationToNotion("c1", T0 + 4 * GAP)).toBe("queued");
+    expect((await rowOf("blank")).notion_status).toBeNull();
+    expect((await rowOf("full")).notion_status).toBeNull();
+    const fresh = (await queue()).filter((r) => r.id !== "blank" && r.id !== "full");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("waiting");
+  });
+
+  it("fresh rows supersede an offered blank row: it is cancelled, one waiting set remains", async () => {
+    seedRow({ id: "old", notion_status: "offered", status: "sent", transcript: "" });
+    message("c1", T0 + 5 * MIN, { content: "saved words" });
+    expect(await sendConversationToNotion("c1", T0 + 4 * GAP)).toBe("queued");
+    expect((await rowOf("old")).notion_status).toBe("cancelled");
+    expect((await queue()).filter((r) => r.notion_status === "waiting")).toHaveLength(1);
+  });
+
+  it("a kick during a slow tick causes exactly one follow-up tick, however many kicks", async () => {
+    insertSend("s1", "retry");
+    let release!: () => void;
+    m.runNotionSend.mockImplementationOnce(() => new Promise<void>((r) => (release = r)));
+    const d = deps(T0);
+    const first = runNotionTick(d);
+    await vi.waitFor(() => expect(m.runNotionSend).toHaveBeenCalledTimes(1));
+    void runNotionTick(d);
+    void runNotionTick(d);
+    expect(m.isConfigured).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    await vi.waitFor(() => expect(m.isConfigured).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(m.isConfigured).toHaveBeenCalledTimes(2);
+  });
+
+  it("actions.ts imports neither the scheduler nor the sender", () => {
+    const src = fs.readFileSync(path.resolve(__dirname, "../lib/notion/actions.ts"), "utf8");
+    expect(src).not.toMatch(/from\s+["']\.\/scheduler["']/);
+    expect(src).not.toMatch(/from\s+["']\.\/send["']/);
+  });
+
+  it("buildSendDeps retry-class error: next_at follows the backoff for attempt 3; a fresh sending send is untouched", async () => {
+    m.buildSendDeps.mockResolvedValue({ error: "NOTION_SERVER" });
+    insertSend("s1", "retry", "attempts=2");
+    insertSend("busy", "sending", "claimed_at=" + (T0 - 1000));
+    await runNotionTick(deps(T0));
+    const all = Object.fromEntries((await sends()).map((x) => [x.id as string, x]));
+    expect(outcomeFor("NOTION_SERVER", 3, T0).nextAt).toBe(T0 + 240_000);
+    expect(all.s1).toMatchObject({ status: "retry", error_code: "NOTION_SERVER", attempts: 3, next_at: T0 + 240_000 });
+    expect(all.busy).toMatchObject({ status: "sending", attempts: 0, claimed_at: T0 - 1000, error_code: null });
+  });
+
+  it("sendConversationToNotion rejects when isNotionConfigured throws or the DB throws", async () => {
+    m.isConfigured.mockRejectedValueOnce(new Error("x"));
+    await expect(sendConversationToNotion("c1", T0)).rejects.toThrow("x");
+    m.select.mockRejectedValueOnce(new Error("db"));
+    await expect(sendConversationToNotion("c1", T0)).rejects.toThrow("db");
+  });
+
+  it("after a tick whose body throws, the next tick actually runs", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    m.isConfigured.mockRejectedValueOnce(new Error("x"));
+    await runNotionTick(deps(T0));
+    m.isConfigured.mockClear();
+    await runNotionTick(deps(T0));
+    expect(m.isConfigured).toHaveBeenCalledTimes(1);
+    err.mockRestore();
+  });
+
+  it("reset calls the unlisten and no interval tick fires afterwards", async () => {
+    vi.useFakeTimers();
+    ensureNotionScheduler(deps(T0));
+    await vi.advanceTimersByTimeAsync(0);
+    m.isConfigured.mockClear();
+    resetNotionSchedulerForTests();
+    expect(m.unlisten).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3 * NOTION_TICK_MS);
+    expect(m.isConfigured).not.toHaveBeenCalled();
   });
 });
