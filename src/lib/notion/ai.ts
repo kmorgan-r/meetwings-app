@@ -44,7 +44,9 @@ function codeForError(info: AIErrorInfo): SummaryErrorCode {
  *   provider must be used as chosen. The "meetwings" kind passes
  *   `provider: undefined` and lets the Meetwings API answer as usual.
  * - `ask` owns an AbortController timer: when it fires, the signal aborts and
- *   ask throws SUMMARY_TIMEOUT, whatever else happened.
+ *   ask throws SUMMARY_TIMEOUT, whatever else happened - the timer also races
+ *   every chunk read, so the timeout holds even when fetchImpl ignores the
+ *   signal and never settles.
  */
 export function createNotionAi(
   r: ResolvedSummaryProvider,
@@ -67,14 +69,23 @@ export function createNotionAi(
 
       const controller = new AbortController();
       let timedOut = false;
+      // On the Meetwings path fetchImpl may ignore the abort signal and block
+      // forever, so the timer ALSO rejects this promise: every it.next() races
+      // against it, and the timeout holds even when the generator never
+      // settles.
+      let rejectAborted: (e: SummaryError) => void = () => {};
+      const aborted: Promise<never> = new Promise((_, reject) => {
+        rejectAborted = reject;
+      });
       const timer = setTimeout(() => {
         timedOut = true;
         controller.abort();
+        rejectAborted(new SummaryError("SUMMARY_TIMEOUT"));
       }, timeoutMs);
 
       let text = "";
       try {
-        for await (const chunk of fetchImpl({
+        const gen = fetchImpl({
           provider: r.kind === "meetwings" ? undefined : r.config.provider,
           selectedProvider:
             r.kind === "meetwings"
@@ -88,24 +99,40 @@ export function createNotionAi(
           onError: (e) => {
             if (failed.info === null) failed.info = e;
           },
-        })) {
-          text += chunk;
+        });
+        const it = gen[Symbol.asyncIterator]();
+        try {
+          for (;;) {
+            const next = await Promise.race([it.next(), aborted]);
+            if (next.done) break;
+            text += next.value;
+          }
+        } catch {
+          // The generator threw or the timer fired. The timeout keeps priority
+          // over everything else: it wins over a fired onError, a mid-stream
+          // throw and a hung generator alike.
+          if (timedOut) {
+            // The generator may be hung; request its cleanup without awaiting,
+            // because it.return may never settle.
+            void it.return?.(undefined);
+            throw new SummaryError("SUMMARY_TIMEOUT");
+          }
+          throw new SummaryError("SUMMARY_REJECTED");
         }
-      } catch {
-        // The generator threw. The timeout keeps priority over everything else.
-        if (timedOut) throw new SummaryError("SUMMARY_TIMEOUT");
-        throw new SummaryError("SUMMARY_REJECTED");
+        // The timer may have fired while the last chunk was still settling.
+        if (timedOut) {
+          void it.return?.(undefined);
+          throw new SummaryError("SUMMARY_TIMEOUT");
+        }
+        if (failed.info !== null) {
+          throw new SummaryError(codeForError(failed.info));
+        }
+        const trimmed = text.trim();
+        if (!trimmed) throw new SummaryError("SUMMARY_EMPTY");
+        return trimmed;
       } finally {
         clearTimeout(timer);
       }
-
-      if (timedOut) throw new SummaryError("SUMMARY_TIMEOUT");
-      if (failed.info !== null) {
-        throw new SummaryError(codeForError(failed.info));
-      }
-      const trimmed = text.trim();
-      if (!trimmed) throw new SummaryError("SUMMARY_EMPTY");
-      return trimmed;
     },
   };
 }

@@ -141,7 +141,10 @@ describe("summarizeForNotion", () => {
   it.each([
     [401, "SUMMARY_AUTH"],
     [402, "SUMMARY_SPENDING_LIMIT"],
+    [403, "SUMMARY_AUTH"],
     [429, "SUMMARY_RATE_LIMITED"],
+    [408, "SUMMARY_PROVIDER_DOWN"],
+    [500, "SUMMARY_PROVIDER_DOWN"],
     [503, "SUMMARY_PROVIDER_DOWN"],
     [400, "SUMMARY_REJECTED"],
   ])(
@@ -177,7 +180,7 @@ describe("summarizeForNotion", () => {
     expect(outcome.stringForm).not.toContain("getaddrinfo failed");
   });
 
-  it("stream error → SUMMARY_UNREADABLE; meetwings error → SUMMARY_PROVIDER_DOWN; a thrown error → SUMMARY_REJECTED", async () => {
+  it("stream error → SUMMARY_UNREADABLE; meetwings error → SUMMARY_PROVIDER_DOWN", async () => {
     const streamCase = fakeFetch({
       error: { kind: "stream" },
       yields: ["API error: upstream exploded"],
@@ -197,13 +200,39 @@ describe("summarizeForNotion", () => {
         summarizeForNotion(LINES, aiFor({ kind: "chat", config: CONFIG }, meetwingsCase.fetchImpl)),
       )).code,
     ).toBe("SUMMARY_PROVIDER_DOWN");
+  });
 
-    const thrownCase = fakeFetch({ throw: new Error("generator blew up") });
-    expect(
-      (await thrownBy(() =>
-        summarizeForNotion(LINES, aiFor({ kind: "chat", config: CONFIG }, thrownCase.fetchImpl)),
-      )).code,
-    ).toBe("SUMMARY_REJECTED");
+  it("a generator that throws → SUMMARY_REJECTED (ask called directly)", async () => {
+    const { fetchImpl } = fakeFetch({ throw: new Error("generator blew up") });
+    const ai = aiFor({ kind: "chat", config: CONFIG }, fetchImpl);
+    const outcome = await thrownBy(() =>
+      ai.ask(
+        NOTION_SUMMARY_PROMPT,
+        "MEETING TRANSCRIPT:\n" + LINES.join("\n"),
+        NOTION_SUMMARY_TIMEOUT_MS,
+      ),
+    );
+    expect(outcome.code).toBe("SUMMARY_REJECTED");
+  });
+
+  it("a generator that throws after the timer fired → SUMMARY_TIMEOUT (ask called directly)", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = async function* (): AsyncGenerator<string> {
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, NOTION_SUMMARY_TIMEOUT_MS),
+      );
+      throw new Error("threw once the timer had fired");
+    };
+    const ai = aiFor({ kind: "chat", config: CONFIG }, fetchImpl);
+    const promise = ai.ask(
+      NOTION_SUMMARY_PROMPT,
+      "MEETING TRANSCRIPT:\n" + LINES.join("\n"),
+      NOTION_SUMMARY_TIMEOUT_MS,
+    );
+    // Fires ask's timer first, then the generator's settle timer: the throw
+    // lands after the timeout, and the timeout still wins.
+    vi.advanceTimersByTime(NOTION_SUMMARY_TIMEOUT_MS + 1);
+    await expect(promise).rejects.toMatchObject({ code: "SUMMARY_TIMEOUT" });
   });
 
   it("own timer firing → SUMMARY_TIMEOUT (abort makes fetchImpl return silently)", async () => {
@@ -225,6 +254,85 @@ describe("summarizeForNotion", () => {
     await expect(promise).rejects.toMatchObject({ code: "SUMMARY_TIMEOUT" });
     expect(NOTION_SUMMARY_TIMEOUT_MS).toBe(120_000);
     expect(calls[0].signal?.aborted).toBe(true);
+  });
+
+  it("the timer firing wins over a fired onError → SUMMARY_TIMEOUT", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = async function* (params: AskParams): AsyncGenerator<string> {
+      // Reports once, then the provider goes away mid-stream and never
+      // settles - not even when its own abort signal fires.
+      params.onError?.({ kind: "http", status: 503 });
+      await new Promise(() => {});
+    };
+    const ai = aiFor({ kind: "chat", config: CONFIG }, fetchImpl);
+    const promise = summarizeForNotion(LINES, ai);
+    vi.advanceTimersByTime(NOTION_SUMMARY_TIMEOUT_MS);
+    await expect(promise).rejects.toMatchObject({ code: "SUMMARY_TIMEOUT" });
+  });
+
+  it("two onError calls → the first one's code wins", async () => {
+    const fetchImpl = async function* (params: AskParams): AsyncGenerator<string> {
+      params.onError?.({ kind: "http", status: 429 });
+      params.onError?.({ kind: "network" });
+      yield "the provider's error text";
+    };
+    const outcome = await thrownBy(() =>
+      summarizeForNotion(LINES, aiFor({ kind: "chat", config: CONFIG }, fetchImpl)),
+    );
+    expect(outcome.code).toBe("SUMMARY_RATE_LIMITED");
+  });
+
+  it("after a successful ask no timer is left running", async () => {
+    vi.useFakeTimers();
+    const { fetchImpl } = fakeFetch({ yields: [SUMMARY_JSON] });
+    await summarizeForNotion(LINES, aiFor({ kind: "chat", config: CONFIG }, fetchImpl));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it(`exactly ${MIN_NOTION_LINES} lines → the model is called; fewer → SUMMARY_TOO_SHORT`, async () => {
+    const four = fakeFetch({ yields: [SUMMARY_JSON] });
+    const parsed = await summarizeForNotion(
+      ["one", "two", "three", "four"],
+      aiFor({ kind: "chat", config: CONFIG }, four.fetchImpl),
+    );
+    expect(four.calls).toHaveLength(1);
+    expect(parsed.title).toBe("Weekly sync");
+
+    const three = fakeFetch({ yields: [SUMMARY_JSON] });
+    const outcome = await thrownBy(() =>
+      summarizeForNotion(["one", "two", "three"], aiFor({ kind: "chat", config: CONFIG }, three.fetchImpl)),
+    );
+    expect(outcome.code).toBe("SUMMARY_TOO_SHORT");
+    expect(three.calls).toHaveLength(0);
+  });
+
+  it("summarizeForNotion calls ask with the 120_000 ms Notion timeout", async () => {
+    const ask = vi.fn(() => Promise.resolve(SUMMARY_JSON));
+    const fakeAi: NotionAi = { ask };
+    const result = await summarizeForNotion(LINES, fakeAi);
+    expect(result.title).toBe("Weekly sync");
+    expect(ask).toHaveBeenCalledWith(
+      NOTION_SUMMARY_PROMPT,
+      "MEETING TRANSCRIPT:\n" + LINES.join("\n"),
+      NOTION_SUMMARY_TIMEOUT_MS,
+    );
+    const [, , timeoutMs] = ask.mock.calls[0];
+    expect(timeoutMs).toBe(120_000);
+  });
+
+  it("a plain Error thrown by a fake NotionAi propagates out of summarizeForNotion unchanged", async () => {
+    const boom = new Error("boom");
+    const fakeAi: NotionAi = { ask: vi.fn(() => Promise.reject(boom)) };
+    let caught: unknown;
+    try {
+      await summarizeForNotion(LINES, fakeAi);
+    } catch (thrown) {
+      caught = thrown;
+    }
+    expect(caught).toBe(boom);
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(SummaryError);
+    expect(caught).toMatchObject({ message: "boom" });
   });
 
   it("empty reply → SUMMARY_EMPTY; prose reply → SUMMARY_UNREADABLE", async () => {
@@ -360,7 +468,16 @@ describe("createNotionAi wiring and the prompt", () => {
     );
     expect(NOTION_SUMMARY_PROMPT).toContain("own words");
     expect(NOTION_SUMMARY_PROMPT).toContain("no people's names");
+    expect(NOTION_SUMMARY_PROMPT).toContain("no fees");
+    expect(NOTION_SUMMARY_PROMPT).toContain("no percentages");
+    expect(NOTION_SUMMARY_PROMPT).toContain("no deal terms");
+    expect(NOTION_SUMMARY_PROMPT).toContain(
+      "a partner organisation only if the practice is about that organisation",
+    );
     expect(NOTION_SUMMARY_PROMPT).toContain("order the topics came up");
+    // The value types: plain strings everywhere, and topic a string or null.
+    expect(NOTION_SUMMARY_PROMPT).toContain("is a plain string");
+    expect(NOTION_SUMMARY_PROMPT).toContain('"topic" is a string, or null');
     // The transcript is data, and instructions spoken in it are ignored.
     const lower = NOTION_SUMMARY_PROMPT.toLowerCase();
     expect(lower).toContain("data");

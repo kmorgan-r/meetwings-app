@@ -34,6 +34,7 @@ Reply with JSON only - no markdown, no text outside the JSON object. The object 
 - "action_items": the things someone agreed to do.
 - "sections": one section per topic the meeting covered, in the order the topics came up, each with a heading and the bullet points said about it.
 - "practices": every team practice heard in the transcript, with a "rule" and a short "topic" label when the practice has one (otherwise null).
+- "title", every "heading", every "bullets" item, every "action_items" item and every "rule" is a plain string. "topic" is a string, or null.
 
 A team practice is a standing rule about how the team works that should apply to future work: how documents and reports are written, reviewed or published; which terms, methods or tools to use; standard checklists or steps. These are not practices: action items, status updates, plans, opinions, and one-off decisions about a specific deal, partner or person.
 
@@ -121,7 +122,9 @@ export function parseNotionSummary(text: string): NotionSummary | null {
 /**
  * Summarises a joined transcript for the Notion lane: too few lines fails
  * before any model call; the model call goes through NotionAi (typed, timed);
- * an unparseable reply fails as unreadable.
+ * an unparseable reply fails as unreadable. Anything else `ask` throws passes
+ * through unchanged - ask's own typed errors are the contract, and a plain
+ * throw must surface as the bug it is, not be masked by a code.
  */
 export async function summarizeForNotion(
   lines: string[],
@@ -130,17 +133,11 @@ export async function summarizeForNotion(
   if (lines.length < MIN_NOTION_LINES) {
     throw new SummaryError("SUMMARY_TOO_SHORT");
   }
-  let text: string;
-  try {
-    text = await ai.ask(
-      NOTION_SUMMARY_PROMPT,
-      "MEETING TRANSCRIPT:\n" + lines.join("\n"),
-      NOTION_SUMMARY_TIMEOUT_MS,
-    );
-  } catch (thrown) {
-    if (thrown instanceof SummaryError) throw thrown;
-    throw new SummaryError("SUMMARY_REJECTED");
-  }
+  const text = await ai.ask(
+    NOTION_SUMMARY_PROMPT,
+    "MEETING TRANSCRIPT:\n" + lines.join("\n"),
+    NOTION_SUMMARY_TIMEOUT_MS,
+  );
   const parsed = parseNotionSummary(text);
   if (!parsed) throw new SummaryError("SUMMARY_UNREADABLE");
   return parsed;
