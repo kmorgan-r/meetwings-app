@@ -6,6 +6,8 @@ import { CheckCircle2, Circle, XCircle } from "lucide-react";
 import { Button, Input, Label, StatusIcon, Switch } from "@/components";
 import { isCalendarAutoSelectEnabled, setCalendarAutoSelectEnabled } from "@/lib/calendar/auto-select";
 import { PageLayout } from "@/layouts";
+import { useNotionConfigured, useOdooSetupState } from "@/hooks/useNotionConfigured";
+import { NotionSettingsCard } from "./components/NotionSettingsCard";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
 import { runSync, testOdooConnection } from "@/lib/odoo";
@@ -368,6 +370,13 @@ export default function OdooSettings() {
   const [graphMessage, setGraphMessage] = useState<Status | null>(null);
 
   const [autoSelect, setAutoSelect] = useState(isCalendarAutoSelectEnabled);
+
+  // Notion alone: everything Odoo- or calendar-related waits behind a button.
+  const notionConfigured = useNotionConfigured();
+  const odooSetup = useOdooSetupState();
+  const [showOther, setShowOther] = useState(false);
+  const notionOnly = notionConfigured === true && odooSetup === "absent";
+  const hideOther = notionOnly && !showOther;
 
   // "Saved" is only true of the config that was actually written. The next
   // keystroke makes it stale, so it is cleared on every field edit rather
@@ -783,8 +792,22 @@ export default function OdooSettings() {
   return (
     <PageLayout
       title="Integrations"
-      description="Connect Odoo to pick contacts and log meetings from your CRM, and your calendar to propose the current meeting's attendees."
+      description={
+        notionOnly
+          ? "Connect Notion to send your meeting notes to your team."
+          : "Connect Odoo to pick contacts and log meetings from your CRM, and your calendar to propose the current meeting's attendees."
+      }
     >
+      <NotionSettingsCard />
+
+      {notionOnly && !showOther && (
+        <Button type="button" variant="outline" className="mt-6" onClick={() => setShowOther(true)}>
+          Show other integrations
+        </Button>
+      )}
+
+      {!hideOther && (
+        <>
       {loadStatus && <StatusLine status={loadStatus} testId="odoo-load-status" />}
 
       <OdooSetupCard
@@ -959,6 +982,8 @@ export default function OdooSettings() {
           />
         </div>
       </div>
+        </>
+      )}
     </PageLayout>
   );
 }

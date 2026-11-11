@@ -5,6 +5,12 @@ import { safeLocalStorage } from "./helper";
 
 export const SECURE_NOTION_CONFIG_KEY = "secure_notion_config";
 
+/**
+ * A Tauri event, NOT a window event: the settings card lives in the dashboard
+ * window and the overlay is a separate JS context.
+ */
+export const NOTION_CONFIG_CHANGED_EVENT = "notion-config-changed";
+
 export type Weekday =
   | "monday"
   | "tuesday"

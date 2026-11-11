@@ -56,7 +56,13 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     // context and the whole audio stack, same reasoning as
     // settings-page.meeting-auto-record.test.tsx's F34 block, which this
     // harness is copied from.
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),

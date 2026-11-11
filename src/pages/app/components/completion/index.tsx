@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   useCalendarProposal,
   useCalendarAutoSelect,
@@ -11,6 +11,7 @@ import {
   useQuickActions,
   type MeetingAutoRecordAudio,
 } from "@/hooks";
+import { useNotionConfigured, useOdooSetupState } from "@/hooks/useNotionConfigured";
 import { useApp } from "@/contexts";
 import { shouldUseMeetwingsAPI } from "@/lib";
 import { setPillData } from "@/lib/overlay-minimize.store";
@@ -51,6 +52,12 @@ export const Completion = ({
   // does for Files.tsx. The main window is 600x54 and non-resizable; without
   // this the popover has no way to make the window grow around it.
   const notionPick = useNotionPick();
+  const notionConfigured = useNotionConfigured();
+  const odooSetup = useOdooSetupState();
+  const notionAvailable = notionConfigured === true && odooSetup === "complete";
+  // Notion alone: nothing to pick. A null (still loading) keeps today's picker.
+  const hidePicker = notionConfigured === true && odooSetup === "absent";
+  const onToggleNotion = useCallback(() => notionPick.toggle(), [notionPick.toggle]);
   const odoo = useOdooTarget({
     meetingAssistMode: completion.meetingAssistMode,
     isPickerOpen: completion.isContactPickerOpen,
@@ -266,8 +273,14 @@ export const Completion = ({
           onUndo={meetingLog.onUndo}
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
-      ) : (
-        <ContactPicker {...odoo.pickerProps} calendar={calendarProps} />
+      ) : hidePicker ? null : (
+        <ContactPicker
+          {...odoo.pickerProps}
+          calendar={calendarProps}
+          notionAvailable={notionAvailable}
+          notionSelected={notionPick.picked}
+          onToggleNotion={onToggleNotion}
+        />
       )}
       <Audio {...completion} />
       <Input

@@ -65,7 +65,7 @@ function normalise(value: string): string {
 }
 
 /** The name of every option list under `value`; anything else is none. */
-function optionNames(value: unknown): string[] {
+export function optionNames(value: unknown): string[] {
   if (typeof value !== "object" || value === null) return [];
   const options = (value as { options?: unknown }).options;
   if (!Array.isArray(options)) return [];

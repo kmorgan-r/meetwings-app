@@ -99,6 +99,9 @@ function defaultProps(over: Partial<ContactPickerProps> = {}): ContactPickerProp
     onRetryContactOpportunities: vi.fn(async () => {}),
     open: false,
     onOpenChange: vi.fn(),
+    notionAvailable: false,
+    notionSelected: false,
+    onToggleNotion: vi.fn(),
     ...over,
   };
 }
@@ -1190,5 +1193,28 @@ describe("calendar proposal slot", () => {
     const search = screen.getByPlaceholderText("Search contacts");
     // Node.DOCUMENT_POSITION_FOLLOWING: the search box comes after the region.
     expect(region.compareDocumentPosition(search) & 4).toBeTruthy();
+  });
+});
+
+describe("the Notion row", () => {
+  it("picker shows the Notion row only when Odoo and Notion are both set up", async () => {
+    // notionAvailable is the AND of the two; the picker itself just obeys it.
+    const { unmount } = render(<Harness {...defaultProps({ notionAvailable: false })} />);
+    await openPopover();
+    expect(screen.queryByText("Notion: Weekly Team Meetings")).toBeNull();
+    unmount();
+
+    render(<Harness {...defaultProps({ notionAvailable: true })} />);
+    await openPopover();
+    expect(screen.getByRole("checkbox", { name: "Notion: Weekly Team Meetings" })).not.toBeChecked();
+  });
+
+  it("reflects notionSelected and calls onToggleNotion on click", async () => {
+    const props = setup({ notionAvailable: true, notionSelected: true });
+    await openPopover();
+    const box = screen.getByRole("checkbox", { name: "Notion: Weekly Team Meetings" });
+    expect(box).toBeChecked();
+    await userEvent.click(box);
+    expect(props.onToggleNotion).toHaveBeenCalledTimes(1);
   });
 });

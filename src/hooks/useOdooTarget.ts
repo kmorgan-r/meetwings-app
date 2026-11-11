@@ -146,6 +146,9 @@ function isNotConfigured(err: unknown): boolean {
  * vanish silently and slice 2 would file the meeting as unassigned while the
  * user believes they picked someone.
  */
+/** Everything the picker takes from this hook; the Notion row comes from completion/index.tsx. */
+type OdooPickerProps = Omit<ContactPickerProps, "notionAvailable" | "notionSelected" | "onToggleNotion">;
+
 export interface UseOdooTargetReturn {
   /**
    * The single-select flow's own ref, used ONLY by this hook's internal
@@ -154,7 +157,7 @@ export interface UseOdooTargetReturn {
    * `targetsRef` for what `useMeetingLog` actually consumes now.
    */
   targetRef: RefObject<SingleTarget | null>;
-  pickerProps: ContactPickerProps;
+  pickerProps: OdooPickerProps;
   /**
    * Task 14: what `useMeetingLog`'s `targetRef` param is fed at the
    * `<Completion />` call site now - the flat multi-target list (Task 4's
@@ -1342,7 +1345,7 @@ export function useOdooTarget({
   // selection's name for a render every time target actually changes.
   const contactName = contactsOf(cache).find((c) => c.id === target?.contactId)?.name ?? null;
 
-  const pickerProps: ContactPickerProps = {
+  const pickerProps: OdooPickerProps = {
     contactId: target?.contactId ?? null,
     leadId: target?.leadId ?? null,
     leadName: target?.leadName ?? null,

@@ -113,7 +113,13 @@ describe("app page mounts the detection hook", () => {
     // and calls it in its body, so a missing mount fails this assertion. Every
     // other module App's render path touches is stubbed to a no-op for the same
     // reason - the only behavior under test is the hook call site.
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: {} }),
       useSetupStatus: () => ({
         isComplete: true,
@@ -152,7 +158,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
     // context and the whole audio stack. mockAppRenderDeps() is deliberately
     // NOT used here - it stubs Completion itself to `() => null`, so the
     // component under test would never render and the spy never be called.
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD,
@@ -316,7 +328,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
       undoBlockedMessage: null,
     }));
 
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),
@@ -462,7 +480,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
       return false;
     });
 
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),
@@ -580,7 +604,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
     vi.resetModules();
     const useMeetingAutoRecord = vi.fn();
 
+    // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
+    vi.doMock("@/hooks/useNotionConfigured", () => ({
+      useNotionConfigured: () => null,
+      useOdooSetupState: () => null,
+    }));
     vi.doMock("@/hooks", () => ({
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
       useSetupStatus: () => ({
         isComplete: true,

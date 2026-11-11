@@ -6,6 +6,7 @@ import {
   AICustomProviders,
   STTCustomProviders,
 } from "./components";
+import { SummaryProviderCard } from "./components/ai-configs/SummaryProviderCard";
 import Contribute from "@/components/Contribute";
 import { useSettings, useSetupStatus } from "@/hooks";
 import { PageLayout } from "@/layouts";
@@ -52,6 +53,9 @@ const DevSpace = () => {
         <div className="space-y-6">
           {/* Meetwings API Setup */}
           <MeetwingsApiSetup />
+
+          {/* Meeting summaries (Notion and Odoo) */}
+          <SummaryProviderCard />
 
           {/* Custom AI Providers */}
           <AICustomProviders {...settings} />
