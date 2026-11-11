@@ -5,6 +5,7 @@ mod capture;
 mod db;
 mod graph;
 mod meeting_detect;
+mod notion_token;
 mod shortcuts;
 mod window;
 use std::sync::{Arc, Mutex};
@@ -238,6 +239,11 @@ pub fn run() {
             graph::graph_disconnect,
             graph::graph_status,
             graph::graph_current_meetings,
+            // Notion token: deliberately returns the credential to the webview (spec §7/§9: plugin-http + JS redactor). Not a Graph payload; the scan above does not apply.
+            notion_token::notion_keychain_available,
+            notion_token::notion_token_set,
+            notion_token::notion_token_get,
+            notion_token::notion_token_clear,
         ])
         .setup(|app| {
             // Setup main window positioning
