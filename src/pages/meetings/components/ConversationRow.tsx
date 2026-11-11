@@ -3,6 +3,8 @@ import type { MouseEvent } from "react";
 import moment from "moment";
 import { Badge, Card, Button, Input } from "@/components";
 import { CheckIcon, PencilIcon, XIcon } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type { NotionBadge } from "@/hooks/useNotionQueue";
 import { getMeetingSummaryByConversation, getEntitiesForSummary } from "@/lib/database";
 import { SummaryContent } from "@/pages/context-memory/components/SummaryContent";
 import type { MeetingSummary, KnowledgeEntity } from "@/types";
@@ -59,6 +61,15 @@ export interface ConversationRowProps {
    * a meeting no trigger ever logged - and `null` until Odoo is fully set up.
    */
   onSendToOdoo: ((id: string) => Promise<string | null>) | null;
+  /**
+   * The Notion badge, flattened to primitives for the same reason as the Odoo
+   * one: the page's Notion map is rebuilt on every reload.
+   */
+  notionLabel: string | null;
+  notionUrl: string | null;
+  notionTone: NotionBadge["tone"] | null;
+  /** Like `onSendToOdoo`: resolves to the line to show, or `null` once queued. `null` until Notion is set up. */
+  onSendToNotion: ((id: string) => Promise<string | null>) | null;
 }
 
 /**
@@ -90,6 +101,10 @@ function ConversationRowInner({
   onCommitRename,
   onCancelRename,
   onSendToOdoo,
+  notionLabel,
+  notionUrl,
+  notionTone,
+  onSendToNotion,
 }: ConversationRowProps) {
   // Transient - reset from the `title` prop every time editing starts, so it
   // never needs to survive past the commit/cancel that ends it, and does not
@@ -101,6 +116,8 @@ function ConversationRowInner({
   const [nameError, setNameError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [sendingNotion, setSendingNotion] = useState(false);
+  const [notionError, setNotionError] = useState<string | null>(null);
   const [summaryState, setSummaryState] = useState<
     { loading: true } | { loading: false; summary: MeetingSummary | null; entities: KnowledgeEntity[] } | null
   >(null);
@@ -159,6 +176,18 @@ function ConversationRowInner({
       setSendError(await onSendToOdoo(id));
     } finally {
       setSending(false);
+    }
+  };
+
+  const sendToNotion = async (e: MouseEvent) => {
+    e.stopPropagation(); // the card's own onClick navigates
+    if (sendingNotion || !onSendToNotion) return;
+    setSendingNotion(true);
+    setNotionError(null);
+    try {
+      setNotionError(await onSendToNotion(id));
+    } finally {
+      setSendingNotion(false);
     }
   };
 
@@ -269,6 +298,14 @@ function ConversationRowInner({
               {sendError}
             </p>
           )}
+          {notionError !== null && (
+            <p
+              className="text-xs text-destructive"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {notionError}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {badgeStatus !== null && (
@@ -281,6 +318,30 @@ function ConversationRowInner({
           {badgeStatus === null && onSendToOdoo && (
             <Button size="sm" variant="outline" disabled={sending} onClick={sendToOdoo}>
               {sending ? "Sending…" : "Send to Odoo"}
+            </Button>
+          )}
+          {notionLabel !== null && (
+            <Badge data-notion-tone={notionTone ?? undefined} variant="outline" className="text-xs">
+              {notionUrl !== null ? (
+                <a
+                  href={notionUrl}
+                  className="underline"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation(); // the card's own onClick navigates
+                    void openUrl(notionUrl);
+                  }}
+                >
+                  {notionLabel}
+                </a>
+              ) : (
+                notionLabel
+              )}
+            </Badge>
+          )}
+          {notionLabel === null && onSendToNotion && !id.startsWith("sysaudio_conv_") && (
+            <Button size="sm" variant="outline" disabled={sendingNotion} onClick={sendToNotion}>
+              {sendingNotion ? "Sending…" : "Send to Notion"}
             </Button>
           )}
           <Badge variant="outline" className="text-xs">

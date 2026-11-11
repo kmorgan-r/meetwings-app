@@ -13,8 +13,27 @@ const db = vi.hoisted(() => ({
   getQueueTranscript: vi.fn(),
   getQueueRow: vi.fn(),
   listConversationBadgeRows: vi.fn(),
+  // Read at import time by notion-queue.action, which the page's Notion hook reaches.
+  NOTION_LANE_OPEN: "1",
 }));
 vi.mock("@/lib/database/meeting-log.action", () => db);
+
+// This suite is about the Odoo queue: Notion is not set up, and the real hook
+// would reach Tauri's event bus and the database under jsdom.
+const inertNotion = vi.hoisted(() => ({
+  configured: false,
+  items: [],
+  byConversation: new Map(),
+  reload: async () => {},
+  onSendRows: async () => {},
+  onRetry: async () => {},
+  onDontSend: async () => {},
+  onSendConversation: async () => null,
+}));
+vi.mock("@/hooks/useNotionQueue", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useNotionQueue")>()),
+  useNotionQueue: () => inertNotion,
+}));
 
 // `useHistory` reads this in a mount effect through the `@/lib` barrel, which
 // star-exports it. Mocked at the LEAF rather than at `@/lib`, so the rest of

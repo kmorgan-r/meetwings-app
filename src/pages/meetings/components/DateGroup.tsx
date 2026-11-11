@@ -1,5 +1,6 @@
 import moment from "moment";
 import type { ChatConversation } from "@/types";
+import type { NotionBadge } from "@/hooks/useNotionQueue";
 import { ConversationRow } from "./ConversationRow";
 
 export interface DateGroupProps {
@@ -16,6 +17,8 @@ export interface DateGroupProps {
   onCommitRename: (id: string, title: string) => Promise<boolean>;
   onCancelRename: () => void;
   onSendToOdoo: ((id: string) => Promise<string | null>) | null;
+  notionBadges?: ReadonlyMap<string, NotionBadge>;
+  onSendToNotion?: ((id: string) => Promise<string | null>) | null;
 }
 
 /**
@@ -35,6 +38,8 @@ export function DateGroup({
   onCommitRename,
   onCancelRename,
   onSendToOdoo,
+  notionBadges,
+  onSendToNotion,
 }: DateGroupProps) {
   return (
     <div className="flex flex-col gap-3">
@@ -47,6 +52,7 @@ export function DateGroup({
           // - both get a new identity on every reload.
           const badge = badges.get(doc.id) ?? null;
           const whoLabel = whoNames.get(doc.id) ?? null;
+          const notion = notionBadges?.get(doc.id) ?? null;
           return (
             <ConversationRow
               key={doc.id}
@@ -63,6 +69,10 @@ export function DateGroup({
               onCommitRename={onCommitRename}
               onCancelRename={onCancelRename}
               onSendToOdoo={onSendToOdoo}
+              notionLabel={notion?.label ?? null}
+              notionUrl={notion?.url ?? null}
+              notionTone={notion?.tone ?? null}
+              onSendToNotion={onSendToNotion ?? null}
             />
           );
         })}

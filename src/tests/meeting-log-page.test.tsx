@@ -18,8 +18,27 @@ const db = vi.hoisted(() => ({
   // reload's badge read (Task 11). Left undefined here would throw inside the
   // hook's Promise.all and every test in this file would hit the single catch.
   listConversationBadgeRows: vi.fn(),
+  // Read at import time by notion-queue.action, which the page's Notion hook reaches.
+  NOTION_LANE_OPEN: "1",
 }));
 vi.mock("@/lib/database/meeting-log.action", () => db);
+
+// This suite is about the Odoo queue: Notion is not set up, and the real hook
+// would reach Tauri's event bus and the database under jsdom.
+const inertNotion = vi.hoisted(() => ({
+  configured: false,
+  items: [],
+  byConversation: new Map(),
+  reload: async () => {},
+  onSendRows: async () => {},
+  onRetry: async () => {},
+  onDontSend: async () => {},
+  onSendConversation: async () => null,
+}));
+vi.mock("@/hooks/useNotionQueue", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useNotionQueue")>()),
+  useNotionQueue: () => inertNotion,
+}));
 
 // The actions module, mocked whole: the spec's Testing -> Page section runs
 // this suite with "action and actions modules mocked", so every outcome the
