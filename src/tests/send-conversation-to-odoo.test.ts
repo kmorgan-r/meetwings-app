@@ -65,6 +65,7 @@ beforeEach(async () => {
     db.run(fs.readFileSync(path.join(MIGRATIONS, file), "utf8"));
   }
   await applyMigration14(db);
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
   for (const id of ["conv_1", "sysaudio_conv_1"]) {
     db.run("INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, 't', 1, 1)", [id]);
   }

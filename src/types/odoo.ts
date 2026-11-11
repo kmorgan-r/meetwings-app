@@ -165,8 +165,8 @@ export interface DbMeetingLogRow {
 }
 
 /**
- * What the queue page's list query returns: every column EXCEPT `transcript`,
- * plus every target row for that meeting, attached in memory by
+ * What the queue page's list query returns: every column EXCEPT `transcript` and the Notion lane
+ * (`notion_status`, `notion_send_id`; never read off Odoo list rows), plus every target row for that meeting, attached in memory by
  * `listActionableRows` (one extra query for the whole list, not N+1).
  *
  * A distinct type, and load-bearing. Typing list rows as `DbMeetingLogRow`
@@ -182,7 +182,7 @@ export interface DbMeetingLogRow {
  * lets `groupOf` and AssignDialog's Confirm gate read a row's per-target
  * failure state instead of only its collapsed parent status.
  */
-export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
+export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript" | "notion_status" | "notion_send_id"> & {
   targets?: MeetingLogTarget[];
 };
 

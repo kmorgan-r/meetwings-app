@@ -352,7 +352,7 @@ UPDATE meeting_log_queue SET status = 'deleted', transcript = ''
         OR EXISTS (SELECT 1 FROM meeting_log_targets
                     WHERE row_id = meeting_log_queue.id AND status = 'sent'))`,
 
-  // Every column EXCEPT transcript - loading a whole meeting's text for every
+  // Every column EXCEPT transcript and the Notion lane - loading a whole meeting's text for every
   // row to render a COLLAPSED list is invisible with three rows and painful
   // with forty.
   //
