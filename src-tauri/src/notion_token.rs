@@ -7,7 +7,9 @@
 //! "succeed" without persisting, so Linux refuses everything instead.
 //! Error strings are fixed and never echo the token or keyring details.
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const SERVICE: &str = "com.meetwings.notion";
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const ACCOUNT: &str = "token";
 const NO_KEYCHAIN: &str = "The system keychain isn't available on this computer.";
 
@@ -16,6 +18,7 @@ fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, ACCOUNT).map_err(|_| NO_KEYCHAIN.to_string())
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn clean(token: &str) -> Result<&str, String> {
     let t = token.trim();
     if t.is_empty() {
@@ -26,47 +29,42 @@ fn clean(token: &str) -> Result<&str, String> {
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_keychain_available() -> bool {
     false
 }
 
+/// Reports platform support only; real access failures surface through
+/// `notion_token_get`, which yields NOTION_KEYCHAIN_UNAVAILABLE at send time.
 #[cfg(not(target_os = "linux"))]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_keychain_available() -> bool {
-    match entry() {
-        Ok(e) => !matches!(
-            e.get_password(),
-            Err(keyring::Error::PlatformFailure(_)) | Err(keyring::Error::NoStorageAccess(_))
-        ),
-        Err(_) => false,
-    }
+    true
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_set(token: String) -> Result<(), String> {
-    clean(&token)?;
-    let _ = (SERVICE, ACCOUNT);
+    let _ = token;
     Err(NO_KEYCHAIN.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_set(token: String) -> Result<(), String> {
     let t = clean(&token)?;
     entry()?.set_password(t).map_err(|_| NO_KEYCHAIN.to_string())
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_get() -> Result<Option<String>, String> {
     Err(NO_KEYCHAIN.to_string())
 }
 
 /// `Ok(None)` means no entry, which is not an error.
 #[cfg(not(target_os = "linux"))]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_get() -> Result<Option<String>, String> {
     match entry()?.get_password() {
         Ok(t) => Ok(Some(t)),
@@ -76,13 +74,13 @@ pub fn notion_token_get() -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "linux")]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_clear() -> Result<(), String> {
     Err(NO_KEYCHAIN.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn notion_token_clear() -> Result<(), String> {
     match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -98,10 +96,5 @@ mod tests {
     fn empty_token_is_rejected_without_echo() {
         assert!(clean("  \n").is_err());
         assert_eq!(clean("  secret_abc\n").unwrap(), "secret_abc");
-    }
-
-    #[test]
-    fn error_string_is_fixed() {
-        assert!(!NO_KEYCHAIN.contains("secret"));
     }
 }

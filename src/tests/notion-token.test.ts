@@ -58,12 +58,32 @@ describe("notion token", () => {
     await expect(loadNotionToken()).rejects.toMatchObject({ code: "NOTION_KEYCHAIN_UNAVAILABLE" });
   });
 
-  it("clear and availability use their commands", async () => {
+  it("isNotionKeychainAvailable passes the value through and assumes true on reject", async () => {
+    invoke.mockResolvedValue(false);
+    expect(await isNotionKeychainAvailable()).toBe(false);
+    expect(invoke).toHaveBeenCalledWith("notion_keychain_available");
     invoke.mockResolvedValue(true);
     expect(await isNotionKeychainAvailable()).toBe(true);
+    invoke.mockRejectedValue("x");
+    expect(await isNotionKeychainAvailable()).toBe(true);
+  });
+
+  it("loadNotionToken calls notion_token_get", async () => {
+    invoke.mockResolvedValue(null);
+    await loadNotionToken();
+    expect(invoke).toHaveBeenCalledWith("notion_token_get");
+  });
+
+  it("clearNotionToken calls notion_token_clear", async () => {
+    invoke.mockResolvedValue(undefined);
     await clearNotionToken();
     expect(invoke).toHaveBeenCalledWith("notion_token_clear");
-    invoke.mockRejectedValue("x");
-    expect(await isNotionKeychainAvailable()).toBe(false);
+  });
+
+  it("clearNotionToken throws NOTION_KEYCHAIN_UNAVAILABLE when the invoke rejects", async () => {
+    invoke.mockRejectedValue("denied");
+    const err = await clearNotionToken().catch((e) => e);
+    expect(err).toBeInstanceOf(NotionError);
+    expect(err.code).toBe("NOTION_KEYCHAIN_UNAVAILABLE");
   });
 });

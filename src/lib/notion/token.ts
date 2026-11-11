@@ -8,7 +8,9 @@ export async function isNotionKeychainAvailable(): Promise<boolean> {
   try {
     return await invoke<boolean>("notion_keychain_available");
   } catch {
-    return false;
+    // Unknown means assume available: a false here reads as "no token" and
+    // would drop Notion-only meetings; real failures surface on load/save.
+    return true;
   }
 }
 
