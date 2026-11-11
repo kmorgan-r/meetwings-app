@@ -1,5 +1,6 @@
 import type { DbNotionSend } from "@/types";
 import { getDatabase } from "./config";
+import { NOTION_LANE_OPEN } from "./meeting-log.action";
 
 /**
  * All SQLite access for the Notion send record (`notion_sends`) and the
@@ -103,6 +104,22 @@ SELECT id, conversation_id, notion_status, transcript_start_at, transcript_end_a
   FROM meeting_log_queue
  WHERE notion_status IN ('held', 'offered', 'waiting') AND notion_send_id IS NULL
  ORDER BY transcript_start_at`,
+
+  // NOTION_LANE_OPEN reads `meeting_log_queue.notion_send_id`, so the table stays unaliased.
+  conversationRows: `
+SELECT meeting_log_queue.id AS id, meeting_log_queue.status AS status,
+       meeting_log_queue.notion_status AS notion_status,
+       meeting_log_queue.notion_send_id AS notion_send_id,
+       meeting_log_queue.transcript AS transcript,
+       ${NOTION_LANE_OPEN} AS lane_open,
+       ns.status AS send_status, ns.page_id AS send_page_id
+  FROM meeting_log_queue
+  LEFT JOIN notion_sends ns ON ns.id = meeting_log_queue.notion_send_id
+ WHERE meeting_log_queue.conversation_id = ?`,
+
+  waitPrefix: `
+UPDATE meeting_log_queue SET notion_status = 'waiting'
+ WHERE (notion_status IS NULL OR notion_status = 'offered') AND notion_send_id IS NULL AND id IN `,
 } as const;
 
 const marks = (ids: string[]) => `(${ids.map(() => "?").join(", ")})`;
@@ -249,6 +266,25 @@ export const offerRowsToWaiting = (rowIds: string[]) =>
 
 export const cancelOfferedRows = (rowIds: string[]) =>
   rowIds.length ? one(NOTION_SQL.cancelOfferedPrefix + marks(rowIds), rowIds) : Promise.resolve(false);
+
+export const markRowsWaiting = (rowIds: string[]) =>
+  rowIds.length ? one(NOTION_SQL.waitPrefix + marks(rowIds), rowIds) : Promise.resolve(false);
+
+export interface ConversationNotionRow {
+  id: string;
+  status: string;
+  notion_status: string | null;
+  notion_send_id: string | null;
+  transcript: string;
+  lane_open: number;
+  send_status: string | null;
+  send_page_id: string | null;
+}
+
+export async function listConversationNotionRows(conversationId: string): Promise<ConversationNotionRow[]> {
+  const db = await getDatabase();
+  return db.select<ConversationNotionRow[]>(NOTION_SQL.conversationRows, [conversationId]);
+}
 
 export const requeueAuthFailures = () => one(NOTION_SQL.requeueAuth, []);
 
