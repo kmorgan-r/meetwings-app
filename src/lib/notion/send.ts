@@ -33,7 +33,7 @@ import { addPractices, readKnowledge } from "./knowledge";
 import { batchBlocks, buildPageBlocks, pageProperties, transcriptBlocks } from "./page-blocks";
 import { armNotionRedactor } from "./redact";
 import { buildMapping, describeSubTable, routeMeeting, type SubTable } from "./routing";
-import { isOwnPage, pickWinner, readCandidates, sameMeeting } from "./same-meeting";
+import { pickWinner, type Candidate, readCandidates, sameMeeting } from "./same-meeting";
 import { summarizeForNotion, type NotionSummary } from "./summarize";
 import { loadNotionToken } from "./token";
 
@@ -118,6 +118,15 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     };
 
     const { lines } = await readSendLines(sendId);
+
+    // A known loser trashes first: a failing step below must never keep a duplicate alive.
+    const trashLoser = async (): Promise<SendOutcome> => {
+      await stamp();
+      await deps.client.trashPage(s.page_id as string);
+      return await finish("already");
+    };
+    if (s.lost_to_url && s.page_id) return await trashLoser();
+
     if (lines.length === 0 && !s.page_id) {
       return await finish("no_summary", { errorCode: "SUMMARY_TOO_SHORT" });
     }
@@ -155,6 +164,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
 
     // 3. Mapping.
     const subTables: SubTable[] = [];
+    await stamp();
     const meetingsDb = await deps.client.database(meetingsDbId);
     for (const ds of meetingsDb.dataSources) {
       await stamp();
@@ -164,17 +174,30 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     const mapping = buildMapping(subTables);
     if (mapping === null) throw new NotionError("NOTION_INVALID");
 
+    // Proven to be THIS send's page: a creator match alone is not proof (with a personal
+    // token the owner is the person, so their hand-made pages match too). Needs our creator,
+    // the exact range this send wrote (60 s covers minute rounding) and our bold title.
+    // ponytail: the same token on two devices recording one meeting with identical AI titles
+    // and spans within 60 s would still trash each other's pages; no cheaper proof exists.
+    const isThisSendsPage = (c: Candidate): boolean =>
+      s.create_started_at !== null &&
+      c.createdById !== null &&
+      (c.createdById === me.id || (me.ownerUserId !== null && c.createdById === me.ownerUserId)) &&
+      Math.abs(c.start - s.span_start_at) <= 60_000 &&
+      Math.abs(c.end - s.span_end_at) <= 60_000 &&
+      c.boldTitle === summary.title;
+
     // 4. Find or create the page.
     if (!s.page_id) {
       await stamp();
       const candidates = await readCandidates(deps.client, subTables, s.span_start_at, s.span_end_at);
       if (s.create_started_at !== null) {
-        const own = candidates.find((c) => isOwnPage(c, me));
+        const own = candidates.find(isThisSendsPage);
         if (own) await patch({ page_id: own.pageId, page_url: own.url, page_created_time: own.createdTime });
       }
       if (!s.page_id) {
         for (const c of candidates) {
-          if (isOwnPage(c, me)) continue;
+          if (isThisSendsPage(c)) continue;
           await stamp();
           if (await sameMeeting(deps.ai, c, summary)) {
             await patch({ lost_to_url: c.url });
@@ -212,14 +235,14 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
       const candidates = await readCandidates(deps.client, subTables, s.span_start_at, s.span_end_at);
       // An own page that is not this one is an orphan from a create whose response was lost.
       for (const c of candidates) {
-        if (isOwnPage(c, me) && c.pageId !== pageId) {
+        if (isThisSendsPage(c) && c.pageId !== pageId) {
           await stamp();
           await deps.client.trashPage(c.pageId);
         }
       }
       const rivals: typeof candidates = [];
       for (const c of candidates) {
-        if (isOwnPage(c, me)) continue;
+        if (c.pageId === pageId || isThisSendsPage(c)) continue;
         await stamp();
         if (await sameMeeting(deps.ai, c, summary)) rivals.push(c);
       }
@@ -228,15 +251,13 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
         ...rivals.map((c) => ({ pageId: c.pageId, createdTime: c.createdTime })),
       ]);
       if (winner !== pageId) {
-        const url = rivals.find((c) => c.pageId === winner)?.url ?? "";
+        const url =
+          rivals.find((c) => c.pageId === winner)?.url ||
+          `https://www.notion.so/${winner.replace(/-/g, "")}`;
         await patch({ lost_to_url: url });
       }
     }
-    if (s.lost_to_url) {
-      await stamp();
-      await deps.client.trashPage(pageId);
-      return await finish("already");
-    }
+    if (s.lost_to_url) return await trashLoser();
 
     // 7. Transcript and practices, independent. A LostClaim always escapes.
     let transcriptErr: StepError | null = null;
@@ -260,6 +281,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
           if (!s.page_url) throw new NotionError("NOTION_INTERNAL");
           await stamp();
           const kdb = await readKnowledge(deps.client, knowledgeDbId);
+          await stamp();
           await addPractices(deps.client, deps.ai, kdb, summary.practices, s.page_url, stamp);
         }
         await patch({ practices_done: 1 });

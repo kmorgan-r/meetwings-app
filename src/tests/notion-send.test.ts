@@ -142,6 +142,7 @@ function makeWorld() {
     onCreate: undefined as ((p: Page) => void) | undefined,
     onMe: undefined as (() => void) | undefined,
     onSleep: undefined as (() => void) | undefined,
+    onAppend: undefined as (() => void) | undefined,
     client: undefined as unknown as NotionClient,
     ai: undefined as unknown as NotionAi,
   };
@@ -223,6 +224,7 @@ function makeWorld() {
     },
     appendChildren: async (parent: string, children: NotionBlockInput[]) => {
       tick("appendChildren");
+      w.onAppend?.();
       const list = w.kids.get(parent);
       if (!list) throw new Error("unknown parent");
       const added = addBlocks(children);
@@ -261,7 +263,18 @@ const asks = (w: World, kind: string) => w.asks.filter((a) => a.kind === kind);
 const mainPages = (w: World) => [...w.pages.values()].filter((p) => p.ds === "ds-main");
 const knowledgeRows = (w: World) => [...w.pages.values()].filter((p) => p.ds === "ds-know");
 
-function addRival(w: World, over: Partial<Page> = {}) {
+const iso = (ms: number) => new Date(ms).toISOString();
+const dateProps = (startOff = 0, endOff = 0) => ({
+  Name: { title: [] },
+  Date: { date: { start: iso(START + startOff), end: iso(END + endOff) } },
+});
+/** The two blocks same-meeting reads a bold title from. */
+const titleKids = (title: string): NotionBlock[] => [
+  { id: `h-${title}`, type: "heading_2", heading_2: { rich_text: [{ type: "text", text: { content: "Meeting Notes" } }] } },
+  { id: `t-${title}`, type: "paragraph", paragraph: { rich_text: [{ type: "text", text: { content: title }, annotations: { bold: true } }] } },
+];
+
+function addRival(w: World, over: Partial<Page> = {}, title = "Hand-made agenda") {
   const p: Page = {
     id: "aaa-rival", url: "https://notion.invalid/rival", created_time: w.createdTime,
     created_by: { id: "person-2" },
@@ -269,7 +282,7 @@ function addRival(w: World, over: Partial<Page> = {}) {
     ds: "ds-main", trashed: false, hidden: false, ...over,
   };
   w.pages.set(p.id, p);
-  w.kids.set(p.id, []);
+  w.kids.set(p.id, titleKids(title));
   return p;
 }
 
@@ -288,6 +301,12 @@ function makeDeps(w: World, over: Partial<NotionSendDeps> = {}): NotionSendDeps 
 
 let world: World;
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let warnSpy: ReturnType<typeof vi.spyOn>;
+// A test that expects the NOTION_INTERNAL log line says so; any other log fails the test.
+let logsExpected = false;
+const expectLogs = () => {
+  logsExpected = true;
+};
 
 beforeEach(async () => {
   const wasmBinary = fs.readFileSync(path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm"));
@@ -302,11 +321,18 @@ beforeEach(async () => {
   mocks.select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
   mocks.getSummary.mockReset();
   world = makeWorld();
+  logsExpected = false;
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  if (!logsExpected) {
+    expect(errorSpy).not.toHaveBeenCalled();
+  }
+  expect(warnSpy).not.toHaveBeenCalled();
   errorSpy.mockRestore();
+  warnSpy.mockRestore();
   resetNotionRedactor();
 });
 
@@ -512,7 +538,7 @@ describe("find or create", () => {
   it("an orphan own page from a lost create (invisible at step 4) is trashed at the recheck, not treated as a rival", async () => {
     await seedSend();
     db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = 's1'");
-    const orphan = addRival(world, { id: "orphan-1", created_by: { id: "bot-1" }, hidden: true });
+    const orphan = addRival(world, { id: "orphan-1", created_by: { id: "bot-1" }, hidden: true }, "Weekly sync");
     world.onSleep = () => {
       orphan.hidden = false;
     };
@@ -567,6 +593,78 @@ describe("find or create", () => {
     expect(world.calls.appendChildren).toBeGreaterThanOrEqual(4);
     expect(asks(world, "summary")).toHaveLength(0);
     expect(world.calls.createPage).toBe(1);
+  });
+});
+
+describe("only a page proven to be this send's is adopted or trashed", () => {
+  it("a hand-made page by the owner, different title and range, is never trashed or adopted, and the model was asked", async () => {
+    await seedSend();
+    world.sameAnswer = false;
+    const mine = addRival(world, { id: "hand-1", created_by: { id: "owner-1" }, properties: dateProps(30 * 60_000, 30 * 60_000) });
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+    expect(mine.trashed).toBe(false);
+    expect((await sendOf()).page_id).toBe("pg-1");
+    expect(asks(world, "same").length).toBeGreaterThan(0);
+  });
+
+  it("the same hand-made page, called the same meeting and created earlier, beats this send: already, ours trashed, theirs kept", async () => {
+    await seedSend();
+    const mine = addRival(world, {
+      id: "hand-1", created_by: { id: "owner-1" }, hidden: true, created_time: "2026-11-09T14:00:00.000Z",
+      properties: dateProps(30 * 60_000, 30 * 60_000), url: "https://notion.invalid/hand-1",
+    });
+    world.onSleep = () => {
+      mine.hidden = false;
+    };
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+    expect(await sendOf()).toMatchObject({ status: "already", lost_to_url: "https://notion.invalid/hand-1" });
+    expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    expect(mine.trashed).toBe(false);
+  });
+
+  it("a second own-creator page with a different title is not adopted; the one with our title is", async () => {
+    await seedSend();
+    db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = 's1'");
+    world.sameAnswer = false;
+    const decoy = addRival(world, { id: "decoy-own", created_by: { id: "bot-1" } }, "Another topic");
+    addRival(world, { id: "mine-own", created_by: { id: "bot-1" } }, "Weekly sync");
+    // The page our earlier attempt wrote: the whole body, so the body step finds nothing missing.
+    const body = buildPageBlocks({ title: "Weekly sync", actionItems: ["Send notes"], sections: [{ heading: "Roadmap", bullets: ["Ship it"] }], practices: [] });
+    world.kids.set("mine-own", body.map((b, i) => ({ ...b, id: `mine-b${i}` }) as NotionBlock));
+    world.kids.set(`mine-b${body.length - 1}`, []);
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+    expect((await sendOf()).page_id).toBe("mine-own");
+    expect(world.calls.createPage).toBeUndefined();
+    expect(decoy.trashed).toBe(false);
+  });
+
+  it("two devices: the owner's page with our title but a span 5 minutes off is a competitor, not an orphan", async () => {
+    await seedSend();
+    const other = addRival(
+      world,
+      { id: "aaa-device", created_by: { id: "owner-1" }, hidden: true, created_time: "2026-11-09T14:00:00.000Z", properties: dateProps(5 * 60_000, 5 * 60_000) },
+      "Weekly sync",
+    );
+    world.onSleep = () => {
+      other.hidden = false;
+    };
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+    expect(other.trashed).toBe(false);
+    expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    expect(asks(world, "same").length).toBeGreaterThan(0);
+  });
+
+  it("an empty winner url stores a derived url, and the loser does not carry on", async () => {
+    await seedSend();
+    world.defaultSummary = summaryJson({ practices: TWO_PRACTICES });
+    const rival = addRival(world, { hidden: true, url: "" });
+    world.onSleep = () => {
+      rival.hidden = false;
+    };
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+    expect((await sendOf()).lost_to_url).toBe("https://www.notion.so/aaarival");
+    expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    expect(knowledgeRows(world)).toHaveLength(0);
   });
 });
 
@@ -643,6 +741,7 @@ describe("failures and claims", () => {
 
   it("an unknown thrown error → failed with NOTION_INTERNAL, never thrown to the caller", async () => {
     await seedSend();
+    expectLogs();
     failAt(world, "me", 1, new Error("boom with meeting words"));
     await expect(runNotionSend("s1", makeDeps(world))).resolves.toBe("failed");
     expect(await sendOf()).toMatchObject({ status: "failed", error_code: "NOTION_INTERNAL", next_at: null });
@@ -652,6 +751,7 @@ describe("failures and claims", () => {
 
   it("a corrupt stored summary → failed NOTION_INTERNAL, not thrown", async () => {
     await seedSend();
+    expectLogs();
     db.run("UPDATE notion_sends SET summary_json = '{nope' WHERE id = 's1'");
     await expect(runNotionSend("s1", makeDeps(world))).resolves.toBe("failed");
     expect((await sendOf()).error_code).toBe("NOTION_INTERNAL");
@@ -690,6 +790,42 @@ describe("failures and claims", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it("a known loser is trashed before the mapping, so a failing mapping cannot keep the duplicate alive", async () => {
+    await seedSend();
+    const rival = addRival(world, { hidden: true });
+    world.onSleep = () => {
+      rival.hidden = false;
+    };
+    failAt(world, "trashPage", 1, new NotionError("NOTION_SERVER"));
+    failAt(world, "database", 2, new NotionError("NOTION_SERVER"));
+    const deps = makeDeps(world);
+    expect(await runNotionSend("s1", deps)).toBe("retry");
+    await retrySend("s1");
+    expect(await runNotionSend("s1", deps)).toBe("already");
+    expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    expect(world.calls.database).toBe(1);
+  });
+
+  it("a restamp refused mid-transcript -> lost-claim, no transcript_done, no practices, no finish", async () => {
+    await seedSend("s1", Array.from({ length: 150 }, (_, i) => `Sam: line ${i}`));
+    world.defaultSummary = summaryJson({ practices: TWO_PRACTICES });
+    world.onAppend = tamper;
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("lost-claim");
+    expect(await sendOf()).toMatchObject({ status: "sending", transcript_done: 0, practices_done: 0, error_code: null });
+    expect(knowledgeRows(world)).toHaveLength(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("a finishSend that throws gives failed and never rejects", async () => {
+    expectLogs();
+    await seedSend();
+    mocks.execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (sql.includes("claimed_at = NULL")) throw new Error("db is locked");
+      return rawExecute(sql, args);
+    });
+    await expect(runNotionSend("s1", makeDeps(world))).resolves.toBe("failed");
+  });
+
   it("not-claimed when another attempt holds the send", async () => {
     await seedSend();
     const deps = makeDeps(world);
@@ -710,6 +846,7 @@ describe("failures and claims", () => {
     ["the model throws the key", () => (world.summaryReplies = [new Error(`key ${KEY} invalid`)])],
     ["the transcript throws both", () => failAt(world, "appendChildren", 1, new Error(`${TOKEN} ${KEY}`))],
   ])("the AI key and the token never appear in the stored codes or logs: %s", async (_name, arrange) => {
+    expectLogs();
     await seedSend();
     world.defaultSummary = summaryJson({ practices: TWO_PRACTICES });
     arrange();
@@ -733,6 +870,7 @@ describe("buildSendDeps", () => {
   });
 
   it("a config that throws → NOTION_INTERNAL, logged by code only", async () => {
+    expectLogs();
     mocks.loadState.mockRejectedValue(new Error("NOTION_CONFIG_UNREADABLE"));
     expect(await buildSendDeps()).toEqual({ error: "NOTION_INTERNAL" });
     expect(errorSpy).toHaveBeenCalledWith("[notion] NOTION_INTERNAL", "Error");
@@ -755,6 +893,7 @@ describe("buildSendDeps", () => {
   });
 
   it("a provider that throws → NOTION_INTERNAL", async () => {
+    expectLogs();
     mocks.resolveProvider.mockRejectedValue(new Error("SUMMARY_PROVIDER_UNREADABLE"));
     expect(await buildSendDeps()).toEqual({ error: "NOTION_INTERNAL" });
   });
