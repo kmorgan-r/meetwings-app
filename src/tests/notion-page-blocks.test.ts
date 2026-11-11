@@ -48,7 +48,7 @@ const EXPECTED_ORDER = [
 // (+ bold title, callout), Action Items to-dos, sections, divider, toggle last.
 function richContent(block: NotionBlockInput): string[] {
   const payload = block[block.type] as
-    | { rich_text?: { text?: { content?: string } }[]; icon?: { emoji?: string }; color?: string; children?: unknown[]; checked?: boolean }
+    | { rich_text?: { text?: { content?: string } }[] }
     | undefined;
   return (payload?.rich_text ?? []).map((item) => item.text?.content ?? "");
 }
@@ -81,7 +81,6 @@ describe("buildPageBlocks", () => {
     expect(richContent(blocks[2])).toEqual(["Launch"]);
     expect(richContent(blocks[3])).toEqual(["Pricing"]);
 
-    const notesHeading = typedPayload(blocks[5], "heading_2");
     expect(richContent(blocks[5])).toEqual(["Meeting Notes"]);
 
     const title = blocks[6].paragraph as Record<string, unknown>;
@@ -144,7 +143,7 @@ describe("buildPageBlocks", () => {
       EXPECTED_ORDER.filter((t) => t !== "callout"),
     );
     expect(richContent(blocks[1])).toEqual(["Agenda"]);
-    // The Action Items heading survives even with an empty action list.
+    // Dropping the callout does not touch Action Items: its to-dos still run.
     expect(blocks.map((b) => b.type)).toContain("to_do");
   });
 
@@ -175,6 +174,11 @@ describe("splitRichText", () => {
 
   it('"" → []', () => {
     expect(splitRichText("")).toEqual([]);
+  });
+
+  it("a max below 2 throws RangeError - a surrogate pair cannot fit in one unit", () => {
+    expect(() => splitRichText("abc", 1)).toThrowError(RangeError);
+    expect(() => splitRichText("abc", 0)).toThrowError(RangeError);
   });
 
   it("never splits a surrogate pair at the boundary", () => {
@@ -215,7 +219,7 @@ describe("transcriptBlocks", () => {
     const richText = payload.rich_text as { text: { content: string } }[];
     expect(richText).toHaveLength(4);
     expect(richText.map((item) => item.text.content).join("")).toBe(line);
-    for (const item of richText) expect([...item.text.content].length).toBeLessThanOrEqual(2000);
+    for (const item of richText) expect(item.text.content.length).toBeLessThanOrEqual(2000);
   });
 
   it("a line over 100 rich-text items continues in a second paragraph", () => {
@@ -255,7 +259,7 @@ describe("batchBlocks", () => {
     expect(batchBlocks([])).toEqual([]);
   });
 
-  it("starts a new batch when adding a block would exceed 400,000 bytes", () => {
+  it("250 2 KB blocks split on the 100-block cap; every batch stays within both caps", () => {
     const big: NotionBlockInput = {
       object: "block",
       type: "paragraph",
@@ -272,6 +276,38 @@ describe("batchBlocks", () => {
     }
     // Nothing lost on the way.
     expect(batches.flat().length).toBe(250);
+  });
+
+  // Emoji text is the point: "😀" is 2 UTF-16 units but 4 UTF-8 bytes, so
+  // measuring by string .length sees half the real size. Both tests below
+  // derive maxBytes from the true TextEncoder size of one block.
+  const emojiBlock = (): NotionBlockInput => ({
+    object: "block",
+    type: "paragraph",
+    paragraph: { rich_text: [{ type: "text", text: { content: "😀".repeat(30_000) } }] },
+  });
+
+  it("splits on the byte cap with emoji text: exactly [2, 2], below the 100-block cap", () => {
+    const blocks = Array.from({ length: 4 }, emojiBlock);
+    const one = new TextEncoder().encode(JSON.stringify(blocks[0])).length;
+    // ~120 KB of UTF-8 per block, so two fit and a third would exceed; a
+    // .length measure would see ~half of that and pack all four into [4].
+    // The batch rule compares per-block sums, while the assert below measures
+    // the finished array, so leave head room for its brackets and comma.
+    const maxBytes = one * 2 + 10;
+    const batches = batchBlocks(blocks, 100, maxBytes);
+    expect(batches.map((batch) => batch.length)).toEqual([2, 2]);
+    for (const batch of batches) {
+      expect(new TextEncoder().encode(JSON.stringify(batch)).length).toBeLessThanOrEqual(maxBytes);
+    }
+  });
+
+  it("the byte counter resets per batch: [2, 2, 1] after a full batch", () => {
+    const blocks = Array.from({ length: 5 }, emojiBlock);
+    const one = new TextEncoder().encode(JSON.stringify(blocks[0])).length;
+    const maxBytes = one * 2; // exactly two fit; a counter carried across batches yields [2, 1, 1, 1]
+    const batches = batchBlocks(blocks, 100, maxBytes);
+    expect(batches.map((batch) => batch.length)).toEqual([2, 2, 1]);
   });
 
   it("a single block larger than maxBytes goes alone in its own batch", () => {

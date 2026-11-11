@@ -23,7 +23,7 @@ export interface Mapping {
   other: SubTable;
 }
 
-/** Monday through Sunday: JS `getDay()` gives Sunday as 0, so index 1 = Monday. */
+/** Sunday-first: JS `getDay()` gives Sunday as 0, so index 1 = Monday. */
 const JS_DAY: Weekday[] = [
   "sunday",
   "monday",
@@ -47,6 +47,10 @@ const WEEKDAYS: Weekday[] = [
 
 /** Strict "HH:MM": two digits, 00-23 hours, 00-59 minutes. */
 const HH_MM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+/** "monday" → "Monday", the one capitalisation every user-visible use shares. */
+const capitalizeWeekday = (weekday: Weekday): string =>
+  `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)}`;
 
 /**
  * Reads one Notion data source into the descriptor page creation needs:
@@ -141,7 +145,7 @@ export function routeMeeting(
 ): { subTable: SubTable; title: string } {
   const date = new Date(startAt);
   const weekday = JS_DAY[date.getDay()];
-  const weekdayTitle = `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} Meeting`;
+  const weekdayTitle = `${capitalizeWeekday(weekday)} Meeting`;
 
   const subTable = m.byWeekday[weekday];
   if (subTable !== undefined) {
@@ -169,8 +173,7 @@ export function describeMapping(m: Mapping): string {
   const clauses = WEEKDAYS.filter(
     (weekday) => m.byWeekday[weekday] !== undefined,
   ).map(
-    (weekday) =>
-      `${weekday.charAt(0).toUpperCase()}${weekday.slice(1)} → ${m.byWeekday[weekday]?.name}`,
+    (weekday) => `${capitalizeWeekday(weekday)} → ${m.byWeekday[weekday]?.name}`,
   );
   clauses.push(`other days → ${m.other.name}`);
   return clauses.join(", ");

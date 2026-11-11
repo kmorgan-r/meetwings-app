@@ -24,6 +24,11 @@ export interface RichTextItem {
  * rich_text array with an empty-string item.
  */
 export function splitRichText(text: string, max = 2000): string[] {
+  if (max < 2) {
+    throw new RangeError(
+      `max must be at least 2 - a surrogate pair cannot fit in fewer units; got ${max}`,
+    );
+  }
   const out: string[] = [];
   const isHigh = (code: number) => code >= 0xd800 && code <= 0xdbff;
   const isLow = (code: number) => code >= 0xdc00 && code <= 0xdfff;
@@ -35,9 +40,9 @@ export function splitRichText(text: string, max = 2000): string[] {
       const before = text.charCodeAt(end - 1);
       const after = text.charCodeAt(end);
       // A pair straddling the boundary: push the high surrogate to the next
-      // chunk. `end === i` cannot happen for max >= 2, but the guard keeps a
-      // nonsensical max from spinning the loop.
-      if (end > i && isHigh(before) && isLow(after) && end > i + 1) end -= 1;
+      // chunk. With max >= 2 a retreated end is never i, so the chunk cannot
+      // come out empty and the loop cannot spin.
+      if (isHigh(before) && isLow(after) && end > i + 1) end -= 1;
     }
     out.push(text.slice(i, end));
     i = end;
@@ -136,10 +141,12 @@ export function transcriptBlocks(lines: string[], youName: string): NotionBlockI
 
 /**
  * Splits blocks into request-sized batches: at most 100 blocks, and at most
- * maxBytes of JSON each, measured the way Notion measures. A single block
- * over maxBytes still goes through, alone in a batch of its own - the 2,000
- * character items keep even a huge transcript line far under Notion's hard
- * 500 KB limit, so dropping or splitting it would corrupt the page.
+ * maxBytes of JSON each, measured the way Notion measures. The 400,000-byte
+ * default leaves roughly 100 KB under Notion's hard 500 KB request body -
+ * head room for the array commas and the request envelope that the per-block
+ * sum leaves out. A single block larger than maxBytes still goes through,
+ * alone in a batch of its own: it can exceed the cap on its own, and Notion
+ * may refuse it, but dropping or splitting it would corrupt the page.
  */
 export function batchBlocks(
   blocks: NotionBlockInput[],

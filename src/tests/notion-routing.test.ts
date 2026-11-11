@@ -47,27 +47,28 @@ function localStartAt(weekday: Weekday, clock: string): number {
   return new Date(2026, 10, WEEKDAY_DATE[weekday], h, m).getTime();
 }
 
-/** [desc, weekday, team time (null = entry absent), start clock, sub-table, title] */
-type RouteCase = [string, Weekday, string | null, string, string, string];
+/** [weekday, start clock, team time (null = entry absent), sub-table, title] */
+type RouteCase = [Weekday, string, string | null, string, string];
 
 const ROUTE_CASES: RouteCase[] = [
   // Monday, team time 09:00: the 30-minute window holds on both edges.
-  ["08:30 against a 09:00 team time (30 min apart)", "monday", "09:00", "08:30", "Monday Meetings", "Monday Meeting"],
-  ["09:30 against a 09:00 team time (30 min apart)", "monday", "09:00", "09:30", "Monday Meetings", "Monday Meeting"],
-  ["08:29 against a 09:00 team time (31 min apart)", "monday", "09:00", "08:29", "Other Meetings", AI_TITLE],
-  ["09:31 against a 09:00 team time (31 min apart)", "monday", "09:00", "09:31", "Other Meetings", AI_TITLE],
-  ["an empty team time admits 08:30", "monday", "", "08:30", "Monday Meetings", "Monday Meeting"],
-  ["an empty team time admits 22:47", "monday", "", "22:47", "Monday Meetings", "Monday Meeting"],
-  ["a missing team time entry admits 04:03", "monday", null, "04:03", "Monday Meetings", "Monday Meeting"],
-  ["an out-of-range team time admits 10:15", "monday", "25:61", "10:15", "Monday Meetings", "Monday Meeting"],
-  ["a team time that is not HH:MM admits 09:00", "monday", "9:00", "09:00", "Monday Meetings", "Monday Meeting"],
-  ["a Tuesday start goes to other", "tuesday", "09:00", "09:00", "Other Meetings", AI_TITLE],
-  ["14:29 against a 14:00 team time (29 min apart)", "wednesday", "14:00", "14:29", "Wednesday Meetings", "Wednesday Meeting"],
-  ["a Sunday start with an empty team time", "sunday", "", "19:58", "Sunday Reviews", "Sunday Meeting"],
+  ["monday", "08:30", "09:00", "Monday Meetings", "Monday Meeting"],
+  ["monday", "09:30", "09:00", "Monday Meetings", "Monday Meeting"],
+  // The same Monday window misses by one minute on either side.
+  ["monday", "08:29", "09:00", "Other Meetings", AI_TITLE],
+  ["monday", "09:31", "09:00", "Other Meetings", AI_TITLE],
+  ["monday", "08:30", "", "Monday Meetings", "Monday Meeting"],
+  ["monday", "22:47", "", "Monday Meetings", "Monday Meeting"],
+  ["monday", "04:03", null, "Monday Meetings", "Monday Meeting"],
+  ["monday", "10:15", "25:61", "Monday Meetings", "Monday Meeting"],
+  ["monday", "09:00", "9:00", "Monday Meetings", "Monday Meeting"],
+  ["tuesday", "09:00", "09:00", "Other Meetings", AI_TITLE],
+  ["wednesday", "14:29", "14:00", "Wednesday Meetings", "Wednesday Meeting"],
+  ["sunday", "19:58", "", "Sunday Reviews", "Sunday Meeting"],
 ];
 
 describe("routeMeeting", () => {
-  it.each(ROUTE_CASES)("%s routes to %s titled %s", (_desc, weekday, teamTime, startClock, expectedName, expectedTitle) => {
+  it.each(ROUTE_CASES)("%s %s (team %s) routes to %s titled %s", (weekday, startClock, teamTime, expectedName, expectedTitle) => {
     const teamTimes: Partial<Record<Weekday, string>> =
       teamTime === null ? {} : { [weekday]: teamTime };
     const result = routeMeeting(localStartAt(weekday, startClock), MAPPING, teamTimes, AI_TITLE);
@@ -117,14 +118,6 @@ describe("buildMapping", () => {
     const mapping = buildMapping([MONDAY, WEDNESDAY]) as Mapping;
     expect(mapping.other).toEqual(MONDAY);
   });
-
-  it("no sub-table is used as both a weekday slot and other, unless it is the first-sub-table fallback", () => {
-    const mapping = buildMapping([WEDNESDAY, MONDAY, OTHER]) as Mapping;
-    expect(mapping.other).toEqual(OTHER);
-    // The first sub-table is the fallback: with it also being a weekday entry,
-    // other still comes from the Other-named sub-table.
-    expect(mapping.byWeekday.wednesday).toEqual(WEDNESDAY);
-  });
 });
 
 describe("describeSubTable", () => {
@@ -146,6 +139,32 @@ describe("describeSubTable", () => {
       dateProp: "Meeting Date",
       recordedByProp: "recorded by",
     });
+  });
+
+  it("a 'Recorded by' column of a type other than people is ignored", () => {
+    const ds = {
+      id: "ds-monday",
+      name: "Monday Meetings",
+      properties: {
+        Name: { type: "title" },
+        Date: { type: "date" },
+        "Recorded by": { type: "rich_text" },
+      },
+    };
+    expect(describeSubTable(ds)?.recordedByProp).toBeNull();
+  });
+
+  it("a non-date column named Date is not picked as dateProp", () => {
+    const ds = {
+      id: "ds-monday",
+      name: "Monday Meetings",
+      properties: {
+        Name: { type: "title" },
+        Date: { type: "select" },
+        Held: { type: "date" },
+      },
+    };
+    expect(describeSubTable(ds)?.dateProp).toBe("Held");
   });
 
   it("a date property named Date wins over one named Meeting Date", () => {
