@@ -104,6 +104,7 @@ import {
   selectSweepable,
   sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
+import { NOTION_SQL } from "@/lib/database/notion-queue.action";
 import { SELECTED_TARGET_SQL, purgeOtherInstances } from "@/lib/database/odoo-contacts.action";
 import { ESCALATE_AFTER_ATTEMPTS, HOLD_MS, RETENTION_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { applyMigration14, MIGRATIONS, rows, seedPre14 } from "./helpers/migration-14";
@@ -267,8 +268,7 @@ describe("no JS transactions", () => {
     // SELECTED_TARGET_SQL (odoo-contacts.action.ts, Task 4) is scanned
     // alongside QUEUE_SQL: it is a sibling exported statement object, and this
     // is the only place either one gets checked.
-    // Task 3 appends NOTION_SQL to NOTION_STATEMENTS.
-    const NOTION_STATEMENTS: Record<string, string> = { NOTION_LANE_OPEN };
+    const NOTION_STATEMENTS: Record<string, string> = { NOTION_LANE_OPEN, ...NOTION_SQL };
     for (const [name, sql] of Object.entries({
       ...QUEUE_SQL, ...SELECTED_TARGET_SQL, ...NOTION_STATEMENTS,
     })) {
