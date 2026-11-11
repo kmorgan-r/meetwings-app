@@ -399,7 +399,9 @@ export async function ensureMeetingSummary(
       history: [],
       userMessage,
       imagesBase64: [],
+      // The override key may be shared: keep Context Memory off it.
       skipMeetwingsAPI: resolved.kind === "override",
+      rawSystemPrompt: resolved.kind === "override",
     })) {
       fullResponse += chunk;
     }

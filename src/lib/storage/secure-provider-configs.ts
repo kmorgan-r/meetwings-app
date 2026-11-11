@@ -407,18 +407,24 @@ export interface SummaryProviderSetting {
   variables: Record<string, string>;
 }
 
-/** The Meeting summaries override, or null when unset or unreadable as one. */
+/**
+ * The Meeting summaries override, or null ONLY when nothing is stored. A stored
+ * blob that can't be read throws, so the transcript is never rerouted to a
+ * provider the user did not pick for summaries. The message carries no blob text.
+ */
 export async function loadSummaryProvider(): Promise<SummaryProviderSetting | null> {
-  const stored = await secureGet(SUMMARY_PROVIDER_KEY);
-  if (!stored) return null;
+  const raw = await secureGet(SUMMARY_PROVIDER_KEY);
+  if (!raw) return null;
+  let v: any;
   try {
-    const v = JSON.parse(stored);
-    return typeof v?.provider === "string" && v.provider && v.variables && typeof v.variables === "object"
-      ? { provider: v.provider, variables: v.variables }
-      : null;
+    v = JSON.parse(raw);
   } catch {
-    return null;
+    throw new Error("SUMMARY_PROVIDER_UNREADABLE");
   }
+  if (typeof v?.provider !== "string" || !v.provider || !v.variables || typeof v.variables !== "object") {
+    throw new Error("SUMMARY_PROVIDER_UNREADABLE");
+  }
+  return { provider: v.provider, variables: v.variables };
 }
 
 /** null clears the override. The API key goes to the secure store only. */

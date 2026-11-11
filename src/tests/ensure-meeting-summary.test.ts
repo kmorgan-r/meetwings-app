@@ -6,6 +6,9 @@ const { fetchAIResponse, shouldUseMeetwingsAPI } = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/functions/ai-response.function", () => ({ fetchAIResponse }));
 vi.mock("@/lib/functions/meetwings.api", () => ({ shouldUseMeetwingsAPI }));
+vi.mock("@/lib/storage/secure-provider-configs", () => ({
+  loadSummaryProvider: vi.fn(async () => null),
+}));
 
 const {
   createMeetingSummary,

@@ -19,13 +19,9 @@ export type ResolvedSummaryProvider =
 export async function resolveSummaryProvider(
   fallback?: ProviderConfig
 ): Promise<ResolvedSummaryProvider> {
-  let stored: Awaited<ReturnType<typeof loadSummaryProvider>> = null;
-  try {
-    stored = await loadSummaryProvider();
-  } catch {
-    // Summaries never throw: an unreadable setting counts as unset.
-    console.warn("[summary-provider] could not read the Meeting summaries setting");
-  }
+  // An unreadable setting rejects here; falling through would send the
+  // transcript to a provider the user did not choose for summaries.
+  const stored = await loadSummaryProvider();
   if (stored) {
     // A provider deleted since it was chosen counts as unset (the stored value is kept).
     const provider = [...AI_PROVIDERS, ...getCustomAiProviders()].find(

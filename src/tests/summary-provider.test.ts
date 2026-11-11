@@ -31,6 +31,8 @@ import {
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
 import type { TranscriptEntry } from "@/types";
 
+const ENTRIES4: TranscriptEntry[] = [1, 2, 3, 4].map((n) => ({ original: `l${n}`, timestamp: n * 1000 }));
+
 const OVERRIDE = {
   provider: "openrouter",
   variables: { api_key: "sk-or-v1-TESTKEY", model: "some/model" },
@@ -78,9 +80,10 @@ describe("resolveSummaryProvider", () => {
     expect(r.kind).toBe("override");
   });
 
-  it("an unreadable stored override falls through instead of throwing", async () => {
-    loadSummaryProvider.mockRejectedValue(new Error("store down"));
-    expect(await resolveSummaryProvider(FALLBACK)).toEqual({ kind: "chat", config: FALLBACK });
+  it("an unreadable stored override rejects instead of falling through", async () => {
+    loadSummaryProvider.mockRejectedValue(new Error("SUMMARY_PROVIDER_UNREADABLE"));
+    shouldUseMeetwingsAPI.mockResolvedValue(true);
+    await expect(resolveSummaryProvider(FALLBACK)).rejects.toThrow("SUMMARY_PROVIDER_UNREADABLE");
   });
 });
 
@@ -107,14 +110,28 @@ describe("ensureMeetingSummary with a summary override", () => {
     loadSummaryProvider.mockResolvedValue(OVERRIDE);
     shouldUseMeetwingsAPI.mockResolvedValue(true);
     fetchAIResponse.mockImplementation(async function* () {});
-    const entries: TranscriptEntry[] = [1, 2, 3, 4].map((n) => ({ original: `l${n}`, timestamp: n * 1000 }));
-
-    await ensureMeetingSummary(null, entries, FALLBACK);
+    await ensureMeetingSummary(null, ENTRIES4, FALLBACK);
 
     expect(fetchAIResponse).toHaveBeenCalledTimes(1);
     const arg = fetchAIResponse.mock.calls[0][0];
     expect(arg.skipMeetwingsAPI).toBe(true);
     expect(arg.provider.id).toBe("openrouter");
     expect(arg.selectedProvider).toEqual(OVERRIDE);
+    expect(arg.rawSystemPrompt).toBe(true);
+  });
+
+  it("the chat path sends neither skipMeetwingsAPI nor rawSystemPrompt", async () => {
+    fetchAIResponse.mockImplementation(async function* () {});
+    await ensureMeetingSummary(null, ENTRIES4, FALLBACK);
+    const arg = fetchAIResponse.mock.calls[0][0];
+    expect(arg.skipMeetwingsAPI).toBeFalsy();
+    expect(arg.rawSystemPrompt).toBeFalsy();
+    expect(arg.provider).toBe(FALLBACK.provider);
+  });
+
+  it("an unreadable setting returns null and never calls the AI", async () => {
+    loadSummaryProvider.mockRejectedValue(new Error("SUMMARY_PROVIDER_UNREADABLE"));
+    expect(await ensureMeetingSummary(null, ENTRIES4, FALLBACK)).toBeNull();
+    expect(fetchAIResponse).not.toHaveBeenCalled();
   });
 });

@@ -114,6 +114,36 @@ describe("fetchAIResponse onError", () => {
     expect(out).toEqual(["API error: Provider returned error"]);
   });
 
+  it("reports a non-streaming parse failure as a stream error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200, statusText: "OK",
+      json: async () => { throw new Error("bad json"); },
+    })));
+    const onError = vi.fn();
+    const out = await run({ onError, provider: { ...openrouter, streaming: false } });
+    expect(onError).toHaveBeenCalledWith({ kind: "stream" });
+    expect(out).toEqual(["Failed to parse non-streaming response: bad json"]);
+  });
+
+  it("reports a missing response body as a stream error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, statusText: "OK", body: null })));
+    const onError = vi.fn();
+    const out = await run({ onError });
+    expect(onError).toHaveBeenCalledWith({ kind: "stream" });
+    expect(out).toEqual(["Streaming not supported or response body missing"]);
+  });
+
+  it("reports a stream read failure as a stream error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true, status: 200, statusText: "OK",
+      body: { getReader: () => ({ read: async () => { throw new Error("cut"); }, cancel: async () => {} }) },
+    })));
+    const onError = vi.fn();
+    const out = await run({ onError });
+    expect(onError).toHaveBeenCalledWith({ kind: "stream" });
+    expect(out).toEqual(["Error reading stream: cut"]);
+  });
+
   it("a throwing onError does not change what the caller sees", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("boom"); }));
     const out = await run({ onError: () => { throw new Error("cb"); } });
