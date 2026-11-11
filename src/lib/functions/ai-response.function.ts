@@ -16,6 +16,20 @@ import { CHUNK_POLL_INTERVAL_MS } from "../chat-constants";
 import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES } from "@/lib";
 import { getContextForInjection } from "./context-builder";
 
+/** Why a request failed, for callers that need to tell the causes apart. */
+export type AIErrorInfo =
+  | { kind: "http"; status: number }
+  | { kind: "network" }
+  | { kind: "stream" }
+  | { kind: "meetwings" };
+
+/** A throwing callback must never change what the caller sees. */
+function reportError(onError: ((e: AIErrorInfo) => void) | undefined, info: AIErrorInfo): void {
+  try {
+    onError?.(info);
+  } catch {}
+}
+
 async function buildEnhancedSystemPrompt(baseSystemPrompt?: string): Promise<string> {
   const responseSettings = getResponseSettings();
   const prompts: string[] = [];
@@ -58,6 +72,7 @@ async function* fetchMeetwingsAIResponse(params: {
   imagesBase64?: string[];
   history?: Message[];
   signal?: AbortSignal;
+  onError?: (e: AIErrorInfo) => void;
 }): AsyncIterable<string> {
   try {
     const {
@@ -165,6 +180,7 @@ async function* fetchMeetwingsAIResponse(params: {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    reportError(params.onError, { kind: "meetwings" });
     yield `Meetwings API Error: ${errorMessage}`;
   }
 }
@@ -182,6 +198,12 @@ export async function* fetchAIResponse(params: {
   signal?: AbortSignal;
   /** Called once with the model the provider says answered, e.g. a router's pick */
   onModel?: (model: string) => void;
+  /** Called immediately before each error text is yielded */
+  onError?: (e: AIErrorInfo) => void;
+  /** Use `provider` even when the Meetwings API is on */
+  skipMeetwingsAPI?: boolean;
+  /** Send `systemPrompt` as is: no Context Memory, response-length or language prompts */
+  rawSystemPrompt?: boolean;
 }): AsyncIterable<string> {
   try {
     const {
@@ -193,6 +215,9 @@ export async function* fetchAIResponse(params: {
       imagesBase64 = [],
       signal,
       onModel,
+      onError,
+      skipMeetwingsAPI = false,
+      rawSystemPrompt = false,
     } = params;
 
     // Check if already aborted
@@ -200,10 +225,12 @@ export async function* fetchAIResponse(params: {
       return;
     }
 
-    const enhancedSystemPrompt = await buildEnhancedSystemPrompt(systemPrompt);
+    const enhancedSystemPrompt = rawSystemPrompt
+      ? systemPrompt
+      : await buildEnhancedSystemPrompt(systemPrompt);
 
     // Check if we should use Meetwings API instead
-    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
+    const useMeetwingsAPI = !skipMeetwingsAPI && (await shouldUseMeetwingsAPI());
     console.log("[Cost Tracking] fetchAIResponse called. useMeetwingsAPI:", useMeetwingsAPI);
     if (useMeetwingsAPI) {
       console.log("[Cost Tracking] Using Meetwings API - usage tracking not yet implemented for this path");
@@ -213,6 +240,7 @@ export async function* fetchAIResponse(params: {
         imagesBase64,
         history,
         signal,
+        onError,
       });
       return;
     }
@@ -333,6 +361,7 @@ export async function* fetchAIResponse(params: {
       ) {
         return; // Silently return on abort
       }
+      reportError(onError, { kind: "network" });
       yield `Network error during API request: ${
         fetchError instanceof Error ? fetchError.message : "Unknown error"
       }`;
@@ -344,6 +373,7 @@ export async function* fetchAIResponse(params: {
       try {
         errorText = await response.text();
       } catch {}
+      reportError(onError, { kind: "http", status: response.status });
       yield `API request failed: ${response.status} ${response.statusText}${
         errorText ? ` - ${errorText}` : ""
       }`;
@@ -355,6 +385,7 @@ export async function* fetchAIResponse(params: {
       try {
         json = await response.json();
       } catch (parseError) {
+        reportError(onError, { kind: "stream" });
         yield `Failed to parse non-streaming response: ${
           parseError instanceof Error ? parseError.message : "Unknown error"
         }`;
@@ -387,6 +418,7 @@ export async function* fetchAIResponse(params: {
     }
 
     if (!response.body) {
+      reportError(onError, { kind: "stream" });
       yield "Streaming not supported or response body missing";
       return;
     }
@@ -419,6 +451,7 @@ export async function* fetchAIResponse(params: {
         ) {
           return; // Silently return on abort
         }
+        reportError(onError, { kind: "stream" });
         yield `Error reading stream: ${
           readError instanceof Error ? readError.message : "Unknown error"
         }`;
@@ -469,6 +502,7 @@ export async function* fetchAIResponse(params: {
                 ? parsed.error
                 : parsed?.error?.message;
             if (streamError) {
+              reportError(onError, { kind: "stream" });
               yield `API error: ${streamError}`;
               reader.cancel();
               return;

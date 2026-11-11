@@ -12,6 +12,7 @@ import {
   sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+import type { ProviderConfig } from "@/lib/functions/summary-provider";
 import { createOdooClient } from "@/lib/odoo/client";
 import {
   HOLD_MS,
@@ -33,11 +34,6 @@ import {
 } from "@/lib/storage/odoo-config.storage";
 import type { SelectedTargets, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
-
-type ProviderConfig = {
-  provider: any;
-  selectedProvider: { provider: string; variables: Record<string, string> };
-};
 
 /**
  * Once per PROCESS, not once per mount. See the sweep effect below.

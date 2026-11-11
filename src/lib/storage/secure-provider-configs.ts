@@ -399,3 +399,30 @@ export async function migrateProviderConfigsToSecureStorage(): Promise<void> {
     console.error("[SecureStorage] Migration failed:", error);
   }
 }
+
+const SUMMARY_PROVIDER_KEY = "secure_summary_provider";
+
+export interface SummaryProviderSetting {
+  provider: string;
+  variables: Record<string, string>;
+}
+
+/** The Meeting summaries override, or null when unset or unreadable as one. */
+export async function loadSummaryProvider(): Promise<SummaryProviderSetting | null> {
+  const stored = await secureGet(SUMMARY_PROVIDER_KEY);
+  if (!stored) return null;
+  try {
+    const v = JSON.parse(stored);
+    return typeof v?.provider === "string" && v.provider && v.variables && typeof v.variables === "object"
+      ? { provider: v.provider, variables: v.variables }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** null clears the override. The API key goes to the secure store only. */
+export async function saveSummaryProvider(v: SummaryProviderSetting | null): Promise<void> {
+  if (v === null) await secureDelete(SUMMARY_PROVIDER_KEY);
+  else await secureSet(SUMMARY_PROVIDER_KEY, JSON.stringify(v));
+}
