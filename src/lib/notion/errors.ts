@@ -1,5 +1,3 @@
-import { redactNotion } from "./redact";
-
 /**
  * Error codes and the one fixed copy table for the Notion lane.
  *
@@ -25,20 +23,23 @@ export type NotionErrorCode =
   | "PRACTICES_UNDECIDED"
   | "NOTION_INTERNAL";
 
-// Category per code: "final" gives up outright, "retry, no strike" waits for
-// the next tick, "strike" counts toward SUMMARY_STRIKES. Marked inline below.
+// Category per code group: "final" gives up outright, "retry, no strike" waits
+// for the next tick, "strike" counts toward SUMMARY_STRIKES.
 export type SummaryErrorCode =
+  // final
   | "SUMMARY_NO_PROVIDER"
-  | "SUMMARY_TOO_SHORT" // final
+  | "SUMMARY_TOO_SHORT"
+  // retry, no strike
   | "SUMMARY_NETWORK"
   | "SUMMARY_RATE_LIMITED"
   | "SUMMARY_SPENDING_LIMIT"
   | "SUMMARY_PROVIDER_DOWN"
-  | "SUMMARY_AUTH" // retry, no strike
+  | "SUMMARY_AUTH"
+  // strike
   | "SUMMARY_UNREADABLE"
   | "SUMMARY_EMPTY"
   | "SUMMARY_TIMEOUT"
-  | "SUMMARY_REJECTED"; // strike
+  | "SUMMARY_REJECTED";
 
 // Exact user-visible copy. The strings are verbatim from the plan's table.
 export const NOTION_COPY: Record<
@@ -139,7 +140,7 @@ export class SummaryError extends Error {
  * outcomeFor is the ONLY place a Notion-side code becomes a send status.
  */
 export function outcomeFor(
-  code: string,
+  code: NotionErrorCode | SummaryErrorCode,
   attempts: number,
   now: number,
   retryAfterMs?: number,
@@ -148,22 +149,35 @@ export function outcomeFor(
     return { status: "failed", nextAt: null };
   }
   // attempts is the send's attempt count AFTER the claim, so it is >= 1 in
-  // normal use; clamping below 1 keeps 2^(attempts-1) at the 60_000 ms floor.
-  const clamped = Math.max(1, attempts);
+  // normal use. A non-finite count (NaN, or undefined arriving at runtime)
+  // counts as 1; clamping below 1 keeps 2^(attempts-1) at the 60_000 ms floor.
+  const clamped = Math.max(
+    1,
+    typeof attempts === "number" && Number.isFinite(attempts) ? attempts : 1,
+  );
   const backoff = Math.min(60_000 * 2 ** (clamped - 1), 3_600_000);
+  // A non-finite retryAfterMs carries no usable wait, so it counts as 0 and
+  // the backoff decides.
+  const retryAfter =
+    typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs)
+      ? retryAfterMs
+      : 0;
   return {
     status: "retry",
-    nextAt: now + Math.max(retryAfterMs ?? 0, backoff),
+    nextAt: now + Math.max(retryAfter, backoff),
   };
 }
 
 /**
  * Maps a thrown value to the status's displayed code and text.
  *
- * NotionError / SummaryError carry the fixed copy by construction. Anything
- * else - unknown Error, a rejected string, a response body - becomes
- * NOTION_INTERNAL: unknown error text is never shown, and the ONE console.error
- * line logs it through redactNotion, which fails closed when unarmed.
+ * NotionError / SummaryError carry the fixed copy by construction and are not
+ * logged here. Anything else - unknown Error, a rejected string, a response
+ * body - becomes NOTION_INTERNAL: unknown error text is never shown, and the
+ * ONE console.error line carries the error code and the thrown value's type
+ * name only. It never reads thrown.message nor calls String(thrown), so
+ * meeting content or a Notion response body cannot reach the log, and a
+ * null-prototype thrown object (whose String() throws) cannot throw here.
  */
 export function notionErrorText(thrown: unknown): {
   code: string;
@@ -175,7 +189,9 @@ export function notionErrorText(thrown: unknown): {
   if (thrown instanceof SummaryError) {
     return { code: thrown.code, text: NOTION_COPY[thrown.code] };
   }
-  const message = thrown instanceof Error ? thrown.message : String(thrown);
-  console.error(redactNotion(String(message)));
+  console.error(
+    "[notion] NOTION_INTERNAL",
+    thrown instanceof Error ? thrown.name : typeof thrown,
+  );
   return { code: "NOTION_INTERNAL", text: NOTION_COPY.NOTION_INTERNAL };
 }

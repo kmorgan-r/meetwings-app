@@ -4,7 +4,7 @@ import { REDACTED, buildRedactor } from "@/lib/odoo/redact";
  * The Notion redactor is module-level, like the Odoo one.
  *
  * The token lives in the OS keychain and loads asynchronously, while the
- * notary-facing surfaces (notionErrorText, catch blocks) call synchronously -
+ * user-facing surfaces (notionErrorText, catch blocks) call synchronously -
  * so nothing downstream can build a redactor on demand. The same instance must
  * cover the token and any custom AI provider key handed in.
  */
