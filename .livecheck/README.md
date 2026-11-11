@@ -13,7 +13,7 @@ any of them. This harness is what closes that gap.
 ## Running it
 
 ```bash
-ODOO_LIVE=1 npx vitest run --config .livecheck/vitest.live.config.ts
+ODOO_LIVE=1 npx vitest run --config .livecheck/vitest.live.config.ts .livecheck/odoo-live-smoke.live.ts
 ```
 
 Credentials are read at runtime from the app's own store
@@ -156,26 +156,37 @@ $env:NOTION_LIVE_KNOWLEDGE_DB = "<throwaway Team Knowledge db id>"
 npx vitest run --config .livecheck/vitest.live.config.ts .livecheck/notion-live.live.ts
 ```
 
-Placeholders only — a real token or database id must never be committed.
+Placeholders only — a real token or database id must never be committed. The
+Notion file only runs when its env vars are set, though — so unset all three
+in that PowerShell session (`Remove-Item Env:NOTION_LIVE_*`) before an Odoo
+run, or the smoke test also creates Notion pages.
 
 ### Results
 
 Paste the printed `[live]` lines into the PR body; that paste is the human
-gate. A check 1 whose `created_by` matches neither id fails its assertion —
-that failure *is* the finding.
+gate. A check 1 whose `created_by` matches neither `me.id` nor `ownerUserId`
+FAILS check 1 (the creator clause the sender's `isThisSendsPage` relies on) —
+that failure *is* the finding: the sender's own-page rule must change before
+merge.
 
 ### Decision rules
 
-- **Check 1** shows neither id matches → `isOwnPage` changes before merge.
+- **Check 1** shows neither id matches (the check FAILS) → the sender's
+  own-page rule — `isThisSendsPage`'s creator clause and `isOwnPage` — changes
+  before merge.
 - **Check 2** is informational: readable name or null are both handled.
-- **Check 5** needs more delay than `RECHECK_DELAY_MS` (5 s) for a query to
-  see a just-created page → `RECHECK_DELAY_MS` changes before merge.
+- **Check 5** measures real elapsed time; more than `RECHECK_DELAY_MS` (5 s)
+  before `readCandidates` sees a just-created page → `RECHECK_DELAY_MS`
+  changes before merge.
 - **Check 7** (round-trip) fails: the date lands outside the 60 s tolerance
   or the bold title mismatches → `isThisSendsPage`'s 60 s or title rule
   changes before merge.
-- **Check 8** is print-only: a no-offset `date.start` parsed as the *local*
-  machine's time instead of the `time_zone` instant means `readCandidates`'
-  date parsing changes before merge.
+- **Check 8** is print-only: `deltaMinutes !== 0` (against a fixed UTC
+  instant, written with a `time_zone` that is never the machine's own) means
+  `readCandidates`' date parsing must change before merge, so it honours
+  `time_zone`. Watch "offset present" too: a no-offset raw `date.start` is
+  what ECMAScript `Date.parse` reads in the *machine's* zone, even though a
+  `time_zone` was given — that is exactly the misparse this probe looks for.
 
 ### AI judgement fixtures
 

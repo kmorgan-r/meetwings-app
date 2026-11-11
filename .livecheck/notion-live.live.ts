@@ -5,20 +5,27 @@
 // Gating: the three NOTION_LIVE_* env vars must ALL be set or the whole suite
 // skips (a run without them does nothing but skip - exit 0). Only throwaway
 // database ids are used, and never committed. The token is never printed and
-// never names a printed header. Every page the checks create (meeting pages
-// and the Knowledge row) is trashed in afterAll; page titles all start with
-// "LIVECHECK".
+// no header except Retry-After is ever named. Every page the checks create
+// (meeting pages and the Knowledge row) goes into the cleanup list the moment
+// its createPage returns, and is trashed in afterAll; page titles all start
+// with "LIVECHECK". Sub-table names from the duplicated team database are
+// never printed: each prints as "sub-table #<n> (<weekday slot or "other">)",
+// because the printed output goes into a public PR body.
 //
-// Same vitest config as the Odoo harness, one more file in its include list.
-// Checks 7 and 8 are extras beyond the brief's six: 7 is the round-trip the
-// sender's own-page rule (isThisSendsPage in send.ts) relies on, 8 is the
-// time-zone probe for hand-made pages (print only, no assertion).
+// Read-backs POLLED, never assumed instant: waitForCandidate re-runs the
+// sender's date query every 500 ms (Date.now-timed) up to RECHECK_DELAY_MS;
+// the visibility delay itself is what check 5 measures with real elapsed
+// time. Check 3 reads the create response, not a read-back. Check 8 writes a
+// zone-labelled wall clock for a known instant and prints (no assertion) what
+// readCandidates parses it back to. Check 6 runs LAST: its 200-request burst
+// must not throttle the client calls checks 7 and 8 still need.
 import { beforeAll, afterAll, describe, expect, it, vi } from "vitest";
-import { describeSubTable } from "@/lib/notion/routing";
+import { NotionError } from "@/lib/notion/errors";
+import { buildMapping, describeMapping, describeSubTable } from "@/lib/notion/routing";
 import { buildPageBlocks, pageProperties } from "@/lib/notion/page-blocks";
-import type { NotionClient, NotionClientDeps } from "@/lib/notion/client";
+import type { Mapping, SubTable } from "@/lib/notion/routing";
+import type { NotionClient, NotionClientDeps, NotionPage } from "@/lib/notion/client";
 import type { Candidate, isOwnPage, readCandidates } from "@/lib/notion/same-meeting";
-import type { SubTable } from "@/lib/notion/routing";
 import type { NotionSummary } from "@/lib/notion/summarize";
 
 const TOKEN = process.env.NOTION_LIVE_TOKEN ?? "";
@@ -47,7 +54,7 @@ const summaryCheck: NotionSummary = {
   practices: [],
 };
 
-/** The check-5 pair gets its own span, so its title can filter a query. */
+/** The check-5 pair gets its own span, so the two pages differ from check 1's. */
 const summaryVisible: NotionSummary = {
   ...summaryCheck,
   title: `LIVECHECK visibility ${STAMP}`,
@@ -63,21 +70,25 @@ function spanAt(minutesAgo: number): { startAt: number; endAt: number } {
 let client: NotionClient | undefined;
 let me: { id: string; ownerUserId: string | null } | undefined;
 let subTables: SubTable[] = [];
+let mapping: Mapping | null = null;
 let readCandidatesFn: typeof readCandidates | null = null;
 let isOwnPageFn: typeof isOwnPage | null = null;
 let readKnowledgeFn: typeof import("@/lib/notion/knowledge").readKnowledge | null = null;
 let recheckDelayMs: number | null = null;
-let sendImportProblem: string | null = null;
-let candidatesImportProblem: string | null = null;
-let knowledgeImportProblem: string | null = null;
+let sendImportProblem: unknown = null;
+let candidatesImportProblem: unknown = null;
+let knowledgeImportProblem: unknown = null;
 
 const createdPageIds: string[] = [];
 
+/** One check-1 page, recorded from its create response before any read-back. */
 interface Created {
   subTable: SubTable;
+  label: string;
   pageId: string;
-  parentDataSourceId: string;
-  candidate: Candidate | undefined;
+  pageUrl: string;
+  parentDataSourceId: string | undefined;
+  createdResponseDate: { start: unknown; end: unknown };
   startAt: number;
   endAt: number;
 }
@@ -87,6 +98,86 @@ const check1Pages: Created[] = [];
 function ready(): { client: NotionClient; me: { id: string; ownerUserId: string | null } } {
   if (!client || !me) throw new Error("beforeAll has not completed");
   return { client, me };
+}
+
+/** RECHECK_DELAY_MS, or a loud stop on this check when the send.ts chain failed. */
+function recheckMs(): number {
+  if (recheckDelayMs === null) {
+    throw new Error("RECHECK_DELAY_MS unavailable - send.ts chain failed to load (see the CONCERN line)");
+  }
+  return recheckDelayMs;
+}
+
+/**
+ * A printable name for anything a chain load threw: NotionError code or the
+ * error's name, never its message or a stack (the CONCERN lines go into the
+ * public PR body, and raw messages carry absolute local paths).
+ */
+function errorName(thrown: unknown): string {
+  if (thrown instanceof NotionError) return thrown.code;
+  const name = (thrown as { name?: unknown } | null | undefined)?.name;
+  return typeof name === "string" ? name : "unknown-name";
+}
+
+/** A public, workspace-anonymised label: its routing slot, never the name. */
+function slotLabel(st: SubTable): string {
+  const weekdays = Object.entries(mapping?.byWeekday ?? {})
+    .filter(([, value]) => value === st)
+    .map(([weekday]) => weekday);
+  return `sub-table #${subTables.indexOf(st) + 1} (${weekdays.length > 0 ? weekdays.join("/") : "other"})`;
+}
+
+/** describeMapping's sentence with the team's sub-table names replaced by slot labels. */
+function sanitisedMappingLine(): string {
+  let line = describeMapping(mapping as Mapping);
+  // Longest first, so a name that contains another (e.g. "Monday", "Monday
+  // Late") cannot have the inside part replaced first and garble the rest.
+  for (const st of [...subTables].sort((a, b) => b.name.length - a.name.length)) {
+    line = line.split(st.name).join(slotLabel(st));
+  }
+  return line;
+}
+
+/**
+ * Polls the sender's own date query until it sees the page, instead of
+ * assuming instant visibility (the delay is real Notion behaviour and is what
+ * check 5 measures). readCandidates on this sub-table every 500 ms, timed
+ * with Date.now, up to timeoutMs. Returns the candidate - null when the
+ * timeout ran out - and the real elapsed time in ms.
+ */
+async function waitForCandidate(
+  subTable: SubTable,
+  startAt: number,
+  endAt: number,
+  pageId: string,
+  timeoutMs: number,
+): Promise<{ candidate: Candidate | null; elapsedMs: number }> {
+  const { client } = ready();
+  if (!readCandidatesFn) {
+    throw new Error("readCandidates unavailable - candidates chain failed to load (see the CONCERN line)");
+  }
+  const poll = readCandidatesFn;
+  const startedAt = Date.now();
+  for (;;) {
+    const candidates = await poll(client, [subTable], startAt, endAt);
+    const found = candidates.find((c) => c.pageId === pageId);
+    if (found !== undefined) return { candidate: found, elapsedMs: Date.now() - startedAt };
+    if (Date.now() - startedAt >= timeoutMs) return { candidate: null, elapsedMs: Date.now() - startedAt };
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/** The raw date property the create response echoed, for check 3. */
+function createdResponseDate(page: NotionPage, st: SubTable): { start: unknown; end: unknown } {
+  const property = page.properties?.[st.dateProp];
+  const date = (property as { date?: { start?: unknown; end?: unknown } } | undefined)?.date;
+  return { start: date?.start, end: date?.end };
+}
+
+/** The create response's parent.data_source_id, when Notion echoed one back. */
+function createdResponseParentDataSourceId(page: NotionPage): string | undefined {
+  const id = (page.parent as { data_source_id?: unknown } | undefined)?.data_source_id;
+  return typeof id === "string" ? id : undefined;
 }
 
 /** A meeting page in one sub-table, built the way a send builds it. */
@@ -112,12 +203,15 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
   beforeAll(async () => {
     const { createNotionClient } = await import("@/lib/notion/client");
     const { armNotionRedactor } = await import("@/lib/notion/redact");
+    // The redactor is module-level and fail-closed when unarmed, so it is
+    // armed BEFORE the first anything that could carry the token - the
+    // client's own creation included, as buildSendDeps does.
+    armNotionRedactor([TOKEN]);
     client = createNotionClient({
       token: TOKEN,
       // Node's global fetch stands in for @tauri-apps/plugin-http's fetch.
       fetch: globalThis.fetch as NotionClientDeps["fetch"],
     });
-    armNotionRedactor([TOKEN]);
 
     // same-meeting/knowledge/send are loaded dynamically: their chains reach
     // the DB and tauri modules, and a load failure must become a printed
@@ -125,19 +219,19 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     try {
       ({ RECHECK_DELAY_MS: recheckDelayMs } = await import("@/lib/notion/send"));
     } catch (thrown) {
-      sendImportProblem = thrown instanceof Error ? thrown.message : String(thrown);
+      sendImportProblem = thrown;
     }
     try {
       ({ readCandidates: readCandidatesFn, isOwnPage: isOwnPageFn } = await import(
         "@/lib/notion/same-meeting"
       ));
     } catch (thrown) {
-      candidatesImportProblem = thrown instanceof Error ? thrown.message : String(thrown);
+      candidatesImportProblem = thrown;
     }
     try {
       ({ readKnowledge: readKnowledgeFn } = await import("@/lib/notion/knowledge"));
     } catch (thrown) {
-      knowledgeImportProblem = thrown instanceof Error ? thrown.message : String(thrown);
+      knowledgeImportProblem = thrown;
     }
 
     me = await client.me();
@@ -154,6 +248,14 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
         "the meetings database has no usable sub-table (each needs a title and a date property)",
       );
     }
+    // The sender throws NOTION_INVALID when buildMapping returns null, so a
+    // throwaway database it would reject must fail here, before any check.
+    const builtMapping = buildMapping(subTables);
+    expect(
+      builtMapping !== null,
+      "the sender's buildMapping must accept this database (a null mapping makes send.ts fail NOTION_INVALID before any send)",
+    ).toBe(true);
+    mapping = builtMapping;
     console.log(
       `[live] setup: ${subTables.length} usable sub-table(s); ` +
         `ownerUserId ${me.ownerUserId !== null ? "present" : "null"}; ` +
@@ -161,11 +263,11 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
           recheckDelayMs !== null ? String(recheckDelayMs) : "UNAVAILABLE (send.ts chain failed to load)"
         }`,
     );
-    for (const st of subTables) console.log(`[live] setup: sub-table "${st.name}"`);
+    console.log(`[live] setup: routing: ${sanitisedMappingLine()}`);
+    for (const st of subTables) console.log(`[live] setup: ${slotLabel(st)}`);
   });
 
   afterAll(async () => {
-    if (!ENABLED) return;
     if (!client) return;
     const failed: string[] = [];
     for (const pageId of createdPageIds) {
@@ -184,7 +286,7 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     }
     for (const problem of [sendImportProblem, candidatesImportProblem, knowledgeImportProblem]) {
       if (problem !== null) {
-        console.log(`[live] CONCERN: a module chain failed to load: ${problem}`);
+        console.log(`[live] CONCERN: a module chain failed to load: ${errorName(problem)}`);
       }
     }
   });
@@ -195,36 +297,50 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     const span = spanAt(180); // the -3h .. -2.5h slot
     for (const st of subTables) {
       const page = await client.createPage(meetingPageBody(st, summaryCheck, span, me.ownerUserId));
+      const label = slotLabel(st);
       createdPageIds.push(page.id ?? "");
-      const creatorId = page.created_by?.id ?? null;
-      const bucket =
-        creatorId === null
-          ? "none"
-          : creatorId === me.id
-            ? "the bot (me.id)"
-            : me.ownerUserId !== null && creatorId === me.ownerUserId
-              ? "the person (ownerUserId)"
-              : "neither";
-      console.log(`[live] check 1: "${st.name}" created_by id = ${bucket}`);
-      if (!readCandidatesFn || !isOwnPageFn) {
-        throw new Error(`readCandidates/isOwnPage unavailable: ${candidatesImportProblem}`);
-      }
-      const candidates = await readCandidatesFn(client, [st], span.startAt, span.endAt);
-      const candidate = candidates.find((c) => c.pageId === page.id);
-      expect(candidate, `the new page in "${st.name}" must be read back by readCandidates`).toBeDefined();
       check1Pages.push({
         subTable: st,
+        label,
         pageId: page.id ?? "",
-        parentDataSourceId:
-          (page.parent as { data_source_id?: string } | undefined)?.data_source_id ?? "",
-        candidate,
+        pageUrl: page.url ?? "",
+        parentDataSourceId: createdResponseParentDataSourceId(page),
+        createdResponseDate: createdResponseDate(page, st),
         startAt: span.startAt,
         endAt: span.endAt,
       });
+      const creatorId = page.created_by?.id ?? null;
+      const matched =
+        creatorId === null
+          ? "none"
+          : creatorId === me.id
+            ? "bot"
+            : me.ownerUserId !== null && creatorId === me.ownerUserId
+              ? "owner"
+              : "neither";
+      console.log(`[live] check 1: ${label} created_by matched: ${matched}`);
+      // The creator clause isThisSendsPage (send.ts) relies on: crash
+      // recovery and orphan trashing only claim pages whose created_by is the
+      // bot or the owner, whatever "Recorded by" says.
       expect(
-        isOwnPageFn(candidate as Candidate, me),
-        `isOwnPage must be true for the "${st.name}" page`,
+        matched === "bot" || matched === "owner",
+        `created_by matched neither me.id nor ownerUserId (${matched}) - the sender's creator rule is broken`,
       ).toBe(true);
+      if (isOwnPageFn === null) {
+        throw new Error(
+          "readCandidates/isOwnPage unavailable - candidates chain failed to load (see the CONCERN line)",
+        );
+      }
+      // Captured before the await: a call can reset module-variable narrowing.
+      const isOwn = isOwnPageFn;
+      const { candidate } = await waitForCandidate(st, span.startAt, span.endAt, page.id ?? "", recheckMs());
+      expect(candidate, "page not visible within RECHECK_DELAY_MS (see check 5)").not.toBeNull();
+      if (candidate !== null) {
+        expect(
+          isOwn(candidate, me),
+          `isOwnPage must be true for the ${label} page`,
+        ).toBe(true);
+      }
     }
   });
 
@@ -248,23 +364,37 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
   it("check 3: pages landed in the requested data source with date.end", async () => {
     if (check1Pages.length === 0) throw new Error("check 1 produced no pages to inspect");
     for (const entry of check1Pages) {
-      const matches = entry.parentDataSourceId === entry.subTable.dataSourceId;
+      // Values as the create response sent them; the data-source id of a
+      // throwaway database is the only id printed, and the date strings are
+      // what check 8's offset probe needs to compare against.
       console.log(
-        `[live] check 3: "${entry.subTable.name}" landed in the requested data source: ` +
-          (matches ? "yes" : "NO") +
-          `, date.end = ` +
-          (entry.candidate?.end !== undefined ? new Date(entry.candidate.end).toISOString() : "NOT SET"),
+        `[live] check 3: ${entry.label} parent.data_source_id = ` +
+          (entry.parentDataSourceId ?? "parent.data_source_id not in create response") +
+          `, date.start = ${String(entry.createdResponseDate.start)}` +
+          `, date.end = ${String(entry.createdResponseDate.end)}`,
       );
-      // Compared as a boolean, so a real data-source id never reaches the print.
-      expect(matches, "the page's parent must be the requested data source").toBe(true);
-      expect(entry.candidate?.end, "date.end must be set on the created page").toBeDefined();
+      const parentEcho = entry.parentDataSourceId;
+      expect(parentEcho, "parent.data_source_id not in create response").toBeDefined();
+      expect(
+        parentEcho === entry.subTable.dataSourceId,
+        "the create response's parent.data_source_id must be the requested data source",
+      ).toBe(true);
+      const end = entry.createdResponseDate.end;
+      expect(
+        typeof end === "string" && end.length > 0,
+        "date.end must be a non-empty string in the create response",
+      ).toBe(true);
     }
   });
 
   // ---------------------------------------------------------------- check 4
   it("check 4: a Knowledge row created Proposed reads back Proposed", async () => {
     const { client } = ready();
-    if (!readKnowledgeFn) throw new Error(`readKnowledge unavailable: ${knowledgeImportProblem}`);
+    if (!readKnowledgeFn) throw new Error("readKnowledge unavailable - knowledge chain failed to load (see the CONCERN line)");
+    const firstMeeting = check1Pages[0];
+    if (firstMeeting === undefined) {
+      throw new Error("check 1 produced no page; its url is what the Knowledge row's Meeting link needs");
+    }
     const kdb = await readKnowledgeFn(client, KNOWLEDGE_DB);
     expect(
       kdb.hasProposed,
@@ -275,6 +405,9 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
       properties: {
         Rule: { title: [{ type: "text", text: { content: `LIVECHECK knowledge row ${STAMP}` } }] },
         Status: { status: { name: "Proposed" } },
+        // Production always writes the meeting page's link (addPractices in
+        // knowledge.ts), so the throwaway row carries it too.
+        "Meeting link": { url: firstMeeting.pageUrl },
       },
     });
     createdPageIds.push(row.id ?? "");
@@ -300,8 +433,9 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     const st = subTables[0];
     // Two creates back to back: the client spaces them NOTION_MIN_GAP_MS apart.
     const first = await client.createPage(meetingPageBody(st, summaryVisible, span, me.ownerUserId));
+    createdPageIds.push(first.id ?? "");
     const second = await client.createPage(meetingPageBody(st, summaryVisible, span, me.ownerUserId));
-    createdPageIds.push(first.id ?? "", second.id ?? "");
+    createdPageIds.push(second.id ?? "");
     const createdTimeOf = (page: { created_time?: string }): string => page.created_time ?? "(missing)";
     const minuteRounded = (time: string): boolean => /T\d\d:\d\d:00\.000/.test(time);
     const t1 = createdTimeOf(first);
@@ -309,43 +443,124 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
     console.log(`[live] check 5: created_time #1 = ${t1} (minute-rounded: ${minuteRounded(t1)})`);
     console.log(`[live] check 5: created_time #2 = ${t2} (minute-rounded: ${minuteRounded(t2)})`);
 
-    const seesSecond = async (): Promise<boolean> => {
-      const pages = await client.queryAll(st.dataSourceId, {
-        filter: { property: st.titleProp, title: { contains: summaryVisible.title } },
-      });
-      return pages.some((page) => page.id === second.id);
-    };
-    let delayMs = 0;
-    let seen = await seesSecond();
-    if (!seen) {
-      while (!seen && delayMs < 30_000) {
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-        delayMs += 1_000;
-        seen = await seesSecond();
-      }
+    // Timed from when the second create returned (the wall-clock wait a real
+    // sender's recheck rides on), polled with the sender's own date query -
+    // not a title filter. The 30s cap keeps a stuck query from hanging the
+    // run; the assertion below is the gate.
+    const { candidate, elapsedMs } = await waitForCandidate(st, span.startAt, span.endAt, second.id ?? "", 30_000);
+    console.log(
+      `[live] check 5: readCandidates saw the just-created page after ${elapsedMs}ms` +
+        (candidate === null ? " - NOT seen within the 30s polling cap" : ""),
+    );
+    if (recheckDelayMs === null) {
+      throw new Error("RECHECK_DELAY_MS unavailable - send.ts chain failed to load (see the CONCERN line)");
     }
-    if (seen && delayMs === 0) {
-      console.log("[live] check 5: a query immediately after the second create sees it");
-    } else {
-      const availability =
-        recheckDelayMs !== null
-          ? `RECHECK_DELAY_MS = ${recheckDelayMs}ms`
-          : "RECHECK_DELAY_MS unavailable (CONCERN: send.ts chain failed to load)";
-      console.log(
-        `[live] check 5: the just-created page needed ${
-          seen ? `${delayMs / 1000}s` : ">30s"
-        } to become visible (${availability})`,
+    expect(
+      elapsedMs,
+      `visibility took ${elapsedMs}ms; RECHECK_DELAY_MS is ${recheckDelayMs}ms`,
+    ).toBeLessThanOrEqual(recheckDelayMs);
+  });
+
+  // ---------------------------------------------------------------- check 7
+  it("check 7: round-trip - readCandidates finds the check-1 pages, times intact", async () => {
+    ready();
+    if (!readCandidatesFn) {
+      throw new Error("readCandidates unavailable - candidates chain failed to load (see the CONCERN line)");
+    }
+    if (check1Pages.length === 0) throw new Error("check 1 produced no pages to round-trip");
+    for (const entry of check1Pages) {
+      const { candidate } = await waitForCandidate(
+        entry.subTable,
+        entry.startAt,
+        entry.endAt,
+        entry.pageId,
+        recheckMs(),
       );
-    }
-    if (recheckDelayMs !== null) {
-      expect(
-        delayMs,
-        `the query must see the just-created page within RECHECK_DELAY_MS (${recheckDelayMs}ms)`,
-      ).toBeLessThanOrEqual(recheckDelayMs);
+      expect(candidate, "page not visible within RECHECK_DELAY_MS (see check 5)").not.toBeNull();
+      if (candidate !== null) {
+        console.log(
+          `[live] check 7: ${entry.label}: written start=${new Date(entry.startAt).toISOString()} end=${new Date(entry.endAt).toISOString()} | ` +
+            `page start=${new Date(candidate.start).toISOString()} end=${new Date(candidate.end).toISOString()} ` +
+            `(deltas ${candidate.start - entry.startAt}ms/${candidate.end - entry.endAt}ms), boldTitle === title: ${
+              candidate.boldTitle === summaryCheck.title
+            }`,
+        );
+        expect(
+          Math.abs(candidate.start - entry.startAt),
+          "the round-trip must land within 60s of the written start",
+        ).toBeLessThanOrEqual(60_000);
+        expect(
+          Math.abs(candidate.end - entry.endAt),
+          "the round-trip must land within 60s of the written end",
+        ).toBeLessThanOrEqual(60_000);
+        expect(candidate.boldTitle).toBe(summaryCheck.title);
+      }
     }
   });
 
+  // ---------------------------------------------------------------- check 8
+  it("check 8: hand-made page with a time zone (print only)", async () => {
+    const { client } = ready();
+    const st = subTables[0];
+    const span = spanAt(480); // the -8h .. -7.5h slot, alone on its sub-table
+    // A fixed instant, so the wall clocks below really do encode it.
+    const instant = span.startAt;
+    const machineZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // A zone that cannot agree with the machine's wall clock - delta 0 is
+    // then only possible when the parse honours the zone, never by accident.
+    const zone = machineZone === "America/New_York" ? "Asia/Tokyo" : "America/New_York";
+    /** That zone's wall clock for `ms`: "YYYY-MM-DDTHH:mm:00" with no offset. */
+    const wallClock = (ms: number): string => {
+      const parts = Intl.DateTimeFormat("en-CA", {
+        timeZone: zone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(new Date(ms));
+      const get = (type: Intl.DateTimeFormatPartTypes): string =>
+        parts.find((p) => p.type === type)?.value ?? "";
+      return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:00`;
+    };
+    const start = wallClock(instant);
+    const end = wallClock(instant + 30 * 60_000);
+    const page = await client.createPage({
+      parent: { type: "data_source_id", data_source_id: st.dataSourceId },
+      properties: {
+        [st.titleProp]: { title: [{ type: "text", text: { content: "LIVECHECK tz" } }] },
+        [st.dateProp]: { date: { start, end, time_zone: zone } },
+      },
+    });
+    createdPageIds.push(page.id ?? "");
+    const back = await client.request<{
+      properties?: Record<string, { date?: { start?: string; end?: string; time_zone?: string } }>;
+    }>("GET", `/v1/pages/${page.id}`);
+    const rawStart = back.properties?.[st.dateProp]?.date?.start ?? "(missing)";
+    const carriesOffset = /[+-]\d\d:\d\d$|Z$/.test(rawStart);
+    console.log(
+      `[live] check 8: machine time zone = ${machineZone}; zone used = ${zone}; intended instant = ${new Date(instant).toISOString()}`,
+    );
+    console.log(`[live] check 8: written with time_zone ${zone}, no offset: start "${start}", end "${end}"`);
+    console.log(
+      `[live] check 8: raw stored date.start as Notion returned it = "${rawStart}" (offset present: ${carriesOffset ? "yes" : "no"})`,
+    );
+    const { candidate } = await waitForCandidate(st, span.startAt, span.endAt, page.id ?? "", recheckMs());
+    if (candidate === null) {
+      console.log("[live] check 8: readCandidates did NOT surface the page (parsed outside the overlap window) [print only]");
+      return;
+    }
+    const deltaMinutes = (candidate.start - instant) / 60_000;
+    console.log(
+      `[live] check 8: readCandidates parses start to ${new Date(candidate.start).toISOString()} ` +
+        `(candidate.start = ${candidate.start}; deltaMinutes = ${deltaMinutes}) [print only]`,
+    );
+  });
+
   // ---------------------------------------------------------------- check 6
+  // Runs LAST: its 200-request burst must not leave a throttled token
+  // imposing multi-second Retry-After waits on checks 7 and 8, or on cleanup.
   it("check 6: 200 raw GETs - status counts and Retry-After", async () => {
     const { NOTION_API_BASE, NOTION_VERSION } = await import("@/lib/notion/client");
     const counts = new Map<number, number>();
@@ -390,76 +605,6 @@ describe.skipIf(!ENABLED)("Notion live checks (throwaway databases)", () => {
         (retryAfterValues.length === 0
           ? "no"
           : `yes (values: ${[...new Set(retryAfterValues)].join(", ")})`),
-    );
-  });
-
-  // ---------------------------------------------------------------- check 7
-  it("check 7: round-trip - readCandidates finds the check-1 pages, times intact", async () => {
-    const { client } = ready();
-    if (!readCandidatesFn) throw new Error(`readCandidates unavailable: ${candidatesImportProblem}`);
-    if (check1Pages.length === 0) throw new Error("check 1 produced no pages to round-trip");
-    for (const entry of check1Pages) {
-      const candidates = await readCandidatesFn(client, [entry.subTable], entry.startAt, entry.endAt);
-      const candidate = candidates.find((c) => c.pageId === entry.pageId);
-      expect(candidate, `readCandidates must find the "${entry.subTable.name}" page`).toBeDefined();
-      const c = candidate as Candidate;
-      console.log(
-        `[live] check 7: "${entry.subTable.name}" written start=${new Date(entry.startAt).toISOString()} end=${new Date(entry.endAt).toISOString()} | ` +
-          `page start=${new Date(c.start).toISOString()} end=${new Date(c.end).toISOString()} ` +
-          `(deltas ${c.start - entry.startAt}ms/${c.end - entry.endAt}ms), boldTitle === title: ${
-            c.boldTitle === summaryCheck.title
-          }`,
-      );
-      expect(Math.abs(c.start - entry.startAt), "the round-trip must land within 60s of the written start").toBeLessThanOrEqual(60_000);
-      expect(Math.abs(c.end - entry.endAt), "the round-trip must land within 60s of the written end").toBeLessThanOrEqual(60_000);
-      expect(c.boldTitle).toBe(summaryCheck.title);
-    }
-  });
-
-  // ---------------------------------------------------------------- check 8
-  it("check 8: hand-made page with a time zone (print only)", async () => {
-    const { client } = ready();
-    const st = subTables[0];
-    const span = spanAt(480); // the -8h .. -7.5h slot, alone on its sub-table
-    // The machine's wall clock, formatted with NO offset, as a hand-made page
-    // in Europe/Oslo would write it.
-    const local = (ms: number): string => {
-      const d = new Date(ms);
-      const pad = (n: number): string => String(n).padStart(2, "0");
-      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-    };
-    const page = await client.createPage({
-      parent: { type: "data_source_id", data_source_id: st.dataSourceId },
-      properties: {
-        [st.titleProp]: { title: [{ type: "text", text: { content: "LIVECHECK tz" } }] },
-        [st.dateProp]: {
-          date: { start: local(span.startAt), end: local(span.endAt), time_zone: "Europe/Oslo" },
-        },
-      },
-    });
-    createdPageIds.push(page.id ?? "");
-    const back = await client.request<{
-      properties?: Record<string, { date?: { start?: string; end?: string; time_zone?: string } }>;
-    }>("GET", `/v1/pages/${page.id}`);
-    const rawStart = back.properties?.[st.dateProp]?.date?.start ?? "(missing)";
-    const carriesOffset = /[+-]\d\d:\d\d$|Z$/.test(rawStart);
-    console.log(`[live] check 8: intended UTC = ${new Date(span.startAt).toISOString()} .. ${new Date(span.endAt).toISOString()}`);
-    console.log(`[live] check 8: written (wall clock, no offset, time_zone Europe/Oslo) = ${local(span.startAt)} .. ${local(span.endAt)}`);
-    console.log(`[live] check 8: raw date.start as Notion returned it = "${rawStart}" (offset present: ${carriesOffset ? "yes" : "no"})`);
-    if (!readCandidatesFn) {
-      console.log(`[live] check 8: readCandidates unavailable (${candidatesImportProblem}) - parse probe not run`);
-      return;
-    }
-    const candidates = await readCandidatesFn(client, [st], span.startAt, span.endAt);
-    const candidate = candidates.find((c) => c.pageId === page.id);
-    if (!candidate) {
-      console.log("[live] check 8: readCandidates did NOT surface the page (parsed outside the overlap window) [print only]");
-      return;
-    }
-    console.log(
-      `[live] check 8: readCandidates parses start to ${new Date(candidate.start).toISOString()} (delta vs intended UTC: ${
-        candidate.start - span.startAt
-      }ms), end to ${new Date(candidate.end).toISOString()} (delta: ${candidate.end - span.endAt}ms) [print only]`,
     );
   });
 });
