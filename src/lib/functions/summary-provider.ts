@@ -1,11 +1,12 @@
 import { AI_PROVIDERS } from "@/config/ai-providers.constants";
 import { getCustomAiProviders } from "@/lib/storage/ai-providers";
 import { loadSummaryProvider } from "@/lib/storage/secure-provider-configs";
+import type { TYPE_PROVIDER } from "@/types";
 import { shouldUseMeetwingsAPI } from "./meetwings.api";
 
 /** The provider shape every summary caller threads through. */
 export type ProviderConfig = {
-  provider: any;
+  provider: TYPE_PROVIDER | undefined;
   selectedProvider: { provider: string; variables: Record<string, string> };
 };
 
