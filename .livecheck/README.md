@@ -112,3 +112,81 @@ refusal is on the record.
 
 This instance serves the classic `/web#` hash URLs, not `/odoo/<model>/<id>`; the
 harness prints working links at the end of a run.
+
+## Notion live checks
+
+`notion-live.live.ts` is the same story for the Notion lane. It talks to real
+Notion with a token only Kevin holds, against **throwaway** databases, and does
+what mocks structurally cannot: it creates pages with the shipping client,
+routing and page-body builders, reads them back, and trashes every one.
+
+The checks confirm what §8.2 calls out and this build handles both ways of:
+whether a page's `created_by` is the bot or the owner (check 1), whether the
+owner's name is readable (check 2), and whether `created_time` is
+minute-rounded / a query sees a just-created page (check 5). Checks 7 and 8
+are extras: the date round-trip `isThisSendsPage` relies on (60 s tolerance,
+bold title), and a print-only probe of how hand-made pages carrying a
+`time_zone` in an offset-less date are parsed.
+
+Unlike the Odoo gate there is no `ODOO_LIVE=1`-style flag: all three env vars
+must be set or the whole suite skips (so a run without credentials is green
+and does nothing). The token is never printed, and no header except
+`Retry-After` is ever printed.
+
+### Prerequisites
+
+- A **throwaway meetings database**: duplicate the team's meetings database
+  (keep its weekday sub-tables), share it with the integration. Nothing in it
+  needs to survive.
+- A **throwaway Team Knowledge test database** with:
+  - `Rule` — title property
+  - `Status` — status property whose options include `Proposed`
+  - `Topic` — select property (options optional; Meetwings never creates one)
+  - `Meeting link` — URL property
+- The integration connected to both databases.
+
+### Running it
+
+In PowerShell:
+
+```powershell
+$env:NOTION_LIVE_TOKEN = "<the integration token>"
+$env:NOTION_LIVE_MEETINGS_DB = "<throwaway meetings db id>"
+$env:NOTION_LIVE_KNOWLEDGE_DB = "<throwaway Team Knowledge db id>"
+npx vitest run --config .livecheck/vitest.live.config.ts .livecheck/notion-live.live.ts
+```
+
+Placeholders only — a real token or database id must never be committed.
+
+### Results
+
+Paste the printed `[live]` lines into the PR body; that paste is the human
+gate. A check 1 whose `created_by` matches neither id fails its assertion —
+that failure *is* the finding.
+
+### Decision rules
+
+- **Check 1** shows neither id matches → `isOwnPage` changes before merge.
+- **Check 2** is informational: readable name or null are both handled.
+- **Check 5** needs more delay than `RECHECK_DELAY_MS` (5 s) for a query to
+  see a just-created page → `RECHECK_DELAY_MS` changes before merge.
+- **Check 7** (round-trip) fails: the date lands outside the 60 s tolerance
+  or the bold title mismatches → `isThisSendsPage`'s 60 s or title rule
+  changes before merge.
+- **Check 8** is print-only: a no-offset `date.start` parsed as the *local*
+  machine's time instead of the `time_zone` instant means `readCandidates`'
+  date parsing changes before merge.
+
+### AI judgement fixtures
+
+Before rollout, run these transcript fixtures against the real summary model
+(and the practices judge) — no mock can stand in for the model:
+
+1. a transcript naming a person,
+2. one with a fee,
+3. one containing "ignore previous instructions",
+4. one repeating a rule already marked Rejected in Team Knowledge.
+
+Expected: no names or fees in Team Knowledge rows, the instruction ignored,
+and the rejected rule not re-added.
+
