@@ -206,10 +206,11 @@ and the rejected rule not re-added.
 `google-live.live.ts` is the same story for the Google lane. It talks to the
 real Calendar API with **read-only** access tokens held only by Kevin — one per
 account, two accounts in your own Google Workspace (same organisation) — and
-does what mocks structurally cannot: it re-issues the exact request the Rust
-side makes (same endpoint, `singleEvents=true`, the same field mask, which must
-track `src-tauri/src/google/calendar.rs`'s `EVENT_FIELDS`) and prints what two
-real calendars return for the same shared event.
+does what mocks structurally cannot: it re-issues the request the Rust side
+makes (same endpoint, `singleEvents=true`, the same field mask, which must
+track `src-tauri/src/google/calendar.rs`'s `EVENT_FIELDS`; only `maxResults`
+differs, 250 against production's 50, so a wide live window is not cut short)
+and prints what two real calendars return for the same shared event.
 
 - **G1** checks the exact key the Notion send's pre-check and recheck ride on:
   `iCalUID` + the parsed instant (`originalStartTime.dateTime` for a recurring

@@ -22,8 +22,12 @@
 // The events come straight from Node's fetch against the Calendar API - the
 // production call goes through Rust (src-tauri/src/google/calendar.rs), which
 // cannot run outside the app, so this harness re-issues the same request: the
-// same endpoint, singleEvents=true, maxResults and the same field mask
-// (EVENT_FIELDS below must match calendar.rs's EVENT_FIELDS).
+// same endpoint, singleEvents=true and the same field mask (EVENT_FIELDS below
+// must match calendar.rs's EVENT_FIELDS). One deliberate difference:
+// maxResults is 250 here against production's 50, so a live window wider than
+// production's "now" read is not cut short.
+
+import { beforeAll, describe, expect, it } from "vitest";
 
 const EVENT_FIELDS =
   "items(iCalUID,status,summary,start,end,originalStartTime,organizer(email,displayName,self),attendees(email,displayName,self,organizer,resource,optional,responseStatus))";
@@ -69,8 +73,10 @@ interface TYPE_EVENT {
 // ------------------------------------------------------------------ helpers --
 
 /**
- * One account's event list. A non-200 becomes a thrown Error carrying the
- * status number ONLY - no response body, no headers, ever.
+ * One account's event list. Every failure becomes a fixed message: a non-200
+ * carries the status number ONLY, and a fetch or parse error carries only its
+ * error class. Never the original message: fetch quotes a malformed header
+ * value (the whole bearer token) and JSON.parse quotes part of the body.
  */
 async function fetchEvents(token: string, label: string): Promise<TYPE_EVENT[]> {
   const params = new URLSearchParams({
@@ -80,14 +86,28 @@ async function fetchEvents(token: string, label: string): Promise<TYPE_EVENT[]> 
     maxResults: "250",
     fields: EVENT_FIELDS,
   });
-  const response = await fetch(`${EVENTS_URL}?${params.toString()}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${EVENTS_URL}?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (err) {
+    throw new Error(`the events request for account ${label} could not be sent (${errorClass(err)})`);
+  }
   if (!response.ok) {
     throw new Error(`the events request for account ${label} failed with status ${response.status}`);
   }
-  const body = (await response.json()) as { items?: TYPE_EVENT[] };
-  return body.items ?? [];
+  try {
+    const body = (await response.json()) as { items?: TYPE_EVENT[] };
+    return body.items ?? [];
+  } catch (err) {
+    throw new Error(`the events response for account ${label} could not be read (${errorClass(err)})`);
+  }
+}
+
+/** The error's class name only, never its message. */
+function errorClass(err: unknown): string {
+  return err instanceof Error ? err.name : "unknown error";
 }
 
 /** The lowercase domain of an email address; null when there is none. */
@@ -130,21 +150,22 @@ function organizerLabel(e: TYPE_EVENT, ownDomain: string | null): string {
 }
 
 /** `one-off|recurring` - recurring means Google reports an originalStartTime. */
-function recurranceLabel(e: TYPE_EVENT): string {
+function recurrenceLabel(e: TYPE_EVENT): string {
   return e.originalStartTime !== undefined ? "recurring" : "one-off";
 }
 
 /**
  * The instant the key rides on: the occurrence's original start for a
- * recurring event, the plain start otherwise. NaN for an all-day event (the
- * caller skips those), exactly as the normalization does.
+ * recurring event, the plain start otherwise. NaN for an all-day event: the
+ * caller skips those, as the app does (current-meeting.ts drops all-day
+ * events before a key is ever used).
  */
 function startInstant(e: TYPE_EVENT): number {
   return Date.parse(e.originalStartTime?.dateTime ?? e.start?.dateTime ?? "");
 }
 
-const calendarOrganizer = (name: string): boolean =>
-  name.toLowerCase().endsWith("calendar.google.com");
+const calendarOrganizer = (email: string): boolean =>
+  email.toLowerCase().endsWith("calendar.google.com");
 
 // ------------------------------------------------------------------- checks --
 
@@ -178,21 +199,24 @@ describe.skipIf(!ENABLED)("Google live checks (two read-only tokens)", () => {
 
     let number = 0;
     let matches = 0;
+    // Only events G1 can key count as shared: an all-day or guest-less shared
+    // event can never match, so it must not make the assertion due.
+    let sharesUIDs = false;
     for (const e of eventsA) {
       if ((e.attendees?.length ?? 0) === 0) continue;
       const instant = startInstant(e);
       if (Number.isNaN(instant)) continue; // all-day events never key-match
       number += 1;
+      if (e.iCalUID !== undefined && bUIDs.has(e.iCalUID)) sharesUIDs = true;
       const key = e.iCalUID === undefined ? null : `${e.iCalUID}@${instant}`;
       const match = key !== null && bKeys.has(key);
       if (match) matches += 1;
       console.log(
-        `[G1] event ${number}: ${recurranceLabel(e)}, ` +
+        `[G1] event ${number}: ${recurrenceLabel(e)}, ` +
           `organizer ${organizerLabel(e, ownDomain)}, key match ${match ? "yes" : "no"}`,
       );
     }
 
-    const sharesUIDs = eventsA.some((e) => e.iCalUID !== undefined && bUIDs.has(e.iCalUID));
     if (sharesUIDs) {
       expect(matches, "A and B share events by iCalUID, so at least one must key-match").toBeGreaterThan(0);
     } else {
