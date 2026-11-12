@@ -242,10 +242,11 @@ pub fn run() {
             graph::graph_disconnect,
             graph::graph_status,
             graph::graph_current_meetings,
-            // Google sign-in; connect and status return GraphStatus (scanned by the same test); disconnect returns ().
+            // Google: connect and status return GraphStatus, google_current_meetings returns CurrentMeetings (both scanned by the same test); disconnect returns ().
             google::google_connect,
             google::google_disconnect,
             google::google_status,
+            google::google_current_meetings,
             // Notion token: deliberately returns the credential to the webview (spec §7/§9: plugin-http + JS redactor). Not a Graph payload; the scan above does not apply.
             notion_token::notion_keychain_available,
             notion_token::notion_token_set,

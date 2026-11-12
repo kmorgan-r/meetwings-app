@@ -158,7 +158,6 @@ pub async fn exchange_code(
     .await
 }
 
-#[allow(dead_code)] // consumed by the Task 3 calendar read
 pub async fn refresh(
     client_id: &str,
     client_secret: &str,

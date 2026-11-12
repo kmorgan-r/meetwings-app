@@ -11,7 +11,7 @@ pub const PREFER_UTC: &str = "outlook.timezone=\"UTC\"";
 /// Days since 1970-01-01 for a proleptic Gregorian date. Howard Hinnant's
 /// `days_from_civil`, integer-only - which is why this crate needs no
 /// `chrono`/`time`/`chrono-tz` for a job that is one fixed layout.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -25,14 +25,14 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 /// component's own parser (`i64::from_str`) from quietly accepting things it
 /// is willing to parse but this format does not allow - a leading sign, or
 /// (for the fraction) a trailing non-digit like a stray offset marker.
-fn is_ascii_digits(s: &str) -> bool {
+pub(crate) fn is_ascii_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Parses a component as an unsigned decimal integer, rejecting anything that
 /// is not purely ASCII digits rather than deferring to `i64::from_str`'s own
 /// (sign-accepting) notion of what counts as a number.
-fn parse_digits(s: &str) -> Option<i64> {
+pub(crate) fn parse_digits(s: &str) -> Option<i64> {
     if !is_ascii_digits(s) {
         return None;
     }
@@ -41,7 +41,7 @@ fn parse_digits(s: &str) -> Option<i64> {
 
 /// Days in `month` of `year`, with the Gregorian leap rule for February. The
 /// caller has already range-checked `month` to `1..=12`.
-fn days_in_month(year: i64, month: i64) -> i64 {
+pub(crate) fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -184,6 +184,7 @@ pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
                 name,
                 r#type: "required".to_string(),
                 is_organizer: true,
+                response: None,
             });
         }
         for attendee in value
@@ -205,6 +206,7 @@ pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
                         .unwrap_or("required")
                         .to_string(),
                     is_organizer: false,
+                    response: None,
                 });
             }
         }

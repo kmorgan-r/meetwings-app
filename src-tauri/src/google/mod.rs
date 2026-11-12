@@ -7,15 +7,15 @@
 //! keychain.
 
 mod auth;
+pub(crate) mod calendar;
 
-use crate::graph::GraphStatus;
+use crate::graph::{CurrentMeetings, GraphStatus};
 use crate::oauth::{self, keychain, OAuthFail};
 use std::future::Future;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
-#[allow(dead_code)] // read by the Task 3 calendar read
 pub const NOT_CONNECTED: &str = "GOOGLE_NOT_CONNECTED";
 pub const CONSENT_REQUIRED: &str = "GOOGLE_CONSENT_REQUIRED";
 pub const AUTH_CANCELLED: &str = "GOOGLE_AUTH_CANCELLED";
@@ -75,7 +75,6 @@ pub struct GoogleState {
     /// Serializes adopt-then-persist against clear-then-delete.
     persist_op: Mutex<()>,
     /// Serializes refreshes (held across the token POST).
-    #[allow(dead_code)] // taken by refresh_and_adopt_with
     refresh_op: tokio::sync::Mutex<()>,
 }
 
@@ -167,8 +166,9 @@ fn adopt_and_persist_with(
     true
 }
 
-/// Clear memory first, unconditionally; then delete from the keychain unless
-/// session-only (nothing was ever written, and a real delete would error).
+/// Clear memory first, unconditionally; then delete from the keychain. When
+/// session-only the delete is best-effort (an earlier persisted connect may have
+/// left a stale entry); otherwise its error is returned.
 fn forget_with(
     state: &GoogleState,
     delete: impl Fn() -> Result<(), String>,
@@ -185,7 +185,6 @@ fn forget_with(
     delete()
 }
 
-#[allow(dead_code)] // consumed by the Task 3 calendar read
 pub(crate) fn fresh_access_token(state: &GoogleState) -> Option<String> {
     let session = state.session.lock().unwrap_or_else(|e| e.into_inner());
     match &session.access_token {
@@ -198,7 +197,6 @@ pub(crate) fn fresh_access_token(state: &GoogleState) -> Option<String> {
 /// concurrent callers redeem once. `stale` is a token the caller knows is bad
 /// (a 401): the post-lock re-read must not hand it back. Errors from `redeem`,
 /// `GOOGLE_AUTH_EXPIRED` included, pass through with the credential kept.
-#[allow(dead_code)] // consumed by the Task 3 calendar read
 pub(crate) async fn refresh_and_adopt_with<F, Fut>(
     state: &GoogleState,
     generation: u64,
@@ -244,7 +242,6 @@ where
 }
 
 /// Production wrapper: the real keychain behind `load` and `store`.
-#[allow(dead_code)] // consumed by the Task 3 calendar read
 pub(crate) async fn refresh_and_adopt<F, Fut>(
     state: &GoogleState,
     generation: u64,
@@ -264,6 +261,92 @@ where
         |t| keychain::store(GOOGLE_SERVICE, t).map_err(|_| NO_KEYCHAIN.to_string()),
     )
     .await
+}
+
+/// Testable core of `google_current_meetings`: the token, one 401
+/// refresh-and-retry, and the generation backstop.
+async fn fetch_with_refresh<Fe, FeFut, Rd, RdFut>(
+    state: &GoogleState,
+    fetch: Fe,
+    refresh: Rd,
+) -> Result<String, String>
+where
+    Fe: Fn(String) -> FeFut,
+    FeFut: Future<Output = Result<String, String>>,
+    Rd: Fn(Option<String>, u64) -> RdFut,
+    RdFut: Future<Output = Result<String, String>>,
+{
+    let generation = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .generation;
+    let access = match fresh_access_token(state) {
+        Some(token) => token,
+        None => refresh(None, generation).await?,
+    };
+    let body = match fetch(access.clone()).await {
+        Ok(body) => body,
+        // `stale` makes the refresh a real redemption: the rejected token is
+        // still "fresh" locally until its expiry.
+        Err(code) if code == AUTH_REJECTED => {
+            let refreshed = refresh(Some(access), generation).await?;
+            fetch(refreshed).await?
+        }
+        Err(code) => return Err(code),
+    };
+    // Backstop: a disconnect or reconnect that landed meanwhile withdraws the
+    // question this body answers.
+    let moved = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .generation
+        != generation;
+    if moved {
+        return Err(NOT_CONNECTED.to_string());
+    }
+    Ok(body)
+}
+
+#[tauri::command]
+pub async fn google_current_meetings(
+    app: AppHandle,
+    client_id: String,
+    client_secret: String,
+    start_iso: String,
+    end_iso: String,
+) -> Result<CurrentMeetings, String> {
+    let state = app.state::<GoogleState>();
+    let body = fetch_with_refresh(
+        &state,
+        |access| {
+            let (start, end) = (&start_iso, &end_iso);
+            async move { calendar::fetch_events(&access, start, end).await }
+        },
+        |stale, generation| {
+            let (id, secret, state) = (&client_id, &client_secret, &state);
+            async move {
+                refresh_and_adopt(state, generation, stale.as_deref(), |rt| {
+                    async move { auth::refresh(id, secret, &rt, now_ms()).await }
+                })
+                .await
+            }
+        },
+    )
+    .await?;
+    let (self_address, events) = calendar::parse_events(&body)?;
+    let own_address = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .own_address
+        .clone()
+        .or(self_address);
+    Ok(CurrentMeetings {
+        own_address,
+        events,
+    })
 }
 
 #[tauri::command]
@@ -625,6 +708,80 @@ mod tests {
         assert_eq!(mem_refresh(&state), Some("r1".to_string()));
         assert_eq!(mem_access(&state), Some("A".to_string()));
         assert_eq!(stores.get(), 0);
+    }
+
+    fn live(state: &GoogleState, access: &str) {
+        assert!(adopt(state, &tokens(access, Some("r1")), 0));
+    }
+
+    #[tokio::test]
+    async fn a_401_refreshes_once_and_retries_once() {
+        let state = GoogleState::default();
+        live(&state, "A");
+        let fetches = AtomicUsize::new(0);
+        let refreshes = std::sync::Mutex::new(Vec::new());
+        let result = fetch_with_refresh(
+            &state,
+            |token| {
+                let n = fetches.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        assert_eq!(token, "A");
+                        Err(AUTH_REJECTED.to_string())
+                    } else {
+                        assert_eq!(token, "B");
+                        Ok("body".to_string())
+                    }
+                }
+            },
+            |stale, _generation| {
+                refreshes.lock().unwrap().push(stale);
+                async { Ok("B".to_string()) }
+            },
+        )
+        .await;
+        assert_eq!(result, Ok("body".to_string()));
+        assert_eq!(*refreshes.lock().unwrap(), vec![Some("A".to_string())]);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_second_401_is_returned() {
+        let state = GoogleState::default();
+        live(&state, "A");
+        let fetches = AtomicUsize::new(0);
+        let refreshes = AtomicUsize::new(0);
+        let result = fetch_with_refresh(
+            &state,
+            |_| {
+                fetches.fetch_add(1, Ordering::SeqCst);
+                async { Err(AUTH_REJECTED.to_string()) }
+            },
+            |_, _| {
+                refreshes.fetch_add(1, Ordering::SeqCst);
+                async { Ok("B".to_string()) }
+            },
+        )
+        .await;
+        assert_eq!(result, Err("GOOGLE_AUTH_REJECTED".to_string()));
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_during_the_fetch_drops_the_result() {
+        let state = GoogleState::default();
+        live(&state, "A");
+        let result = fetch_with_refresh(
+            &state,
+            |_| {
+                state.clear_session();
+                async { Ok("body".to_string()) }
+            },
+            |_, _| async { Ok("B".to_string()) },
+        )
+        .await;
+        assert_eq!(result, Err("GOOGLE_NOT_CONNECTED".to_string()));
     }
 
     #[test]

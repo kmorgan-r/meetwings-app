@@ -5,7 +5,7 @@
 //! `meeting_detect`.
 
 mod auth;
-mod calendar;
+pub(crate) mod calendar;
 mod keychain;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,9 @@ pub struct CalendarParticipant {
     /// the only value any rule tests for is "resource".
     pub r#type: String,
     pub is_organizer: bool,
+    /// The invitee's RSVP ("accepted", "declined", ...). Google fills it from
+    /// `responseStatus`; Graph sets `None`.
+    pub response: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -851,7 +854,9 @@ mod tests {
     /// The structs CURRENTLY returned by an exposed command - `GraphStatus`
     /// (`graph_connect`, `graph_status`) and `CurrentMeetings`
     /// (`graph_current_meetings`) - are serialized here and scanned for
-    /// credential-shaped keys. A future edit that widens one of these to
+    /// credential-shaped keys. `google_connect`/`google_status` return
+    /// `GraphStatus` and `google_current_meetings` returns `CurrentMeetings`,
+    /// both already in `payloads`. A future edit that widens one of these to
     /// carry a token fails this test rather than shipping.
     ///
     /// MARKER, not an enforced guarantee: nothing ties this list to
@@ -896,6 +901,7 @@ mod tests {
                         name: None,
                         r#type: "required".into(),
                         is_organizer: false,
+                        response: Some("accepted".into()),
                     }],
                 }],
             })
