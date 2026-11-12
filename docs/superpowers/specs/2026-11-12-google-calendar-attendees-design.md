@@ -149,7 +149,10 @@ Mirror `src-tauri/src/graph/` in a sibling module, with commands `google_connect
 neutral as they stand: `auth.rs` returns `GRAPH_*` strings (`graph/mod.rs:62-70`) and `keychain.rs`
 hard-codes `SERVICE`/`ACCOUNT` (`keychain.rs:15-16`). The shared parts take the keychain service name
 as a parameter and return provider-neutral errors that each module maps to its own codes, so no
-`GRAPH_*` code ever reaches the Google UI. How to share them is otherwise the builder's call.
+`GRAPH_*` code ever reaches the Google UI. Graph keeps its keychain service `com.meetwings.graph`
+(changing it would lose every connected Outlook user's stored token) and its exact `GRAPH_*` mapping
+(the `invalid_grant` streak, `graph/mod.rs:72-90`, depends on `AUTH_EXPIRED`). How to share them is
+otherwise the builder's call.
 
 Google specifics:
 - Authorize: `https://accounts.google.com/o/oauth2/v2/auth` with `access_type=offline` and
@@ -191,8 +194,11 @@ recording path, with any error swallowed into "no attendees". A generation guard
 
 The event fires at **every** capture rising edge until the conversation has a meeting line
 (`useCompletion.ts:1580-1581`), so toggling capture before anyone speaks starts several reads. The
-**newest read wins**: each read takes its own generation, and a newer read replaces any pending result,
-never first-wins (auto-select's `inFlight` drop, `useCalendarAutoSelect.ts:89`, would keep the older).
+**newest read wins**: each read takes its own generation, and a newer read's outcome replaces the older
+one's, never first-wins (auto-select's `inFlight` drop, `useCalendarAutoSelect.ts:89`, would keep the
+older). That holds whether the older snapshot is still pending or already stored (a typed-chat
+conversation inside the gap has an id but no meeting line, `useCompletion.ts:1556-1581`), and a newer
+`none`, `several` or error removes the older snapshot rather than leaving it.
 
 ### 6.2 Which event
 
@@ -244,9 +250,14 @@ This is **not** `overlapEnough` (`same-meeting.ts:58-67`), which measures agains
 joined send 10:00-11:30 over an event 10:00-10:30 shares all 30 minutes of the shorter span and would
 pass, then key-match a teammate's 10:00-10:30 page and finish `already` with no summary, losing the
 10:35 meeting. Under this rule it shares 30 of its own 90 minutes, gets no snapshot, and runs as
-today. A late joiner (10:20-10:30 of that event) is still inside. *Accepted cost:* a back-to-back
-meeting joined onto the end of the event and no longer than it (event 10:00-11:00, send 10:00-11:30)
-still passes, as it would pass today's AI judge on overlap.
+today. A late joiner (10:20-10:30 of that event) is still inside.
+
+*Accepted costs:*
+- A back-to-back meeting joined onto the end, no longer than the send's part inside the event (event
+  10:00-11:00, send 10:00-11:30), still gets the snapshot, so the page shows the event's guests. It
+  cannot settle by key: 8.2's end bound sends it to today's AI judge.
+- A meeting that overruns by more than the time the send spent inside it (a 15-minute standup recorded
+  to 10:35) gets no snapshot: no attendees and no exact match, exactly today's behaviour.
 
 Constraints on where it lives (the place is the builder's call):
 - It must survive an app restart between capture start and the Notion send. Sends run after the hold,
@@ -344,14 +355,19 @@ when the snapshot has a key writes the key into that property.
 Against `runNotionSend` (`src/lib/notion/send.ts`), when the send has a snapshot key, in each sub-table
 that carries the column (8.1):
 
-A **key match** means both conditions hold: the page's Calendar event equals the key, **and** the
-page's date range passes `overlapEnough` with the send's span. The key alone is never enough.
+A **key match** means all three hold: the page's Calendar event equals the key, the page's date range
+passes `overlapEnough` with the send's span, **and** the send ends no later than `ENDED_GRACE_MS`
+(10 minutes, `current-meeting.ts`) after the event's end. The key alone is never enough. The end bound
+is what stops a joined send (6.3) from settling by key: event 10:00-11:00, send 10:00-11:30 keeps its
+snapshot, but its key never matches, so it runs today's AI judge and the 11:00 meeting is not dropped
+unseen. Its page still records the key.
 
 1. **Pre-check, before the summary.** It runs only on a send that has never started a create
    (`create_started_at` null). A send resuming after a lost create response needs today's own-page
    recovery first. That recovery (`isThisSendsPage`, `send.ts:186-192`) needs `summary.title`, so
    before the summary the send cannot recognise its own page, and a pre-check would make it lose to
-   itself. The pre-check queries every sub-table for a non-trashed page that key-matches. Found →
+   itself. The pre-check queries every sub-table that carries the column (8.1) for a non-trashed page
+   that key-matches. Found →
    `lost_to_url` = that page, finish `already`. **No summary call.** This needs the sub-table mapping
    (today step 3) to run before the summary (today step 1); the builder reorders the steps without
    breaking resumability.
@@ -383,14 +399,21 @@ pre-pick only for meetings on his IC Google calendar.
 Kevin makes the source `hand`. Clearing works as today: wherever the Odoo targets are cleared.
 - **One write for both.** The hook's `set` (`useNotionPick.ts:17-19`) writes the ref before
   `setState` so a same-tick trigger sees the new value. It becomes `set(next, source)`, writing the
-  pick ref and a source ref together, then state and both localStorage keys. `useMeetingLog`'s
-  `trigger` snapshots pick and source together in its synchronous snapshot (`useMeetingLog.ts:320-327`).
+  pick ref and a source ref together, then state and both localStorage keys, **the source key before
+  `NOTION_PICKED`**, so a partial write never leaves an `auto` tick that reads as `hand`.
+  `useMeetingLog`'s `trigger` snapshots pick and source together in its synchronous snapshot
+  (`useMeetingLog.ts:320-327`).
 - **Missing source.** A stored `NOTION_PICKED === "true"` with no source key (written before this
   change) reads as `hand`, so an upgrade never subjects an existing hand tick to the checks below.
 - **The automatic set never overrides Kevin.** It only turns an unticked Notion on. It is a no-op when
   Notion is already ticked, and a no-op when Kevin toggled or cleared after check 1 began (a hand-touch
   counter captured at the event). Its generation guard bumps on `newConversationStarted` **and**
-  `odooTargetsCleared`, as auto-select's does (`useCalendarAutoSelect.ts:54-63`).
+  `odooTargetsCleared`, as auto-select's does (`useCalendarAutoSelect.ts:54-63`). This is the tick's
+  own guard, not 6.1's: Clear must not drop the attendee snapshot, whose guard bumps only on
+  `newConversationStarted`.
+- **A newer check 1 can take an `auto` tick back.** The event can fire several times before the first
+  meeting line (6.1). When a newer check 1 refuses (Google `none` or `several`, Outlook `one`,
+  `several` or an error), it clears a tick whose source is `auto`. It never touches a `hand` tick.
 
 **Outlook's state, for both checks.** "Outlook absent" means `loadGraphConfigState()` returns
 `absent` (`fetchCurrentMeetings` → `absent`), which includes a stored config whose client ID is blank
@@ -408,7 +431,7 @@ ticked automatically only when:
 
 Outlook `one` or `several`, or an Outlook error, means no tick. The rule is a pure function with unit
 tests. The tick lands after the rollover (the event fires after `await startNewConversation()`),
-behind the same generation guard as 6.1.
+behind the tick's own generation guard (above).
 
 **The automatic tick only covers the Google event's time.** The tick lasts the whole conversation, but
 an `auto` tick counts for a meeting-end row only when that row is inside the saved Google event (6.3's
@@ -473,6 +496,9 @@ Accepted costs:
   follows the IC call in the **same row** and is no longer than the IC part (the window rule above).
   The 30-second hold and the untick are the guard.
 - Edge rows of an IC call (before its start or after its end) are withheld (Ceiling, per row).
+- A short IC meeting that overruns by more than its inside part and lands in a single row (a
+  15-minute standup recorded to 10:35) is withheld whole. Nothing was sent, so Send to Notion on its
+  conversation row recovers it.
 
 A meeting on both calendars still gets Outlook auto-select's Odoo targets, which are independent of
 Notion.
@@ -484,7 +510,8 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
   without an attendee row, neither (→ `"needsAction"`), resources, optional guests, the recurring key.
 - Rust: the cargo credential-field test's list includes every Google command return type; state and
   nonce mismatch are rejected; a shared helper's error never surfaces as a `GRAPH_*` code from a
-  Google command; a Google error response maps to its fixed code without its body.
+  Google command; a Google error response maps to its fixed code without its body. Graph's existing
+  `auth.rs` and `keychain.rs` cargo tests pass unchanged after the sharing refactor.
 - The client ID and secret are saved through secure storage only, never plain localStorage.
 - Internal/external derivation, including a free-mail own address; free-mail guests land in "Other
   guests"; declined guests are left out of both the prompt and the page.
@@ -492,10 +519,11 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
   send 10:00-11:30 over a 10:00-10:30 event gets no snapshot; a late joiner inside the event gets it.
 - The snapshot: a result arriving before the conversation id exists is held, then stored; it survives
   a restart; it is deleted with the conversation when no send has started; a newer capture-start read
-  replaces a pending older one.
+  replaces a pending or stored older one, and a newer `none` removes it.
 - The send's key paths: pre-check hit makes no summary call and sets `lost_to_url`; same, different and
   absent keys in find and recheck; **same key with a non-overlapping range** (another occurrence) creates
-  its own page in all three paths; a trashed key-matching page is ignored; a recheck key match settles
+  its own page in all three paths; a send ending more than `ENDED_GRACE_MS` after the event's end
+  never key-matches and goes to the AI judge; a trashed key-matching page is ignored; a recheck key match settles
   by `pickWinner` and the loser trashes its own page; a sub-table without the column, or with a
   non-`rich_text` one, behaves as today and Check warns.
 - The reordered send: a crash at each step, then resume, finishes correctly (mapping now runs before
@@ -526,7 +554,11 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
   arriving mid-check is re-run after it, and a toggle mid-check does not change the enqueued row.
 - `pickCurrentMeeting` gives the same results before and after its filters are split out of
   `isCandidate`.
-- `decideDestinations` with `source: "recovery"` never gives a held Notion lane.
+- `decideDestinations` with `source: "recovery"` and Odoo complete or incomplete gives `notionStatus`
+  null or `"offered"`, never `"held"` or `"waiting"` (`destinations.ts:48`'s `"waiting"` is the
+  Notion-only path, where there is no Outlook).
+- Kevin's tick, newer check 1: a refusing newer check 1 clears an `auto` tick and leaves a `hand` tick.
+  The source key is written before `NOTION_PICKED`.
 - A Google failure or hang at capture start leaves recording untouched.
 
 Live checks: add to `.livecheck/`, skipping cleanly without credentials, as `notion-live.live.ts` does.
