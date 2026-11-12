@@ -101,13 +101,19 @@ function boldTitleOf(children: NotionBlock[]): string {
   return "";
 }
 
-/** Every heading_3's text except "Action Items" - the section headings of the page. */
+/**
+ * Every heading_3's text except "Action Items" and "Attendees" - the section
+ * headings of the page. The Attendees heading is ours, not a section: the
+ * page can grow the calendar's invite list between the two records being
+ * compared without either meeting being different, so the judge must never
+ * see it.
+ */
 function headingsOf(children: NotionBlock[]): string[] {
   const out: string[] = [];
   for (const block of children) {
     if (block.type === "heading_3") {
       const text = blockPlainText(block);
-      if (text !== "Action Items") out.push(text);
+      if (text !== "Action Items" && text !== "Attendees") out.push(text);
     }
   }
   return out;

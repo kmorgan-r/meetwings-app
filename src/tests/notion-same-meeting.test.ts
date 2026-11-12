@@ -37,6 +37,8 @@ import {
   sameMeeting,
 } from "@/lib/notion/same-meeting";
 import type { Candidate } from "@/lib/notion/same-meeting";
+import { buildPageBlocks } from "@/lib/notion/page-blocks";
+import type { AttendeeGroups } from "@/lib/calendar/calendar-snapshot";
 
 // Fake values only - never a real Notion id, email or token.
 const START = Date.UTC(2026, 10, 9, 9, 0); // 2026-11-09 09:00Z
@@ -569,5 +571,44 @@ describe("isOwnPage", () => {
     const noOwner = { id: "fake-bot-1", ownerUserId: null };
     expect(isOwnPage(candidateOf({ createdById: "fake-owned-1" }), noOwner)).toBe(false);
     expect(isOwnPage(candidateOf({ createdById: null, recordedByIds: ["fake-owned-1"] }), noOwner)).toBe(false);
+  });
+});
+
+describe("the judge and the Attendees block", () => {
+  it("the judge's headings for a page with an Attendees block equal those without it", async () => {
+    // Defined locally: the SUMMARY inside describe("sameMeeting") is not in scope.
+    const SUMMARY: NotionSummary = {
+      title: "Weekly sync",
+      actionItems: [],
+      sections: [{ heading: "Launch", bullets: ["Ship on Friday"] }],
+      practices: [],
+    };
+    const ATTENDEES: AttendeeGroups = {
+      teamLabel: "Team (example.org)",
+      team: ["Alex"],
+      external: [{ domain: "acme.com", people: ["Bea"] }],
+      otherGuests: [],
+      omitted: 0,
+    };
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          page("fake-page-plain", { start: ISO_START, end: ISO_END }),
+          page("fake-page-with", { start: ISO_START, end: ISO_END }),
+        ],
+      },
+      bodies: {
+        "fake-page-plain": buildPageBlocks(SUMMARY) as unknown as NotionBlock[],
+        "fake-page-with": buildPageBlocks(SUMMARY, ATTENDEES) as unknown as NotionBlock[],
+      },
+    });
+    const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
+    expect(candidates).toHaveLength(2);
+    const plain = candidates.find((c) => c.pageId === "fake-page-plain");
+    const withIt = candidates.find((c) => c.pageId === "fake-page-with");
+    expect(withIt?.headings).toEqual(plain?.headings);
+    expect(withIt?.boldTitle).toEqual(plain?.boldTitle);
+    expect(withIt?.headings).toEqual(["Launch"]);
+    expect(withIt?.boldTitle).toBe("Weekly sync");
   });
 });

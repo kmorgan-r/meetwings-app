@@ -1,3 +1,4 @@
+import type { AttendeeGroups } from "@/lib/calendar/calendar-snapshot";
 import type { NotionBlockInput } from "./client";
 import type { SubTable } from "./routing";
 import type { NotionSummary } from "./summarize";
@@ -76,13 +77,20 @@ function heading3(text: string): NotionBlockInput {
 
 /**
  * Builds the page body, in spec §3.3's order: TOC, Agenda (with the section
- * headings as bullets), divider, Meeting Notes (bold title, then the Team
- * Practices callout), Action Items to-dos, a divider, every section replayed,
- * a divider, and the empty Transcript toggle last. "Agenda" and "Action
- * Items" are always present, even when their lists are empty; only the
- * callout is conditional - a page without practices has nothing to flag.
+ * headings as bullets), divider, Meeting Notes (bold title, the Attendees
+ * list, then the Team Practices callout), Action Items to-dos, a divider,
+ * every section replayed, a divider, and the empty Transcript toggle last.
+ * "Agenda" and "Action Items" are always present, even when their lists are
+ * empty; the callout is conditional - a page without practices has nothing to
+ * flag - and so is the Attendees list, which needs `attendees`. The Attendees
+ * blocks sit between the bold title and the callout but name only people and
+ * domains, never section headings, so the same-meeting judge below the page
+ * reads the same with or without them.
  */
-export function buildPageBlocks(s: NotionSummary): NotionBlockInput[] {
+export function buildPageBlocks(
+  s: NotionSummary,
+  attendees: AttendeeGroups | null = null,
+): NotionBlockInput[] {
   const blocks: NotionBlockInput[] = [];
   const add = (type: string, payload: Record<string, unknown>) =>
     blocks.push(block(type, payload));
@@ -93,6 +101,22 @@ export function buildPageBlocks(s: NotionSummary): NotionBlockInput[] {
   add("divider", {});
   add("heading_2", { rich_text: richText("Meeting Notes") });
   add("paragraph", { rich_text: richText(s.title, true) });
+
+  if (attendees !== null) {
+    add("heading_3", { rich_text: richText("Attendees") });
+    add("paragraph", { rich_text: richText("From the calendar invite") });
+    const addGroup = (label: string, people: string[]) => {
+      if (people.length === 0) return;
+      add("paragraph", { rich_text: richText(label, true) });
+      for (const person of people) blocks.push(bullet(person));
+    };
+    addGroup(attendees.teamLabel, attendees.team);
+    for (const external of attendees.external) addGroup(external.domain, external.people);
+    addGroup("Other guests", attendees.otherGuests);
+    if (attendees.omitted > 0) {
+      add("paragraph", { rich_text: richText(`and ${attendees.omitted} more`) });
+    }
+  }
 
   if (s.practices.length > 0) {
     add("callout", {
