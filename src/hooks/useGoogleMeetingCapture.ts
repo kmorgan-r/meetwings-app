@@ -134,6 +134,8 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       // The snapshot is already stored; only the tick waits on Outlook.
       const outlook = await o;
       if (seq !== readSeq.current || tick !== tickGen.current) return;
+      // Notion may have become unavailable while Outlook was pending.
+      if (!latest.current.tickEnabled) return;
       const { notionPick } = latest.current;
       if (decideCheckOne(result, outlook, now) === "tick") notionPick.autoTick(touches);
       else notionPick.autoUntick();

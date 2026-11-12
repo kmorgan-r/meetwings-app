@@ -50,6 +50,12 @@ describe("decideCheckOne", () => {
       "refuse",
     ],
     [
+      "Outlook GRAPH_AUTH_REJECTED",
+      ok("G"),
+      { kind: "error" as const, code: "GRAPH_AUTH_REJECTED" as const },
+      "refuse",
+    ],
+    [
       "Outlook GRAPH_NETWORK",
       ok("G"),
       { kind: "error" as const, code: "GRAPH_NETWORK" as const },
