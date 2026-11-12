@@ -219,6 +219,8 @@ export async function readCandidates(
       },
     });
     for (const page of pages) {
+      // A trashed page holds no meeting: on the key path it would settle a send with no judge.
+      if (page.in_trash === true || page.archived === true) continue;
       const candidate = await readCandidate(client, page, st, startAt, endAt);
       if (candidate !== null) candidates.push(candidate);
     }

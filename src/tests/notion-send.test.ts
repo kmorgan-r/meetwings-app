@@ -1078,6 +1078,39 @@ describe("one page per meeting: the calendar key", () => {
       expect(asks(world, "same")).toHaveLength(0);
     });
 
+    it("recheck: this send wins against a later key-matching rival and keeps its page", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      // Created after pg-1 (15:00), so pickWinner keeps ours despite the rival's lower id.
+      const rival = addKeyed({ hidden: true, created_time: "2026-11-09T15:05:00.000Z" });
+      world.onSleep = () => {
+        rival.hidden = false;
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(await sendOf()).toMatchObject({ status: "sent", page_id: "pg-1", lost_to_url: null });
+      expect(world.pages.get("pg-1")?.trashed).toBe(false);
+      expect(rival.trashed).toBe(false);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it("find: a key-matching page the date query returns flagged in_trash is not settled already", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      const gone = addKeyed({ trashed: true });
+      // This test only: the date-window query also returns the trashed page, flagged in_trash.
+      const query = world.client.queryAll;
+      world.client.queryAll = async (ds: string, body: object) => {
+        const pages = await query(ds, body);
+        if (JSON.stringify(body).includes('"rich_text"')) return pages;
+        const { id, url, created_time, created_by, properties } = gone;
+        return [...pages, { id, url, created_time, created_by, properties, in_trash: true }];
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(await sendOf()).toMatchObject({ status: "sent", page_id: "pg-1", lost_to_url: null });
+      expect(world.calls.createPage).toBe(1);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
     it.each(["pre-check", "find", "recheck"])(
       "the same key with a non-overlapping range creates its own page (another occurrence): %s",
       async (step) => {

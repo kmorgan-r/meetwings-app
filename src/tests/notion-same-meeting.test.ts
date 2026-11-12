@@ -302,6 +302,20 @@ describe("readCandidates", () => {
     expect(queries).toHaveLength(1);
   });
 
+  it("readCandidates skips in_trash and archived pages", async () => {
+    const { client, listChildrenCalls } = fakeNotion({
+      pages: {
+        "ds-a": [
+          { ...page("fake-page-trashed", { start: ISO_START, end: ISO_END }), in_trash: true },
+          { ...page("fake-page-archived", { start: ISO_START, end: ISO_END }), archived: true },
+        ],
+      },
+      bodies: { "fake-page-trashed": NOTES_BODY, "fake-page-archived": NOTES_BODY },
+    });
+    expect(await readCandidates(client, [subTable("ds-a")], START, END)).toEqual([]);
+    expect(listChildrenCalls).toEqual([]);
+  });
+
   it("recordedByIds come from the sub-table's Recorded by property when set", async () => {
     const { client } = fakeNotion({
       pages: {
