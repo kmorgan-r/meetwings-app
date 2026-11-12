@@ -43,6 +43,12 @@ export async function loadGoogleConfigState(): Promise<GoogleConfigState> {
   } catch {
     return { state: "unreadable", config: null };
   }
+  // Parsed but the wrong shape: unreadable, never a throw (callers rely on a
+  // non-rejecting read).
+  if (typeof parsed !== "object" || parsed === null) return { state: "unreadable", config: null };
+  for (const v of [parsed.clientId, parsed.clientSecret]) {
+    if (v !== undefined && typeof v !== "string") return { state: "unreadable", config: null };
+  }
   return classifyGoogleConfig(parsed);
 }
 

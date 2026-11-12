@@ -17,14 +17,23 @@ beforeEach(() => {
 
 describe("google config storage", () => {
   it("saves the client ID and secret through secure storage only", async () => {
-    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    const setItem = vi.mocked(localStorage.setItem);
+    setItem.mockClear();
     await saveGoogleConfig({ clientId: " id ", clientSecret: " s " });
     expect(secure.secureSet).toHaveBeenCalledWith(
       SECURE_GOOGLE_CONFIG_KEY,
       '{"clientId":"id","clientSecret":"s"}'
     );
     expect(setItem).not.toHaveBeenCalled();
-    setItem.mockRestore();
+  });
+
+  it("a blob of the wrong shape is unreadable, not a throw", async () => {
+    secure.secureGet.mockResolvedValueOnce("null");
+    await expect(loadGoogleConfigState()).resolves.toEqual({ state: "unreadable", config: null });
+    secure.secureGet.mockResolvedValueOnce('{"clientId":5,"clientSecret":"s"}');
+    await expect(loadGoogleConfigState()).resolves.toEqual({ state: "unreadable", config: null });
+    secure.secureGet.mockResolvedValueOnce('{"clientId":"id","clientSecret":{}}');
+    await expect(loadGoogleConfigState()).resolves.toEqual({ state: "unreadable", config: null });
   });
 
   it("a blank secret or client ID is absent", async () => {
