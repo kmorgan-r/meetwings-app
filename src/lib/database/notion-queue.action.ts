@@ -40,8 +40,8 @@ SELECT DISTINCT conversation_id FROM notion_sends
  WHERE status = 'sending' AND claimed_at > ? AND conversation_id IS NOT NULL`,
 
   insertSend: `
-INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at)
-VALUES (?, ?, 'retry', 0, ?, ?, ?)
+INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at, calendar_json)
+VALUES (?, ?, 'retry', 0, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING`,
 
   // Open-ended placeholders are appended per call: `id IN (?, ?, ...)`.
@@ -162,11 +162,11 @@ export async function conversationsWithLiveSend(staleBefore: number): Promise<Se
 
 /** Insert first, link second; the link runs even if the insert was a no-op so a crash between them heals. */
 export async function createSendAndLink(
-  s: { id: string; conversationId: string | null; spanStartAt: number; spanEndAt: number; createdAt: number },
+  s: { id: string; conversationId: string | null; spanStartAt: number; spanEndAt: number; createdAt: number; calendarJson: string | null },
   rowIds: string[]
 ): Promise<void> {
   const db = await getDatabase();
-  await db.execute(NOTION_SQL.insertSend, [s.id, s.conversationId, s.spanStartAt, s.spanEndAt, s.createdAt]);
+  await db.execute(NOTION_SQL.insertSend, [s.id, s.conversationId, s.spanStartAt, s.spanEndAt, s.createdAt, s.calendarJson]);
   if (rowIds.length === 0) return;
   await db.execute(NOTION_SQL.linkRowsPrefix + marks(rowIds), [s.id, ...rowIds]);
 }

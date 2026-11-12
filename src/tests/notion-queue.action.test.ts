@@ -65,7 +65,7 @@ function seedRow(over: Record<string, unknown>) {
 }
 
 const sendInit = (over: Partial<Parameters<typeof createSendAndLink>[0]> = {}) => ({
-  id: "r1", conversationId: "c1", spanStartAt: 1, spanEndAt: 2, createdAt: NOW, ...over,
+  id: "r1", conversationId: "c1", spanStartAt: 1, spanEndAt: 2, createdAt: NOW, calendarJson: null as string | null, ...over,
 });
 
 const rowOf = async (id: string) => (await rawSelect("SELECT * FROM meeting_log_queue WHERE id=?", [id]))[0];
@@ -87,11 +87,21 @@ beforeEach(async () => {
   }
   await applyMigration14(db);
   db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "calendar-snapshots.sql"), "utf8"));
   execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
 });
 
 describe("createSendAndLink", () => {
+  it("createSendAndLink stores calendarJson", async () => {
+    seedRow({ id: "r1" });
+    seedRow({ id: "r2" });
+    await createSendAndLink(sendInit({ calendarJson: '{"key":"k"}' }), ["r1"]);
+    await createSendAndLink(sendInit({ id: "r2" }), ["r2"]);
+    expect((await sendOf("r1")).calendar_json).toBe('{"key":"k"}');
+    expect((await sendOf("r2")).calendar_json).toBeNull();
+  });
+
   it("links rows even when the send already exists (crash between insert and link)", async () => {
     seedRow({ id: "r1" });
     seedRow({ id: "r2" });

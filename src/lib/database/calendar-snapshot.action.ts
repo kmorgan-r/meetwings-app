@@ -1,4 +1,5 @@
 import { parseSnapshot, type CalendarSnapshot } from "@/lib/calendar/calendar-snapshot";
+import { insideEvent } from "@/lib/calendar/current-meeting";
 import { getDatabase } from "./config";
 
 /**
@@ -46,4 +47,18 @@ export async function getCalendarSnapshot(
     [conversationId]
   );
   return parseSnapshot(found[0]?.snapshot_json ?? null);
+}
+
+/**
+ * The JSON a new send stores: the conversation's snapshot when the send's span
+ * lies inside its event, otherwise null. Decided once at send creation; the
+ * send never re-reads the snapshot. Re-serialized, so a stored copy is always
+ * the normalized form parseSnapshot reads back.
+ */
+export async function snapshotJsonForSpan(
+  conversationId: string,
+  span: { start: number; end: number }
+): Promise<string | null> {
+  const snapshot = await getCalendarSnapshot(conversationId);
+  return snapshot !== null && insideEvent(span, snapshot) ? JSON.stringify(snapshot) : null;
 }

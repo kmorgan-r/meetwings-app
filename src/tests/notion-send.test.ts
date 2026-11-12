@@ -93,7 +93,7 @@ function seedRow(over: Record<string, unknown>) {
 async function seedSend(id = "s1", lines: string[] = LINES, span: [number, number] = [START, END]) {
   seedRow({ id: `row-${id}`, transcript: lines.join("\n"), transcript_start_at: span[0], transcript_end_at: span[1] });
   await createSendAndLink(
-    { id, conversationId: "c1", spanStartAt: span[0], spanEndAt: span[1], createdAt: NOW },
+    { id, conversationId: "c1", spanStartAt: span[0], spanEndAt: span[1], createdAt: NOW, calendarJson: null },
     [`row-${id}`]
   );
 }
@@ -317,6 +317,7 @@ beforeEach(async () => {
   }
   await applyMigration14(db);
   db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "calendar-snapshots.sql"), "utf8"));
   mocks.execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   mocks.select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
   mocks.getSummary.mockReset();
@@ -429,7 +430,7 @@ describe("summary step", () => {
   });
 
   it("a send with no joined rows and no page → no_summary SUMMARY_TOO_SHORT, never an empty page", async () => {
-    await createSendAndLink({ id: "s1", conversationId: "c1", spanStartAt: START, spanEndAt: END, createdAt: NOW }, []);
+    await createSendAndLink({ id: "s1", conversationId: "c1", spanStartAt: START, spanEndAt: END, createdAt: NOW, calendarJson: null }, []);
     expect(await runNotionSend("s1", makeDeps(world))).toBe("no_summary");
     expect(await sendOf()).toMatchObject({ status: "no_summary", error_code: "SUMMARY_TOO_SHORT" });
     expect(world.calls.createPage).toBeUndefined();
