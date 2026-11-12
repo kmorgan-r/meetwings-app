@@ -30,6 +30,7 @@ import type { NotionSummary } from "@/lib/notion/summarize";
 import {
   SAME_MEETING_PROMPT,
   SAME_MEETING_TIMEOUT_MS,
+  findKeyMatch,
   isOwnPage,
   overlapEnough,
   pickWinner,
@@ -611,6 +612,71 @@ describe("isOwnPage", () => {
     const noOwner = { id: "fake-bot-1", ownerUserId: null };
     expect(isOwnPage(candidateOf({ createdById: "fake-owned-1" }), noOwner)).toBe(false);
     expect(isOwnPage(candidateOf({ createdById: null, recordedByIds: ["fake-owned-1"] }), noOwner)).toBe(false);
+  });
+});
+
+describe("findKeyMatch", () => {
+  const KEY = "fake-ical-uid-1|2026-11-09T09:00:00.000Z";
+  const SPAN = { start: START, end: END };
+  const range = { start: ISO_START, end: ISO_END };
+  const keyed = (pageId: string, key = KEY, date: { start: string; end: string } = range) =>
+    page(pageId, date, { calendarRichText: [{ plain_text: key }] });
+
+  it("a hit: the key query on each sub-table's column, the first matching page, no page body read", async () => {
+    const { client, queries, listChildrenCalls } = fakeNotion({
+      pages: { "ds-a": [keyed("fake-page-1"), keyed("fake-page-2")] },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toEqual({
+      pageId: "fake-page-1",
+      url: "https://notion.invalid/fake-page-1",
+    });
+    expect(queries).toEqual([
+      { dataSourceId: "ds-a", body: { filter: { property: "Calendar event", rich_text: { equals: KEY } } } },
+    ]);
+    expect(listChildrenCalls).toEqual([]);
+  });
+
+  it.each(["in_trash", "archived"])("a page flagged %s is skipped, and the next page can still hit", async (flag) => {
+    const { client } = fakeNotion({
+      pages: { "ds-a": [{ ...keyed("fake-page-gone"), [flag]: true }, keyed("fake-page-live")] },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toEqual({
+      pageId: "fake-page-live",
+      url: "https://notion.invalid/fake-page-live",
+    });
+    const only = fakeNotion({ pages: { "ds-a": [{ ...keyed("fake-page-gone"), [flag]: true }] } });
+    expect(await findKeyMatch(only.client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("a page whose read-back key is not exactly the key is skipped", async () => {
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          keyed("fake-page-other", "fake-ical-uid-2|2026-11-09T09:00:00.000Z"),
+          keyed("fake-page-prefix", `${KEY} `),
+          page("fake-page-none", range),
+        ],
+      },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("a page with the key and a non-overlapping range is skipped", async () => {
+    const weekBefore = {
+      start: new Date(START - 7 * DAY_MS).toISOString(),
+      end: new Date(END - 7 * DAY_MS).toISOString(),
+    };
+    const { client } = fakeNotion({ pages: { "ds-a": [keyed("fake-page-old", KEY, weekBefore)] } });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("sub-tables without the prop are not queried, and one data source is queried once", async () => {
+    const { client, queries } = fakeNotion({
+      pages: { "ds-none": [keyed("fake-page-x")], "ds-b": [] },
+    });
+    const none = { ...subTable("ds-none"), calendarEventProp: null };
+    expect(await findKeyMatch(client, [none, subTable("ds-b"), subTable("ds-b")], KEY, SPAN)).toBeNull();
+    expect(queries.map((q) => q.dataSourceId)).toEqual(["ds-b"]);
   });
 });
 

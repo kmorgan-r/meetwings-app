@@ -1,3 +1,5 @@
+import { groupAttendees, parseSnapshot } from "@/lib/calendar/calendar-snapshot";
+import { ENDED_GRACE_MS } from "@/lib/calendar/current-meeting";
 import {
   claimSend,
   finishSend,
@@ -32,8 +34,8 @@ import {
 import { addPractices, readKnowledge } from "./knowledge";
 import { batchBlocks, buildPageBlocks, pageProperties, transcriptBlocks } from "./page-blocks";
 import { armNotionRedactor } from "./redact";
-import { buildMapping, describeSubTable, routeMeeting, type SubTable } from "./routing";
-import { pickWinner, type Candidate, readCandidates, sameMeeting } from "./same-meeting";
+import { buildMapping, describeSubTable, routeMeeting, type Mapping, type SubTable } from "./routing";
+import { findKeyMatch, pickWinner, type Candidate, readCandidates, sameMeeting } from "./same-meeting";
 import { summarizeForNotion, type NotionSummary } from "./summarize";
 import { loadNotionToken } from "./token";
 
@@ -60,7 +62,8 @@ export type SendOutcome =
   | "not-claimed";
 
 /** The competitor's link; an empty url must never leave lost_to_url empty. */
-const linkOf = (c: Candidate) => c.url || `https://www.notion.so/${c.pageId.replace(/-/g, "")}`;
+const linkOf = (c: { pageId: string; url: string }) =>
+  c.url || `https://www.notion.so/${c.pageId.replace(/-/g, "")}`;
 
 /** Thrown when a restamp, patch or finish is refused: another attempt owns the send. */
 class LostClaim extends Error {}
@@ -122,6 +125,20 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
 
     const { lines } = await readSendLines(sendId);
 
+    // The calendar snapshot this send copied when it was created: never re-read from the
+    // conversation, so every attempt builds the same prompt and the same page body.
+    const snap = parseSnapshot(s.calendar_json);
+    const groups = snap ? groupAttendees(snap) : null;
+    const attendees =
+      groups &&
+      (groups.team.length > 0 || groups.external.length > 0 || groups.otherGuests.length > 0 || groups.omitted > 0)
+        ? groups
+        : null;
+    // A key match needs the send to end within ENDED_GRACE_MS of the event's end: a joined
+    // send that runs on into the next meeting keeps its snapshot but goes to the AI judge.
+    const keyed = snap !== null && s.span_end_at <= snap.endMs + ENDED_GRACE_MS;
+    const keyMatch = (c: Candidate) => keyed && c.calendarKey === snap.key;
+
     // A known loser trashes first: a failing step below must never keep a duplicate alive.
     const trashLoser = async (): Promise<SendOutcome> => {
       await stamp();
@@ -135,6 +152,36 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
       return await finish("no_summary", { errorCode: "SUMMARY_TOO_SHORT" });
     }
 
+    // The sub-table mapping, read once per attempt. Only the key pre-check reads it before
+    // the summary, so a send without a usable key keeps today's step order.
+    let mapped: { subTables: SubTable[]; mapping: Mapping | null } | null = null;
+    const loadMapping = async () => {
+      if (mapped) return mapped;
+      const subTables: SubTable[] = [];
+      await stamp();
+      const meetingsDb = await deps.client.database(deps.state.meetingsDbId);
+      for (const ds of meetingsDb.dataSources) {
+        await stamp();
+        const st = describeSubTable(await deps.client.dataSource(ds.id));
+        if (st !== null) subTables.push(st);
+      }
+      mapped = { subTables, mapping: buildMapping(subTables) };
+      return mapped;
+    };
+
+    // 0. Key pre-check: a teammate's page for this calendar meeting ends the send before
+    // the summary is paid for. Never after a create started: that send needs its own-page
+    // recovery first, which needs the summary's title, or it would lose to its own page.
+    if (keyed && !s.page_id && s.create_started_at === null) {
+      const { subTables } = await loadMapping();
+      await stamp();
+      const hit = await findKeyMatch(deps.client, subTables, snap.key, { start: s.span_start_at, end: s.span_end_at });
+      if (hit) {
+        await patch({ lost_to_url: linkOf(hit) });
+        return await finish("already");
+      }
+    }
+
     // 1. Summary: stored once, reused on every retry.
     let summary: NotionSummary;
     if (s.summary_json) {
@@ -142,7 +189,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     } else {
       await stamp();
       try {
-        summary = await summarizeForNotion(lines, deps.ai);
+        summary = await summarizeForNotion(lines, deps.ai, attendees);
       } catch (e) {
         if (!(e instanceof SummaryError)) throw e;
         if (SUMMARY_FINAL.has(e.code)) return await finish("no_summary", { errorCode: e.code });
@@ -160,22 +207,14 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
 
     // 2. Me.
     await stamp();
-    const { config, meetingsDbId, knowledgeDbId } = deps.state;
+    const { config, knowledgeDbId } = deps.state;
     const me = await deps.client.me();
     let name = config.yourName;
     if (!name && me.ownerUserId !== null) name = (await deps.client.userName(me.ownerUserId)) ?? "";
     name = name || "You";
 
-    // 3. Mapping.
-    const subTables: SubTable[] = [];
-    await stamp();
-    const meetingsDb = await deps.client.database(meetingsDbId);
-    for (const ds of meetingsDb.dataSources) {
-      await stamp();
-      const st = describeSubTable(await deps.client.dataSource(ds.id));
-      if (st !== null) subTables.push(st);
-    }
-    const mapping = buildMapping(subTables);
+    // 3. Mapping (already read when the pre-check ran).
+    const { subTables, mapping } = await loadMapping();
     if (mapping === null) throw new NotionError("NOTION_INVALID");
 
     // Proven to be THIS send's page: a creator match alone is not proof (with a personal
@@ -200,6 +239,12 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
         if (own) await patch({ page_id: own.pageId, page_url: own.url, page_created_time: own.createdTime });
       }
       if (!s.page_id) {
+        // An exact calendar-key match settles it with no AI; anything else goes to the judge.
+        const exact = candidates.find((c) => !isThisSendsPage(c) && keyMatch(c));
+        if (exact) {
+          await patch({ lost_to_url: linkOf(exact) });
+          return await finish("already");
+        }
         for (const c of candidates) {
           if (isThisSendsPage(c)) continue;
           await stamp();
@@ -213,8 +258,9 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
         const r = routeMeeting(s.span_start_at, mapping, config.teamTimes, summary.title);
         const page = await deps.client.createPage({
           parent: { type: "data_source_id", data_source_id: r.subTable.dataSourceId },
-          properties: pageProperties(r, s.span_start_at, s.span_end_at, me.ownerUserId),
-          children: batchBlocks(buildPageBlocks(summary))[0] ?? [],
+          // The key is recorded even when this send cannot match by it (it ends too late).
+          properties: pageProperties(r, s.span_start_at, s.span_end_at, me.ownerUserId, snap?.key ?? null),
+          children: batchBlocks(buildPageBlocks(summary, attendees))[0] ?? [],
         });
         if (!page.id || !page.url) throw new NotionError("NOTION_INTERNAL");
         await patch({ page_id: page.id, page_url: page.url, page_created_time: page.created_time ?? "" });
@@ -225,7 +271,8 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     // 5. Body.
     if (!s.body_done) {
       await stamp();
-      const all = await appendResumable(deps.client, pageId, buildPageBlocks(summary), stamp);
+      // The same attendees as the create: the resume check compares block by block.
+      const all = await appendResumable(deps.client, pageId, buildPageBlocks(summary, attendees), stamp);
       const toggle = [...all].reverse().find((b) => b.type === "toggle");
       if (!toggle?.id) throw new NotionError("NOTION_PAGE_CHANGED");
       await patch({ body_done: 1, toggle_block_id: toggle.id });
@@ -247,6 +294,10 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
       const rivals: typeof candidates = [];
       for (const c of candidates) {
         if (c.pageId === pageId || isThisSendsPage(c)) continue;
+        if (keyMatch(c)) {
+          rivals.push(c);
+          continue;
+        }
         await stamp();
         if (await sameMeeting(deps.ai, c, summary)) rivals.push(c);
       }

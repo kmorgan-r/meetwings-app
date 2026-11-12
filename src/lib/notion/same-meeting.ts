@@ -227,6 +227,38 @@ export async function readCandidates(
 }
 
 /**
+ * The page that already holds this calendar meeting, found by its key alone:
+ * each sub-table with a "Calendar event" column is queried for the key, and
+ * the first page that is not trashed, reads back exactly this key and whose
+ * date range overlaps the span enough wins. No page body is read. The key
+ * alone is never enough: the range must agree too.
+ */
+export async function findKeyMatch(
+  client: NotionClient,
+  subTables: SubTable[],
+  key: string,
+  span: { start: number; end: number },
+): Promise<{ pageId: string; url: string } | null> {
+  const seen = new Set<string>();
+  for (const st of subTables) {
+    if (st.calendarEventProp === null || seen.has(st.dataSourceId)) continue;
+    seen.add(st.dataSourceId);
+    const pages = await client.queryAll(st.dataSourceId, {
+      filter: { property: st.calendarEventProp, rich_text: { equals: key } },
+    });
+    for (const page of pages) {
+      if (page.in_trash === true || page.archived === true) continue;
+      if (calendarKeyOf(st, page) !== key) continue;
+      const range = pageRange(st, page);
+      if (range !== null && overlapEnough(range, span)) {
+        return { pageId: page.id ?? "", url: page.url ?? "" };
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Whether the page looks like ours by its recorded identity alone: created by
  * the bot, created by the integration's owner, or the owner listed under
  * "Recorded by". ownerUserId null matches nothing, so a page by someone who
