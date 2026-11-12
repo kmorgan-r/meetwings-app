@@ -650,13 +650,7 @@ pub async fn graph_connect(
     // `rx.recv()`, the real listener has already been dropped by the time
     // this guard runs, so its self-connect just fails against a closed port
     // and is discarded - see `cancel_listener`'s own doc comment.
-    struct ListenerGuard(u16);
-    impl Drop for ListenerGuard {
-        fn drop(&mut self) {
-            auth::cancel_listener(self.0);
-        }
-    }
-    let _listener_guard = ListenerGuard(port);
+    let _listener_guard = crate::oauth::ListenerGuard(port);
 
     let pkce = auth::new_pkce();
     let expected_state = auth::random_token(24);

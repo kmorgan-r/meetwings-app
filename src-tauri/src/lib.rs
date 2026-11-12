@@ -6,6 +6,7 @@ mod db;
 mod graph;
 mod meeting_detect;
 mod notion_token;
+mod oauth;
 mod shortcuts;
 mod window;
 use std::sync::{Arc, Mutex};
