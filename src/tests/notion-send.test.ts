@@ -1100,6 +1100,8 @@ describe("one page per meeting: the calendar key", () => {
       expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
       expect(asks(world, "same").length).toBeGreaterThan(0);
       expect(keyQueries()).toHaveLength(0);
+      // A snapshot without a usable key keeps today's order: the mapping comes after the summary.
+      expect(world.order.indexOf("ask:summary")).toBeLessThan(world.order.indexOf("database"));
       expect(world.pages.get("pg-1")?.properties["Calendar event"]).toEqual({ rich_text: [{ type: "text", text: { content: EV_KEY } }] });
     });
 
