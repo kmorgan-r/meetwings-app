@@ -242,7 +242,7 @@ pub fn run() {
             graph::graph_disconnect,
             graph::graph_status,
             graph::graph_current_meetings,
-            // Google sign-in; all three return GraphStatus (scanned by the same test).
+            // Google sign-in; connect and status return GraphStatus (scanned by the same test); disconnect returns ().
             google::google_connect,
             google::google_disconnect,
             google::google_status,

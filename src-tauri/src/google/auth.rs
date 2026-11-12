@@ -213,6 +213,12 @@ mod tests {
             classify_token_error(400, r#"{"error":"access_denied"}"#),
             "GOOGLE_CONSENT_REQUIRED"
         );
+        for code in ["consent_required", "interaction_required"] {
+            assert_eq!(
+                classify_token_error(400, &format!(r#"{{"error":"{code}"}}"#)),
+                "GOOGLE_CONSENT_REQUIRED"
+            );
+        }
         assert_eq!(classify_token_error(429, "{}"), "GOOGLE_THROTTLED");
         assert_eq!(classify_token_error(503, "{}"), "GOOGLE_NETWORK");
         assert_eq!(
@@ -230,8 +236,8 @@ mod tests {
     #[test]
     fn email_is_read_from_the_id_token_and_blank_is_none() {
         assert_eq!(
-            email_from_id_token(&fake_id_token(r#"{"email":"me@ic.org"}"#)),
-            Some("me@ic.org".to_string())
+            email_from_id_token(&fake_id_token(r#"{"email":"me@example.org"}"#)),
+            Some("me@example.org".to_string())
         );
         assert_eq!(email_from_id_token(&fake_id_token("{}")), None);
         assert_eq!(

@@ -89,6 +89,14 @@ impl GoogleState {
         session.generation = session.generation.wrapping_add(1);
     }
 
+    /// Bumps the generation and returns the new value, so an in-flight refresh
+    /// that captured the old one loses its adopt (`google_connect` step 7).
+    pub(crate) fn begin_generation(&self) -> u64 {
+        let mut session = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        session.generation = session.generation.wrapping_add(1);
+        session.generation
+    }
+
     /// A keychain read failure is `Err`, never `connected: false`: a silent
     /// "disconnected" would make the calendar block vanish without a word.
     pub fn status(&self) -> Result<GraphStatus, String> {
@@ -169,6 +177,9 @@ fn forget_with(
     let was_session_only = *state.session_only.lock().unwrap_or_else(|e| e.into_inner());
     state.clear_session();
     if was_session_only {
+        // Best-effort: an earlier connect may have left a token on disk, and
+        // leaving it would revive that account on the next status or launch.
+        let _ = delete();
         return Ok(());
     }
     delete()
@@ -327,14 +338,15 @@ pub async fn google_connect(
         !keychain::available(GOOGLE_SERVICE);
     // Bump the generation so an old account's refresh still in flight loses
     // its adopt.
-    let generation = {
-        let mut session = state.session.lock().unwrap_or_else(|e| e.into_inner());
-        session.generation = session.generation.wrapping_add(1);
-        session.generation
-    };
+    let generation = state.begin_generation();
     adopt_and_persist_with(&state, &tokens, generation, |t| {
         keychain::store(GOOGLE_SERVICE, t).map_err(|_| NO_KEYCHAIN.to_string())
     });
+    // A session-only account must not leave an older account's token on disk
+    // to be revived on relaunch. Best-effort.
+    if *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) {
+        let _ = keychain::delete(GOOGLE_SERVICE);
+    }
     state.status()
 }
 
@@ -493,23 +505,59 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_session_only_never_deletes_and_normal_deletes_once() {
+    fn forgetting_session_only_deletes_best_effort_and_normal_deletes_once() {
         let deletes = Cell::new(0);
-        let delete = || {
+        let failing = || {
+            deletes.set(deletes.get() + 1);
+            Err("GOOGLE_NO_KEYCHAIN".to_string())
+        };
+        let ok = || {
             deletes.set(deletes.get() + 1);
             Ok(())
         };
 
         let state = seeded("r1");
         *state.session_only.lock().unwrap() = true;
-        assert_eq!(forget_with(&state, delete), Ok(()));
-        assert_eq!(deletes.get(), 0);
+        assert_eq!(forget_with(&state, failing), Ok(()));
+        assert_eq!(deletes.get(), 1);
         assert_eq!(mem_refresh(&state), None);
 
         let state = seeded("r1");
-        assert_eq!(forget_with(&state, delete), Ok(()));
-        assert_eq!(deletes.get(), 1);
+        assert_eq!(forget_with(&state, ok), Ok(()));
+        assert_eq!(deletes.get(), 2);
         assert_eq!(mem_refresh(&state), None);
+
+        let state = seeded("r1");
+        assert_eq!(
+            forget_with(&state, failing),
+            Err("GOOGLE_NO_KEYCHAIN".to_string())
+        );
+        assert_eq!(deletes.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_keychain_load_error_passes_through_unchanged() {
+        let state = GoogleState::default();
+        let redeems = AtomicUsize::new(0);
+        let stores = AtomicUsize::new(0);
+        let result = refresh_and_adopt_with(
+            &state,
+            0,
+            None,
+            |_| {
+                redeems.fetch_add(1, Ordering::SeqCst);
+                async { Ok(tokens("A", None)) }
+            },
+            || Err(NO_KEYCHAIN.to_string()),
+            |_| {
+                stores.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result, Err(NO_KEYCHAIN.to_string()));
+        assert_eq!(redeems.load(Ordering::SeqCst), 0);
+        assert_eq!(stores.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -584,10 +632,7 @@ mod tests {
         let state = seeded("old");
         let generation = state.session.lock().unwrap().generation;
         // google_connect step 7.
-        {
-            let mut s = state.session.lock().unwrap();
-            s.generation = s.generation.wrapping_add(1);
-        }
+        state.begin_generation();
         let stores = Cell::new(0);
         let adopted =
             adopt_and_persist_with(&state, &tokens("A", Some("r-old-acct")), generation, |_| {
