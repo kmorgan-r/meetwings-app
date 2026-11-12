@@ -30,7 +30,16 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
     useQuickActions: () => ({}),
     usePillRecordAction: vi.fn(),
     useMeetingAutoRecord: vi.fn(),
-    useNotionPick: () => ({ picked: true, pickedRef: { current: true }, toggle, clear: vi.fn() }),
+    useNotionPick: () => ({
+      picked: true,
+      pickedRef: { current: true },
+      sourceRef: { current: "hand" },
+      handTouchesRef: { current: 0 },
+      toggle,
+      clear: vi.fn(),
+      autoTick: vi.fn(),
+      autoUntick: vi.fn(),
+    }),
     useOdooTarget: () => ({
       targetsRef: { current: [] },
       addTarget: vi.fn(),

@@ -53,7 +53,9 @@ describe("useNotionPick", () => {
     expect(remounted.result.current.picked).toBe(true);
     expect(remounted.result.current.pickedRef.current).toBe(true);
     remounted.rerender();
-    expect(ls.safeLocalStorage.getItem).toHaveBeenCalledTimes(1);
+    expect(ls.safeLocalStorage.getItem).toHaveBeenCalledTimes(2);
+    expect(ls.safeLocalStorage.getItem).toHaveBeenCalledWith("notion_picked");
+    expect(ls.safeLocalStorage.getItem).toHaveBeenCalledWith("notion_pick_source");
   });
 
   it("clear sets false, in the ref at once and in storage", () => {
@@ -70,5 +72,95 @@ describe("useNotionPick", () => {
     expect(seenInTick).toBe(false);
     expect(result.current.picked).toBe(false);
     expect(ls.map.get("notion_picked")).toBe("false");
+  });
+
+  it("writes the source key before NOTION_PICKED", () => {
+    const { result } = renderHook(() => useNotionPick());
+    ls.safeLocalStorage.setItem.mockClear();
+
+    act(() => result.current.autoTick(0));
+
+    const calls = ls.safeLocalStorage.setItem.mock.calls;
+    expect(calls[0]).toEqual(["notion_pick_source", "auto"]);
+    expect(calls[1]).toEqual(["notion_picked", "true"]);
+  });
+
+  it("a stored tick with no source key reads as hand", () => {
+    ls.map.set("notion_picked", "true");
+    const { result } = renderHook(() => useNotionPick());
+    expect(result.current.picked).toBe(true);
+    expect(result.current.sourceRef.current).toBe("hand");
+  });
+
+  it("any toggle sets hand", () => {
+    const { result } = renderHook(() => useNotionPick());
+
+    act(() => result.current.toggle());
+
+    expect(result.current.picked).toBe(true);
+    expect(result.current.sourceRef.current).toBe("hand");
+    expect(result.current.handTouchesRef.current).toBe(1);
+    expect(ls.map.get("notion_pick_source")).toBe("hand");
+  });
+
+  it("autoTick does nothing when Notion is already ticked", () => {
+    ls.map.set("notion_picked", "true");
+    const { result } = renderHook(() => useNotionPick());
+    const t = result.current.handTouchesRef.current;
+
+    act(() => result.current.autoTick(t));
+
+    expect(result.current.picked).toBe(true);
+    expect(result.current.sourceRef.current).toBe("hand");
+    expect(ls.map.has("notion_pick_source")).toBe(false);
+  });
+
+  it("autoTick does nothing after a toggle or clear since the check began", () => {
+    const { result } = renderHook(() => useNotionPick());
+    const t = result.current.handTouchesRef.current;
+
+    act(() => result.current.toggle());
+    act(() => result.current.toggle());
+    act(() => result.current.autoTick(t));
+    expect(result.current.picked).toBe(false);
+    expect(result.current.sourceRef.current).toBe("hand");
+
+    act(() => result.current.clear());
+    act(() => result.current.autoTick(t));
+    expect(result.current.picked).toBe(false);
+    expect(result.current.sourceRef.current).toBe("hand");
+  });
+
+  it("autoUntick clears an auto tick and leaves a hand tick", () => {
+    const { result } = renderHook(() => useNotionPick());
+
+    act(() => result.current.autoTick(0));
+    expect(result.current.picked).toBe(true);
+    act(() => result.current.autoUntick());
+    expect(result.current.picked).toBe(false);
+    expect(result.current.sourceRef.current).toBe("auto");
+    expect(result.current.handTouchesRef.current).toBe(0);
+
+    // A hand tick survives autoUntick.
+    act(() => result.current.toggle());
+    expect(result.current.picked).toBe(true);
+    act(() => result.current.autoUntick());
+    expect(result.current.picked).toBe(true);
+    expect(result.current.sourceRef.current).toBe("hand");
+  });
+
+  it("pickedRef and sourceRef update in the same tick as the call", () => {
+    const { result } = renderHook(() => useNotionPick());
+    let seenPicked: boolean | undefined;
+    let seenSource: "auto" | "hand" | undefined;
+
+    act(() => {
+      result.current.autoTick(0);
+      seenPicked = result.current.pickedRef.current;
+      seenSource = result.current.sourceRef.current;
+    });
+
+    expect(seenPicked).toBe(true);
+    expect(seenSource).toBe("auto");
   });
 });

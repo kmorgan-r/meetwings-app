@@ -83,8 +83,11 @@ export const STORAGE_KEYS = {
   // Notion meeting notes (see notion-config.storage.ts).
   // NOTION_PICKED: whether the user picked Notion for the current meeting
   // (useNotionPick boolean); cleared together with the Odoo targets.
+  // NOTION_PICK_SOURCE: "auto" when Meetwings set that tick from the calendar,
+  // else "hand".
   NOTION_AUTO_SEND: "notion_auto_send",
   NOTION_PICKED: "notion_picked",
+  NOTION_PICK_SOURCE: "notion_pick_source",
   // When Notion first read as fully set up (ms epoch); floors crash recovery.
   NOTION_SETUP_AT: "notion_setup_at",
 } as const;
