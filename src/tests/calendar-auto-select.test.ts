@@ -75,10 +75,28 @@ describe("planAutoSelect", () => {
       .toEqual({ kind: "skip", reason: "nothing-to-do" });
   });
 
-  it("does not add a matched contact on a colleague domain", () => {
+  it("adds a matched contact on a colleague domain", () => {
     const coworker = contact(9, "pat@corp.test", { name: "Pat Coworker" });
     expect(plan({ events: [meeting([person("pat@corp.test", "Pat")])], contacts: [coworker] }))
+      .toEqual({ kind: "apply", add: [coworker], create: [] });
+  });
+
+  it("adds a contact flagged colleague", () => {
+    const leon = contact(12, "leon@partner.test", { isColleague: true, name: "Leon Partner" });
+    expect(plan({ events: [meeting([person("leon@partner.test", "Leon")])], contacts: [leon] }))
+      .toEqual({ kind: "apply", add: [leon], create: [] });
+  });
+
+  it("does not add an archived colleague", () => {
+    const gone = contact(13, "gone@corp.test", { isColleague: true, active: false, name: "Gone Coworker" });
+    expect(plan({ events: [meeting([person("gone@corp.test", "Gone Coworker")])], contacts: [gone] }))
       .toEqual({ kind: "skip", reason: "nothing-to-do" });
+  });
+
+  it("never adds the user's own contact, flagged colleague or not", () => {
+    const me = contact(1, "me@corp.test", { isColleague: true, name: "Me" });
+    expect(plan({ events: [meeting([person("cfo@acme.example")])], contacts: [me, CFO] }))
+      .toEqual({ kind: "apply", add: [CFO], create: [] });
   });
 
   it("never creates over an archived contact", () => {
@@ -159,6 +177,20 @@ describe("planAutoSelect", () => {
           { participant: pat, name: "Pat Coworker", parentId: null },
         ],
       });
+  });
+
+  it("pins the accepted limit: with a UPN domain unlike the mail domain, the user's own record takes a slot and can push a customer over the cap", () => {
+    // The flagged colleague puts corp.test on the colleague list, which used
+    // to keep the user's own SMTP row out of the adds. Adds are no longer
+    // domain-gated, so that row is added and the one free slot is gone.
+    const me = contact(1, "me@corp.test", { name: "Me" });
+    const pat = contact(9, "pat@corp.test", { isColleague: true, name: "Pat Coworker" });
+    expect(plan({
+      ownAddress: "me@corp.onmicrosoft.com",
+      events: [meeting([person("cfo@acme.example")])],
+      contacts: [me, pat, CFO],
+      targets: [lead(1), lead(2), lead(3), lead(4)],
+    })).toEqual({ kind: "skip", reason: "over-cap" });
   });
 
   it("prefills the company inferred from the address domain", () => {

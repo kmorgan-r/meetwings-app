@@ -58,10 +58,17 @@ export function matchAttendees({
   participants,
   contacts,
   ownAddress,
+  includeColleagues = false,
 }: {
   participants: CalendarParticipant[];
   contacts: OdooContact[];
   ownAddress: string | null;
+  /**
+   * Off for the proposal block, which leaves colleagues to be added by hand.
+   * On for auto-select, which logs the meeting onto coworkers too: a colleague
+   * then matches, or is `archived`, exactly like any other contact.
+   */
+  includeColleagues?: boolean;
 }): MatchResult {
   const byEmail = new Map<string, OdooContact>();
   for (const contact of contacts) {
@@ -88,7 +95,8 @@ export function matchAttendees({
       result.unmatched.push({ participant, reason: "no-contact" });
       continue;
     }
-    if (contact.isColleague) {
+    if (contact.isColleague && !includeColleagues) {
+      // The proposal block's rule; auto-select passes includeColleagues.
       // Logging a meeting onto a coworker's partner record is noise. No greyed
       // row either - the user can still add a colleague by hand.
       result.excluded.push({ participant, reason: "colleague" });
