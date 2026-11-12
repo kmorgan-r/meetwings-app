@@ -210,7 +210,7 @@ fn token_errors_map_to_fixed_google_codes_without_the_body() {
 }
 
 #[test]
-fn email_is_read_from_the_id_token_and_blank_is_none() { /* fake JWT with {"email":"me@ic.org"} → Some; {} → None; {"email":"  "} → None */ }
+fn email_is_read_from_the_id_token_and_blank_is_none() { /* fake JWT with {"email":"me@example.org"} → Some; {} → None; {"email":"  "} → None */ }
 ```
 
 Put the state tests in `google/mod.rs`. Use a `fn tokens(access: &str, refresh: Option<&str>) -> auth::GoogleTokens` helper.
@@ -293,9 +293,9 @@ Put the state tests in `google/mod.rs`. Use a `fn tokens(access: &str, refresh: 
 ```rust
 const ONE_OFF: &str = r#"{"iCalUID":"abc@google.com","status":"confirmed","summary":"Sync",
  "start":{"dateTime":"2026-11-12T10:00:00+01:00"},"end":{"dateTime":"2026-11-12T10:30:00+01:00"},
- "organizer":{"email":"ann@ic.org","displayName":"Ann"},
- "attendees":[{"email":"ANN@ic.org","organizer":true,"responseStatus":"accepted"},
-  {"email":"me@ic.org","self":true,"responseStatus":"tentative"},
+ "organizer":{"email":"ann@example.org","displayName":"Ann"},
+ "attendees":[{"email":"ANN@example.org","organizer":true,"responseStatus":"accepted"},
+  {"email":"me@example.org","self":true,"responseStatus":"tentative"},
   {"email":"room@resource.calendar.google.com","resource":true,"responseStatus":"accepted"},
   {"email":"cleo@acme.com","optional":true,"displayName":"Cleo","responseStatus":"declined"}]}"#;
 
@@ -303,7 +303,7 @@ const ONE_OFF: &str = r#"{"iCalUID":"abc@google.com","status":"confirmed","summa
 fn normalizes_a_one_off_event() {
     let (me, events) = parse_events(&body(ONE_OFF)).unwrap();
     let e = &events[0];
-    assert_eq!(me.as_deref(), Some("me@ic.org"));
+    assert_eq!(me.as_deref(), Some("me@example.org"));
     assert_eq!(e.start_ms, parse_rfc3339_ms("2026-11-12T09:00:00Z").unwrap());
     assert_eq!(e.end_ms - e.start_ms, 30 * 60 * 1000);
     assert_eq!(e.id, "abc@google.com|2026-11-12T09:00:00Z");
@@ -331,7 +331,7 @@ fn a_recurring_occurrence_is_keyed_by_its_original_start() {
 ```
 
 Also add:
-- `the_organizer_with_no_attendee_row_and_self_is_accepted`: organizer `{"email":"me@ic.org","self":true}` with one attendee `x@acme.com`. Expect `own_response == "accepted"`, two participants, the organizer flagged, and self address `me@ic.org`.
+- `the_organizer_with_no_attendee_row_and_self_is_accepted`: organizer `{"email":"me@example.org","self":true}` with one attendee `x@acme.com`. Expect `own_response == "accepted"`, two participants, the organizer flagged, and self address `me@example.org`.
 - `neither_self_nor_organizer_reads_needs_action`.
 - `an_all_day_event_is_flagged_not_rejected`: `{"date":"2026-11-12"}`/`{"date":"2026-11-13"}` gives `is_all_day`, `start_ms == parse_date_ms("2026-11-12")`, and no error.
 - `a_cancelled_event_is_flagged`.
@@ -543,8 +543,8 @@ Add `isMeetingEvent`: one false case per filter (cancelled, all-day, declined, s
     - Display text is `name.trim()` when non-empty, else the address, cut to `MAX_ATTENDEE_TEXT` characters, with `…` as the 100th character when cut.
     - At most `MAX_ATTENDEES` people are kept in the order team, external, otherGuests. The rest are counted in `omitted`.
 
-- [ ] **Step 1: Write the failing tests** (fixtures: own `me@ic.org`):
-  - `the user and same-domain guests are the team`: `teamLabel "Team (ic.org)"`, with team `["Me","ann@ic.org"]` in invite order.
+- [ ] **Step 1: Write the failing tests** (fixtures: own `me@example.org`):
+  - `the user and same-domain guests are the team`: `teamLabel "Team (example.org)"`, with team `["Me","ann@example.org"]` in invite order.
   - `external guests are grouped by domain, sorted`: acme.com and beta.io.
   - `free-mail guests land in Other guests, never a company`: `x@gmail.com` → `otherGuests`, and `external` has no `gmail.com`.
   - `a free-mail own address gives the label "Team" and only the user in it`.
