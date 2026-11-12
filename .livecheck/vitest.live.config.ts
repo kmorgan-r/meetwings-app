@@ -5,7 +5,11 @@ import path from "path";
 // worktree's src, never the primary checkout (whose tree is someone else's).
 const REPO = path.resolve(__dirname, "..");
 
-const LIVE_FILES = ["odoo-live-smoke.live.ts", "notion-live.live.ts"].map(
+const LIVE_FILES = [
+  "odoo-live-smoke.live.ts",
+  "notion-live.live.ts",
+  "google-live.live.ts",
+].map(
   (file) => path.resolve(__dirname, file).split(path.sep).join("/"),
 );
 

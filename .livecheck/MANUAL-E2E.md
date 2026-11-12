@@ -121,3 +121,28 @@ see the README.
 If anything went sideways locally, the backup from step 1 is in `%APPDATA%`;
 close the app, copy it back over
 `%APPDATA%/com.meetwings.app/meetwings.db`, relaunch.
+
+## Part 4 — Google G3 (macOS): sign-in, refresh, disconnect
+
+The Google flow's harness legs are headless API reads; the credential side is
+not, and it must be proven on **macOS** — Keychain, browser loopback. The
+Outlook flow has only ever run on Windows, and most teammates are on Mac.
+With a real Google account in a real Meetwings build:
+
+1. **Connect** the account (browser loopback sign-in).
+2. **Quit and relaunch** Meetwings → still connected.
+3. **Wait more than 60 minutes**, then start a capture → the snapshot is
+   stored. That is the refresh path working: the access token minted at
+   sign-in is stale by then, and the read must renew it and retry once.
+4. **Disconnect** → the app reads "Not connected", and the Keychain Access
+   entry `com.meetwings.google` is gone (Keychain Access.app, search for
+   `com.meetwings.google`, account `refresh-token`).
+
+## Part 5 — Notion check 5 also gates the exact-key recheck
+
+PR #91's Notion **check 5** (how long until a just-created page shows up in a
+query) now also gates the exact-key **recheck**: the recheck waits
+`RECHECK_DELAY_MS` (5 s) on the wall clock before its second `readCandidates`,
+and check 5 measures exactly that kind of visibility delay against a real
+Notion. Run `.livecheck/notion-live.live.ts` before relying on the 5-second
+recheck.

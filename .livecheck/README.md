@@ -201,3 +201,66 @@ Before rollout, run these transcript fixtures against the real summary model
 Expected: no names or fees in Team Knowledge rows, the instruction ignored,
 and the rejected rule not re-added.
 
+## Google live checks
+
+`google-live.live.ts` is the same story for the Google lane. It talks to the
+real Calendar API with **read-only** access tokens held only by Kevin — one per
+account, two accounts in your own Google Workspace (same organisation) — and
+does what mocks structurally cannot: it re-issues the exact request the Rust
+side makes (same endpoint, `singleEvents=true`, the same field mask, which must
+track `src-tauri/src/google/calendar.rs`'s `EVENT_FIELDS`) and prints what two
+real calendars return for the same shared event.
+
+- **G1** checks the exact key the Notion send's pre-check and recheck ride on:
+  `iCalUID` + the parsed instant (`originalStartTime.dateTime` for a recurring
+  occurrence, `start.dateTime` otherwise; all-day events never key). Per event
+  it prints `one-off|recurring`, `organizer internal|external` (internal when
+  the organizer's email domain equals account A's own domain, read from a
+  `self: true` attendee or organizer and kept in memory only), and
+  `key match yes|no`. When A and B share any event by `iCalUID`, at least one
+  key match is **asserted**; otherwise it prints `no shared events in window`.
+- **G2** prints the guest-list shape, no assertions: attendee count, whether a
+  `self` attendee row is present, whether the organizer carries `self`, and
+  whether the organizer email ends with `calendar.google.com` (the event was
+  created on a shared or secondary calendar, so the organizer is a calendar,
+  not a person).
+
+### Prerequisites
+
+- Two accounts in your own Google Workspace (same organisation), invited to the
+  same test events in the window — account A as the recording owner, B as the
+  second attendee.
+- An OAuth **access token** per account — each with the
+  `calendar.events.readonly` scope. Tokens are short-lived (about 1 hour), so
+  mint them right before the run: use the OAuth Playground or
+  `gcloud auth print-access-token`, requesting that scope for each account.
+
+### Running it
+
+In PowerShell:
+
+```powershell
+$env:GOOGLE_LIVE_TOKEN_A = "<account A's access token, scope calendar.events.readonly>"
+$env:GOOGLE_LIVE_TOKEN_B = "<account B's access token, scope calendar.events.readonly>"
+$env:GOOGLE_LIVE_FROM    = "<RFC 3339 timeMin of the window with the test events>"
+$env:GOOGLE_LIVE_TO      = "<RFC 3339 timeMax of the window with the test events>"
+npx vitest run --config .livecheck/vitest.live.config.ts .livecheck/google-live.live.ts
+```
+
+Placeholders only — a real token must never be committed. All four env vars
+must be set or the whole suite skips (so a run without credentials is green and
+does nothing). No header, token, email address, name, domain or event subject
+is ever printed; a failed request prints its HTTP status number only.
+
+### Decision rules
+
+- **G1** shows `key match no` for every A event while A and B share events →
+  the normalization's key (offset handling, `originalStartTime`) must change
+  before merge; the send pre-check would never hit against a real second
+  calendar.
+- **G2** is informational: the self-row / organizer-self / calendar-organizer
+  shapes are what the participant grouping consumes, and the calendar-organizer
+  rows show whether a solo event reads as two people.
+- The tokens' `calendar.events.readonly` scope makes every request here read
+  only; nothing is created, patched or deleted.
+
