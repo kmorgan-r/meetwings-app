@@ -74,7 +74,7 @@ const MATRIX: [Input, Decision][] = [
   // Odoo half-filled, Notion on.
   ...BOOLS.flatMap((a): [Input, Decision][] => [
     [I("live", "incomplete", true, a, true), Q("none", "held", true)],
-    [I("live", "incomplete", true, a, false), NO(true)],
+    [I("live", "incomplete", true, a, false), Q("none", "offered", true)],
     [I("recovery", "incomplete", true, a, true), Q("none", "offered", false)],
     [I("recovery", "incomplete", true, a, false), Q("none", "offered", false)],
   ]),

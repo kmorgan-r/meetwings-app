@@ -54,7 +54,8 @@ export const Completion = ({
   const notionPick = useNotionPick();
   const notionConfigured = useNotionConfigured();
   const odooSetup = useOdooSetupState();
-  const notionAvailable = notionConfigured === true && odooSetup === "complete";
+  const notionAvailable =
+    notionConfigured === true && (odooSetup === "complete" || odooSetup === "incomplete");
   // Notion alone: nothing to pick. A null (still loading) keeps today's picker.
   const hidePicker = notionConfigured === true && odooSetup === "absent";
   const toggleNotionPick = notionPick.toggle;

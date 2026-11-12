@@ -71,6 +71,6 @@ export function decideDestinations(i: DestinationInput): Decision {
   if (!live) {
     return { queue: true, odooStatus: "none", notionStatus: "offered", toastIncomplete: false };
   }
-  if (!i.notionPicked) return { queue: false, toastIncomplete: true };
-  return { queue: true, odooStatus: "none", notionStatus: "held", toastIncomplete: true };
+  // Not picked is offered, as recovery does: never dropped, never auto-sent.
+  return { queue: true, odooStatus: "none", notionStatus: i.notionPicked ? "held" : "offered", toastIncomplete: true };
 }

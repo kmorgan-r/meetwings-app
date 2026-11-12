@@ -84,7 +84,7 @@ describe("<Completion /> and the Notion picker row", () => {
     expect(pickerSpy).not.toHaveBeenCalled();
   });
 
-  it("offers the Notion row only when Notion is configured and Odoo is complete", async () => {
+  it("offers the Notion row only when Notion is configured and Odoo is complete or half set up", async () => {
     const both = await renderCompletion({ notion: true, odoo: "complete" });
     expect(both.pickerSpy.mock.calls[0][0]).toMatchObject({
       notionAvailable: true,
@@ -97,7 +97,7 @@ describe("<Completion /> and the Notion picker row", () => {
     expect(odooOnly.pickerSpy.mock.calls[0][0].notionAvailable).toBe(false);
 
     const incomplete = await renderCompletion({ notion: true, odoo: "incomplete" });
-    expect(incomplete.pickerSpy.mock.calls[0][0].notionAvailable).toBe(false);
+    expect(incomplete.pickerSpy.mock.calls[0][0].notionAvailable).toBe(true);
   });
 
   it("Notion off and Odoo absent still renders today's picker", async () => {
