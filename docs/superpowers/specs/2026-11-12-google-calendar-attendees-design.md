@@ -78,8 +78,9 @@ So the builder can check the mirror is faithful:
 - **Stored.** Nothing. The proposal lives in React state.
 - **Credentials.** `src-tauri/src/graph/`: PKCE, loopback listener on an ephemeral port, state and
   nonce checked, refresh token in the OS keychain via `keyring` with a session-only fallback, typed
-  `GRAPH_*` error codes, and a cargo test that fails if any command's return type can carry a
-  credential.
+  `GRAPH_*` error codes, and a cargo test that fails if a listed return struct gains a credential
+  field. The list is kept by hand (`graph/mod.rs:863-869`): a new command's return type is covered
+  only once someone adds it.
 - **Setup.** Calendar card on `/odoo`. Each user pastes their own Azure app client ID. Notion-only
   users see it only behind "Show other integrations".
 
@@ -146,7 +147,8 @@ Google specifics:
   so the UPN-vs-SMTP limit Outlook has does not apply.
 - Error codes: a `GOOGLE_*` set shaped like `GraphErrorCode`, fixed user copy, and response bodies are
   never read into logs or UI (PR #91's rule).
-- The credential-field cargo test is extended to the new commands.
+- The Google commands' return types are added by hand to the credential-field cargo test's list.
+  Nothing adds them automatically.
 - Disconnect forgets the refresh token and clears memory, as Graph does. *My call:* no revoke call to
   Google. Revoking is a network step that can fail, and the user can revoke from their Google account.
 
@@ -187,9 +189,14 @@ so `pickCurrentMeeting` and `participantsOf` are reused unchanged:
 | `isAllDay` | `start.date` present and `start.dateTime` absent |
 | `isCancelled` | `status == "cancelled"` |
 | `ownResponse` | the attendee with `self: true`, its `responseStatus`; the organizer with no attendee row → `"accepted"` |
-| `participants` | `organizer` (flagged) plus `attendees[]`; `resource: true` → type `"resource"`, `optional: true` → `"optional"` |
+| `participants` | `organizer` (flagged) plus `attendees[]`; `resource: true` → type `"resource"`, `optional: true` → `"optional"`; each guest's `responseStatus` → the new `response` field |
 
 Google's `"declined"` is the same string `isDeclined` compares, lowercased.
+
+`CalendarParticipant` (TS `src/types/calendar.ts:35-45`, Rust `graph/mod.rs:18-26`) has no per-guest
+response today. It gains an optional `response` (string or null). Google fills it. Graph leaves it null,
+so Outlook behaviour is unchanged. `pickCurrentMeeting` still sees declined guests, so its solo rule is
+unchanged. Declined guests are dropped only when the snapshot is built (6.3).
 
 `pickCurrentMeeting(events, now)`: `one` → snapshot it. `none` or `several` → no snapshot (#94 covers
 `several`).
@@ -202,17 +209,31 @@ Internal/external is **derived at use**, not stored: a participant is internal w
 the own address's domain, and the own address's domain counts only when it is not free-mail (reuse
 `domainOf`, `FREE_MAIL`). The user themself is internal.
 
+**A snapshot belongs to its event's time window, not to the whole conversation.** The capture-start
+event fires once per conversation (`useCompletion.ts:1580-1581`). A conversation can still hold
+several meetings: Meeting Assist left on, or a back-to-back call inside the 30-minute gap. And
+`joinSets` (`join.ts:16-31`) and the manual send (`actions.ts:70-91`) split such a conversation into
+several sends. A snapshot applies to a send **only when the send's span overlaps the event by at
+least half the shorter of the two** (reuse `overlapEnough`, `same-meeting.ts:58`). Any other send in
+that conversation has no snapshot and runs exactly as today. Without this rule, the later meeting's
+send would match the earlier page by key and finish `already` with no page of its own. That would be
+a new way to lose a meeting.
+
 Constraints on where it lives (the place is the builder's call):
 - It must survive an app restart between capture start and the Notion send. Sends run after the hold,
   on retries, in crash recovery, and on a manual Send days later.
-- It is keyed by conversation and deleted with the conversation.
-- A send whose joined rows carry more than one snapshot uses the earliest row's.
+- **No conversation id exists yet when the event fires.** The id is null after a rollover
+  (`useCompletion.ts:1514`) and is created at the first transcript line (`useCompletion.ts:654`).
+  The snapshot waits for that id before it is stored.
+- It is deleted with the conversation, **except for a send that has already started**. When a send
+  first uses a snapshot, *my call:* it copies the snapshot onto its own `notion_sends` record. A send
+  that has joined its rows keeps running after its conversation is deleted (`cancelOrphans` skips
+  joined rows, `notion-queue.action.ts:28-34`). The page body is rebuilt on every attempt and compared
+  block by block (`send.ts:217, 228`; `append.ts:54-59`), so a snapshot that vanished mid-send would
+  fail it with `NOTION_PAGE_CHANGED`.
 - No snapshot is a normal state: everything downstream behaves exactly as today.
 
 A new migration (18) is expected. Earlier migrations' checksums are frozen; add, don't edit.
-
-Accepted limit (same as Outlook): a back-to-back meeting inside the 30-minute rollover gap stays in the
-first conversation and keeps the first meeting's snapshot.
 
 ### 6.4 The meeting key
 
@@ -278,16 +299,28 @@ has a key writes the key into that property.
 Against `runNotionSend` (`src/lib/notion/send.ts`), when the send has a snapshot key and the sub-tables
 carry the column:
 
-1. **Pre-check, before the summary.** Query every sub-table for a non-trashed page whose Calendar event
-   equals the key. Found → `lost_to_url` = that page, finish `already`. **No summary call.** This needs
-   the sub-table mapping (today step 3) to run before the summary (today step 1); the builder reorders
-   the steps without breaking resumability.
-2. **Find (step 4).** Of the time-overlap candidates: same key → `already`, no AI. A *different*
-   non-empty key → never the same meeting, skipped, no AI. No key → today's AI judge.
+A **key match** means both conditions hold: the page's Calendar event equals the key, **and** the
+page's date range passes `overlapEnough` with the send's span. The key alone is never enough.
+
+1. **Pre-check, before the summary.** It runs only on a send that has never started a create
+   (`create_started_at` null). A send resuming after a lost create response needs today's own-page
+   recovery first. That recovery (`isThisSendsPage`, `send.ts:186-192`) needs `summary.title`, so
+   before the summary the send cannot recognise its own page, and a pre-check would make it lose to
+   itself. The pre-check queries every sub-table for a non-trashed page that key-matches. Found →
+   `lost_to_url` = that page, finish `already`. **No summary call.** This needs the sub-table mapping
+   (today step 3) to run before the summary (today step 1); the builder reorders the steps without
+   breaking resumability.
+2. **Find (step 4).** Of the time-overlap candidates: a key match → `already`, no AI. Anything else
+   (a different key, or none) → today's AI judge.
 3. **Create.** Writes the key.
-4. **Recheck (step 6).** Same key → a rival, no AI. Different key → not a rival. No key → today's AI
-   judge. The earliest `created_time` wins, ties to the lowest page ID, and a loser trashes its own page:
-   `pickWinner` unchanged.
+4. **Recheck (step 6).** A key match → a rival, no AI. Anything else → today's AI judge. The earliest
+   `created_time` wins, ties to the lowest page ID, and a loser trashes its own page: `pickWinner`
+   unchanged.
+
+*My call:* a **different** key falls back to the AI judge, never to "different meeting". The key adds
+exact matches and never removes one today's check would make. If G1 (section 9) shows the key is
+unstable for some kind of event, the result is fewer exact matches, never a duplicate page today's
+judge would have caught. So section 8 can be planned before G1 runs.
 
 Without a key (no Google, no current event, or two at once) every step is exactly today's. A teammate
 with no Google is still caught: their page has no key, so the other side's overlap + AI check finds it.
@@ -315,6 +348,9 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
 - Internal/external derivation, including a free-mail own address.
 - The send's key paths: pre-check hit makes no summary call; same, different and absent keys in find
   and recheck; a sub-table without the column behaves as today.
+- A conversation holding two meetings: the second send gets no snapshot and gets its own page.
+- A send resuming after a lost create skips the pre-check and recovers its own page.
+- Deleting the conversation mid-send leaves the send's copied snapshot, and the send finishes.
 - The prompt with and without attendees, and an injection inside a display name staying inside the
   data block.
 - The Attendees page block.
