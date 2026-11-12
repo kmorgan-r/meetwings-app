@@ -39,6 +39,7 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
     }),
     useCalendarProposal: () => ({ present: false, state: { kind: "no-meeting" }, onPickCandidate: vi.fn(), onRetry: vi.fn() }),
     useCalendarAutoSelect: vi.fn(),
+    useGoogleMeetingCapture: vi.fn(),
     useMeetingLog: () => ({ holding: false, onUndo: vi.fn(), undoBlockedMessage: null }),
   }));
   vi.doMock("@/hooks/useNotionConfigured", () => ({

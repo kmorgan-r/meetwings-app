@@ -3,6 +3,7 @@ import {
   useCalendarProposal,
   useCalendarAutoSelect,
   useCompletion,
+  useGoogleMeetingCapture,
   useMeetingAutoRecord,
   useMeetingLog,
   useNotionPick,
@@ -100,6 +101,9 @@ export const Completion = ({
     addTarget: odoo.addTarget,
     onCreateContact: odoo.onCreateContact,
   });
+
+  // One Google read at capture start, saved as the conversation's snapshot.
+  useGoogleMeetingCapture({ currentConversationId: completion.currentConversationId });
 
   /**
    * MEMOIZED, not an inline literal at the call site.

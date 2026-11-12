@@ -117,6 +117,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
       }),
       useCalendarProposal,
       useCalendarAutoSelect,
+      useGoogleMeetingCapture: vi.fn(),
       useMeetingLog: () => ({
         holding: false,
         onUndo: vi.fn(),

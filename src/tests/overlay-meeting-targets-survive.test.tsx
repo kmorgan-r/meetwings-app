@@ -379,6 +379,7 @@ const mockEverything = () => {
           onRetry: vi.fn(),
         },
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       useMeetingLog: () => ({ holding: false, onUndo: vi.fn(), undoBlockedMessage: null }),
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: () => {}, clear: () => {} }),
     };

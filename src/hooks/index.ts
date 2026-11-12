@@ -28,4 +28,5 @@ export * from "./useNotionPick";
 export * from "./useMeetingLogQueue";
 export * from "./useCalendarProposal";
 export * from "./useCalendarAutoSelect";
+export * from "./useGoogleMeetingCapture";
 export * from "./usePillRecordAction";

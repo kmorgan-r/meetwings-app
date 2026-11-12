@@ -229,6 +229,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       // Returns the RENDER PROPS shape, not a bare vi.fn(). <Completion />
       // destructures holding/onUndo/undoBlockedMessage, so an undefined return
       // throws before any assertion - byte-for-byte the failure slice 1 hit with
@@ -391,6 +392,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       useMeetingLog,
     }));
     vi.doMock("@/contexts", () => ({
@@ -545,6 +547,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       // holding true from mount, so the picker-close effect has work to do
       // (and something to race the shouldUseMeetwingsAPI probe against) on
       // the very first commit.
