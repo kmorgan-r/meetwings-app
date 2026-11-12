@@ -76,8 +76,8 @@ describe("fetchMeetingsBetween", () => {
       fetchMeetingsBetween(Date.UTC(2026, 10, 12, 10, 0, 0), Date.UTC(2026, 10, 12, 10, 47, 30))
     ).resolves.toEqual({ kind: "ok", ownAddress: "me@example.org", events: [] });
     expect(invoke).toHaveBeenCalledWith("graph_current_meetings", {
-      clientId: "c",
-      authority: "https://login.microsoftonline.com/organizations",
+      clientId: COMPLETE.config.clientId,
+      authority: COMPLETE.config.authority,
       startIso: "2026-11-12T10:00:00.000Z",
       endIso: "2026-11-12T10:47:30.000Z",
     });
