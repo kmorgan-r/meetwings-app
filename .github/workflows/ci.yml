@@ -56,9 +56,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned, not @stable: Rust 1.100 rejects xcap 0.0.12's Linux code
+      # (rust-lang/rust#148922, E0277 `!: ReadAll`). Unpin after upgrading xcap.
+      # Keep every Rust job here and in publish.yml on the same version.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: clippy
 
       - name: Install system dependencies (Ubuntu)
@@ -99,9 +103,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned with the Linux job above; see its comment.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: clippy
 
       # `shell: bash` so this block behaves identically to the Linux job's;
@@ -128,9 +134,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned with the clippy jobs above; see the Linux job's comment.
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.1
           components: rustfmt
 
       - name: Check formatting
