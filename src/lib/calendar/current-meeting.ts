@@ -27,13 +27,43 @@ function isDeclined(event: CalendarEvent): boolean {
   return event.ownResponse.toLowerCase() === "declined";
 }
 
-function isCandidate(event: CalendarEvent, nowMs: number): boolean {
+/**
+ * Whether one event, on its own qualities, is a meeting at all: not cancelled,
+ * not all-day, not declined by the user, and a real gathering (two or more
+ * people after resources are dropped). Carries NO knowledge of the time
+ * window, so callers scanning a history can filter events without an anchor
+ * time.
+ */
+export function isMeetingEvent(event: CalendarEvent): boolean {
   if (event.isCancelled) return false;
   if (event.isAllDay) return false;
   if (isDeclined(event)) return false;
   // Organizer INCLUDED, resources EXCLUDED - both handled by participantsOf.
   // A solo entry is a focus block or a reminder, not a meeting.
   if (participantsOf(event).length < 2) return false;
+  return true;
+}
+
+/**
+ * Whether a recording span sits mostly inside an event: the overlap is at
+ * least half the span's own length. A span that is empty or ends before it
+ * starts never counts, whatever its overlap. Tolerates the joined meeting
+ * sprawling far past the calendar entry.
+ */
+export function insideEvent(
+  span: { start: number; end: number },
+  event: { startMs: number; endMs: number }
+): boolean {
+  const overlap =
+    Math.min(span.end, event.endMs) - Math.max(span.start, event.startMs);
+  if (overlap < 0) return false;
+  const spanLength = span.end - span.start;
+  if (spanLength <= 0) return false;
+  return overlap >= 0.5 * spanLength;
+}
+
+function isCandidate(event: CalendarEvent, nowMs: number): boolean {
+  if (!isMeetingEvent(event)) return false;
   if (event.startMs > nowMs + EARLY_JOIN_MS) return false;
   if (event.endMs < nowMs - ENDED_GRACE_MS) return false;
   return true;
