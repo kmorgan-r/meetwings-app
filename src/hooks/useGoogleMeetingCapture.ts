@@ -39,6 +39,9 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
 
   const flush = useCallback(() => {
     const job = pending.current;
+    // The rollover dispatches meetingCaptureStarted before React commits the
+    // null id, so a result resolving before that commit would flush to the
+    // previous conversation. Safe only because the read awaits IPC plus HTTP.
     const id = latest.current.currentConversationId;
     if (!job || !id) return;
     pending.current = null;

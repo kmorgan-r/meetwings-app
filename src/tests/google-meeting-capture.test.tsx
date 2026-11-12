@@ -233,6 +233,45 @@ describe("useGoogleMeetingCapture", () => {
     }
   });
 
+  it("a result held for a missing id is discarded by newConversationStarted", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    const view = setup(null);
+    await dispatch();
+    await settle();
+    await dispatch("newConversationStarted");
+    view.rerender({ id: "c1" });
+    await settle();
+    expect(saveCalendarSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("a rejected write does not block the next one", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      saveCalendarSnapshot.mockRejectedValueOnce(new Error("db"));
+      setup("c1");
+      fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+      await dispatch();
+      await settle();
+      fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("B"));
+      await dispatch();
+      await settle();
+      expect(savedKeys()).toEqual(["A", "B"]);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("a Google error result deletes the stored snapshot", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce({ kind: "error", code: "GOOGLE_NETWORK" });
+    await dispatch();
+    await settle();
+    expect(deleteCalendarSnapshot).toHaveBeenCalledWith("c1");
+    expect(saveCalendarSnapshot).not.toHaveBeenCalled();
+  });
+
   it("several and absent store nothing", async () => {
     setup("c1");
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(several);
