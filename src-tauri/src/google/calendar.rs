@@ -22,7 +22,7 @@ pub fn events_url(start_iso: &str, end_iso: &str) -> String {
         ],
     )
     .map(String::from)
-    .unwrap_or_else(|_| EVENTS_ENDPOINT.to_string())
+    .expect("EVENTS_ENDPOINT is a valid URL")
 }
 
 /// `YYYY-MM-DD` to days since the epoch, with calendar validation.
@@ -82,7 +82,8 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<i64> {
         _ => {
             let sign = match offset.as_bytes()[0] {
                 b'+' => 1,
-                _ => -1,
+                b'-' => -1,
+                _ => return None,
             };
             let body = &offset[1..];
             if body.len() != 5 || body.as_bytes()[2] != b':' {
@@ -228,7 +229,7 @@ pub fn parse_events(body: &str) -> Result<(Option<String>, Vec<CalendarEvent>), 
             }
         }
         if organizer_is_self {
-            if let Some(email) = organizer_email {
+            if let Some(email) = organizer_email.filter(|s| !s.is_empty()) {
                 self_address.get_or_insert_with(|| email.to_string());
             }
         }
@@ -384,6 +385,17 @@ mod tests {
     }
 
     #[test]
+    fn an_attendee_matching_the_organizer_by_email_alone_is_the_organizer() {
+        let item = r#"{"iCalUID":"u4","status":"confirmed",
+ "start":{"dateTime":"2026-11-12T10:00:00Z"},"end":{"dateTime":"2026-11-12T11:00:00Z"},
+ "organizer":{"email":"ann@example.org"},
+ "attendees":[{"email":"ANN@example.org","responseStatus":"accepted"}]}"#;
+        let e = &parse_events(&body(item)).unwrap().1[0];
+        assert_eq!(e.participants.len(), 1);
+        assert!(e.participants[0].is_organizer);
+    }
+
+    #[test]
     fn neither_self_nor_organizer_reads_needs_action() {
         let item = r#"{"iCalUID":"u2","status":"confirmed",
  "start":{"dateTime":"2026-11-12T10:00:00Z"},"end":{"dateTime":"2026-11-12T11:00:00Z"},
@@ -416,7 +428,9 @@ mod tests {
             r#"{"iCalUID":"u","status":"confirmed","end":{"dateTime":"2026-11-12T11:00:00Z"}}"#;
         let no_uid = r#"{"status":"confirmed","start":{"dateTime":"2026-11-12T10:00:00Z"},"end":{"dateTime":"2026-11-12T11:00:00Z"}}"#;
         let bad_start = r#"{"iCalUID":"u","status":"confirmed","start":{"dateTime":"nope"},"end":{"dateTime":"2026-11-12T11:00:00Z"}}"#;
-        for item in [no_start, no_uid, bad_start] {
+        let no_end =
+            r#"{"iCalUID":"u","status":"confirmed","start":{"dateTime":"2026-11-12T10:00:00Z"}}"#;
+        for item in [no_start, no_uid, bad_start, no_end] {
             assert_eq!(
                 parse_events(&body(item)),
                 Err("GOOGLE_BAD_RESPONSE".to_string())
@@ -426,7 +440,9 @@ mod tests {
 
     #[test]
     fn a_cancelled_stub_is_skipped_not_fatal() {
-        let items = format!(r#"{{"status":"cancelled","id":"x"}},{ONE_OFF}"#);
+        let items = format!(
+            r#"{{"status":"cancelled","id":"x"}},{{"status":"cancelled","iCalUID":"abc@google.com","originalStartTime":{{"dateTime":"2026-11-05T10:00:00+01:00"}}}},{ONE_OFF}"#
+        );
         let (_, events) = parse_events(&body(&items)).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, "abc@google.com|2026-11-12T09:00:00Z");
@@ -480,6 +496,8 @@ mod tests {
             "2026-11-12T09:00:00",
             "2026-02-29T09:00:00Z",
             "2026-11-12T09:00:00Zx",
+            "2026-11-12T09:00:00Z01:00",
+            "2026-11-12T09:00:00z05:30",
         ] {
             assert_eq!(parse_rfc3339_ms(bad), None, "{bad}");
         }
