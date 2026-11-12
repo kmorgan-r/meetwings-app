@@ -179,6 +179,20 @@ describe("planAutoSelect", () => {
       });
   });
 
+  it("pins the accepted limit: with a UPN domain unlike the mail domain, the user's own record takes a slot and can push a customer over the cap", () => {
+    // The flagged colleague puts corp.test on the colleague list, which used
+    // to keep the user's own SMTP row out of the adds. Adds are no longer
+    // domain-gated, so that row is added and the one free slot is gone.
+    const me = contact(1, "me@corp.test", { name: "Me" });
+    const pat = contact(9, "pat@corp.test", { isColleague: true, name: "Pat Coworker" });
+    expect(plan({
+      ownAddress: "me@corp.onmicrosoft.com",
+      events: [meeting([person("cfo@acme.example")])],
+      contacts: [me, pat, CFO],
+      targets: [lead(1), lead(2), lead(3), lead(4)],
+    })).toEqual({ kind: "skip", reason: "over-cap" });
+  });
+
   it("prefills the company inferred from the address domain", () => {
     const acme = contact(50, null, { isCompany: true, name: "Acme" });
     const ops = contact(51, "ops@acme.example", { parentId: 50, name: "Ops Desk" });

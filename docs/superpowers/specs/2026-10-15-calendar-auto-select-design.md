@@ -258,7 +258,11 @@ would not help: release builds have no visible console.)
   any coworker's. With no coworker flagged colleague, coworkers without a
   partner record, the user included, are also created. Flagging
   any one coworker as colleague puts the mail domain on the colleague list and
-  stops the creates.
+  stops the creates. It does not stop the adds: the user's own record still
+  takes a target slot. Near `MAX_TARGETS` that slot can tip the meeting into
+  `over-cap`, so a customer who would fit alone is skipped along with everyone
+  else. Before adds included coworkers, a flagged colleague kept the user's own
+  record out, and the customer was added.
 - **Early start.** Capture started more than `EARLY_JOIN_MS` (5 min) before the
   event finds no meeting, and there is no retry.
 - **Cache not ready.** Capture that starts before the contact cache is ready
