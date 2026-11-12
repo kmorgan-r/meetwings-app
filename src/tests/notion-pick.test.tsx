@@ -125,10 +125,22 @@ describe("useNotionPick", () => {
     expect(result.current.picked).toBe(false);
     expect(result.current.sourceRef.current).toBe("hand");
 
+    // Captured again: a clear on its own must also block the late tick.
+    const t2 = result.current.handTouchesRef.current;
     act(() => result.current.clear());
-    act(() => result.current.autoTick(t));
+    act(() => result.current.autoTick(t2));
     expect(result.current.picked).toBe(false);
     expect(result.current.sourceRef.current).toBe("hand");
+  });
+
+  it("a stored auto source reads back as auto", () => {
+    ls.map.set("notion_picked", "true");
+    ls.map.set("notion_pick_source", "auto");
+    const { result } = renderHook(() => useNotionPick());
+
+    expect(result.current.sourceRef.current).toBe("auto");
+    act(() => result.current.autoUntick());
+    expect(result.current.picked).toBe(false);
   });
 
   it("autoUntick clears an auto tick and leaves a hand tick", () => {

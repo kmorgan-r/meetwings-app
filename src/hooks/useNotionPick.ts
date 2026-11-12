@@ -22,9 +22,8 @@ export interface UseNotionPickReturn {
   toggle: () => void;
   clear: () => void;
   /**
-   * Tick from the calendar, but only within the same turn: a no-op once
-   * Notion is ticked or after any hand touch since the caller captured
-   * `touchesAtStart`.
+   * Tick from the calendar: a no-op once Notion is ticked, or after any hand
+   * touch since the caller captured `touchesAtStart`.
    */
   autoTick: (touchesAtStart: number) => void;
   /** Unticks only a meetwings-set tick; a hand tick survives it. */
@@ -37,27 +36,28 @@ export interface UseNotionPickReturn {
  * both; cleared wherever the Odoo targets are.
  *
  * The refs are written BEFORE setState so a meeting-ended trigger firing in
- * the same tick as a toggle snapshots the new value; sourceRef moves the same
- * way, so autoTick/autoUntick can never be mistaken for a hand touch.
+ * the same tick as a toggle snapshots the new value and source. Only
+ * toggle/clear bump handTouchesRef, which is how a late autoTick knows the
+ * user touched the box since its check began.
  */
 export function useNotionPick(): UseNotionPickReturn {
   const [picked, setPicked] = useState(
     () => safeLocalStorage.getItem(STORAGE_KEYS.NOTION_PICKED) === "true"
   );
   const pickedRef = useRef(picked);
-  const [source, setSource] = useState<NotionPickSource>(() =>
+  // Lazy, read once on mount: nothing renders from the source, so no state.
+  const [initialSource] = useState<NotionPickSource>(() =>
     safeLocalStorage.getItem(STORAGE_KEYS.NOTION_PICK_SOURCE) === "auto"
       ? "auto"
       : "hand"
   );
-  const sourceRef = useRef<NotionPickSource>(source);
+  const sourceRef = useRef<NotionPickSource>(initialSource);
   const handTouchesRef = useRef(0);
 
   const set = useCallback((next: boolean, nextSource: NotionPickSource) => {
     pickedRef.current = next;
     sourceRef.current = nextSource;
     setPicked(next);
-    setSource(nextSource);
     safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICK_SOURCE, nextSource);
     safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICKED, String(next));
   }, []);
