@@ -56,13 +56,20 @@ function subTable(dataSourceId: string, dateProp = "Meeting Date"): SubTable {
     titleProp: "Name",
     dateProp,
     recordedByProp: "Recorded by",
+    calendarEventProp: "Calendar event",
+    calendarEventIssue: null,
   };
 }
 
 function page(
   pageId: string,
   date: { start: string; end: string | number | null },
-  extra: { createdTime?: string; createdById?: string; recordedByIds?: string[] } = {},
+  extra: {
+    createdTime?: string;
+    createdById?: string;
+    recordedByIds?: string[];
+    calendarRichText?: unknown[];
+  } = {},
 ): NotionPage {
   const properties: Record<string, unknown> = {
     "Meeting Date": { type: "date", date },
@@ -72,6 +79,9 @@ function page(
       type: "people",
       people: extra.recordedByIds.map((id) => ({ id })),
     };
+  }
+  if (extra.calendarRichText !== undefined) {
+    properties["Calendar event"] = { type: "rich_text", rich_text: extra.calendarRichText };
   }
   fakeCounter += 1;
   return {
@@ -199,6 +209,7 @@ describe("readCandidates", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: expect.any(String),
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "Weekly sync",
@@ -305,6 +316,33 @@ describe("readCandidates", () => {
     expect(candidates[0].recordedByIds).toEqual(["fake-owned-1", "fake-peer-9"]);
   });
 
+  it("readCandidate reads the page's calendar key; empty or no column gives null", async () => {
+    const body = { "fake-page-7": NOTES_BODY, "fake-page-8": NOTES_BODY, "fake-page-9": NOTES_BODY };
+    const range = { start: ISO_START, end: ISO_END };
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          page("fake-page-7", range, {
+            calendarRichText: [{ plain_text: "evt-" }, { text: { content: "key-1" } }],
+          }),
+          page("fake-page-8", range, { calendarRichText: [] }),
+          page("fake-page-9", range),
+        ],
+      },
+      bodies: body,
+    });
+    const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
+    expect(candidates.map((c) => c.calendarKey)).toEqual(["evt-key-1", null, null]);
+
+    const noCol = fakeNotion({
+      pages: { "ds-b": [page("fake-page-7", range, { calendarRichText: [{ plain_text: "evt-key-1" }] })] },
+      bodies: body,
+    });
+    const st = { ...subTable("ds-b"), calendarEventProp: null };
+    const other = await readCandidates(noCol.client, [st], START, END);
+    expect(other[0].calendarKey).toBeNull();
+  });
+
   it("a first paragraph after the Meeting Notes heading that is not all bold → boldTitle \"\"", async () => {
     const { client } = fakeNotion({
       pages: { "ds-a": [page("fake-page-5", { start: ISO_START, end: ISO_END })] },
@@ -345,6 +383,7 @@ describe("sameMeeting", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: null,
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "Weekly sync",
@@ -549,6 +588,7 @@ describe("isOwnPage", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: null,
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "T",

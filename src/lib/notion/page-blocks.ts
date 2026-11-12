@@ -209,6 +209,7 @@ export function pageProperties(
   startAt: number,
   endAt: number,
   ownerUserId: string | null,
+  calendarKey: string | null = null,
 ): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     [r.subTable.titleProp]: { title: richText(r.title) },
@@ -221,6 +222,11 @@ export function pageProperties(
   };
   if (r.subTable.recordedByProp !== null && ownerUserId !== null) {
     properties[r.subTable.recordedByProp] = { people: [{ id: ownerUserId }] };
+  }
+  if (r.subTable.calendarEventProp !== null && calendarKey !== null) {
+    properties[r.subTable.calendarEventProp] = {
+      rich_text: [{ type: "text", text: { content: calendarKey } }],
+    };
   }
   return properties;
 }

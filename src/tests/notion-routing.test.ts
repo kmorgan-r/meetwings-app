@@ -19,6 +19,8 @@ function subTable(id: string, name: string, overrides: Partial<SubTable> = {}): 
     titleProp: "Name",
     dateProp: "Meeting Date",
     recordedByProp: "Recorded by",
+    calendarEventProp: null,
+    calendarEventIssue: null,
     ...overrides,
   };
 }
@@ -138,7 +140,37 @@ describe("describeSubTable", () => {
       titleProp: "Name",
       dateProp: "Meeting Date",
       recordedByProp: "recorded by",
+      calendarEventProp: null,
+      calendarEventIssue: "missing",
     });
+  });
+
+  it("detects the column case-insensitively", () => {
+    const st = describeSubTable({
+      id: "ds-a",
+      name: "Monday Meetings",
+      properties: {
+        Name: { type: "title" },
+        Date: { type: "date" },
+        "calendar EVENT": { type: "rich_text" },
+      },
+    });
+    expect(st?.calendarEventProp).toBe("calendar EVENT");
+    expect(st?.calendarEventIssue).toBeNull();
+  });
+
+  it("a non-rich_text Calendar event column is ignored and flagged wrong-type", () => {
+    const st = describeSubTable({
+      id: "ds-a",
+      name: "Monday Meetings",
+      properties: {
+        Name: { type: "title" },
+        Date: { type: "date" },
+        "Calendar event": { type: "url" },
+      },
+    });
+    expect(st?.calendarEventProp).toBeNull();
+    expect(st?.calendarEventIssue).toBe("wrong-type");
   });
 
   it("a 'Recorded by' column of a type other than people is ignored", () => {

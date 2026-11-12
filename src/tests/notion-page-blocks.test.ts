@@ -476,6 +476,8 @@ const SUB_TABLE: SubTable = {
   titleProp: "Name",
   dateProp: "Meeting Date",
   recordedByProp: "Recorded by",
+  calendarEventProp: null,
+  calendarEventIssue: null,
 };
 
 describe("pageProperties", () => {
@@ -515,5 +517,20 @@ describe("pageProperties", () => {
     const noProp: SubTable = { ...SUB_TABLE, recordedByProp: null };
     const withOwner = pageProperties({ subTable: noProp, title: "T" }, startAt, endAt, "user-owner-1");
     expect(Object.keys(withOwner)).toEqual(["Name", "Meeting Date"]);
+  });
+
+  it("pageProperties writes the key only where the column exists", () => {
+    const withCol: SubTable = { ...SUB_TABLE, calendarEventProp: "Calendar event" };
+    const r = { subTable: withCol, title: "T" };
+    const written = pageProperties(r, startAt, endAt, "user-owner-1", "evt-key-1");
+    expect(written["Calendar event"]).toEqual({
+      rich_text: [{ type: "text", text: { content: "evt-key-1" } }],
+    });
+    const today = pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, "user-owner-1");
+    expect(
+      pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, "user-owner-1", "evt-key-1"),
+    ).toEqual(today);
+    expect(pageProperties(r, startAt, endAt, "user-owner-1", null)).toEqual(today);
+    expect(pageProperties(r, startAt, endAt, "user-owner-1")).toEqual(today);
   });
 });

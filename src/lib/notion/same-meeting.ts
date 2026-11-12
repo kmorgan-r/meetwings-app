@@ -28,6 +28,8 @@ export interface Candidate {
   end: number;
   boldTitle: string;
   headings: string[];
+  /** The page's "Calendar event" key, null when the column is absent or empty. */
+  calendarKey: string | null;
 }
 
 /**
@@ -119,6 +121,40 @@ function headingsOf(children: NotionBlock[]): string[] {
   return out;
 }
 
+/**
+ * The page's date range in ms; null for an all-day value, a null or non-string
+ * end, or a value that does not parse - none of those is our meeting time range.
+ */
+export function pageRange(
+  st: SubTable,
+  page: NotionPage,
+): { start: number; end: number } | null {
+  const property = page.properties?.[st.dateProp];
+  const date = (property as { date?: { start?: unknown; end?: unknown } } | undefined)?.date;
+  const start = date?.start;
+  const end = date?.end;
+  if (typeof start !== "string" || !start.includes("T")) return null;
+  if (typeof end !== "string") return null;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+  return { start: startMs, end: endMs };
+}
+
+/** The page's "Calendar event" text, joined; null without the column or when empty. */
+function calendarKeyOf(st: SubTable, page: NotionPage): string | null {
+  if (st.calendarEventProp === null) return null;
+  const property = page.properties?.[st.calendarEventProp];
+  const items = (property as { rich_text?: unknown } | undefined)?.rich_text;
+  if (!Array.isArray(items)) return null;
+  let text = "";
+  for (const item of items as { plain_text?: unknown; text?: { content?: unknown } }[]) {
+    if (typeof item.plain_text === "string") text += item.plain_text;
+    else if (typeof item.text?.content === "string") text += item.text.content;
+  }
+  return text === "" ? null : text;
+}
+
 /** Reads one page into a Candidate; null when the page cannot count for this meeting. */
 async function readCandidate(
   client: NotionClient,
@@ -127,17 +163,9 @@ async function readCandidate(
   startAt: number,
   endAt: number,
 ): Promise<Candidate | null> {
-  const property = page.properties?.[st.dateProp];
-  const date = (property as { date?: { start?: unknown; end?: unknown } } | undefined)?.date;
-  const start = date?.start;
-  const end = date?.end;
-  // An all-day value ("2026-11-09") or a null end is a date, not our meeting
-  // time range; a value that does not parse is unusable. None count.
-  if (typeof start !== "string" || !start.includes("T")) return null;
-  if (typeof end !== "string") return null;
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+  const range = pageRange(st, page);
+  if (range === null) return null;
+  const { start: startMs, end: endMs } = range;
   if (!overlapEnough({ start: startMs, end: endMs }, { start: startAt, end: endAt })) {
     return null;
   }
@@ -154,6 +182,7 @@ async function readCandidate(
     end: endMs,
     boldTitle: boldTitleOf(children),
     headings: headingsOf(children),
+    calendarKey: calendarKeyOf(st, page),
   };
 }
 
