@@ -28,6 +28,10 @@ jobs:
       contents: read
       pull-requests: write
       issues: read
+      # Required: anthropics/claude-code-action exchanges this OIDC token for a
+      # Claude GitHub App installation token (see its setupGitHubToken()).
+      # Neither step below sets OVERRIDE_GITHUB_TOKEN, so removing this breaks
+      # both the primary and fallback review steps.
       id-token: write
 
     # Shared by the primary and fallback review steps so the two attempts can
@@ -62,6 +66,9 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          # The checkout token must never be able to leak into the review
+          # transcript (this workflow posts no execution-log artifact).
+          persist-credentials: false
 
       # Workaround for anthropics/claude-code-action#1290 (open upstream).
       # `claude install` exits 0 even when $HOME/.local/bin does not exist, so the
@@ -79,7 +86,7 @@ jobs:
       - name: Run Claude Code Review
         id: claude-review
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: ${{ env.REVIEW_PROMPT }}
@@ -98,7 +105,7 @@ jobs:
         id: claude-review-fallback
         if: env.HAS_FALLBACK_TOKEN == 'true' && (steps.claude-review.outcome == 'failure' || hashFiles('review.md') == '')
         # Keep this pin identical to the primary step above.
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_FALLBACK }}
           prompt: ${{ env.REVIEW_PROMPT }}
