@@ -183,6 +183,18 @@ describe("autoNotionAllowed", () => {
     await expect(check({ readOutlook }).result).resolves.toBe(false);
   });
 
+  it("an Outlook meeting overlapping the row by one millisecond withholds", async () => {
+    const event = { ...outlookAt(-30, 0), endMs: at(0) + 1 };
+    const readOutlook = vi.fn<Read>(async () => outlookOk(event));
+    await expect(check({ readOutlook }).result).resolves.toBe(false);
+  });
+
+  it("an Outlook meeting that starts exactly at the row's end still sends", async () => {
+    const readOutlook = vi.fn<Read>(async () => outlookOk(outlookAt(30, 60)));
+    await expect(check({ readOutlook }).result).resolves.toBe(true);
+    expect(readOutlook).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["cancelled", { isCancelled: true }],
     ["all-day", { isAllDay: true }],

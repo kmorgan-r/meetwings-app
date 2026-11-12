@@ -300,6 +300,25 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     expect(toastMock.error).toHaveBeenCalledTimes(1);
   });
 
+  it("a trigger dropped after an allowed check 2 is not re-run", async () => {
+    // The check finished, so the latch is lowered: a drop during the insert
+    // that follows is an ordinary drop, exactly as before.
+    const insert = deferred<boolean>();
+    queue.insertQueueRow.mockImplementationOnce(() => insert.promise);
+    renderLog();
+    await listening();
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(1));
+    expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1);
+
+    endMeeting();
+    insert.resolve(true);
+    await settle();
+
+    expect(decideDestinations).toHaveBeenCalledTimes(1);
+    expect(queue.insertQueueRow).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["absent", { state: "absent", config: null }, true],
     ["complete", GRAPH_COMPLETE, false],
