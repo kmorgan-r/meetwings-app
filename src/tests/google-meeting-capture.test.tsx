@@ -191,6 +191,32 @@ describe("useGoogleMeetingCapture", () => {
     expect(deleteCalendarSnapshot).not.toHaveBeenCalled();
   });
 
+  it("a result in flight when another conversation is loaded is dropped", async () => {
+    const d = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
+    const view = setup("c1");
+    await dispatch();
+    await dispatch("conversationLoaded");
+    view.rerender({ id: "c2" });
+    await act(async () => {
+      d.resolve(one("A"));
+    });
+    await settle();
+    expect(saveCalendarSnapshot).not.toHaveBeenCalled();
+    expect(deleteCalendarSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("a result held for a missing id is discarded when a conversation is loaded", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    const view = setup(null);
+    await dispatch();
+    await settle();
+    await dispatch("conversationLoaded");
+    view.rerender({ id: "c2" });
+    await settle();
+    expect(saveCalendarSnapshot).not.toHaveBeenCalled();
+  });
+
   it("odooTargetsCleared does not drop the snapshot", async () => {
     const d = deferred<unknown>();
     fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
@@ -474,6 +500,22 @@ describe("useGoogleMeetingCapture check 1 (Notion tick)", () => {
     await dispatch();
     await settle();
     await dispatch("newConversationStarted");
+    await act(async () => {
+      o.resolve({ kind: "absent" });
+    });
+    await settle();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).not.toHaveBeenCalled();
+  });
+
+  it("loading another conversation while Outlook is pending drops the tick", async () => {
+    const o = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockReturnValueOnce(o.promise);
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    await dispatch("conversationLoaded");
     await act(async () => {
       o.resolve({ kind: "absent" });
     });

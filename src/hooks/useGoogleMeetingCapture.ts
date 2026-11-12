@@ -42,9 +42,10 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
 
   // Bumped by every capture start and by a Google connection change.
   const readSeq = useRef(0);
-  // Bumped by newConversationStarted only (not odooTargetsCleared, spec 8.3).
+  // Bumped by newConversationStarted and conversationLoaded (not
+  // odooTargetsCleared, spec 8.3).
   const convGen = useRef(0);
-  // Bumped by newConversationStarted AND odooTargetsCleared: guards the tick.
+  // Bumped by those two AND odooTargetsCleared: guards the tick.
   const tickGen = useRef(0);
   const pending = useRef<Pending | null>(null);
   const chain = useRef<Promise<void>>(Promise.resolve());
@@ -54,6 +55,8 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
     // The rollover dispatches meetingCaptureStarted before React commits the
     // null id, so a result resolving before that commit would flush to the
     // previous conversation. Safe only because the read awaits IPC plus HTTP.
+    // Opening another conversation mid-read drops the result instead
+    // (conversationLoaded below): no snapshot beats the wrong one.
     const id = latest.current.currentConversationId;
     if (!job || !id) return;
     pending.current = null;
@@ -80,9 +83,11 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       tickGen.current += 1;
     };
     window.addEventListener("newConversationStarted", onNewConversation);
+    window.addEventListener("conversationLoaded", onNewConversation);
     window.addEventListener("odooTargetsCleared", onTargetsCleared);
     return () => {
       window.removeEventListener("newConversationStarted", onNewConversation);
+      window.removeEventListener("conversationLoaded", onNewConversation);
       window.removeEventListener("odooTargetsCleared", onTargetsCleared);
     };
   }, []);

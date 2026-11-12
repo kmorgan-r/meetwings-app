@@ -1474,6 +1474,7 @@ export const useCompletion = () => {
     // The loaded conversation is now the in-progress one.
     setActiveConversationId(conversation.id);
     conversationTranscriptStartRef.current = meetingTranscript.length;
+    const switching = currentConversationIdRef.current !== conversation.id;
     currentConversationIdRef.current = conversation.id;
     conversationHistoryRef.current = conversation.messages; // Update ref immediately
     // Reset autosave watermark relative to any existing meeting transcript so
@@ -1483,6 +1484,10 @@ export const useCompletion = () => {
     persistedMessageIdsRef.current = new Set(
       conversation.messages.map((message) => message.id)
     );
+    // Before the new id commits: useGoogleMeetingCapture drops a snapshot read
+    // still in flight for the outgoing conversation, which would otherwise be
+    // written to this one. Not newConversationStarted: that clears Odoo targets.
+    if (switching) window.dispatchEvent(new CustomEvent("conversationLoaded"));
     setState((prev) => ({
       ...prev,
       currentConversationId: conversation.id,
