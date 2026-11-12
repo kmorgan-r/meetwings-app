@@ -152,6 +152,47 @@ describe("groupAttendees", () => {
     expect(groups.omitted).toBe(250);
   });
 
+  it("the cap keeps team, then external A-Z, then other guests, regardless of invite order", () => {
+    const participants = [
+      ...Array.from({ length: 5 }, (_unused, i) => participant(`g${i}@gmail.com`)),
+      ...Array.from({ length: 30 }, (_unused, i) => participant(`z${i}@zeta.io`)),
+      ...Array.from({ length: 30 }, (_unused, i) => participant(`a${i}@acme.com`)),
+      participant("t0@example.org"),
+      participant("t1@example.org"),
+    ];
+    const snap = buildSnapshot(event({ participants }), "me@example.org");
+    const groups = groupAttendees(snap);
+    expect(groups.team).toHaveLength(2);
+    expect(groups.external).toEqual([
+      {
+        domain: "acme.com",
+        people: Array.from({ length: 30 }, (_unused, i) => `a${i}@acme.com`),
+      },
+      {
+        domain: "zeta.io",
+        people: Array.from({ length: 18 }, (_unused, i) => `z${i}@zeta.io`),
+      },
+    ]);
+    expect(groups.otherGuests).toEqual([]);
+    expect(groups.omitted).toBe(17);
+  });
+
+  it("the own address matches case-insensitively", () => {
+    const snap = buildSnapshot(
+      event({
+        participants: [
+          participant("me@gmail.com", { name: "Me" }),
+          participant("x@gmail.com"),
+        ],
+      }),
+      "ME@gmail.com"
+    );
+    const groups = groupAttendees(snap);
+    expect(groups.teamLabel).toBe("Team");
+    expect(groups.team).toEqual(["Me"]);
+    expect(groups.otherGuests).toEqual(["x@gmail.com"]);
+  });
+
   it("the MAX_ATTENDEES boundary is exact", () => {
     const at = (n: number) =>
       groupAttendees(
@@ -230,5 +271,18 @@ describe("parseSnapshot", () => {
     expect(parseSnapshot("{")).toBeNull();
     expect(parseSnapshot('{"key":1}')).toBeNull();
     expect(parseSnapshot('{"key":"e1","startMs":1,"endMs":2}')).toBeNull();
+    expect(
+      parseSnapshot(
+        '{"key":"e1","startMs":1,"endMs":2,"participants":[{"address":1,"name":null}]}'
+      )
+    ).toBeNull();
+    expect(
+      parseSnapshot(
+        '{"key":"e1","startMs":1,"endMs":2,"participants":[{"address":"a@b.c","name":5}]}'
+      )
+    ).toBeNull();
+    expect(
+      parseSnapshot('{"key":"e1","startMs":1,"endMs":2,"participants":[null]}')
+    ).toBeNull();
   });
 });

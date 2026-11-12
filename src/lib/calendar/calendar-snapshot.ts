@@ -45,7 +45,7 @@ function displayText(raw: string): string {
 
 function displayOf(participant: SnapshotParticipant): string {
   const name = participant.name === null ? "" : participant.name.trim();
-  return name === "" ? participant.address : name;
+  return name === "" ? participant.address.trim() : name;
 }
 
 /**
@@ -180,8 +180,6 @@ export function groupAttendees(snapshot: CalendarSnapshot): AttendeeGroups {
   };
 
   const teamCapped = cap(team);
-  // [...keys()] sorts the SNAPSHOT-encounter order A-Z; this cannot reach the
-  // caller's arrays, the map is local.
   const domains = [...byDomain.keys()].sort();
   let omitted = teamCapped.dropped;
   const external: { domain: string; people: string[] }[] = [];
