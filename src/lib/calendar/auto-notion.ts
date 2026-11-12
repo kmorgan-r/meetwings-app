@@ -1,4 +1,5 @@
-import { pickCurrentMeeting } from "./current-meeting";
+import type { CalendarSnapshot } from "./calendar-snapshot";
+import { insideEvent, isMeetingEvent, pickCurrentMeeting } from "./current-meeting";
 import type { FetchCurrentMeetingsResult } from "./fetch-current-meetings";
 import type { FetchGoogleMeetingsResult } from "./fetch-google-meetings";
 
@@ -44,4 +45,37 @@ export function decideCheckOne(
     return "tick";
   }
   return "refuse";
+}
+
+/**
+ * The window rule, then check 2, for one meeting-end row with an AUTO tick.
+ * The row must sit mostly inside the saved Google event, and no Outlook
+ * meeting may overlap it at all. Never rejects: any doubt (no snapshot, an
+ * Outlook error, timeout or throw) withholds. `outlookAbsent` only skips the
+ * read; it never excuses the window rule.
+ */
+export async function autoNotionAllowed(i: {
+  span: { start: number; end: number };
+  snapshot: CalendarSnapshot | null;
+  outlookAbsent: boolean;
+  readOutlook: (startMs: number, endMs: number) => Promise<FetchCurrentMeetingsResult>;
+  timeoutMs?: number;
+}): Promise<boolean> {
+  try {
+    if (i.snapshot === null || !insideEvent(i.span, i.snapshot)) return false;
+    if (i.outlookAbsent) return true;
+    const outlook = await withTimeout(
+      i.readOutlook(i.span.start, i.span.end),
+      i.timeoutMs ?? OUTLOOK_CHECK_TIMEOUT_MS
+    );
+    // A config that vanished mid-check (`absent`) is doubt too, not "no Outlook".
+    if (outlook === "timeout" || outlook.kind !== "ok") return false;
+    return !outlook.events.some(
+      (e) =>
+        isMeetingEvent(e) &&
+        Math.min(e.endMs, i.span.end) - Math.max(e.startMs, i.span.start) > 0
+    );
+  } catch {
+    return false;
+  }
 }

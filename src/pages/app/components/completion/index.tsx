@@ -181,6 +181,7 @@ export const Completion = ({
     // ref - see useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
     targetRef: odoo.targetsRef,
     notionPickedRef: notionPick.pickedRef,
+    notionSourceRef: notionPick.sourceRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     meetingAssistMode: completion.meetingAssistMode,

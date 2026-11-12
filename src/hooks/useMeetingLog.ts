@@ -2,6 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
+import { autoNotionAllowed } from "@/lib/calendar/auto-notion";
+import { fetchMeetingsBetween } from "@/lib/calendar/fetch-current-meetings";
+import { getCalendarSnapshot } from "@/lib/database/calendar-snapshot.action";
 import {
   cancelHeldRow,
   findHeldRow,
@@ -34,6 +37,7 @@ import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
 import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
+import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
 import { isNotionAutoSendEnabled, isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import {
@@ -43,6 +47,7 @@ import {
 } from "@/lib/storage/odoo-config.storage";
 import type { SelectedTargets, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
+import type { NotionPickSource } from "@/hooks/useNotionPick";
 
 /**
  * Once per PROCESS, not once per mount. See the sweep effect below.
@@ -135,6 +140,11 @@ export interface UseMeetingLogOptions {
    * `pickedRef`). Optional so callers with no Notion pill compile unchanged.
    */
   notionPickedRef?: RefObject<boolean>;
+  /**
+   * Who set that tick (useNotionPick's `sourceRef`). Missing reads as "hand",
+   * which is never checked. An "auto" tick is held only when check 2 allows.
+   */
+  notionSourceRef?: RefObject<NotionPickSource>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
   meetingAssistMode: boolean;
@@ -161,8 +171,14 @@ export interface UseMeetingLogReturn {
  * Windows-only watcher.
  */
 export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogReturn {
-  const { targetRef, notionPickedRef, meetingTranscript, currentConversationId, meetingAssistMode } =
-    options;
+  const {
+    targetRef,
+    notionPickedRef,
+    notionSourceRef,
+    meetingTranscript,
+    currentConversationId,
+    meetingAssistMode,
+  } = options;
 
   // Synchronous and stable. getCurrentWindow().label is read synchronously in
   // this repo (useOdooTarget.ts:296, useMeetingAutoRecord.ts:121-124), so this
@@ -223,6 +239,15 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * would mean only the first meeting of a window's lifetime is ever logged.
    */
   const inFlightRef = useRef(false);
+  /**
+   * Check 2 lengthens the in-flight window by up to its Outlook timeout, so a
+   * trigger dropped WHILE it runs (`checkingRef`) is re-run once from the
+   * finally (`pendingRef`); otherwise a pill-off during the check would leave
+   * the meeting's tail to startup recovery. A drop at any other time is
+   * dropped exactly as before.
+   */
+  const checkingRef = useRef(false);
+  const pendingRef = useRef(false);
   const heldRowIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -315,15 +340,21 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   );
 
   const trigger = useCallback(async () => {
-    if (!isOwner || inFlightRef.current) return;
+    // The owner gate stays FIRST: a non-owner must never set pendingRef.
+    if (!isOwner) return;
+    if (inFlightRef.current) {
+      if (checkingRef.current) pendingRef.current = true;
+      return;
+    }
     inFlightRef.current = true;
     // Snapshot SYNCHRONOUSLY, before any await. Without it a user clearing
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
     const targets = targetRef.current;
-    // Same reason as `targets`: the pick is per-meeting and must not change
-    // under an await.
+    // Same reason as `targets`: the pick and who set it are per-meeting and
+    // must not change under an await (check 2 included).
     const notionPicked = notionPickedRef?.current ?? false;
+    const notionSource = notionSourceRef?.current ?? "hand";
     const conversationId = conversationIdRef.current;
 
     // The consumed span, from the SAME synchronous snapshot.
@@ -356,14 +387,15 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       } catch (err) {
         console.warn("[notion] config unreadable:", notionErrorText(err).code);
       }
-      const decision = decideDestinations({
-        source: "live",
+      const input = {
+        source: "live" as const,
         odoo: state.state,
         notion,
         autoSend: isNotionAutoSendEnabled(),
         odooTargets: targets.length,
         notionPicked,
-      });
+      };
+      let decision = decideDestinations(input);
       if (decision.toastIncomplete && state.state === "incomplete") {
         // Set up, then a field got cleared. The sweep already goes out of its
         // way to recordErrorOnUnsent for exactly this state "because nothing
@@ -381,11 +413,6 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         return;
       }
 
-      // Only a fully set-up Odoo has an instance to key the row to.
-      const instance =
-        state.state === "complete" ? instanceFingerprint(state.config.url, state.config.db) : "";
-      // A Notion-only row (odooStatus 'none') carries no Odoo targets.
-      const rowTargets = decision.odooStatus === "none" ? [] : targets;
       // The skip watermark can only ever push this FORWARD of the real one: a
       // row that IS written always advances getTranscriptWatermark() past
       // whatever an earlier skip recorded, so max() never resurrects a span a
@@ -422,6 +449,40 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
 
       const slice = sliceTranscript(all, watermark);
       if (!slice) return; // a genuinely silent meeting is not a meeting
+
+      // The window rule and check 2 (spec 8.3): an AUTO tick is held only for a
+      // row inside the saved Google event with no Outlook meeting over it. Any
+      // throw withholds. A hand tick is the user's explicit choice: no reads.
+      if (decision.notionStatus === "held" && notionPicked && notionSource === "auto") {
+        let allowed = false;
+        checkingRef.current = true;
+        try {
+          allowed = await autoNotionAllowed({
+            span: { start: slice.startAt, end: slice.endAt },
+            snapshot: recoveryId ? await getCalendarSnapshot(recoveryId) : null,
+            outlookAbsent: (await loadGraphConfigState()).state === "absent",
+            readOutlook: fetchMeetingsBetween,
+          });
+        } catch {
+          allowed = false;
+        } finally {
+          checkingRef.current = false;
+        }
+        if (!allowed) {
+          decision = decideDestinations({ ...input, notionPicked: false });
+          if (!decision.queue) {
+            skipUnwritten();
+            return;
+          }
+        }
+      }
+
+      // From the FINAL decision. Only a fully set-up Odoo has an instance to
+      // key the row to.
+      const instance =
+        state.state === "complete" ? instanceFingerprint(state.config.url, state.config.db) : "";
+      // A Notion-only row (odooStatus 'none') carries no Odoo targets.
+      const rowTargets = decision.odooStatus === "none" ? [] : targets;
 
       const rowId = crypto.randomUUID();
       const created = await insertQueueRow({
@@ -477,8 +538,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       skipUnwritten();
     } finally {
       inFlightRef.current = false;
+      if (pendingRef.current) {
+        pendingRef.current = false;
+        void triggerRef.current();
+      }
     }
-  }, [isOwner, startHold, targetRef, notionPickedRef]);
+  }, [isOwner, startHold, targetRef, notionPickedRef, notionSourceRef]);
 
   const triggerRef = useRef(trigger);
   useLayoutEffect(() => {
