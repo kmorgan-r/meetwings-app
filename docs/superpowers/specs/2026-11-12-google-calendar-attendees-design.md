@@ -53,9 +53,9 @@ Non-goals (this project; issues exist for the first three)
 - Telling apart voices on the far end. The transcript still says "Guest".
 
 Anti-goals: Kevin's words.
-- **"I don't want Outlook calls going to Notion."** No path in this project sends an Outlook meeting
-  to Notion without Kevin ticking Notion by hand (8.3). Every uncertain case resolves toward not
-  sending.
+- **"I don't want Outlook calls going to Notion."** An automatic tick needs a Google meeting and no
+  Outlook meeting, and it covers only the Google event's time (8.3). Every uncertain case resolves
+  toward not sending. 8.3 names the one case nothing can see.
 
 The four from the Notion design (section 2 there) apply unchanged, and the first two bind this project
 hardest:
@@ -346,24 +346,47 @@ pre-pick only for meetings on his IC Google calendar.
 (`auto` or `hand`) next to `NOTION_PICKED`. Today the hook has only `toggle` and `clear`. Any toggle by
 Kevin makes the source `hand`. Clearing works as today: wherever the Odoo targets are cleared.
 
-**Check 1, at recording start.** Both calendar reads run on `meetingCaptureStarted`. Notion is ticked
-automatically only when:
-- Google returns `one`, **and**
-- Outlook is not connected (`absent`), or its read returns `none`.
+**Outlook's state, for both checks.** "Outlook absent" means no Graph config is stored at all
+(`fetchCurrentMeetings` → `absent`). A stored config whose read fails for any reason, including
+`GRAPH_NOT_CONNECTED` and `GRAPH_AUTH_EXPIRED`, counts as an **error**, and an error never allows
+Notion. If Kevin disconnects or lets Outlook expire, nothing is ticked automatically until it's back.
 
-Outlook `one` or `several`, or an Outlook read error, means no tick. The rule is a pure function with
-unit tests. The tick lands after the rollover (the event fires after `await startNewConversation()`),
+**Check 1, at recording start.** On `meetingCaptureStarted` the Google read and **its own Outlook
+read** run. It cannot reuse auto-select's read: `useCalendarAutoSelect` returns before fetching when
+its setting is off or the contact cache is empty or stale. "No read happened" is not `none`. Notion is
+ticked automatically only when:
+- Google returns `one`, **and**
+- Outlook is absent, or its read returns `none`.
+
+Outlook `one` or `several`, or an Outlook error, means no tick. The rule is a pure function with unit
+tests. The tick lands after the rollover (the event fires after `await startNewConversation()`),
 behind the same generation guard as 6.1.
 
-**Check 2, when the meeting ends.** The tick lasts the whole conversation, so an IC call followed by a
-client call inside the 30-minute gap would carry it into the client call. So when a meeting ends with
-an `auto` tick and Outlook connected, Meetwings reads Outlook once more for the recording's span. If any
-event passing `pickCurrentMeeting`'s filters (not cancelled, all-day, declined or solo) overlaps the
-span at all, the pick goes to `decideDestinations` as **false**. The same happens if the read fails, or
-doesn't answer within a short timeout (*my call:* 5 seconds). The meeting then waits on the Meetings
-page with a **Send to Notion** button, as an unpicked meeting does today.
-- The span read reuses `graph_current_meetings` with the span as its window.
-- A `hand` tick skips check 2. Kevin chose it explicitly.
+**The automatic tick only covers the Google event's time.** The tick lasts the whole conversation, but
+an `auto` tick counts for a meeting-end row only when that row's span passes `overlapEnough` with the
+saved Google event, the same window rule as 6.3. A later call in the same conversation, outside the IC
+event's time, isn't sent even when Outlook can't see it (an ad-hoc call).
+
+**Check 2, when a meeting-end row is written.** A row is written per trigger: the detector's
+`meeting-ended`, the pill turning off, or the idle flush (`useMeetingLog.ts:504, 528, 569`).
+Detection can flap into several rows per call. For each row with an `auto` tick and Outlook not
+absent, Meetwings reads Outlook once more for that row's span. If any event overlaps the span at all,
+the row's pick goes to `decideDestinations` as **false**. The events counted are those passing
+`pickCurrentMeeting`'s filters: not cancelled, not all-day, not declined, not solo. The same happens
+if the read errors or doesn't answer within a short timeout (*my call:* 5 seconds). Check 2 catches
+what the window rule can't: one long row that runs from the IC call straight into a client call.
+- `isCandidate` (`current-meeting.ts:31-41`) bundles those filters with the now-relative window.
+  Split the filters out so the span check reuses them without the window.
+- The span read reuses `graph_current_meetings` with the row's span as its window.
+- A `hand` tick skips both the window rule and check 2. Kevin chose it explicitly.
+- Where a row that wasn't sent ends up: its conversation row on the Meetings page offers **Send to
+  Notion** (`ConversationRow.tsx:350-354`), which accepts rows whose Notion status is null
+  (`actions.ts:58-62`). That button returns "already" once any row of the conversation has a Notion
+  page.
+- **Ceiling, per row.** Each row is decided on its own. A check 2 that fails for one row of an IC call
+  while its sibling rows pass leaves that part off the Notion page. Since the conversation then
+  counts as "already" sent, the button can't add it later. The transcript stays complete on Kevin's
+  machine. Accepted: it needs a calendar read failure during an IC call that also has other rows.
 - Crash safety: if the app dies during the check, the meeting is recovered by the existing recovery
   path, and recovery never auto-sends to Notion (`decideDestinations`, `source: "recovery"`). That is
   the safe direction.
@@ -374,8 +397,12 @@ page with a **Send to Notion** button, as an unpicked meeting does today.
 `decideDestinations` is unchanged: a ticked pick still gives `notionStatus: "held"`. Notion-only users
 are unaffected: they have no Outlook, and their meetings already go to Notion when auto-send is on.
 
-Accepted cost: an IC meeting that also sits on Kevin's Outlook calendar is never ticked automatically.
-He ticks it by hand.
+Accepted costs:
+- An IC meeting that also sits on Kevin's Outlook calendar is never ticked automatically. He ticks it
+  by hand.
+- One case nothing can see: a call that isn't on Outlook, held **inside** the IC event's time (Kevin
+  leaves the IC call early for an ad-hoc one) in the same conversation. The 30-second hold and the
+  untick are the guard.
 
 A meeting on both calendars still gets Outlook auto-select's Odoo targets, which are independent of
 Notion.
@@ -397,8 +424,11 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
 - Kevin's tick, check 1: Google `one` with Outlook absent or `none` ticks. Google `none` or
   `several` doesn't. Outlook `one`, `several` or an error doesn't. A late result after a new
   conversation is dropped.
-- Kevin's tick, check 2: an `auto` tick with an Outlook meeting overlapping the span → not sent to
-  Notion. Read error → not sent. Timeout → not sent. A `hand` tick → sent, with no Outlook read.
+- Kevin's tick, check 1, with Outlook config stored but `GRAPH_NOT_CONNECTED` or `GRAPH_AUTH_EXPIRED`
+  → no tick. Check 1 still reads Outlook when the auto-select setting is off.
+- Kevin's tick, window rule: an `auto` tick on a row outside the Google event's time → not sent.
+- Kevin's tick, check 2: an `auto` tick with an Outlook meeting overlapping the row's span → not sent
+  to Notion. Read error → not sent. Timeout → not sent. A `hand` tick → sent, with no Outlook read.
 - A Google failure or hang at capture start leaves recording untouched.
 
 Live checks: add to `.livecheck/`, skipping cleanly without credentials, as `notion-live.live.ts` does.
