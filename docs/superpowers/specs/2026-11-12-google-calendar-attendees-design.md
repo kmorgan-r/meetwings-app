@@ -5,8 +5,9 @@ Owner: Kevin Morgan-Rothschild
 Builds on: `2026-11-11-notion-meeting-notes-design.md` (PR #91), section 11 item 1.
 Mirrors: `2026-09-01-calendar-target-proposal-design.md` (Outlook, PR #51) and
 `2026-10-15-calendar-auto-select-design.md` (PR #87, #89).
-Follow-ups, each its own issue and its own design: #92 attendees in Odoo notes, #93 Outlook guests to
-Notion, #94 pick between overlapping meetings, #95 Google Meet detection.
+Follow-ups, each its own issue and its own design: #92 attendees in Odoo notes, #94 pick between
+overlapping meetings, #95 Google Meet detection. (#93, Outlook guests to Notion, was closed: Kevin does
+not want Outlook calls in Notion.)
 
 Code references are against `origin/main` at `eed2258`.
 
@@ -39,19 +40,25 @@ Goals
 - Team Practices come from the IC team, not from external guests' suggestions.
 - Each Notion page stores the meeting's calendar key. A teammate whose meeting already has a page
   skips before any AI call. Racing creates settle by key, with no AI judge.
-- On Kevin's machine, a current Google meeting at recording start ticks Notion in the overlay picker.
-- Outlook and Google are connected independently and never block each other.
+- On Kevin's machine, a current Google meeting at recording start ticks Notion in the overlay picker,
+  unless Outlook has a meeting too (8.3).
+- Outlook and Google connect independently, and neither can stop a recording or the other's
+  connection. On Kevin's machine the Notion tick deliberately depends on both (8.3).
 
-Non-goals (this project; issues exist for all four)
+Non-goals (this project; issues exist for the first three)
 - Google Meet detection (#95).
 - Attendees in Odoo notes (#92).
-- Outlook guests going to Notion (#93).
 - Choosing between two meetings that overlap the recording start (#94).
 - Writing to Google Calendar in any way.
 - Telling apart voices on the far end. The transcript still says "Guest".
 
-Anti-goals: the four from the Notion design (section 2 there) apply unchanged, and the first two bind
-this project hardest:
+Anti-goals: Kevin's words.
+- **"I don't want Outlook calls going to Notion."** No path in this project sends an Outlook meeting
+  to Notion without Kevin ticking Notion by hand (8.3). Every uncertain case resolves toward not
+  sending.
+
+The four from the Notion design (section 2 there) apply unchanged, and the first two bind this project
+hardest:
 1. A meeting isn't transcribed because of an app bug. **The calendar read must never delay, block or
    fail a recording.** It runs after capture has started, in the background, and any failure means
    "no attendees", nothing more.
@@ -94,7 +101,9 @@ So the builder can check the mirror is faithful:
   only from the IC team.
 - Same read moment and same event rules as Outlook. **Two meetings at once → no attendees**, not a
   guess.
-- On Kevin's machine, a current Google meeting ticks Notion.
+- On Kevin's machine, a current Google meeting ticks Notion, **but Outlook calls never go to Notion**.
+  So there's no tick when Outlook also has a meeting, and a second Outlook check runs at meeting end
+  (8.3). An IC meeting that is also on his Outlook calendar is ticked by hand.
 - Each teammate connects their own Google account to **one shared Google app** that Kevin creates in
   IC's Google Cloud org (Kevin has access and the gcloud CLI).
 - The four out-of-scope items are important and tracked as #92-#95.
@@ -329,16 +338,47 @@ Kept from PR #91: whoever finishes first wins, even if another recording is long
 
 ### 8.3 Kevin's machine: Notion ticked
 
-When both Odoo and Notion are set up and the Google read at recording start returns `one`, Notion is
-ticked for that meeting. `useNotionPick` gains a set-true; today it has only `toggle` and `clear`. It
-lands after the rollover (the event fires after `await startNewConversation()`), and it is cleared
-wherever the Odoo targets are, as today. Kevin can untick it; the 30-second hold still applies.
+This applies when both Odoo and Notion are set up. The binding rule is Kevin's: **Outlook calls never
+go to Notion** unless he ticks Notion by hand. The Notion spec's promise (section 6 there) is the same:
+pre-pick only for meetings on his IC Google calendar.
 
-`decideDestinations` is unchanged: a ticked pick already gives `notionStatus: "held"`. Notion-only
-users are unaffected: their meetings already go to Notion when auto-send is on.
+**The tick remembers who set it.** `useNotionPick` gains an automatic set, plus a persisted source
+(`auto` or `hand`) next to `NOTION_PICKED`. Today the hook has only `toggle` and `clear`. Any toggle by
+Kevin makes the source `hand`. Clearing works as today: wherever the Odoo targets are cleared.
 
-A meeting on both calendars at once gets both: Outlook auto-select fills Odoo targets, and Google ticks
-Notion. The two are independent.
+**Check 1, at recording start.** Both calendar reads run on `meetingCaptureStarted`. Notion is ticked
+automatically only when:
+- Google returns `one`, **and**
+- Outlook is not connected (`absent`), or its read returns `none`.
+
+Outlook `one` or `several`, or an Outlook read error, means no tick. The rule is a pure function with
+unit tests. The tick lands after the rollover (the event fires after `await startNewConversation()`),
+behind the same generation guard as 6.1.
+
+**Check 2, when the meeting ends.** The tick lasts the whole conversation, so an IC call followed by a
+client call inside the 30-minute gap would carry it into the client call. So when a meeting ends with
+an `auto` tick and Outlook connected, Meetwings reads Outlook once more for the recording's span. If any
+event passing `pickCurrentMeeting`'s filters (not cancelled, all-day, declined or solo) overlaps the
+span at all, the pick goes to `decideDestinations` as **false**. The same happens if the read fails, or
+doesn't answer within a short timeout (*my call:* 5 seconds). The meeting then waits on the Meetings
+page with a **Send to Notion** button, as an unpicked meeting does today.
+- The span read reuses `graph_current_meetings` with the span as its window.
+- A `hand` tick skips check 2. Kevin chose it explicitly.
+- Crash safety: if the app dies during the check, the meeting is recovered by the existing recovery
+  path, and recovery never auto-sends to Notion (`decideDestinations`, `source: "recovery"`). That is
+  the safe direction.
+- The Odoo lane's hold starts at most the timeout later. *My call:* checking before the enqueue is
+  simpler than checking during the hold. During the hold, a crash would need new recovery state to stop
+  a held Notion row from being promoted unchecked (`useMeetingLog.ts:251`).
+
+`decideDestinations` is unchanged: a ticked pick still gives `notionStatus: "held"`. Notion-only users
+are unaffected: they have no Outlook, and their meetings already go to Notion when auto-send is on.
+
+Accepted cost: an IC meeting that also sits on Kevin's Outlook calendar is never ticked automatically.
+He ticks it by hand.
+
+A meeting on both calendars still gets Outlook auto-select's Odoo targets, which are independent of
+Notion.
 
 ## 9. Checks before rollout
 
@@ -354,8 +394,11 @@ Unit tests (Vitest, `src/tests`; cargo tests in the new Rust module):
 - The prompt with and without attendees, and an injection inside a display name staying inside the
   data block.
 - The Attendees page block.
-- Kevin's tick: `one` ticks, `none` and `several` don't, a late result after a new conversation is
-  dropped.
+- Kevin's tick, check 1: Google `one` with Outlook absent or `none` ticks. Google `none` or
+  `several` doesn't. Outlook `one`, `several` or an error doesn't. A late result after a new
+  conversation is dropped.
+- Kevin's tick, check 2: an `auto` tick with an Outlook meeting overlapping the span → not sent to
+  Notion. Read error → not sent. Timeout → not sent. A `hand` tick → sent, with no Outlook read.
 - A Google failure or hang at capture start leaves recording untouched.
 
 Live checks: add to `.livecheck/`, skipping cleanly without credentials, as `notion-live.live.ts` does.
