@@ -12,6 +12,18 @@ export type GraphErrorCode =
   | "GRAPH_NETWORK"
   | "GRAPH_NO_KEYCHAIN";
 
+/** Every failure the Google calendar read can surface. Bare codes from Rust. */
+export type GoogleErrorCode =
+  | "GOOGLE_NOT_CONNECTED"
+  | "GOOGLE_CONSENT_REQUIRED"
+  | "GOOGLE_AUTH_CANCELLED"
+  | "GOOGLE_AUTH_EXPIRED"
+  | "GOOGLE_AUTH_REJECTED"
+  | "GOOGLE_BAD_RESPONSE"
+  | "GOOGLE_THROTTLED"
+  | "GOOGLE_NETWORK"
+  | "GOOGLE_NO_KEYCHAIN";
+
 /**
  * Graph puts rooms and equipment in the same `attendees[]` array as people,
  * distinguished only by `type: "resource"`. They are dropped before any rule
@@ -42,6 +54,8 @@ export interface CalendarParticipant {
    * says which side a participant came from.
    */
   isOrganizer: boolean;
+  /** Google's per-guest responseStatus; Graph leaves it null. */
+  response?: string | null;
 }
 
 /**
