@@ -375,7 +375,7 @@ the row's pick goes to `decideDestinations` as **false**. The events counted are
 `pickCurrentMeeting`'s filters: not cancelled, not all-day, not declined, not solo. The same happens
 if the read errors or doesn't answer within a short timeout (*my call:* 5 seconds). Check 2 catches
 what the window rule can't: one long row that runs from the IC call straight into a client call.
-- `isCandidate` (`current-meeting.ts:31-41`) bundles those filters with the now-relative window.
+- `isCandidate` (`current-meeting.ts:30-40`) bundles those filters with the now-relative window.
   Split the filters out so the span check reuses them without the window.
 - The span read reuses `graph_current_meetings` with the row's span as its window.
 - A `hand` tick skips both the window rule and check 2. Kevin chose it explicitly.
