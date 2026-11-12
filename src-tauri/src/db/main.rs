@@ -122,5 +122,13 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/notion-sends.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 18: one calendar snapshot per conversation, plus a
+        // per-send copy on notion_sends
+        Migration {
+            version: 18,
+            description: "create_calendar_snapshots",
+            sql: include_str!("migrations/calendar-snapshots.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

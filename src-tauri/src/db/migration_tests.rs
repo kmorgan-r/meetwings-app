@@ -110,6 +110,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn calendar_snapshots_migration_is_version_18_and_points_at_its_own_file() {
+        let m = migrations()
+            .into_iter()
+            .find(|m| m.description == "create_calendar_snapshots")
+            .expect("calendar snapshots migration must be registered");
+        assert_eq!(m.version, 18, "calendar snapshots migration must be version 18");
+        assert_eq!(
+            m.sql,
+            include_str!("migrations/calendar-snapshots.sql"),
+            "calendar snapshots migration must embed migrations/calendar-snapshots.sql"
+        );
+    }
+
     /// Same reasoning again. This one rebuilds a table migration 11 already
     /// created, so registering it at an ALREADY-APPLIED version would not
     /// merely collide on a checksum - the rebuild would never run at all on an
