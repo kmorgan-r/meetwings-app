@@ -124,7 +124,7 @@ function send(over: Partial<DbNotionSend> = {}): NotionItem {
     send: {
       id: "s1", conversation_id: "c1", status: "retry", span_start_at: AT, span_end_at: AT + 60_000,
       attempts: 1, summary_failures: 0, claimed_at: null, next_at: null, error_code: null,
-      practices_error_code: null, summary_json: null, create_started_at: null, page_id: null,
+      practices_error_code: null, summary_json: null, calendar_json: null, create_started_at: null, page_id: null,
       page_url: null, page_created_time: null, lost_to_url: null, body_done: 0,
       toggle_block_id: null, transcript_done: 0, practices_done: 0, created_at: AT, sent_at: null,
       ...over,

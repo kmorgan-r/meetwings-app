@@ -74,9 +74,14 @@ describe("calendar snapshot storage", () => {
   });
 
   it("a second save for the same conversation replaces it", async () => {
-    await saveCalendarSnapshot("c1", snap("e1"), NOW);
-    await saveCalendarSnapshot("c1", snap("e2"), NOW + 1);
+    await saveCalendarSnapshot("c1", snap("e1"), 1000);
+    await saveCalendarSnapshot("c1", snap("e2"), 2000);
     expect((await getCalendarSnapshot("c1"))?.key).toBe("e2");
+    const [row] = await rawSelect(
+      "SELECT updated_at FROM calendar_snapshots WHERE conversation_id = ?",
+      ["c1"]
+    );
+    expect(row.updated_at).toBe(2000);
     expect(await rawSelect("SELECT * FROM calendar_snapshots")).toHaveLength(1);
   });
 
