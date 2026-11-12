@@ -4,6 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fetchCurrentGoogleMeetings = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/calendar/fetch-google-meetings", () => ({ fetchCurrentGoogleMeetings }));
 
+const fetchCurrentMeetings = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/calendar/fetch-current-meetings", () => ({ fetchCurrentMeetings }));
+
 const saveCalendarSnapshot = vi.hoisted(() => vi.fn());
 const deleteCalendarSnapshot = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/database/calendar-snapshot.action", () => ({
@@ -22,6 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { useGoogleMeetingCapture } from "@/hooks/useGoogleMeetingCapture";
+import { OUTLOOK_CHECK_TIMEOUT_MS } from "@/lib/calendar/auto-notion";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import type { CalendarEvent } from "@/types";
 
@@ -64,10 +68,20 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function setup(id: string | null = null) {
-  return renderHook((p: { id: string | null }) => useGoogleMeetingCapture({ currentConversationId: p.id }), {
-    initialProps: { id },
-  });
+const autoTick = vi.fn();
+const autoUntick = vi.fn();
+const handTouchesRef = { current: 0 };
+
+function setup(id: string | null = null, tickEnabled = false) {
+  return renderHook(
+    (p: { id: string | null }) =>
+      useGoogleMeetingCapture({
+        currentConversationId: p.id,
+        tickEnabled,
+        notionPick: { autoTick, autoUntick, handTouchesRef },
+      }),
+    { initialProps: { id } }
+  );
 }
 
 async function dispatch(name = "meetingCaptureStarted") {
@@ -94,9 +108,15 @@ beforeEach(() => {
   deleteCalendarSnapshot.mockReset();
   deleteCalendarSnapshot.mockResolvedValue(undefined);
   fetchCurrentGoogleMeetings.mockReset();
+  fetchCurrentMeetings.mockReset();
+  autoTick.mockReset();
+  autoUntick.mockReset();
+  handTouchesRef.current = 0;
+  localStorage.clear();
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -283,5 +303,131 @@ describe("useGoogleMeetingCapture", () => {
     expect(saveCalendarSnapshot).not.toHaveBeenCalled();
     expect(deleteCalendarSnapshot).toHaveBeenCalledTimes(2);
     expect(deleteCalendarSnapshot).toHaveBeenCalledWith("c1");
+  });
+});
+
+describe("useGoogleMeetingCapture check 1 (Notion tick)", () => {
+  it("ticks on Google one with Outlook absent", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockResolvedValue({ kind: "absent" });
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    expect(autoTick).toHaveBeenCalledTimes(1);
+    expect(autoUntick).not.toHaveBeenCalled();
+  });
+
+  it("does not tick when Outlook has a meeting", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockResolvedValue(one("O"));
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads Outlook even when calendar auto-select is off", async () => {
+    localStorage.setItem("calendar_auto_select_enabled", "false");
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockResolvedValue({ kind: "absent" });
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    expect(fetchCurrentMeetings).toHaveBeenCalledTimes(1);
+  });
+
+  it("a late result after newConversationStarted neither ticks nor stores", async () => {
+    const g = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(g.promise);
+    fetchCurrentMeetings.mockResolvedValue({ kind: "absent" });
+    setup("c1", true);
+    await dispatch();
+    await dispatch("newConversationStarted");
+    await act(async () => {
+      g.resolve(one("A"));
+    });
+    await settle();
+    expect(saveCalendarSnapshot).not.toHaveBeenCalled();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).not.toHaveBeenCalled();
+  });
+
+  it("odooTargetsCleared drops a late tick but still stores the snapshot", async () => {
+    const o = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockReturnValueOnce(o.promise);
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    expect(savedKeys()).toEqual(["A"]);
+    await dispatch("odooTargetsCleared");
+    await act(async () => {
+      o.resolve({ kind: "absent" });
+    });
+    await settle();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).not.toHaveBeenCalled();
+    expect(savedKeys()).toEqual(["A"]);
+  });
+
+  it("a newer refusing read unticks an auto tick", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    fetchCurrentMeetings.mockResolvedValueOnce({ kind: "absent" });
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    expect(autoTick).toHaveBeenCalledTimes(1);
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("B"));
+    fetchCurrentMeetings.mockResolvedValueOnce(one("O"));
+    await dispatch();
+    await settle();
+    expect(autoUntick).toHaveBeenCalledTimes(1);
+    expect(autoTick).toHaveBeenCalledTimes(1);
+  });
+
+  it("tickEnabled false makes no Outlook read and never ticks", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    setup("c1", false);
+    await dispatch();
+    await settle();
+    expect(fetchCurrentMeetings).not.toHaveBeenCalled();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).not.toHaveBeenCalled();
+    expect(savedKeys()).toEqual(["A"]);
+  });
+
+  it("passes the touch count captured at the event", async () => {
+    const o = deferred<unknown>();
+    handTouchesRef.current = 3;
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockReturnValueOnce(o.promise);
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    handTouchesRef.current = 4;
+    await act(async () => {
+      o.resolve({ kind: "absent" });
+    });
+    await settle();
+    expect(autoTick).toHaveBeenCalledWith(3);
+  });
+
+  it("a hung Outlook read never holds up the snapshot", async () => {
+    vi.useFakeTimers();
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    fetchCurrentMeetings.mockReturnValue(new Promise(() => {}));
+    setup("c1", true);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(saveCalendarSnapshot).toHaveBeenCalledTimes(1);
+    expect(autoUntick).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(OUTLOOK_CHECK_TIMEOUT_MS);
+    });
+    expect(autoUntick).toHaveBeenCalledTimes(1);
+    expect(autoTick).not.toHaveBeenCalled();
   });
 });

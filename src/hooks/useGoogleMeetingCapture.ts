@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { buildSnapshot, type CalendarSnapshot } from "@/lib/calendar/calendar-snapshot";
+import {
+  OUTLOOK_CHECK_TIMEOUT_MS,
+  decideCheckOne,
+  withTimeout,
+} from "@/lib/calendar/auto-notion";
 import { pickCurrentMeeting } from "@/lib/calendar/current-meeting";
+import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
 import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
 import {
   deleteCalendarSnapshot,
   saveCalendarSnapshot,
 } from "@/lib/database/calendar-snapshot.action";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
+import type { UseNotionPickReturn } from "@/hooks/useNotionPick";
 
 export interface GoogleMeetingCaptureInputs {
   currentConversationId: string | null;
+  /** True when Notion is available to tick; false makes no Outlook read. */
+  tickEnabled: boolean;
+  notionPick: Pick<UseNotionPickReturn, "autoTick" | "autoUntick" | "handTouchesRef">;
 }
 
 type Pending = { kind: "save"; snapshot: CalendarSnapshot } | { kind: "delete" };
@@ -34,6 +44,8 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
   const readSeq = useRef(0);
   // Bumped by newConversationStarted only (not odooTargetsCleared, spec 8.3).
   const convGen = useRef(0);
+  // Bumped by newConversationStarted AND odooTargetsCleared: guards the tick.
+  const tickGen = useRef(0);
   const pending = useRef<Pending | null>(null);
   const chain = useRef<Promise<void>>(Promise.resolve());
 
@@ -60,10 +72,19 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
   useEffect(() => {
     const onNewConversation = () => {
       convGen.current += 1;
+      tickGen.current += 1;
       pending.current = null;
     };
+    // Drops a late tick but never the snapshot (spec 8.3).
+    const onTargetsCleared = () => {
+      tickGen.current += 1;
+    };
     window.addEventListener("newConversationStarted", onNewConversation);
-    return () => window.removeEventListener("newConversationStarted", onNewConversation);
+    window.addEventListener("odooTargetsCleared", onTargetsCleared);
+    return () => {
+      window.removeEventListener("newConversationStarted", onNewConversation);
+      window.removeEventListener("odooTargetsCleared", onTargetsCleared);
+    };
   }, []);
 
   useEffect(() => {
@@ -89,8 +110,19 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
     const run = async () => {
       const seq = ++readSeq.current;
       const gen = convGen.current;
+      // Captured before any await: the touch count at the event, and the
+      // tick generation.
+      const tick = tickGen.current;
+      const touches = latest.current.notionPick.handTouchesRef.current;
+      const tickEnabled = latest.current.tickEnabled;
       const now = Date.now();
-      const result = await fetchCurrentGoogleMeetings(now);
+      const g = fetchCurrentGoogleMeetings(now);
+      // Always read, whatever the auto-select setting. Never rejects, so it
+      // is safe to leave unawaited if the Google result is dropped.
+      const o = tickEnabled
+        ? withTimeout(fetchCurrentMeetings(), OUTLOOK_CHECK_TIMEOUT_MS)
+        : null;
+      const result = await g;
       if (seq !== readSeq.current || gen !== convGen.current) return;
       const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
       pending.current =
@@ -98,6 +130,13 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
           ? { kind: "save", snapshot: buildSnapshot(pick.event, result.ownAddress) }
           : { kind: "delete" };
       flush();
+      if (!o) return;
+      // The snapshot is already stored; only the tick waits on Outlook.
+      const outlook = await o;
+      if (seq !== readSeq.current || tick !== tickGen.current) return;
+      const { notionPick } = latest.current;
+      if (decideCheckOne(result, outlook, now) === "tick") notionPick.autoTick(touches);
+      else notionPick.autoUntick();
     };
     const onCaptureStarted = () => {
       run().catch(() => {});

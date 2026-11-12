@@ -103,7 +103,11 @@ export const Completion = ({
   });
 
   // One Google read at capture start, saved as the conversation's snapshot.
-  useGoogleMeetingCapture({ currentConversationId: completion.currentConversationId });
+  useGoogleMeetingCapture({
+    currentConversationId: completion.currentConversationId,
+    tickEnabled: notionAvailable,
+    notionPick,
+  });
 
   /**
    * MEMOIZED, not an inline literal at the call site.
