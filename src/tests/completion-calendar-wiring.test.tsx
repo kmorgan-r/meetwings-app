@@ -62,7 +62,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),
@@ -117,6 +117,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
       }),
       useCalendarProposal,
       useCalendarAutoSelect,
+      useGoogleMeetingCapture: vi.fn(),
       useMeetingLog: () => ({
         holding: false,
         onUndo: vi.fn(),

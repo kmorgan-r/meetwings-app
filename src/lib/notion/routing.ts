@@ -16,6 +16,10 @@ export interface SubTable {
   titleProp: string;
   dateProp: string;
   recordedByProp: string | null;
+  /** The optional "Calendar event" text column, when present and a text column. */
+  calendarEventProp: string | null;
+  /** Why calendarEventProp is null: no such column, or one of another type. */
+  calendarEventIssue: "missing" | "wrong-type" | null;
 }
 
 export interface Mapping {
@@ -44,6 +48,22 @@ const WEEKDAYS: Weekday[] = [
   "saturday",
   "sunday",
 ];
+
+export const CALENDAR_EVENT_COLUMN = "Calendar event";
+
+/** The first property named "calendar event" (any case): usable only as rich_text. */
+export function calendarEventColumn(properties: Record<string, NotionProperty>): {
+  prop: string | null;
+  issue: "missing" | "wrong-type" | null;
+} {
+  for (const [name, property] of Object.entries(properties)) {
+    if (name.toLowerCase() !== CALENDAR_EVENT_COLUMN.toLowerCase()) continue;
+    return property.type === "rich_text"
+      ? { prop: name, issue: null }
+      : { prop: null, issue: "wrong-type" };
+  }
+  return { prop: null, issue: "missing" };
+}
 
 /** Strict "HH:MM": two digits, 00-23 hours, 00-59 minutes. */
 const HH_MM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
@@ -95,12 +115,15 @@ export function describeSubTable(ds: {
   if (dateProp === null) dateProp = firstDate;
   if (titleProp === null || dateProp === null) return null;
 
+  const calendar = calendarEventColumn(ds.properties);
   return {
     dataSourceId: ds.id,
     name: ds.name,
     titleProp,
     dateProp,
     recordedByProp,
+    calendarEventProp: calendar.prop,
+    calendarEventIssue: calendar.issue,
   };
 }
 

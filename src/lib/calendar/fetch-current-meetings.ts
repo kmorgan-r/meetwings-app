@@ -15,18 +15,26 @@ export type FetchCurrentMeetingsResult =
 
 /** The calendar read both the proposal block and auto-select make. Never rejects. */
 export async function fetchCurrentMeetings(): Promise<FetchCurrentMeetingsResult> {
+  const now = Date.now();
+  return fetchMeetingsBetween(now - QUERY_WINDOW_MS, now + QUERY_WINDOW_MS);
+}
+
+/** The same read for an explicit window (check 2 reads a row's span). Never rejects. */
+export async function fetchMeetingsBetween(
+  startMs: number,
+  endMs: number
+): Promise<FetchCurrentMeetingsResult> {
   const config = await loadGraphConfigState();
   if (config.state === "absent") return { kind: "absent" };
   // Same code readStatus uses for the same condition: an invalid stored config
   // is a rejected authority, not a disconnected account.
   if (config.state !== "complete") return { kind: "error", code: "GRAPH_AUTH_REJECTED" };
-  const now = Date.now();
   try {
     const response = await invoke<CurrentMeetings>("graph_current_meetings", {
       clientId: config.config.clientId,
       authority: config.config.authority,
-      startIso: new Date(now - QUERY_WINDOW_MS).toISOString(),
-      endIso: new Date(now + QUERY_WINDOW_MS).toISOString(),
+      startIso: new Date(startMs).toISOString(),
+      endIso: new Date(endMs).toISOString(),
     });
     return { kind: "ok", events: response.events, ownAddress: response.ownAddress };
   } catch (err) {

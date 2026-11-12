@@ -92,6 +92,7 @@ export async function checkNotionSetup(token: string, cfg: NotionConfig): Promis
 
   let ownerUserId: string | null;
   let mapping: ReturnType<typeof buildMapping>;
+  let subTables: SubTable[];
   try {
     ownerUserId = (await client.me()).ownerUserId;
   } catch (thrown) {
@@ -101,13 +102,25 @@ export async function checkNotionSetup(token: string, cfg: NotionConfig): Promis
   const meetingsDbId = parseNotionDatabaseId(cfg.meetingsDbUrl);
   if (meetingsDbId === null) return { ok: false, message: MEETINGS_UNSEEN };
   try {
-    mapping = buildMapping(await readSubTables(client, meetingsDbId));
+    subTables = await readSubTables(client, meetingsDbId);
+    mapping = buildMapping(subTables);
   } catch (thrown) {
     return { ok: false, message: messageFor(thrown, MEETINGS_UNSEEN) };
   }
   if (mapping === null) return { ok: false, message: MEETINGS_UNSEEN };
 
   const warnings: string[] = [];
+  for (const st of subTables) {
+    if (st.calendarEventIssue === "missing") {
+      warnings.push(
+        `"${st.name}" has no "Calendar event" text column, so duplicate recordings there are matched by time and AI only.`,
+      );
+    } else if (st.calendarEventIssue === "wrong-type") {
+      warnings.push(
+        `"${st.name}" has a "Calendar event" column that isn't a text column, so it is ignored.`,
+      );
+    }
+  }
   if (cfg.knowledgeDbUrl.trim() === "") {
     warnings.push("No Team Knowledge link: practices will only appear on the meeting page.");
   } else {

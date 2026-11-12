@@ -9,6 +9,7 @@ import {
   listDueSends,
   listWaitingRows,
 } from "@/lib/database/notion-queue.action";
+import { snapshotJsonForSpan } from "@/lib/database/calendar-snapshot.action";
 import { promoteStaleHeldNotionRows } from "@/lib/database/meeting-log.action";
 import type { ProviderConfig } from "@/lib/functions/summary-provider";
 import { HOLD_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
@@ -48,6 +49,10 @@ async function tick(deps: SchedulerDeps): Promise<void> {
         ? rowEnd
         : Math.max((await lastSpokenLineAt(conv)) ?? 0, deps.liveLastLineAt(conv) ?? 0, rowEnd);
     if (!isQuiet(last, now)) continue;
+    const calendarJson =
+      conv === null
+        ? null
+        : await snapshotJsonForSpan(conv, { start: first.transcript_start_at, end: rowEnd });
     await createSendAndLink(
       {
         id: first.id,
@@ -55,6 +60,7 @@ async function tick(deps: SchedulerDeps): Promise<void> {
         spanStartAt: first.transcript_start_at,
         spanEndAt: rowEnd,
         createdAt: now,
+        calendarJson,
       },
       set.map((r) => r.id),
     );

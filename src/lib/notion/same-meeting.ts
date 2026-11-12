@@ -28,6 +28,8 @@ export interface Candidate {
   end: number;
   boldTitle: string;
   headings: string[];
+  /** The page's "Calendar event" key, null when the column is absent or empty. */
+  calendarKey: string | null;
 }
 
 /**
@@ -101,16 +103,55 @@ function boldTitleOf(children: NotionBlock[]): string {
   return "";
 }
 
-/** Every heading_3's text except "Action Items" - the section headings of the page. */
+/**
+ * Every heading_3's text except "Action Items" and "Attendees" - the section
+ * headings of the page. The Attendees heading is ours, not a section: the
+ * summary side has no Attendees section, so it is skipped here to keep both
+ * sides comparable.
+ */
 function headingsOf(children: NotionBlock[]): string[] {
   const out: string[] = [];
   for (const block of children) {
     if (block.type === "heading_3") {
       const text = blockPlainText(block);
-      if (text !== "Action Items") out.push(text);
+      if (text !== "Action Items" && text !== "Attendees") out.push(text);
     }
   }
   return out;
+}
+
+/**
+ * The page's date range in ms; null for an all-day value, a null or non-string
+ * end, or a value that does not parse - none of those is our meeting time range.
+ */
+export function pageRange(
+  st: SubTable,
+  page: NotionPage,
+): { start: number; end: number } | null {
+  const property = page.properties?.[st.dateProp];
+  const date = (property as { date?: { start?: unknown; end?: unknown } } | undefined)?.date;
+  const start = date?.start;
+  const end = date?.end;
+  if (typeof start !== "string" || !start.includes("T")) return null;
+  if (typeof end !== "string") return null;
+  const startMs = Date.parse(start);
+  const endMs = Date.parse(end);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+  return { start: startMs, end: endMs };
+}
+
+/** The page's "Calendar event" text, joined; null without the column or when empty. */
+function calendarKeyOf(st: SubTable, page: NotionPage): string | null {
+  if (st.calendarEventProp === null) return null;
+  const property = page.properties?.[st.calendarEventProp];
+  const items = (property as { rich_text?: unknown } | undefined)?.rich_text;
+  if (!Array.isArray(items)) return null;
+  let text = "";
+  for (const item of items as { plain_text?: unknown; text?: { content?: unknown } }[]) {
+    if (typeof item.plain_text === "string") text += item.plain_text;
+    else if (typeof item.text?.content === "string") text += item.text.content;
+  }
+  return text === "" ? null : text;
 }
 
 /** Reads one page into a Candidate; null when the page cannot count for this meeting. */
@@ -121,17 +162,9 @@ async function readCandidate(
   startAt: number,
   endAt: number,
 ): Promise<Candidate | null> {
-  const property = page.properties?.[st.dateProp];
-  const date = (property as { date?: { start?: unknown; end?: unknown } } | undefined)?.date;
-  const start = date?.start;
-  const end = date?.end;
-  // An all-day value ("2026-11-09") or a null end is a date, not our meeting
-  // time range; a value that does not parse is unusable. None count.
-  if (typeof start !== "string" || !start.includes("T")) return null;
-  if (typeof end !== "string") return null;
-  const startMs = Date.parse(start);
-  const endMs = Date.parse(end);
-  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+  const range = pageRange(st, page);
+  if (range === null) return null;
+  const { start: startMs, end: endMs } = range;
   if (!overlapEnough({ start: startMs, end: endMs }, { start: startAt, end: endAt })) {
     return null;
   }
@@ -148,6 +181,7 @@ async function readCandidate(
     end: endMs,
     boldTitle: boldTitleOf(children),
     headings: headingsOf(children),
+    calendarKey: calendarKeyOf(st, page),
   };
 }
 
@@ -184,11 +218,45 @@ export async function readCandidates(
       },
     });
     for (const page of pages) {
+      // A trashed page holds no meeting: on the key path it would settle a send with no judge.
+      if (page.in_trash === true || page.archived === true) continue;
       const candidate = await readCandidate(client, page, st, startAt, endAt);
       if (candidate !== null) candidates.push(candidate);
     }
   }
   return candidates;
+}
+
+/**
+ * The page that already holds this calendar meeting, found by its key alone:
+ * each sub-table with a "Calendar event" column is queried for the key, and
+ * the first page that is not trashed, reads back exactly this key and whose
+ * date range overlaps the span enough wins. No page body is read. The key
+ * alone is never enough: the range must agree too.
+ */
+export async function findKeyMatch(
+  client: NotionClient,
+  subTables: SubTable[],
+  key: string,
+  span: { start: number; end: number },
+): Promise<{ pageId: string; url: string } | null> {
+  const seen = new Set<string>();
+  for (const st of subTables) {
+    if (st.calendarEventProp === null || seen.has(st.dataSourceId)) continue;
+    seen.add(st.dataSourceId);
+    const pages = await client.queryAll(st.dataSourceId, {
+      filter: { property: st.calendarEventProp, rich_text: { equals: key } },
+    });
+    for (const page of pages) {
+      if (page.in_trash === true || page.archived === true) continue;
+      if (calendarKeyOf(st, page) !== key) continue;
+      const range = pageRange(st, page);
+      if (range !== null && overlapEnough(range, span)) {
+        return { pageId: page.id ?? "", url: page.url ?? "" };
+      }
+    }
+  }
+  return null;
 }
 
 /**

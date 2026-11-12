@@ -132,6 +132,7 @@ const hooksBarrelStub = async (
       onRetry: vi.fn(),
     }),
     useCalendarAutoSelect: vi.fn(),
+    useGoogleMeetingCapture: vi.fn(),
     useMeetingLog: vi.fn(() => ({
       holding: false,
       onUndo: vi.fn(),

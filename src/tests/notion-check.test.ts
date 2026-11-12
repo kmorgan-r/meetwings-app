@@ -30,10 +30,11 @@ const cfg = (over: Partial<NotionConfig> = {}): NotionConfig => ({
   ...over,
 });
 
-const meetingsProps = {
+const bareProps = {
   Name: { type: "title" },
   Date: { type: "date" },
 };
+const meetingsProps = { ...bareProps, "Calendar event": { type: "rich_text" } };
 const knowledgeProps = (over: Record<string, unknown> = {}) => ({
   Rule: { type: "title" },
   Status: { type: "status", status: { options: [{ name: "Proposed" }, { name: "Done" }] } },
@@ -90,6 +91,49 @@ describe("checkNotionSetup", () => {
     });
     expect(h.arm).toHaveBeenCalledWith(["secret-token"]);
     expect(h.requeueAuthFailures).toHaveBeenCalledTimes(1);
+  });
+
+  it("a missing Calendar event column is a warning, not a failure", async () => {
+    wire({
+      meetings: [
+        { id: "ds-mon", name: "Monday Meetings", properties: bareProps },
+        { id: "ds-other", name: "Other Meetings", properties: bareProps },
+      ],
+    });
+    const result = await checkNotionSetup("t", cfg());
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.warnings).toEqual([
+      `"Monday Meetings" has no "Calendar event" text column, so duplicate recordings there are matched by time and AI only.`,
+      `"Other Meetings" has no "Calendar event" text column, so duplicate recordings there are matched by time and AI only.`,
+    ]);
+  });
+
+  it("a non-text Calendar event column is a warning, not a failure", async () => {
+    wire({
+      meetings: [
+        { id: "ds-mon", name: "Monday Meetings", properties: { ...bareProps, "Calendar event": { type: "url" } } },
+        { id: "ds-other", name: "Other Meetings", properties: meetingsProps },
+      ],
+    });
+    const result = await checkNotionSetup("t", cfg());
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.warnings).toEqual([
+      `"Monday Meetings" has a "Calendar event" column that isn't a text column, so it is ignored.`,
+    ]);
+  });
+
+  it("warns for a sub-table the mapping does not place", async () => {
+    wire({
+      meetings: [
+        { id: "ds-mon", name: "Monday Meetings", properties: meetingsProps },
+        { id: "ds-mon2", name: "Monday Archive", properties: bareProps },
+        { id: "ds-other", name: "Other Meetings", properties: meetingsProps },
+      ],
+    });
+    const result = await checkNotionSetup("t", cfg());
+    expect(result.ok && result.warnings).toEqual([
+      `"Monday Archive" has no "Calendar event" text column, so duplicate recordings there are matched by time and AI only.`,
+    ]);
   });
 
   it("uses the typed name over the Notion name, and falls back to You", async () => {

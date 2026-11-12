@@ -119,7 +119,7 @@ describe("app page mounts the detection hook", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: {} }),
       useSetupStatus: () => ({
         isComplete: true,
@@ -164,7 +164,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD,
@@ -229,6 +229,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       // Returns the RENDER PROPS shape, not a bare vi.fn(). <Completion />
       // destructures holding/onUndo/undoBlockedMessage, so an undefined return
       // throws before any assertion - byte-for-byte the failure slice 1 hit with
@@ -322,11 +323,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
     // same reason F34/F34b exist for useMeetingAutoRecord.
     vi.resetModules();
     const systemAudio = { capturing: false };
-    const useMeetingLog = vi.fn(() => ({
-      holding: false,
-      onUndo: vi.fn(),
-      undoBlockedMessage: null,
-    }));
+    const useMeetingLog = vi.fn(
+      (_options: Parameters<typeof import("@/hooks/useMeetingLog").useMeetingLog>[0]) => ({
+        holding: false,
+        onUndo: vi.fn(),
+        undoBlockedMessage: null,
+      })
+    );
 
     // The overlay's Notion/Odoo setup reads; null = still loading = today's picker.
     vi.doMock("@/hooks/useNotionConfigured", () => ({
@@ -334,7 +337,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),
@@ -391,6 +394,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       useMeetingLog,
     }));
     vi.doMock("@/contexts", () => ({
@@ -434,6 +438,8 @@ describe("<Completion /> mounts the auto-record hook", () => {
     expect(useMeetingLog).toHaveBeenCalledTimes(1);
     expect(useMeetingLog.mock.calls[0][0]).toMatchObject({
       targetRef: expect.any(Object),
+      // Task 17: who set the Notion tick, so an auto tick gets check 2.
+      notionSourceRef: { current: "hand" },
       meetingTranscript: [],
       meetingAssistMode: expect.any(Boolean),
     });
@@ -486,7 +492,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useCompletion: () => ({
         enableVAD: false,
         setEnableVAD: vi.fn(),
@@ -545,6 +551,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         onRetry: vi.fn(),
       }),
       useCalendarAutoSelect: vi.fn(),
+      useGoogleMeetingCapture: vi.fn(),
       // holding true from mount, so the picker-close effect has work to do
       // (and something to race the shouldUseMeetwingsAPI probe against) on
       // the very first commit.
@@ -610,7 +617,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useOdooSetupState: () => null,
     }));
     vi.doMock("@/hooks", () => ({
-      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: vi.fn(), clear: vi.fn() }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
       useSetupStatus: () => ({
         isComplete: true,

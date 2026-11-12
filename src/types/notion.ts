@@ -25,6 +25,7 @@ export interface DbNotionSend {
   error_code: string | null;
   practices_error_code: string | null;
   summary_json: string | null;
+  calendar_json: string | null;
   create_started_at: number | null;
   page_id: string | null;
   page_url: string | null;

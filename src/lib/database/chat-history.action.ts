@@ -710,6 +710,9 @@ export async function deleteConversation(id: string): Promise<boolean> {
   const db = await getDatabase();
 
   try {
+    await db.execute("DELETE FROM calendar_snapshots WHERE conversation_id = ?", [
+      id,
+    ]);
     const result = await db.execute("DELETE FROM conversations WHERE id = ?", [
       id,
     ]);
@@ -728,6 +731,7 @@ export async function deleteAllConversations(): Promise<void> {
   const db = await getDatabase();
 
   try {
+    await db.execute("DELETE FROM calendar_snapshots");
     // Delete in correct order (messages first due to foreign key)
     await db.execute("DELETE FROM messages");
     await db.execute("DELETE FROM conversations");

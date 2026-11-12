@@ -61,6 +61,9 @@ import {
   type SchedulerDeps,
 } from "@/lib/notion/scheduler";
 import { outcomeFor } from "@/lib/notion/errors";
+import { deleteConversation } from "@/lib/database/chat-history.action";
+import { saveCalendarSnapshot } from "@/lib/database/calendar-snapshot.action";
+import { parseSnapshot, type CalendarSnapshot } from "@/lib/calendar/calendar-snapshot";
 import { MIGRATIONS, applyMigration14 } from "./helpers/migration-14";
 
 const GAP = MEETING_CONVERSATION_GAP_MS;
@@ -132,6 +135,7 @@ beforeEach(async () => {
   }
   await applyMigration14(db);
   db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "calendar-snapshots.sql"), "utf8"));
   m.execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   m.select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
 });
@@ -310,6 +314,74 @@ describe("runNotionTick", () => {
     expect(await sends()).toHaveLength(1);
     expect(s).toMatchObject({ id: "pre", span_start_at: T0, span_end_at: T0 + 20 * MIN });
     expect((await rowOf("rec")).notion_send_id).toBe("pre");
+  });
+});
+
+describe("calendar snapshot copy at send creation", () => {
+  const event = (startMs: number, endMs: number): CalendarSnapshot => ({
+    key: "ev1", subject: "Sync", startMs, endMs, ownAddress: "me@example.org",
+    participants: [{ address: "me@example.org", name: "Me" }, { address: "you@example.org", name: null }],
+  });
+  const calJson = async (id: string) => (await rawSelect("SELECT calendar_json FROM notion_sends WHERE id=?", [id]))[0].calendar_json as string | null;
+
+  it("a send inside the saved event carries a copy of the snapshot", async () => {
+    const snap = event(T0, T0 + 10 * MIN);
+    seedRow({ id: "r1" });
+    await saveCalendarSnapshot("c1", snap, T0);
+    await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
+    const json = await calJson("r1");
+    expect(json).not.toBeNull();
+    expect(parseSnapshot(json)).toEqual(snap);
+  });
+
+  it("a joined send 10:00-11:30 over a 10:00-10:30 event carries none", async () => {
+    seedRow({ id: "r1", transcript_start_at: T0, transcript_end_at: T0 + 30 * MIN });
+    seedRow({ id: "r2", transcript_start_at: T0 + 40 * MIN, transcript_end_at: T0 + 90 * MIN });
+    await saveCalendarSnapshot("c1", event(T0, T0 + 30 * MIN), T0);
+    await runNotionTick(deps(T0 + 90 * MIN + 2 * GAP));
+    expect(await sends()).toHaveLength(1);
+    expect(await calJson("r1")).toBeNull();
+  });
+
+  it("a joined send's snapshot span starts at its first row", async () => {
+    // Span T0..T0+50 overlaps the T0+40..T0+100 event by 10 of 50 min: not inside.
+    // From the last row's start (T0+40..T0+50) it would be wholly inside.
+    seedRow({ id: "r1", transcript_start_at: T0, transcript_end_at: T0 + 30 * MIN });
+    seedRow({ id: "r2", transcript_start_at: T0 + 40 * MIN, transcript_end_at: T0 + 50 * MIN });
+    await saveCalendarSnapshot("c1", event(T0 + 40 * MIN, T0 + 100 * MIN), T0);
+    await runNotionTick(deps(T0 + 50 * MIN + 2 * GAP));
+    expect(await sends()).toHaveLength(1);
+    expect((await rowOf("r2")).notion_send_id).toBe("r1");
+    expect(await calJson("r1")).toBeNull();
+  });
+
+  it("a conversation's second meeting gets no snapshot", async () => {
+    seedRow({ id: "r1", transcript_start_at: T0, transcript_end_at: T0 + 10 * MIN });
+    seedRow({ id: "r2", transcript_start_at: T0 + 10 * MIN + 2 * GAP, transcript_end_at: T0 + 20 * MIN + 2 * GAP });
+    await saveCalendarSnapshot("c1", event(T0, T0 + 10 * MIN), T0);
+    await runNotionTick(deps(T0 + 20 * MIN + 4 * GAP));
+    expect(await sends()).toHaveLength(2);
+    expect(parseSnapshot(await calJson("r1"))).not.toBeNull();
+    expect(await calJson("r2")).toBeNull();
+  });
+
+  it("deleting the conversation after the send is created leaves the copy", async () => {
+    seedRow({ id: "r1" });
+    await saveCalendarSnapshot("c1", event(T0, T0 + 10 * MIN), T0);
+    await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
+    const before = await calJson("r1");
+    expect(before).not.toBeNull();
+    await deleteConversation("c1");
+    expect(await rawSelect("SELECT 1 FROM calendar_snapshots WHERE conversation_id='c1'")).toEqual([]);
+    expect(await calJson("r1")).toBe(before);
+  });
+
+  it("a null conversation id never reads a snapshot", async () => {
+    seedRow({ id: "r1", conversation_id: null });
+    await runNotionTick(deps(T0 + 10 * MIN + 2 * GAP));
+    expect(await sends()).toHaveLength(1);
+    expect(await calJson("r1")).toBeNull();
+    expect(m.select.mock.calls.some((c) => String(c[0]).includes("calendar_snapshots"))).toBe(false);
   });
 });
 

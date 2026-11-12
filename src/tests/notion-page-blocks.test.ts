@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { AttendeeGroups } from "@/lib/calendar/calendar-snapshot";
 import type { NotionBlockInput } from "@/lib/notion/client";
 import {
   batchBlocks,
@@ -163,6 +164,140 @@ describe("buildPageBlocks", () => {
     expect(types[types.length - 1]).toBe("toggle");
     expect(types).not.toContain("callout");
     expect(types).not.toContain("to_do");
+  });
+});
+
+describe("buildPageBlocks with attendees", () => {
+  const GROUPS: AttendeeGroups = {
+    teamLabel: "Team (example.org)",
+    team: ["Alex", "Sam"],
+    external: [{ domain: "acme.com", people: ["Bea", "Carl"] }],
+    otherGuests: ["Dana (gmail)"],
+    omitted: 2,
+  };
+
+  const textOf = (block: NotionBlockInput): string => richContent(block).join("");
+
+  /** The rich-text items of a paragraph that carry a bold annotation. */
+  const boldContents = (block: NotionBlockInput): string[] => {
+    const payload = block.paragraph as
+      | { rich_text?: { annotations?: { bold?: boolean } }[] }
+      | undefined;
+    return (payload?.rich_text ?? [])
+      .filter((item) => item.annotations?.bold === true)
+      .map((item) => (item as { text?: { content?: string } }).text?.content ?? "");
+  };
+
+  const attendeeSection = (blocks: NotionBlockInput[]): NotionBlockInput[] => {
+    const attendeesAt = blocks.findIndex(
+      (b) => b.type === "heading_3" && textOf(b) === "Attendees",
+    );
+    const calloutAt = blocks.findIndex((b) => b.type === "callout");
+    return blocks.slice(attendeesAt + 1, calloutAt);
+  };
+
+  it("the Attendees block sits between the bold title and the practices callout", () => {
+    const blocks = buildPageBlocks(SUMMARY, GROUPS);
+    const titleAt = blocks.findIndex(
+      (b) => b.type === "paragraph" && textOf(b) === "Weekly sync",
+    );
+    expect(blocks[titleAt].paragraph).toEqual({
+      rich_text: [
+        { type: "text", text: { content: "Weekly sync" }, annotations: { bold: true } },
+      ],
+    });
+    const attendeesAt = titleAt + 1;
+    expect(blocks[attendeesAt].type).toBe("heading_3");
+    expect(textOf(blocks[attendeesAt])).toBe("Attendees");
+    expect(textOf(blocks[attendeesAt + 1])).toBe("From the calendar invite");
+    const calloutAt = blocks.findIndex((b) => b.type === "callout");
+    expect(calloutAt).toBeGreaterThan(attendeesAt);
+    // The whole inserted section, between the "From the calendar invite" line
+    // and the practices callout: one bold label paragraph then its bullets,
+    // per group, in the order team, external domains, Other guests.
+    expect(blocks.slice(attendeesAt, calloutAt).map((b) => b.type)).toEqual([
+      "heading_3",
+      "paragraph",
+      "paragraph",
+      "bulleted_list_item",
+      "bulleted_list_item",
+      "paragraph",
+      "bulleted_list_item",
+      "bulleted_list_item",
+      "paragraph",
+      "bulleted_list_item",
+      "paragraph",
+    ]);
+    expect(blocks.slice(attendeesAt, calloutAt).map(textOf)).toEqual([
+      "Attendees",
+      "From the calendar invite",
+      "Team (example.org)",
+      "Alex",
+      "Sam",
+      "acme.com",
+      "Bea",
+      "Carl",
+      "Other guests",
+      "Dana (gmail)",
+      "and 2 more",
+    ]);
+  });
+
+  it("group labels are bold paragraphs, not headings, and empty groups are skipped", () => {
+    const blocks = buildPageBlocks(SUMMARY, {
+      teamLabel: "Team",
+      team: [],
+      external: [{ domain: "acme.com", people: ["Bea", "Carl"] }],
+      otherGuests: [],
+      omitted: 0,
+    });
+    const section = attendeeSection(blocks);
+    expect(section.map((b) => b.type)).toEqual([
+      "paragraph",
+      "paragraph",
+      "bulleted_list_item",
+      "bulleted_list_item",
+    ]);
+    expect(section.map(textOf)).toEqual(["From the calendar invite", "acme.com", "Bea", "Carl"]);
+    // Exactly one bold label paragraph - "acme.com".
+    const labels = section
+      .filter((b) => b.type === "paragraph")
+      .filter((b) => boldContents(b).length > 0)
+      .map(textOf);
+    expect(labels).toEqual(["acme.com"]);
+    const label = section[1].paragraph as {
+      rich_text: { annotations?: { bold?: boolean } }[];
+    };
+    expect(label.rich_text[0].annotations?.bold).toBe(true);
+    // No "Team" label for the empty team, no "Other guests" label.
+    expect(section.map(textOf)).not.toContain("Team");
+    expect(section.map(textOf)).not.toContain("Other guests");
+    // Labels are paragraphs, not headings: the block adds no heading_3 other
+    // than "Attendees" itself.
+    const headings = blocks.filter((b) => b.type === "heading_3").map(textOf);
+    for (const heading of headings) {
+      expect(["Attendees", "Action Items", "Launch", "Pricing"]).toContain(heading);
+    }
+  });
+
+  it("an omitted count adds one \"and N more\" line", () => {
+    const blocks = buildPageBlocks(SUMMARY, {
+      teamLabel: "Team (example.org)",
+      team: ["Alex"],
+      external: [],
+      otherGuests: [],
+      omitted: 3,
+    });
+    const andMore = blocks.filter(
+      (b) => b.type === "paragraph" && textOf(b) === "and 3 more",
+    );
+    expect(andMore).toHaveLength(1);
+    // A plain paragraph: its single rich-text item is not bold.
+    const payload = andMore[0].paragraph as {
+      rich_text: { annotations?: { bold?: boolean } }[];
+    };
+    expect(payload.rich_text).toHaveLength(1);
+    expect(payload.rich_text[0].annotations?.bold ?? false).toBe(false);
   });
 });
 
@@ -336,6 +471,8 @@ const SUB_TABLE: SubTable = {
   titleProp: "Name",
   dateProp: "Meeting Date",
   recordedByProp: "Recorded by",
+  calendarEventProp: null,
+  calendarEventIssue: null,
 };
 
 describe("pageProperties", () => {
@@ -375,5 +512,20 @@ describe("pageProperties", () => {
     const noProp: SubTable = { ...SUB_TABLE, recordedByProp: null };
     const withOwner = pageProperties({ subTable: noProp, title: "T" }, startAt, endAt, "user-owner-1");
     expect(Object.keys(withOwner)).toEqual(["Name", "Meeting Date"]);
+  });
+
+  it("pageProperties writes the key only where the column exists", () => {
+    const withCol: SubTable = { ...SUB_TABLE, calendarEventProp: "Calendar event" };
+    const r = { subTable: withCol, title: "T" };
+    const written = pageProperties(r, startAt, endAt, "user-owner-1", "evt-key-1");
+    expect(written["Calendar event"]).toEqual({
+      rich_text: [{ type: "text", text: { content: "evt-key-1" } }],
+    });
+    const today = pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, "user-owner-1");
+    expect(
+      pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, "user-owner-1", "evt-key-1"),
+    ).toEqual(today);
+    expect(pageProperties(r, startAt, endAt, "user-owner-1", null)).toEqual(today);
+    expect(pageProperties(r, startAt, endAt, "user-owner-1")).toEqual(today);
   });
 });

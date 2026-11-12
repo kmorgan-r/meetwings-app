@@ -3,6 +3,7 @@ import {
   useCalendarProposal,
   useCalendarAutoSelect,
   useCompletion,
+  useGoogleMeetingCapture,
   useMeetingAutoRecord,
   useMeetingLog,
   useNotionPick,
@@ -101,6 +102,13 @@ export const Completion = ({
     onCreateContact: odoo.onCreateContact,
   });
 
+  // One Google read at capture start, saved as the conversation's snapshot.
+  useGoogleMeetingCapture({
+    currentConversationId: completion.currentConversationId,
+    tickEnabled: notionAvailable,
+    notionPick,
+  });
+
   /**
    * MEMOIZED, not an inline literal at the call site.
    *
@@ -173,6 +181,7 @@ export const Completion = ({
     // ref - see useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
     targetRef: odoo.targetsRef,
     notionPickedRef: notionPick.pickedRef,
+    notionSourceRef: notionPick.sourceRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     meetingAssistMode: completion.meetingAssistMode,

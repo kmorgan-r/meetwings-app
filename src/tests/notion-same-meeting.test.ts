@@ -30,6 +30,7 @@ import type { NotionSummary } from "@/lib/notion/summarize";
 import {
   SAME_MEETING_PROMPT,
   SAME_MEETING_TIMEOUT_MS,
+  findKeyMatch,
   isOwnPage,
   overlapEnough,
   pickWinner,
@@ -37,6 +38,8 @@ import {
   sameMeeting,
 } from "@/lib/notion/same-meeting";
 import type { Candidate } from "@/lib/notion/same-meeting";
+import { buildPageBlocks } from "@/lib/notion/page-blocks";
+import type { AttendeeGroups } from "@/lib/calendar/calendar-snapshot";
 
 // Fake values only - never a real Notion id, email or token.
 const START = Date.UTC(2026, 10, 9, 9, 0); // 2026-11-09 09:00Z
@@ -54,13 +57,20 @@ function subTable(dataSourceId: string, dateProp = "Meeting Date"): SubTable {
     titleProp: "Name",
     dateProp,
     recordedByProp: "Recorded by",
+    calendarEventProp: "Calendar event",
+    calendarEventIssue: null,
   };
 }
 
 function page(
   pageId: string,
   date: { start: string; end: string | number | null },
-  extra: { createdTime?: string; createdById?: string; recordedByIds?: string[] } = {},
+  extra: {
+    createdTime?: string;
+    createdById?: string;
+    recordedByIds?: string[];
+    calendarRichText?: unknown[];
+  } = {},
 ): NotionPage {
   const properties: Record<string, unknown> = {
     "Meeting Date": { type: "date", date },
@@ -70,6 +80,9 @@ function page(
       type: "people",
       people: extra.recordedByIds.map((id) => ({ id })),
     };
+  }
+  if (extra.calendarRichText !== undefined) {
+    properties["Calendar event"] = { type: "rich_text", rich_text: extra.calendarRichText };
   }
   fakeCounter += 1;
   return {
@@ -197,6 +210,7 @@ describe("readCandidates", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: expect.any(String),
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "Weekly sync",
@@ -288,6 +302,20 @@ describe("readCandidates", () => {
     expect(queries).toHaveLength(1);
   });
 
+  it("readCandidates skips in_trash and archived pages", async () => {
+    const { client, listChildrenCalls } = fakeNotion({
+      pages: {
+        "ds-a": [
+          { ...page("fake-page-trashed", { start: ISO_START, end: ISO_END }), in_trash: true },
+          { ...page("fake-page-archived", { start: ISO_START, end: ISO_END }), archived: true },
+        ],
+      },
+      bodies: { "fake-page-trashed": NOTES_BODY, "fake-page-archived": NOTES_BODY },
+    });
+    expect(await readCandidates(client, [subTable("ds-a")], START, END)).toEqual([]);
+    expect(listChildrenCalls).toEqual([]);
+  });
+
   it("recordedByIds come from the sub-table's Recorded by property when set", async () => {
     const { client } = fakeNotion({
       pages: {
@@ -301,6 +329,33 @@ describe("readCandidates", () => {
     });
     const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
     expect(candidates[0].recordedByIds).toEqual(["fake-owned-1", "fake-peer-9"]);
+  });
+
+  it("readCandidate reads the page's calendar key; empty or no column gives null", async () => {
+    const body = { "fake-page-7": NOTES_BODY, "fake-page-8": NOTES_BODY, "fake-page-9": NOTES_BODY };
+    const range = { start: ISO_START, end: ISO_END };
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          page("fake-page-7", range, {
+            calendarRichText: [{ plain_text: "evt-" }, { text: { content: "key-1" } }],
+          }),
+          page("fake-page-8", range, { calendarRichText: [] }),
+          page("fake-page-9", range),
+        ],
+      },
+      bodies: body,
+    });
+    const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
+    expect(candidates.map((c) => c.calendarKey)).toEqual(["evt-key-1", null, null]);
+
+    const noCol = fakeNotion({
+      pages: { "ds-b": [page("fake-page-7", range, { calendarRichText: [{ plain_text: "evt-key-1" }] })] },
+      bodies: body,
+    });
+    const st = { ...subTable("ds-b"), calendarEventProp: null };
+    const other = await readCandidates(noCol.client, [st], START, END);
+    expect(other[0].calendarKey).toBeNull();
   });
 
   it("a first paragraph after the Meeting Notes heading that is not all bold → boldTitle \"\"", async () => {
@@ -343,6 +398,7 @@ describe("sameMeeting", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: null,
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "Weekly sync",
@@ -547,6 +603,7 @@ describe("isOwnPage", () => {
       createdTime: "2026-11-09T09:10:00.000Z",
       createdById: null,
       recordedByIds: [],
+      calendarKey: null,
       start: START,
       end: END,
       boldTitle: "T",
@@ -569,5 +626,109 @@ describe("isOwnPage", () => {
     const noOwner = { id: "fake-bot-1", ownerUserId: null };
     expect(isOwnPage(candidateOf({ createdById: "fake-owned-1" }), noOwner)).toBe(false);
     expect(isOwnPage(candidateOf({ createdById: null, recordedByIds: ["fake-owned-1"] }), noOwner)).toBe(false);
+  });
+});
+
+describe("findKeyMatch", () => {
+  const KEY = "fake-ical-uid-1|2026-11-09T09:00:00.000Z";
+  const SPAN = { start: START, end: END };
+  const range = { start: ISO_START, end: ISO_END };
+  const keyed = (pageId: string, key = KEY, date: { start: string; end: string } = range) =>
+    page(pageId, date, { calendarRichText: [{ plain_text: key }] });
+
+  it("a hit: the key query on each sub-table's column, the first matching page, no page body read", async () => {
+    const { client, queries, listChildrenCalls } = fakeNotion({
+      pages: { "ds-a": [keyed("fake-page-1"), keyed("fake-page-2")] },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toEqual({
+      pageId: "fake-page-1",
+      url: "https://notion.invalid/fake-page-1",
+    });
+    expect(queries).toEqual([
+      { dataSourceId: "ds-a", body: { filter: { property: "Calendar event", rich_text: { equals: KEY } } } },
+    ]);
+    expect(listChildrenCalls).toEqual([]);
+  });
+
+  it.each(["in_trash", "archived"])("a page flagged %s is skipped, and the next page can still hit", async (flag) => {
+    const { client } = fakeNotion({
+      pages: { "ds-a": [{ ...keyed("fake-page-gone"), [flag]: true }, keyed("fake-page-live")] },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toEqual({
+      pageId: "fake-page-live",
+      url: "https://notion.invalid/fake-page-live",
+    });
+    const only = fakeNotion({ pages: { "ds-a": [{ ...keyed("fake-page-gone"), [flag]: true }] } });
+    expect(await findKeyMatch(only.client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("a page whose read-back key is not exactly the key is skipped", async () => {
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          keyed("fake-page-other", "fake-ical-uid-2|2026-11-09T09:00:00.000Z"),
+          keyed("fake-page-prefix", `${KEY} `),
+          page("fake-page-none", range),
+        ],
+      },
+    });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("a page with the key and a non-overlapping range is skipped", async () => {
+    const weekBefore = {
+      start: new Date(START - 7 * DAY_MS).toISOString(),
+      end: new Date(END - 7 * DAY_MS).toISOString(),
+    };
+    const { client } = fakeNotion({ pages: { "ds-a": [keyed("fake-page-old", KEY, weekBefore)] } });
+    expect(await findKeyMatch(client, [subTable("ds-a")], KEY, SPAN)).toBeNull();
+  });
+
+  it("sub-tables without the prop are not queried, and one data source is queried once", async () => {
+    const { client, queries } = fakeNotion({
+      pages: { "ds-none": [keyed("fake-page-x")], "ds-b": [] },
+    });
+    const none = { ...subTable("ds-none"), calendarEventProp: null };
+    expect(await findKeyMatch(client, [none, subTable("ds-b"), subTable("ds-b")], KEY, SPAN)).toBeNull();
+    expect(queries.map((q) => q.dataSourceId)).toEqual(["ds-b"]);
+  });
+});
+
+describe("the judge and the Attendees block", () => {
+  it("the judge's headings for a page with an Attendees block equal those without it", async () => {
+    // Defined locally: the SUMMARY inside describe("sameMeeting") is not in scope.
+    const SUMMARY: NotionSummary = {
+      title: "Weekly sync",
+      actionItems: [],
+      sections: [{ heading: "Launch", bullets: ["Ship on Friday"] }],
+      practices: [],
+    };
+    const ATTENDEES: AttendeeGroups = {
+      teamLabel: "Team (example.org)",
+      team: ["Alex"],
+      external: [{ domain: "acme.com", people: ["Bea"] }],
+      otherGuests: [],
+      omitted: 0,
+    };
+    const { client } = fakeNotion({
+      pages: {
+        "ds-a": [
+          page("fake-page-plain", { start: ISO_START, end: ISO_END }),
+          page("fake-page-with", { start: ISO_START, end: ISO_END }),
+        ],
+      },
+      bodies: {
+        "fake-page-plain": buildPageBlocks(SUMMARY) as unknown as NotionBlock[],
+        "fake-page-with": buildPageBlocks(SUMMARY, ATTENDEES) as unknown as NotionBlock[],
+      },
+    });
+    const candidates = await readCandidates(client, [subTable("ds-a")], START, END);
+    expect(candidates).toHaveLength(2);
+    const plain = candidates.find((c) => c.pageId === "fake-page-plain");
+    const withIt = candidates.find((c) => c.pageId === "fake-page-with");
+    expect(withIt?.headings).toEqual(plain?.headings);
+    expect(withIt?.boldTitle).toEqual(plain?.boldTitle);
+    expect(withIt?.headings).toEqual(["Launch"]);
+    expect(withIt?.boldTitle).toBe("Weekly sync");
   });
 });

@@ -7,6 +7,7 @@ import { Button, Input, Label, StatusIcon, Switch } from "@/components";
 import { isCalendarAutoSelectEnabled, setCalendarAutoSelectEnabled } from "@/lib/calendar/auto-select";
 import { PageLayout } from "@/layouts";
 import { useNotionConfigured } from "@/hooks/useNotionConfigured";
+import { GoogleCalendarCard } from "./components/GoogleCalendarCard";
 import { NotionSettingsCard } from "./components/NotionSettingsCard";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
@@ -801,6 +802,8 @@ export default function OdooSettings() {
       }
     >
       <NotionSettingsCard />
+
+      <GoogleCalendarCard />
 
       {notionOnly && !showOther && (
         <Button type="button" variant="outline" className="mt-6" onClick={() => setShowOther(true)}>

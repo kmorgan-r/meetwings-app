@@ -41,6 +41,8 @@ vi.mock("@/lib/database/meeting-context.action", async (importOriginal) => ({
   getMeetingSummaryByConversation: mocks.getSummary,
 }));
 
+import { groupAttendees, parseSnapshot, type AttendeeGroups, type CalendarSnapshot } from "@/lib/calendar/calendar-snapshot";
+import { ENDED_GRACE_MS } from "@/lib/calendar/current-meeting";
 import { NOTION_LANE_OPEN } from "@/lib/database/meeting-log.action";
 import { cancelSend, createSendAndLink, retrySend } from "@/lib/database/notion-queue.action";
 import type { NotionAi } from "@/lib/notion/ai";
@@ -90,10 +92,15 @@ function seedRow(over: Record<string, unknown>) {
 }
 
 /** A joined send `id` with one row holding `lines`; the span is START..END unless overridden. */
-async function seedSend(id = "s1", lines: string[] = LINES, span: [number, number] = [START, END]) {
+async function seedSend(
+  id = "s1",
+  lines: string[] = LINES,
+  span: [number, number] = [START, END],
+  calendarJson: string | null = null,
+) {
   seedRow({ id: `row-${id}`, transcript: lines.join("\n"), transcript_start_at: span[0], transcript_end_at: span[1] });
   await createSendAndLink(
-    { id, conversationId: "c1", spanStartAt: span[0], spanEndAt: span[1], createdAt: NOW },
+    { id, conversationId: "c1", spanStartAt: span[0], spanEndAt: span[1], createdAt: NOW, calendarJson },
     [`row-${id}`]
   );
 }
@@ -119,6 +126,12 @@ function summaryJson(over: Record<string, unknown> = {}): string {
   });
 }
 
+/** A fake page's "Calendar event" text, "" without one. */
+const keyOfPage = (p: Page): string =>
+  ((p.properties["Calendar event"]?.rich_text ?? []) as { text?: { content?: string } }[])
+    .map((item) => item.text?.content ?? "")
+    .join("");
+
 const TWO_PRACTICES = [
   { rule: "Always send an agenda", topic: null },
   { rule: "Rotate the note taker", topic: null },
@@ -138,6 +151,12 @@ function makeWorld() {
     summaryReplies: [] as (string | Error)[],
     defaultSummary: summaryJson(),
     asks: [] as { kind: string; user: string }[],
+    /** Every client call and model ask, in order ("ask:summary", "me", "queryAll", ...). */
+    order: [] as string[],
+    /** The body of every queryAll call, in order. */
+    queries: [] as object[],
+    /** The type of ds-main's "Calendar event" column; null = no such column. */
+    calendarCol: null as string | null,
     loseNextCreateResponse: false,
     onCreate: undefined as ((p: Page) => void) | undefined,
     onMe: undefined as (() => void) | undefined,
@@ -148,6 +167,7 @@ function makeWorld() {
   };
 
   const tick = (method: string) => {
+    w.order.push(method);
     w.calls[method] = (w.calls[method] ?? 0) + 1;
     const f = w.fails.find((x) => x.method === method && x.at === w.calls[method]);
     if (f) throw f.err;
@@ -192,13 +212,23 @@ function makeWorld() {
           },
         };
       }
-      return {
-        id, name: "Other",
-        properties: { Name: { type: "title" }, Date: { type: "date" }, "Recorded by": { type: "people" } },
+      const properties: Record<string, NotionProperty> = {
+        Name: { type: "title" }, Date: { type: "date" }, "Recorded by": { type: "people" },
       };
+      if (w.calendarCol !== null) properties["Calendar event"] = { type: w.calendarCol };
+      return { id, name: "Other", properties };
     },
-    queryAll: async (ds: string) => {
+    queryAll: async (ds: string, body: object) => {
       tick("queryAll");
+      w.queries.push(body);
+      const equals = (body as { filter?: { rich_text?: { equals?: string } } }).filter?.rich_text?.equals;
+      if (equals !== undefined) {
+        // The key query: Notion's filter is honoured, and a just-trashed page can still
+        // surface in a filtered query, flagged in_trash, so findKeyMatch must skip it.
+        return [...w.pages.values()]
+          .filter((p) => p.ds === ds && !p.hidden && keyOfPage(p) === equals)
+          .map((p) => (p.trashed ? { ...asPage(p), in_trash: true } : asPage(p)));
+      }
       return [...w.pages.values()].filter((p) => p.ds === ds && !p.trashed && !p.hidden).map(asPage);
     },
     createPage: async (body: object) => {
@@ -240,9 +270,11 @@ function makeWorld() {
 
   w.ai = {
     ask: async (system: string, user: string) => {
+      // startsWith: with attendees the summary prompt carries extra rules after it.
       const kind =
-        system === NOTION_SUMMARY_PROMPT ? "summary" : system === SAME_MEETING_PROMPT ? "same" : system === PRACTICES_PROMPT ? "practices" : "other";
+        system.startsWith(NOTION_SUMMARY_PROMPT) ? "summary" : system === SAME_MEETING_PROMPT ? "same" : system === PRACTICES_PROMPT ? "practices" : "other";
       w.asks.push({ kind, user });
+      w.order.push(`ask:${kind}`);
       if (kind === "summary") {
         const r = w.summaryReplies.shift() ?? w.defaultSummary;
         if (r instanceof Error) throw r;
@@ -317,6 +349,7 @@ beforeEach(async () => {
   }
   await applyMigration14(db);
   db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "calendar-snapshots.sql"), "utf8"));
   mocks.execute.mockImplementation(async (sql: string, args?: unknown[]) => rawExecute(sql, args));
   mocks.select.mockImplementation(async (sql: string, args?: unknown[]) => rawSelect(sql, args));
   mocks.getSummary.mockReset();
@@ -429,7 +462,7 @@ describe("summary step", () => {
   });
 
   it("a send with no joined rows and no page → no_summary SUMMARY_TOO_SHORT, never an empty page", async () => {
-    await createSendAndLink({ id: "s1", conversationId: "c1", spanStartAt: START, spanEndAt: END, createdAt: NOW }, []);
+    await createSendAndLink({ id: "s1", conversationId: "c1", spanStartAt: START, spanEndAt: END, createdAt: NOW, calendarJson: null }, []);
     expect(await runNotionSend("s1", makeDeps(world))).toBe("no_summary");
     expect(await sendOf()).toMatchObject({ status: "no_summary", error_code: "SUMMARY_TOO_SHORT" });
     expect(world.calls.createPage).toBeUndefined();
@@ -887,6 +920,362 @@ describe("failures and claims", () => {
       expect(String(text)).not.toContain(KEY);
     }
     expect(send.error_code).toBe("NOTION_INTERNAL");
+  });
+});
+
+describe("one page per meeting: the calendar key", () => {
+  it.each([null, "rich_text"])("without a snapshot the Notion calls come in today's order (Calendar event column: %s)", async (col) => {
+    world.calendarCol = col;
+    await seedSend();
+    expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+    expect(world.order).toEqual([
+      "ask:summary",
+      "me",
+      "userName",
+      "database",
+      "dataSource",
+      "queryAll",
+      "createPage",
+      "listChildren",
+      "queryAll",
+      "listChildren",
+      "listChildren",
+      "appendChildren",
+    ]);
+  });
+
+  describe("a send with a snapshot", () => {
+    const MIN = 60_000;
+    const EV_START = Date.UTC(2026, 10, 9, 10, 0);
+    const EV_END = EV_START + 30 * MIN;
+    const EV_KEY = "fake-ical-uid-1|2026-11-09T10:00:00.000Z";
+    const snapshotJson = (over: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        key: EV_KEY,
+        subject: "Weekly sync",
+        startMs: EV_START,
+        endMs: EV_END,
+        ownAddress: "kim@example.org",
+        participants: [
+          { address: "kim@example.org", name: "Kim" },
+          { address: "lee@example.org", name: "Lee" },
+          { address: "bea@acme.com", name: "Bea" },
+          { address: "pat@gmail.com", name: null },
+        ],
+        ...over,
+      });
+    const ATTENDEES = groupAttendees(parseSnapshot(snapshotJson()) as CalendarSnapshot);
+    const WEEKLY: NotionSummary = {
+      title: "Weekly sync", actionItems: ["Send notes"], sections: [{ heading: "Roadmap", bullets: ["Ship it"] }], practices: [],
+    };
+
+    const seedKeyed = (span: [number, number] = [EV_START, EV_END], json: string | null = snapshotJson()) =>
+      seedSend("s1", LINES, span, json);
+    /** Someone else's page in ds-main: `key` null = no Calendar event value. */
+    const addKeyed = (
+      over: Partial<Page> = {},
+      key: string | null = EV_KEY,
+      range: [number, number] = [EV_START, EV_END],
+      title = "Hand-made agenda",
+    ) =>
+      addRival(world, {
+        properties: {
+          Name: { title: [] },
+          Date: { date: { start: iso(range[0]), end: iso(range[1]) } },
+          ...(key === null ? {} : { "Calendar event": { rich_text: [{ type: "text", text: { content: key } }] } }),
+        },
+        ...over,
+      }, title);
+    const keyQueries = () => world.queries.filter((q) => JSON.stringify(q).includes('"rich_text"'));
+    const textOf = (b: { type?: string; [k: string]: unknown }) =>
+      ((b[b.type as string] as { rich_text?: { text?: { content?: string } }[] } | undefined)?.rich_text ?? [])
+        .map((i) => i.text?.content ?? "").join("");
+    const blocksOf = (w: World, id: string) => (w.kids.get(id) ?? []).map((b) => ({ type: b.type, text: textOf(b) }));
+    const expectedBlocks = (s: NotionSummary, a: AttendeeGroups | null) =>
+      buildPageBlocks(s, a).map((b) => ({ type: b.type, text: textOf(b) }));
+    /** A summary whose page body is more than one 100-block batch, so the body step appends. */
+    const BIG = summaryJson({
+      sections: Array.from({ length: 12 }, (_, i) => ({ heading: `H${i}`, bullets: Array.from({ length: 8 }, (_, j) => `b${i}-${j}`) })),
+    });
+
+    beforeEach(() => {
+      world.calendarCol = "rich_text";
+    });
+
+    it("a pre-check key match finishes already with no summary call and sets lost_to_url", async () => {
+      await seedKeyed();
+      addKeyed();
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+      expect(await sendOf()).toMatchObject({ status: "already", lost_to_url: "https://notion.invalid/rival", page_id: null, summary_json: null });
+      expect(world.asks).toHaveLength(0);
+      expect(world.calls.createPage).toBeUndefined();
+      expect(keyQueries()).toEqual([{ filter: { property: "Calendar event", rich_text: { equals: EV_KEY } } }]);
+    });
+
+    it("a pre-check hit with an empty url stores the derived url", async () => {
+      await seedKeyed();
+      addKeyed({ url: "" });
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+      expect((await sendOf()).lost_to_url).toBe("https://www.notion.so/aaarival");
+    });
+
+    it("the pre-check is skipped after a lost create and the send recovers its own page", async () => {
+      await seedKeyed();
+      db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = 's1'");
+      // The page our earlier attempt wrote: our creator, our range, our title, the key and the whole body.
+      addKeyed({ id: "mine-own", created_by: { id: "bot-1" } }, EV_KEY, [EV_START, EV_END], "Weekly sync");
+      const body = buildPageBlocks(WEEKLY, ATTENDEES);
+      world.kids.set("mine-own", body.map((b, i) => ({ ...b, id: `mine-b${i}` }) as NotionBlock));
+      world.kids.set(`mine-b${body.length - 1}`, []);
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect((await sendOf()).page_id).toBe("mine-own");
+      expect(world.calls.createPage).toBeUndefined();
+      expect(world.pages.get("mine-own")?.trashed).toBe(false);
+      expect(keyQueries()).toHaveLength(0);
+    });
+
+    it("find: the same key settles already without the AI judge", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      const rival = addKeyed({ hidden: true });
+      // Hidden from the pre-check, visible to find.
+      world.onMe = () => {
+        rival.hidden = false;
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+      expect(await sendOf()).toMatchObject({ status: "already", lost_to_url: "https://notion.invalid/rival", page_id: null });
+      expect(keyQueries()).toHaveLength(1);
+      expect(asks(world, "summary")).toHaveLength(1);
+      expect(asks(world, "same")).toHaveLength(0);
+      expect(world.calls.createPage).toBeUndefined();
+    });
+
+    it.each([
+      ["a different key", "fake-ical-uid-2|2026-11-09T10:00:00.000Z"],
+      ["no key", null],
+    ])("find: a page with %s goes to the AI judge", async (_name, key) => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      addKeyed({}, key);
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(keyQueries()).toHaveLength(1);
+      // find and recheck both asked.
+      expect(asks(world, "same")).toHaveLength(2);
+      expect(world.calls.createPage).toBe(1);
+    });
+
+    it("recheck: a key-matching rival settles by pickWinner and the loser trashes its own page, no judge call", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      const rival = addKeyed({ hidden: true });
+      world.onSleep = () => {
+        rival.hidden = false;
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+      expect(await sendOf()).toMatchObject({ status: "already", lost_to_url: "https://notion.invalid/rival", page_id: "pg-1" });
+      expect(world.pages.get("pg-1")?.trashed).toBe(true);
+      expect(rival.trashed).toBe(false);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it("recheck: this send wins against a later key-matching rival and keeps its page", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      // Created after pg-1 (15:00), so pickWinner keeps ours despite the rival's lower id.
+      const rival = addKeyed({ hidden: true, created_time: "2026-11-09T15:05:00.000Z" });
+      world.onSleep = () => {
+        rival.hidden = false;
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(await sendOf()).toMatchObject({ status: "sent", page_id: "pg-1", lost_to_url: null });
+      expect(world.pages.get("pg-1")?.trashed).toBe(false);
+      expect(rival.trashed).toBe(false);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it("find: a key-matching page the date query returns flagged in_trash is not settled already", async () => {
+      await seedKeyed();
+      world.sameAnswer = false;
+      const gone = addKeyed({ trashed: true });
+      // This test only: the date-window query also returns the trashed page, flagged in_trash.
+      const query = world.client.queryAll;
+      world.client.queryAll = async (ds: string, body: object) => {
+        const pages = await query(ds, body);
+        if (JSON.stringify(body).includes('"rich_text"')) return pages;
+        const { id, url, created_time, created_by, properties } = gone;
+        return [...pages, { id, url, created_time, created_by, properties, in_trash: true }];
+      };
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(await sendOf()).toMatchObject({ status: "sent", page_id: "pg-1", lost_to_url: null });
+      expect(world.calls.createPage).toBe(1);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it.each(["pre-check", "find", "recheck"])(
+      "the same key with a non-overlapping range creates its own page (another occurrence): %s",
+      async (step) => {
+        await seedKeyed();
+        world.sameAnswer = true;
+        const other = addKeyed({ hidden: step !== "pre-check" }, EV_KEY, [EV_START + 120 * MIN, EV_END + 120 * MIN]);
+        if (step === "find") world.onMe = () => void (other.hidden = false);
+        if (step === "recheck") world.onSleep = () => void (other.hidden = false);
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(world.calls.createPage).toBe(1);
+        expect(world.pages.get("pg-1")?.trashed).toBe(false);
+        expect(other.trashed).toBe(false);
+      },
+    );
+
+    it("a send ending more than ENDED_GRACE_MS after the event's end never key-matches", async () => {
+      await seedKeyed([EV_START, EV_END + ENDED_GRACE_MS + MIN]);
+      world.sameAnswer = false;
+      addKeyed();
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(asks(world, "same").length).toBeGreaterThan(0);
+      expect(keyQueries()).toHaveLength(0);
+      // A snapshot without a usable key keeps today's order: the mapping comes after the summary.
+      expect(world.order.indexOf("ask:summary")).toBeLessThan(world.order.indexOf("database"));
+      expect(world.pages.get("pg-1")?.properties["Calendar event"]).toEqual({ rich_text: [{ type: "text", text: { content: EV_KEY } }] });
+    });
+
+    it("a send ending exactly ENDED_GRACE_MS after the event's end still key-matches", async () => {
+      await seedKeyed([EV_START, EV_END + ENDED_GRACE_MS]);
+      addKeyed();
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("already");
+      expect(world.asks).toHaveLength(0);
+    });
+
+    it("a trashed key-matching page is ignored", async () => {
+      await seedKeyed();
+      const gone = addKeyed({ trashed: true });
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      expect(keyQueries()).toHaveLength(1);
+      expect(world.calls.createPage).toBe(1);
+      expect((await sendOf()).lost_to_url).toBeNull();
+      expect(gone.trashed).toBe(true);
+    });
+
+    it.each([null, "number"])(
+      "a sub-table without the column, or with a non-rich_text one, behaves as today (column: %s)",
+      async (col) => {
+        const pageOf = (w: World) => {
+          const p = mainPages(w)[0];
+          return { properties: p.properties, blocks: blocksOf(w, p.id) };
+        };
+        world.calendarCol = col;
+        await seedSend("s0", LINES, [EV_START, EV_END], null);
+        const plain = world;
+        expect(await runNotionSend("s0", makeDeps(plain))).toBe("sent");
+
+        world = makeWorld();
+        world.calendarCol = col;
+        // No participants: attendees are null (R-16), so the prompt and body are today's too.
+        await seedSend("s1", LINES, [EV_START, EV_END], snapshotJson({ participants: [] }));
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+
+        expect(mainPages(world)).toHaveLength(1);
+        expect(pageOf(world)).toEqual(pageOf(plain));
+        expect(keyQueries()).toHaveLength(0);
+        expect(Object.keys(mainPages(world)[0].properties)).not.toContain("Calendar event");
+        expect(asks(world, "summary")[0].user).toBe(asks(plain, "summary")[0].user);
+        // On purpose: a keyed send reads the mapping before the summary (the pre-check's loadMapping).
+        expect(world.order.indexOf("database")).toBeLessThan(world.order.indexOf("ask:summary"));
+        expect(plain.order.indexOf("database")).toBeGreaterThan(plain.order.indexOf("ask:summary"));
+      },
+    );
+
+    it.each([
+      "database (mapping)",
+      "the pre-check queryAll",
+      "ai.ask (summary)",
+      "createPage",
+      "createPage, response lost",
+      "appendChildren (body)",
+      "the recheck queryAll",
+    ])("a crash at %s then a resume finishes once", async (point) => {
+      await seedKeyed();
+      world.defaultSummary = BIG;
+      const net = new NotionError("NOTION_NETWORK");
+      if (point === "database (mapping)") failAt(world, "database", 1, net);
+      if (point === "the pre-check queryAll") failAt(world, "queryAll", 1, net);
+      if (point === "ai.ask (summary)") world.summaryReplies = [net];
+      if (point === "createPage") failAt(world, "createPage", 1, net);
+      if (point === "createPage, response lost") world.loseNextCreateResponse = true;
+      if (point === "appendChildren (body)") failAt(world, "appendChildren", 1, net);
+      if (point === "the recheck queryAll") failAt(world, "queryAll", 3, net);
+      const deps = makeDeps(world);
+
+      let outcome = await runNotionSend("s1", deps);
+      expect(outcome).toBe("retry");
+      if (point === "appendChildren (body)") expect(await sendOf()).toMatchObject({ page_id: "pg-1", body_done: 0 });
+      for (let i = 0; outcome === "retry" && i < 5; i++) {
+        await retrySend("s1");
+        outcome = await runNotionSend("s1", deps);
+      }
+      expect(outcome).toBe("sent");
+
+      const live = mainPages(world).filter((p) => !p.trashed);
+      expect(live).toHaveLength(1);
+      const send = await sendOf();
+      expect(send.page_id).toBe(live[0].id);
+      expect(asks(world, "summary")).toHaveLength(point === "ai.ask (summary)" ? 2 : 1);
+      const summary = JSON.parse(send.summary_json as string) as NotionSummary;
+      expect(blocksOf(world, live[0].id)).toEqual(expectedBlocks(summary, ATTENDEES));
+      expect(keyOfPage(live[0])).toBe(EV_KEY);
+    });
+
+    it("a conversation's second meeting (calendar_json NULL) gets its own page", async () => {
+      await seedKeyed();
+      await seedSend("s2", LINES, [EV_END + 30 * MIN, EV_END + 60 * MIN], null);
+      const deps = makeDeps(world);
+      expect(await runNotionSend("s1", deps)).toBe("sent");
+      expect(await runNotionSend("s2", deps)).toBe("sent");
+      expect(mainPages(world).filter((p) => !p.trashed)).toHaveLength(2);
+      expect((await sendOf("s2")).page_id).not.toBe((await sendOf("s1")).page_id);
+      const second = world.pages.get((await sendOf("s2")).page_id as string) as Page;
+      expect(Object.keys(second.properties)).not.toContain("Calendar event");
+      expect(blocksOf(world, second.id).some((b) => b.text === "Attendees")).toBe(false);
+      expect(asks(world, "summary")[1].user).not.toContain("ATTENDEES");
+    });
+
+    it("the conversation deleted mid-send: the copied snapshot still puts attendees on the page", async () => {
+      await seedKeyed();
+      db.run("INSERT INTO calendar_snapshots (conversation_id, snapshot_json, updated_at) VALUES ('c1', ?, ?)", [snapshotJson(), NOW]);
+      world.defaultSummary = BIG;
+      // The body step fails after the page exists.
+      failAt(world, "appendChildren", 1, new NotionError("NOTION_NETWORK"));
+      const deps = makeDeps(world);
+      expect(await runNotionSend("s1", deps)).toBe("retry");
+      db.run("DELETE FROM calendar_snapshots WHERE conversation_id = 'c1'");
+      db.run("DELETE FROM conversations WHERE id = 'c1'");
+      await retrySend("s1");
+      expect(await runNotionSend("s1", deps)).toBe("sent");
+      const summary = JSON.parse((await sendOf()).summary_json as string) as NotionSummary;
+      expect(blocksOf(world, "pg-1")).toEqual(expectedBlocks(summary, ATTENDEES));
+    });
+
+    it("the created page carries the Attendees block and the key property", async () => {
+      await seedKeyed();
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      const page = world.pages.get("pg-1") as Page;
+      expect(page.properties["Calendar event"]).toEqual({ rich_text: [{ type: "text", text: { content: EV_KEY } }] });
+      expect(blocksOf(world, "pg-1")).toEqual(expectedBlocks(WEEKLY, ATTENDEES));
+      const texts = blocksOf(world, "pg-1").map((b) => b.text);
+      for (const t of ["Attendees", "Team (example.org)", "Kim", "Lee", "acme.com", "Bea", "Other guests", "pat@gmail.com"]) {
+        expect(texts).toContain(t);
+      }
+      expect(asks(world, "summary")[0].user).toContain("ATTENDEES (from the calendar invite)");
+    });
+
+    it("a snapshot with no participants creates a page with no Attendees heading and still writes the key", async () => {
+      await seedKeyed([EV_START, EV_END], snapshotJson({ participants: [] }));
+      expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+      const page = world.pages.get("pg-1") as Page;
+      expect(keyOfPage(page)).toBe(EV_KEY);
+      expect(blocksOf(world, "pg-1").some((b) => b.type === "heading_3" && b.text === "Attendees")).toBe(false);
+      expect(blocksOf(world, "pg-1")).toEqual(expectedBlocks(WEEKLY, null));
+      expect(asks(world, "summary")[0].user).not.toContain("ATTENDEES");
+    });
   });
 });
 

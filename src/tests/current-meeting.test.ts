@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { EARLY_JOIN_MS, ENDED_GRACE_MS, pickCurrentMeeting } from "@/lib/calendar/current-meeting";
+import {
+  EARLY_JOIN_MS,
+  ENDED_GRACE_MS,
+  insideEvent,
+  isMeetingEvent,
+  pickCurrentMeeting,
+} from "@/lib/calendar/current-meeting";
 import type { CalendarEvent, CalendarParticipant } from "@/types";
 
 const NOW = Date.UTC(2026, 8, 2, 14, 0, 0); // 2026-09-02T14:00:00Z
@@ -180,5 +186,79 @@ describe("pickCurrentMeeting", () => {
     const endMs = Date.parse("2026-09-02T17:25:00+03:00"); // == 14:25Z
     const shifted = event({ startMs, endMs });
     expect(pickCurrentMeeting([shifted], NOW)).toMatchObject({ kind: "one" });
+  });
+});
+
+const T = Date.UTC(2026, 10, 12, 10); // 2026-11-12T10:00:00Z
+
+describe("insideEvent", () => {
+  const ev = { startMs: T, endMs: T + 30 * MIN }; // 10:00-10:30
+  it("exactly half of the span's own length passes", () => {
+    expect(insideEvent({ start: T + 10 * MIN, end: T + 50 * MIN }, ev)).toBe(true); // 20 of 40
+  });
+  it("just under half fails", () => {
+    expect(insideEvent({ start: T + 10 * MIN + 1, end: T + 50 * MIN + 1 }, { startMs: T, endMs: T + 30 * MIN })).toBe(false);
+  });
+  it("a joined 10:00-11:30 send over a 10:00-10:30 event is not inside", () => {
+    expect(insideEvent({ start: T, end: T + 90 * MIN }, ev)).toBe(false);
+  });
+  it("a late joiner 10:20-10:30 is inside", () => {
+    expect(insideEvent({ start: T + 20 * MIN, end: T + 30 * MIN }, ev)).toBe(true);
+  });
+  it("a zero-length span is never inside", () => {
+    expect(insideEvent({ start: T + 5 * MIN, end: T + 5 * MIN }, ev)).toBe(false);
+  });
+});
+
+describe("isMeetingEvent", () => {
+  // An event hours outside every window still passes: this export carries only
+  // the per-event filters, no acceptance window at all.
+  const farOutside = { startMs: T - 8 * 60 * 60 * 1000, endMs: T - 7 * 60 * 60 * 1000 };
+
+  it.each([
+    ["cancelled", { isCancelled: true }],
+    ["all-day", { isAllDay: true }],
+    ["declined", { ownResponse: "declined" }],
+    ["solo", { participants: [participant("me@corp.test", { isOrganizer: true })] }],
+  ])("rejects a %s event", (_label, over) => {
+    expect(isMeetingEvent(event(over))).toBe(false);
+  });
+
+  it("accepts a two-person accepted event", () => {
+    expect(isMeetingEvent(event())).toBe(true);
+  });
+
+  it("accepts an event far outside any window, because it has no window", () => {
+    expect(isMeetingEvent(event(farOutside))).toBe(true);
+  });
+});
+
+// Pinned as fixed expectations over one fixture list, since a before/after the
+// split comparison cannot live in a single test. Seven events: one per filter
+// (cancelled, all-day, declined, solo), one out-of-window, and two in-window.
+// If the split ever changed pickCurrentMeeting's behaviour, either the kind or
+// the surviving ids move.
+describe("pickCurrentMeeting is unchanged by the split", () => {
+  it("returns several with exactly the two in-window ids over seven events", () => {
+    const nowMs = T + 10 * MIN;
+    const events = [
+      event({ id: "cancelled", isCancelled: true, startMs: T, endMs: T + 30 * MIN }),
+      event({ id: "allday", isAllDay: true, startMs: T, endMs: T + 30 * MIN }),
+      event({ id: "declined", ownResponse: "declined", startMs: T, endMs: T + 30 * MIN }),
+      event({
+        id: "solo",
+        participants: [participant("me@corp.test", { isOrganizer: true })],
+        startMs: T,
+        endMs: T + 30 * MIN,
+      }),
+      event({ id: "out-of-window", subject: "Later", startMs: T + 20 * MIN, endMs: T + 50 * MIN }),
+      event({ id: "in-a", subject: "First", startMs: T, endMs: T + 30 * MIN }),
+      event({ id: "in-b", subject: "Second", startMs: T + 2 * MIN, endMs: T + 32 * MIN }),
+    ];
+    const result = pickCurrentMeeting(events, nowMs);
+    expect(result.kind).toBe("several");
+    if (result.kind === "several") {
+      expect(result.candidates.map((c) => c.id)).toEqual(["in-a", "in-b"]);
+    }
   });
 });

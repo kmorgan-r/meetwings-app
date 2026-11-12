@@ -890,6 +890,28 @@ describe("useCompletion meeting assist mode", () => {
     expect(result.current.currentConversationId).toBe("chat-b");
   });
 
+  it("announces conversationLoaded when another conversation is opened, not the same one", async () => {
+    // useGoogleMeetingCapture drops an in-flight snapshot on this event; without
+    // it the result flushes onto whichever conversation was just opened.
+    const seen: string[] = [];
+    const onLoaded = () => seen.push(String(result.current.currentConversationId));
+    window.addEventListener("conversationLoaded", onLoaded);
+    const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+    try {
+      await act(async () => {
+        await result.current.loadConversation({ ...EXISTING_CONVERSATION, id: "chat-b" });
+      });
+      // Fired before the new id commits, so a listener still sees the old one.
+      expect(seen).toEqual(["null"]);
+      await act(async () => {
+        await result.current.loadConversation({ ...EXISTING_CONVERSATION, id: "chat-b" });
+      });
+      expect(seen).toEqual(["null"]);
+    } finally {
+      window.removeEventListener("conversationLoaded", onLoaded);
+    }
+  });
+
   it("carries speaker and audioSource onto diarized batch messages", async () => {
     const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 

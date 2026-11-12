@@ -6,7 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const config = vi.hoisted(() => ({ loadGraphConfigState: vi.fn() }));
 vi.mock("@/lib/storage/graph-config.storage", () => config);
 
-import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
+import { fetchCurrentMeetings, fetchMeetingsBetween } from "@/lib/calendar/fetch-current-meetings";
 
 const COMPLETE = {
   state: "complete" as const,
@@ -49,5 +49,46 @@ describe("fetchCurrentMeetings", () => {
   it("maps a Graph failure to its code instead of rejecting", async () => {
     invoke.mockRejectedValue(new Error("GRAPH_THROTTLED"));
     await expect(fetchCurrentMeetings()).resolves.toEqual({ kind: "error", code: "GRAPH_THROTTLED" });
+  });
+
+  it("fetchCurrentMeetings still uses ±15 minutes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.UTC(2026, 10, 12, 23, 50, 0));
+    invoke.mockResolvedValue({ ownAddress: null, events: [] });
+
+    await fetchCurrentMeetings();
+    expect(invoke).toHaveBeenCalledWith(
+      "graph_current_meetings",
+      expect.objectContaining({
+        startIso: "2026-11-12T23:35:00.000Z",
+        endIso: "2026-11-13T00:05:00.000Z",
+      })
+    );
+    vi.useRealTimers();
+  });
+});
+
+describe("fetchMeetingsBetween", () => {
+  it("fetchMeetingsBetween passes its own window", async () => {
+    invoke.mockResolvedValue({ ownAddress: "me@example.org", events: [] });
+
+    await expect(
+      fetchMeetingsBetween(Date.UTC(2026, 10, 12, 10, 0, 0), Date.UTC(2026, 10, 12, 10, 47, 30))
+    ).resolves.toEqual({ kind: "ok", ownAddress: "me@example.org", events: [] });
+    expect(invoke).toHaveBeenCalledWith("graph_current_meetings", {
+      clientId: COMPLETE.config.clientId,
+      authority: COMPLETE.config.authority,
+      startIso: "2026-11-12T10:00:00.000Z",
+      endIso: "2026-11-12T10:47:30.000Z",
+    });
+  });
+
+  it("reports an absent config, and a failed read, the same way fetchCurrentMeetings does", async () => {
+    config.loadGraphConfigState.mockResolvedValueOnce({ state: "absent", config: null });
+    await expect(fetchMeetingsBetween(0, 1)).resolves.toEqual({ kind: "absent" });
+    expect(invoke).not.toHaveBeenCalled();
+
+    invoke.mockRejectedValue(new Error("GRAPH_AUTH_EXPIRED"));
+    await expect(fetchMeetingsBetween(0, 1)).resolves.toEqual({ kind: "error", code: "GRAPH_AUTH_EXPIRED" });
   });
 });

@@ -3,9 +3,11 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod google;
 mod graph;
 mod meeting_detect;
 mod notion_token;
+mod oauth;
 mod shortcuts;
 mod window;
 use std::sync::{Arc, Mutex};
@@ -150,6 +152,7 @@ pub fn run() {
         .manage(shortcuts::MoveWindowState::default())
         .manage(meeting_detect::MeetingWatcherState::default())
         .manage(graph::GraphState::default())
+        .manage(google::GoogleState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -239,6 +242,11 @@ pub fn run() {
             graph::graph_disconnect,
             graph::graph_status,
             graph::graph_current_meetings,
+            // Google: connect and status return GraphStatus, google_current_meetings returns CurrentMeetings (both scanned by the same test); disconnect returns ().
+            google::google_connect,
+            google::google_disconnect,
+            google::google_status,
+            google::google_current_meetings,
             // Notion token: deliberately returns the credential to the webview (spec §7/§9: plugin-http + JS redactor). Not a Graph payload; the scan above does not apply.
             notion_token::notion_keychain_available,
             notion_token::notion_token_set,

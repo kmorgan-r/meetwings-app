@@ -96,6 +96,21 @@ describe("decideDestinations", () => {
     }
   });
 
+  // Recovery has no tick source to check, so a pick must never reach Notion
+  // from it unchecked.
+  it("recovery with Odoo complete or incomplete never holds or waits", () => {
+    for (const autoSend of BOOLS) {
+      for (const odooTargets of [0, 2]) {
+        expect(
+          decideDestinations(I("recovery", "complete", true, autoSend, true, odooTargets))
+        ).toMatchObject({ queue: true, notionStatus: null });
+        expect(
+          decideDestinations(I("recovery", "incomplete", true, autoSend, true, odooTargets))
+        ).toMatchObject({ queue: true, notionStatus: "offered" });
+      }
+    }
+  });
+
   it("never asks to toast an incomplete Odoo setup from recovery", () => {
     for (const [input] of MATRIX.filter(([i]) => i.source === "recovery")) {
       expect(decideDestinations(input).toastIncomplete).toBe(false);

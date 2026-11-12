@@ -1,4 +1,7 @@
-# Manual GUI end-to-end — the two legs the harness cannot reach
+# Manual GUI end-to-end — the legs the harness cannot reach
+
+Parts 1-3 cover the Odoo lane; Part 4 (Google sign-in on macOS) and Part 5
+(Notion check 5) follow its closing section.
 
 `.livecheck/odoo-live-smoke.live.ts` enters at the queue row and proves five of
 PR #48's seven behaviours. Two remain, and both need the running app:
@@ -121,3 +124,27 @@ see the README.
 If anything went sideways locally, the backup from step 1 is in `%APPDATA%`;
 close the app, copy it back over
 `%APPDATA%/com.meetwings.app/meetwings.db`, relaunch.
+
+## Part 4 — Google G3 (macOS): sign-in, refresh, disconnect
+
+The Google flow's harness legs are headless API reads; the credential side is
+not, and it must be proven on **macOS** — Keychain, browser loopback.
+With a real Google account in a real Meetwings build:
+
+1. **Connect** the account (browser loopback sign-in).
+2. **Quit and relaunch** Meetwings → still connected.
+3. **Wait more than 60 minutes**, then start a capture → the snapshot is
+   stored. That is the refresh path working: the access token lives in memory
+   only, so the read must mint a new one from the Keychain's refresh token.
+4. **Disconnect** → the app reads "Not connected", and the Keychain Access
+   entry `com.meetwings.google` is gone (Keychain Access.app, search for
+   `com.meetwings.google`, account `refresh-token`).
+
+## Part 5 — Notion check 5 also gates the exact-key recheck
+
+PR #91's Notion **check 5** (how long until a just-created page shows up in a
+query) now also gates the exact-key **recheck**: the recheck waits
+`RECHECK_DELAY_MS` (5 s) on the wall clock before its second `readCandidates`,
+and check 5 measures exactly that kind of visibility delay against a real
+Notion. Run `.livecheck/notion-live.live.ts` before relying on the 5-second
+recheck.
