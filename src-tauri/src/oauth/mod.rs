@@ -316,7 +316,10 @@ mod tests {
 
     #[test]
     fn shared_callback_errors_are_neutral() {
-        assert_eq!(classify_callback_error("access_denied"), OAuthFail::Cancelled);
+        assert_eq!(
+            classify_callback_error("access_denied"),
+            OAuthFail::Cancelled
+        );
         assert_eq!(
             classify_callback_error("consent_required"),
             OAuthFail::ConsentRequired

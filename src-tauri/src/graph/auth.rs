@@ -1,6 +1,5 @@
 use super::{
-    AUTH_CANCELLED, AUTH_EXPIRED, AUTH_REJECTED, BAD_RESPONSE, CONSENT_REQUIRED, NETWORK,
-    THROTTLED,
+    AUTH_CANCELLED, AUTH_EXPIRED, AUTH_REJECTED, BAD_RESPONSE, CONSENT_REQUIRED, NETWORK, THROTTLED,
 };
 use crate::oauth::{self, OAuthFail};
 
@@ -72,7 +71,6 @@ pub fn own_address_from_id_token(id_token: &str) -> Option<String> {
     }
     None
 }
-
 
 /// SEE PROBE 1 (Task 2). ReadBasic additionally withholds the meeting body -
 /// text this feature never needs and would rather not hold - so it is the

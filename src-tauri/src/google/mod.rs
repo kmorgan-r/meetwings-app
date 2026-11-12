@@ -169,10 +169,7 @@ fn adopt_and_persist_with(
 /// Clear memory first, unconditionally; then delete from the keychain. When
 /// session-only the delete is best-effort (an earlier persisted connect may have
 /// left a stale entry); otherwise its error is returned.
-fn forget_with(
-    state: &GoogleState,
-    delete: impl Fn() -> Result<(), String>,
-) -> Result<(), String> {
+fn forget_with(state: &GoogleState, delete: impl Fn() -> Result<(), String>) -> Result<(), String> {
     let _persist = state.persist_op.lock().unwrap_or_else(|e| e.into_inner());
     let was_session_only = *state.session_only.lock().unwrap_or_else(|e| e.into_inner());
     state.clear_session();
@@ -327,8 +324,8 @@ pub async fn google_current_meetings(
         |stale, generation| {
             let (id, secret, state) = (&client_id, &client_secret, &state);
             async move {
-                refresh_and_adopt(state, generation, stale.as_deref(), |rt| {
-                    async move { auth::refresh(id, secret, &rt, now_ms()).await }
+                refresh_and_adopt(state, generation, stale.as_deref(), |rt| async move {
+                    auth::refresh(id, secret, &rt, now_ms()).await
                 })
                 .await
             }
@@ -701,10 +698,15 @@ mod tests {
     fn a_refresh_without_a_new_refresh_token_keeps_the_old_one() {
         let state = seeded("r1");
         let stores = Cell::new(0);
-        assert!(adopt_and_persist_with(&state, &tokens("A", None), 0, |_| {
-            stores.set(stores.get() + 1);
-            Ok(())
-        }));
+        assert!(adopt_and_persist_with(
+            &state,
+            &tokens("A", None),
+            0,
+            |_| {
+                stores.set(stores.get() + 1);
+                Ok(())
+            }
+        ));
         assert_eq!(mem_refresh(&state), Some("r1".to_string()));
         assert_eq!(mem_access(&state), Some("A".to_string()));
         assert_eq!(stores.get(), 0);

@@ -258,7 +258,8 @@ mod tests {
     async fn post_token_maps_a_refused_connection_to_network() {
         // Not the real endpoint: this only proves the mapping, so point at a
         // closed loopback port through the endpoint-taking helper.
-        let result = post_token_to("https://127.0.0.1:1", &[("grant_type", "refresh_token")], 0).await;
+        let result =
+            post_token_to("https://127.0.0.1:1", &[("grant_type", "refresh_token")], 0).await;
         assert_eq!(result.err().as_deref(), Some("GOOGLE_NETWORK"));
     }
 }

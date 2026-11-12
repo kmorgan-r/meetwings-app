@@ -116,7 +116,10 @@ mod tests {
             .into_iter()
             .find(|m| m.description == "create_calendar_snapshots")
             .expect("calendar snapshots migration must be registered");
-        assert_eq!(m.version, 18, "calendar snapshots migration must be version 18");
+        assert_eq!(
+            m.version, 18,
+            "calendar snapshots migration must be version 18"
+        );
         assert_eq!(
             m.sql,
             include_str!("migrations/calendar-snapshots.sql"),
