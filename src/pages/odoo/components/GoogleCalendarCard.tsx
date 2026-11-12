@@ -39,10 +39,13 @@ export function GoogleCalendarCard() {
     void (async () => {
       const state = await loadGoogleConfigState();
       if (cancelled) return;
-      if (state.state === "complete") {
-        setClientId(state.config.clientId);
-        setClientSecret(state.config.clientSecret);
-        // Silent for never-configured users, like the Graph page.
+      if (state.state !== "absent") {
+        if (state.state === "complete") {
+          setClientId(state.config.clientId);
+          setClientSecret(state.config.clientSecret);
+        }
+        // Silent only for never-configured users, like the Graph page: the
+        // keychain alone says connected, even when the stored config is corrupt.
         try {
           const s = await invoke<GraphStatus>("google_status");
           if (!cancelled) setStatus(s);
@@ -85,10 +88,11 @@ export function GoogleCalendarCard() {
     try {
       await invoke("google_disconnect");
       setStatus({ connected: false, sessionOnly: false });
-      await broadcast();
     } catch (err) {
       setError(GOOGLE_COPY[toGoogleCode(err)]);
     } finally {
+      // Rust clears memory even when the keychain delete fails, so always tell listeners.
+      await broadcast();
       setBusy(false);
     }
   }

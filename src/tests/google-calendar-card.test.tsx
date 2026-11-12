@@ -75,6 +75,9 @@ describe("GoogleCalendarCard", () => {
       h.invoke.mock.invocationCallOrder[connectAt]
     );
     expect(h.emit).toHaveBeenCalledWith("google-connection-changed");
+    expect(h.invoke.mock.invocationCallOrder[connectAt]).toBeLessThan(
+      h.emit.mock.invocationCallOrder[0]
+    );
     expect(screen.getByText("Connected")).toBeTruthy();
   });
 
@@ -123,7 +126,42 @@ describe("GoogleCalendarCard", () => {
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
     expect(h.invoke).toHaveBeenCalledWith("google_disconnect");
     expect(h.emit).toHaveBeenCalledWith("google-connection-changed");
+    const disconnectAt = h.invoke.mock.calls.findIndex((c) => c[0] === "google_disconnect");
+    expect(h.invoke.mock.invocationCallOrder[disconnectAt]).toBeLessThan(
+      h.emit.mock.invocationCallOrder[0]
+    );
     expect(screen.getByText("Not connected")).toBeTruthy();
+  });
+
+  it("a failed disconnect still broadcasts", async () => {
+    h.load.mockResolvedValue(COMPLETE);
+    h.invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "google_disconnect") throw "GOOGLE_NO_KEYCHAIN";
+      return { connected: true, sessionOnly: false };
+    });
+    const user = await renderCard();
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    expect(h.emit).toHaveBeenCalledWith("google-connection-changed");
+    expect(screen.getByText(GOOGLE_COPY.GOOGLE_NO_KEYCHAIN)).toBeTruthy();
+  });
+
+  it("an unreadable config still reads status and offers Disconnect when connected", async () => {
+    h.load.mockResolvedValue({ state: "unreadable", config: null });
+    h.invoke.mockImplementation(async () => ({ connected: true, sessionOnly: false }));
+    await renderCard();
+    expect(calls("google_status")).toHaveLength(1);
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
+    expect((screen.getByLabelText("Client ID") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Client secret") as HTMLInputElement).value).toBe("");
+  });
+
+  it("prefills both fields from a complete stored config", async () => {
+    h.load.mockResolvedValue(COMPLETE);
+    h.invoke.mockImplementation(async () => ({ connected: false, sessionOnly: false }));
+    await renderCard();
+    expect((screen.getByLabelText("Client ID") as HTMLInputElement).value).toBe("id");
+    expect((screen.getByLabelText("Client secret") as HTMLInputElement).value).toBe("s");
   });
 
   it("never calls google_status for a user who never configured Google", async () => {

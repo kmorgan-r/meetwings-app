@@ -26,4 +26,6 @@ paste both values into the **Google Calendar** card, then press **Connect**.
 
 ## What Meetwings reads
 
-Read-only access to the current event's guest list only. Nothing is written to your calendar.
+Read-only. Meetwings reads your Google account's email address and, for the meetings happening right
+now, their title, start and end times, organizer and guest list. It never reads event descriptions and
+never writes to your calendar.
