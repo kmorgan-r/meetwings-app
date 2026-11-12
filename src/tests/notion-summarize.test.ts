@@ -310,7 +310,7 @@ describe("summarizeForNotion", () => {
   });
 
   it("summarizeForNotion calls ask with the 120_000 ms Notion timeout", async () => {
-    const ask = vi.fn(() => Promise.resolve(SUMMARY_JSON));
+    const ask = vi.fn<NotionAi["ask"]>(() => Promise.resolve(SUMMARY_JSON));
     const fakeAi: NotionAi = { ask };
     const result = await summarizeForNotion(LINES, fakeAi);
     expect(result.title).toBe("Weekly sync");
@@ -501,7 +501,7 @@ describe("summarizeForNotion attendees", () => {
   };
 
   it("without attendees the prompt and message are exactly today's", async () => {
-    const ask = vi.fn(() => Promise.resolve(SUMMARY_JSON));
+    const ask = vi.fn<NotionAi["ask"]>(() => Promise.resolve(SUMMARY_JSON));
     const fakeAi: NotionAi = { ask };
     const result = await summarizeForNotion(LINES, fakeAi);
     expect(result.title).toBe("Weekly sync");
@@ -513,7 +513,7 @@ describe("summarizeForNotion attendees", () => {
   });
 
   it("with attendees the block comes before the transcript and the rules are appended", async () => {
-    const ask = vi.fn(() => Promise.resolve(SUMMARY_JSON));
+    const ask = vi.fn<NotionAi["ask"]>(() => Promise.resolve(SUMMARY_JSON));
     const fakeAi: NotionAi = { ask };
     await summarizeForNotion(LINES, fakeAi, GROUPS);
     expect(ask.mock.calls).toHaveLength(1);
