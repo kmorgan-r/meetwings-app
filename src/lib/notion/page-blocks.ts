@@ -224,9 +224,7 @@ export function pageProperties(
     properties[r.subTable.recordedByProp] = { people: [{ id: ownerUserId }] };
   }
   if (r.subTable.calendarEventProp !== null && calendarKey !== null) {
-    properties[r.subTable.calendarEventProp] = {
-      rich_text: [{ type: "text", text: { content: calendarKey } }],
-    };
+    properties[r.subTable.calendarEventProp] = { rich_text: richText(calendarKey) };
   }
   return properties;
 }
