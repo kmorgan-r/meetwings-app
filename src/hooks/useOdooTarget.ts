@@ -135,6 +135,9 @@ function isNotConfigured(err: unknown): boolean {
   return err instanceof OdooError && err.code === "ODOO_NOT_CONFIGURED";
 }
 
+/** Everything the picker takes from this hook; the Notion row comes from completion/index.tsx. */
+type OdooPickerProps = Omit<ContactPickerProps, "notionAvailable" | "notionSelected" | "onToggleNotion">;
+
 /**
  * Owns the Odoo selection for <Completion />.
  *
@@ -154,7 +157,7 @@ export interface UseOdooTargetReturn {
    * `targetsRef` for what `useMeetingLog` actually consumes now.
    */
   targetRef: RefObject<SingleTarget | null>;
-  pickerProps: ContactPickerProps;
+  pickerProps: OdooPickerProps;
   /**
    * Task 14: what `useMeetingLog`'s `targetRef` param is fed at the
    * `<Completion />` call site now - the flat multi-target list (Task 4's
@@ -192,6 +195,7 @@ export function useOdooTarget({
   isPickerOpen,
   setIsPickerOpen,
   setTargetCount,
+  onTargetsCleared,
 }: {
   meetingAssistMode: boolean;
   // Threaded through from useCompletion (see Files.tsx's isFilesPopoverOpen
@@ -209,6 +213,10 @@ export function useOdooTarget({
   // isPickerOpen/setIsPickerOpen exactly. Called from an effect below
   // whenever `targets` changes, never from render.
   setTargetCount: (count: number) => void;
+  // Called whenever every target is dropped at once (a new chat, or the
+  // explicit clear-all). <Completion /> uses it to clear the per-meeting
+  // Notion pick, which must not outlive the targets it was picked beside.
+  onTargetsCleared?: () => void;
 }): UseOdooTargetReturn {
   const [target, setTarget] = useState<SingleTarget | null>(null);
   const [cache, setCache] = useState<PickerCacheState>({ kind: "never-synced" });
@@ -823,6 +831,7 @@ export function useOdooTarget({
     targetRef.current = null;
     applyTargets([]);
     bumpEpoch();
+    onTargetsCleared?.();
     clearingRef.current = (async () => {
       try {
         const instance = await resolveInstance();
@@ -834,7 +843,7 @@ export function useOdooTarget({
         toast.error(`${report.code}: ${report.message}`);
       }
     })().catch((err) => console.error("Clearing targets failed:", err));
-  }, [applyTargets, bumpEpoch, resolveInstance]);
+  }, [applyTargets, bumpEpoch, resolveInstance, onTargetsCleared]);
 
   useEffect(() => {
     window.addEventListener("newConversationStarted", handleNewChat);
@@ -1268,13 +1277,14 @@ export function useOdooTarget({
       setTarget(null);
       targetRef.current = null;
       applyTargets([]);
+      onTargetsCleared?.();
     } catch (err) {
       // UI state left ALONE on failure: the targets still on screen are still
       // the ones the database will push to, which is the honest thing to show.
       const report = reportOdooError(err, "clear targets");
       toast.error(`${report.code}: ${report.message}`);
     }
-  }, [applyTargets, resolveInstance]);
+  }, [applyTargets, resolveInstance, onTargetsCleared]);
 
   const onToggleColleague = useCallback(
     async (contact: OdooContact) => {
@@ -1335,7 +1345,7 @@ export function useOdooTarget({
   // selection's name for a render every time target actually changes.
   const contactName = contactsOf(cache).find((c) => c.id === target?.contactId)?.name ?? null;
 
-  const pickerProps: ContactPickerProps = {
+  const pickerProps: OdooPickerProps = {
     contactId: target?.contactId ?? null,
     leadId: target?.leadId ?? null,
     leadName: target?.leadName ?? null,

@@ -91,6 +91,7 @@ function seedRow(over: Partial<DbMeetingLogRow> = {}): DbMeetingLogRow {
     attachment_id: null, message_id: null, status: "pending", attempts: 0,
     claimed_at: null, last_error: null, last_error_code: null,
     meeting_started_at: 1000, created_at: NOW, sent_at: null,
+    notion_status: null, notion_send_id: null,
     ...over,
   } as DbMeetingLogRow;
   db.run(
@@ -163,6 +164,7 @@ beforeEach(async () => {
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-contacts.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-multi-target.sql"), "utf8"));
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
   tauriFetch.mockReset();
   claimed.clear();
   failNextWrite.value = null;
@@ -281,6 +283,29 @@ describe("runMeetingLogSweep", () => {
     });
     await runMeetingLogSweep(async () => null);
     expect((await getQueueRow("stale"))?.status).toBe("sent");
+  });
+
+  it("a sweep with Odoo complete never claims, pushes or stamps a 'none' row", async () => {
+    seedRow({ id: "none", session_key: "none", status: "none", notion_status: "waiting" });
+    seedRow({ id: "pend", session_key: "pend" });
+    seedTargets("pend", 42);
+    tauriFetch.mockImplementation(async (_url, init) => {
+      const body = String((init as { body: string }).body);
+      if (body.includes("authenticate")) return AUTH();
+      const { model, method } = modelMethod(body);
+      if (model === "res.partner" && method === "search") return arrayResponse([42]);
+      if (body.includes("ir.attachment")) return intResponse(555);
+      return intResponse(999);
+    });
+
+    await runMeetingLogSweep(async () => null);
+
+    expect((await getQueueRow("pend"))?.status).toBe("sent");
+    // Exactly one push happened: one attachment create, for the pending row.
+    expect(calls().filter((c) => c === "ir.attachment.create")).toHaveLength(1);
+    expect(await getQueueRow("none")).toMatchObject({
+      status: "none", attempts: 0, last_error_code: null, last_error: null,
+    });
   });
 
   it("never touches sent, cancelled or unassigned rows", async () => {

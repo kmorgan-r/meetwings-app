@@ -14,3 +14,4 @@ export * from "./secure-provider-configs";
 export * from "./odoo-config.storage";
 export * from "./odoo-verification.storage";
 export * from "./graph-config.storage";
+export * from "./notion-config.storage";

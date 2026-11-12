@@ -1,3 +1,5 @@
+import type { NotionRowStatus } from "./notion";
+
 /** Error codes for every failure this feature can surface. */
 export type OdooErrorCode =
   | "ODOO_NOT_CONFIGURED"
@@ -134,7 +136,8 @@ export type MeetingLogStatus =
   | "sent"        // terminal
   | "failed"      // terminal until a manual retry
   | "cancelled"   // undone
-  | "deleted";    // terminal. Transcript and summary blanked; the row survives.
+  | "deleted"     // terminal. Transcript and summary blanked; the row survives.
+  | "none";       // no Odoo destination (Notion-only row); every Odoo query whitelists statuses, so it is invisible to them
 
 /** The snake_case shape SQLite actually returns for a queued meeting. */
 export interface DbMeetingLogRow {
@@ -157,11 +160,13 @@ export interface DbMeetingLogRow {
   meeting_started_at: number | null;
   created_at: number;
   sent_at: number | null;
+  notion_status: NotionRowStatus | null;
+  notion_send_id: string | null;
 }
 
 /**
- * What the queue page's list query returns: every column EXCEPT `transcript`,
- * plus every target row for that meeting, attached in memory by
+ * What the queue page's list query returns: every column EXCEPT `transcript` and the Notion lane
+ * (`notion_status`, `notion_send_id`; never read off Odoo list rows), plus every target row for that meeting, attached in memory by
  * `listActionableRows` (one extra query for the whole list, not N+1).
  *
  * A distinct type, and load-bearing. Typing list rows as `DbMeetingLogRow`
@@ -177,7 +182,7 @@ export interface DbMeetingLogRow {
  * lets `groupOf` and AssignDialog's Confirm gate read a row's per-target
  * failure state instead of only its collapsed parent status.
  */
-export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript"> & {
+export type MeetingLogListRow = Omit<DbMeetingLogRow, "transcript" | "notion_status" | "notion_send_id"> & {
   targets?: MeetingLogTarget[];
 };
 

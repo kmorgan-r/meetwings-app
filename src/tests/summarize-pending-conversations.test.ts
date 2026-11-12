@@ -36,6 +36,10 @@ vi.mock("@/lib/functions/meetwings.api", () => ({
   shouldUseMeetwingsAPI: vi.fn(async () => false),
 }));
 
+vi.mock("@/lib/storage/secure-provider-configs", () => ({
+  loadSummaryProvider: vi.fn(async () => null),
+}));
+
 vi.mock("@/lib/storage", () => ({
   getUserIdentity: vi.fn(() => null),
   hasUserIdentity: vi.fn(() => false),

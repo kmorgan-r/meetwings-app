@@ -1,5 +1,6 @@
 import { memo, useMemo } from "react";
 import moment from "moment";
+import type { NotionBadge } from "@/hooks/useNotionQueue";
 import type { ChatConversation } from "@/types";
 import { DateGroup } from "./DateGroup";
 
@@ -31,6 +32,10 @@ export interface ConversationListProps {
   onCancelRename: () => void;
   /** `null` until Odoo is fully set up - see ConversationRow. */
   onSendToOdoo: ((id: string) => Promise<string | null>) | null;
+  /** Conversation id -> Notion badge; DateGroup flattens it to primitives per row. */
+  notionBadges: ReadonlyMap<string, NotionBadge>;
+  /** `null` until Notion is set up - see ConversationRow. */
+  onSendToNotion: ((id: string) => Promise<string | null>) | null;
 }
 
 interface DateBucket {
@@ -72,6 +77,8 @@ function ConversationListInner({
   onCommitRename,
   onCancelRename,
   onSendToOdoo,
+  notionBadges,
+  onSendToNotion,
 }: ConversationListProps) {
   const dateGroups = useMemo<DateBucket[]>(() => {
     const term = search.toLowerCase();
@@ -120,6 +127,8 @@ function ConversationListInner({
           onCommitRename={onCommitRename}
           onCancelRename={onCancelRename}
           onSendToOdoo={onSendToOdoo}
+          notionBadges={notionBadges}
+          onSendToNotion={onSendToNotion}
         />
       ))}
     </>

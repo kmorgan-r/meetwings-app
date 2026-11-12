@@ -266,6 +266,7 @@ beforeEach(async () => {
   db.run(fs.readFileSync(path.join(MIGRATIONS, "meeting-log-queue.sql"), "utf8"));
   db.run(fs.readFileSync(path.join(MIGRATIONS, "odoo-lead-only-target.sql"), "utf8"));
   await applyMigration14(db);
+  db.run(fs.readFileSync(path.join(MIGRATIONS, "notion-sends.sql"), "utf8"));
 
   vi.clearAllMocks();
   // `clearAllMocks` clears CALLS, not IMPLEMENTATIONS. Several cases below use

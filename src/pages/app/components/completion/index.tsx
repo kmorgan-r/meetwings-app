@@ -1,15 +1,17 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import {
   useCalendarProposal,
   useCalendarAutoSelect,
   useCompletion,
   useMeetingAutoRecord,
   useMeetingLog,
+  useNotionPick,
   useOdooTarget,
   usePillRecordAction,
   useQuickActions,
   type MeetingAutoRecordAudio,
 } from "@/hooks";
+import { useNotionConfigured, useOdooSetupState } from "@/hooks/useNotionConfigured";
 import { useApp } from "@/contexts";
 import { shouldUseMeetwingsAPI } from "@/lib";
 import { setPillData } from "@/lib/overlay-minimize.store";
@@ -49,6 +51,15 @@ export const Completion = ({
   // effect can see the picker open, exactly like isFilesPopoverOpen already
   // does for Files.tsx. The main window is 600x54 and non-resizable; without
   // this the popover has no way to make the window grow around it.
+  const notionPick = useNotionPick();
+  const notionConfigured = useNotionConfigured();
+  const odooSetup = useOdooSetupState();
+  const notionAvailable =
+    notionConfigured === true && (odooSetup === "complete" || odooSetup === "incomplete");
+  // Notion alone: nothing to pick. A null (still loading) keeps today's picker.
+  const hidePicker = notionConfigured === true && odooSetup === "absent";
+  const toggleNotionPick = notionPick.toggle;
+  const onToggleNotion = useCallback(() => toggleNotionPick(), [toggleNotionPick]);
   const odoo = useOdooTarget({
     meetingAssistMode: completion.meetingAssistMode,
     isPickerOpen: completion.isContactPickerOpen,
@@ -60,6 +71,8 @@ export const Completion = ({
     // file even though useOdooTarget's param list gained a new required
     // field; without this the call here would not compile.
     setTargetCount: completion.setTargetCount,
+    // The Notion pick is per meeting: it clears wherever the targets do.
+    onTargetsCleared: notionPick.clear,
   });
 
   // Mounted HERE, not inside ContactPicker: a hook there would re-run on every
@@ -159,6 +172,7 @@ export const Completion = ({
     // Task 14: the flat multi-target list, not the single-select flow's own
     // ref - see useOdooTarget.ts's UseOdooTargetReturn.targetsRef doc comment.
     targetRef: odoo.targetsRef,
+    notionPickedRef: notionPick.pickedRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     meetingAssistMode: completion.meetingAssistMode,
@@ -261,8 +275,14 @@ export const Completion = ({
           onUndo={meetingLog.onUndo}
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
-      ) : (
-        <ContactPicker {...odoo.pickerProps} calendar={calendarProps} />
+      ) : hidePicker ? null : (
+        <ContactPicker
+          {...odoo.pickerProps}
+          calendar={calendarProps}
+          notionAvailable={notionAvailable}
+          notionSelected={notionPick.picked}
+          onToggleNotion={onToggleNotion}
+        />
       )}
       <Audio {...completion} />
       <Input

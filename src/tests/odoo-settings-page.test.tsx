@@ -25,7 +25,8 @@ const { getQueueCounts, countAllQueued } = vi.hoisted(() => ({
   getQueueCounts: vi.fn(),
   countAllQueued: vi.fn(async () => 0),
 }));
-vi.mock("@/lib/database/meeting-log.action", () => ({ getQueueCounts, countAllQueued }));
+// NOTION_LANE_OPEN: read at module load by notion-queue.action, which useMeetingLog reaches.
+vi.mock("@/lib/database/meeting-log.action", () => ({ getQueueCounts, countAllQueued, NOTION_LANE_OPEN: "1" }));
 
 // The EMITTING half of the cross-window notification. Task 12 covers the
 // listening half; without this suite covering the emit, a save handler that
@@ -98,7 +99,24 @@ vi.mock("@/lib/storage/odoo-verification.storage", () => verification);
 // repo's own settings-page test does exactly this stub; see
 // src/tests/settings-page.meeting-auto-record.test.tsx:21-23.
 vi.mock("@/layouts", () => ({
-  PageLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  PageLayout: ({ children, description }: { children: React.ReactNode; description?: string }) => (
+    <div>
+      <p data-testid="page-description">{description}</p>
+      {children}
+    </div>
+  ),
+}));
+
+// The Notion card's Check pulls in the Notion queue, which needs more of the
+// meeting-log module than this file's mock above provides.
+vi.mock("@/lib/notion/check", () => ({ checkNotionSetup: vi.fn() }));
+
+// The Notion-only state is steered per test; null (still loading) is today's page.
+const setupHooks = vi.hoisted(() => ({
+  notion: null as boolean | null,
+}));
+vi.mock("@/hooks/useNotionConfigured", () => ({
+  useNotionConfigured: () => setupHooks.notion,
 }));
 
 import { odooError, OdooError } from "@/lib/odoo/errors";
@@ -120,6 +138,7 @@ function renderPage() {
 const SYNCED_3 = { ran: true, changed: 3, fetched: 3, skipped: 0, clampSkipped: false } as const;
 
 beforeEach(() => {
+  setupHooks.notion = null;
   // clearAllMocks wipes the CALL LOG and leaves implementations, so a
   // mockResolvedValue / mockRejectedValue set by one test is still in force for
   // every test after it. Re-establish the defaults explicitly rather than reach
@@ -160,10 +179,10 @@ beforeEach(() => {
 async function fillAndSave() {
   const user = userEvent.setup({ delay: null });
   await user.type(await screen.findByLabelText(/url/i), "http://h:8069");
-  await user.type(screen.getByLabelText(/database/i), "odoo");
+  await user.type(screen.getByLabelText(/^database$/i), "odoo");
   await user.type(screen.getByLabelText(/login/i), "bob@example.com");
   await user.type(screen.getByLabelText(/api key/i), KEY);
-  await user.click(screen.getByRole("button", { name: /save/i }));
+  await user.click(screen.getByRole("button", { name: /^save$/i }));
 }
 
 describe("saving credentials", () => {
@@ -235,7 +254,8 @@ describe("saving credentials", () => {
     });
 
     expect(screen.queryByText(/ODOO_INTERNAL/)).not.toBeInTheDocument();
-    expect(screen.getByText(/saved/i)).toBeInTheDocument();
+    // Scoped: the Notion card above has its own "Saved ..." line.
+    expect(screen.getByTestId("odoo-save-status")).toHaveTextContent(/saved/i);
   });
 
   // Finding 4: the only prior observable difference between a successful save
@@ -244,15 +264,15 @@ describe("saving credentials", () => {
   it("shows a success confirmation after a successful save", async () => {
     renderPage();
     await fillAndSave();
-    expect(await screen.findByText(/saved/i)).toBeInTheDocument();
+    expect(await screen.findByTestId("odoo-save-status")).toHaveTextContent(/saved/i);
   });
 
   it("clears the success confirmation on the next edit", async () => {
     renderPage();
     await fillAndSave();
-    expect(await screen.findByText(/saved/i)).toBeInTheDocument();
+    expect(await screen.findByTestId("odoo-save-status")).toHaveTextContent(/saved/i);
     await userEvent.type(screen.getByLabelText(/url/i), "1");
-    expect(screen.queryByText(/saved/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("odoo-save-status")).not.toBeInTheDocument();
   });
 });
 
@@ -384,7 +404,7 @@ describe("the Odoo settings page", () => {
     renderPage();
     const user = userEvent.setup({ delay: null });
     await user.type(await screen.findByLabelText(/url/i), "http://h:8069");
-    await user.type(screen.getByLabelText(/database/i), "odoo");
+    await user.type(screen.getByLabelText(/^database$/i), "odoo");
     await user.type(screen.getByLabelText(/login/i), "bob@example.com");
     await user.type(screen.getByLabelText(/api key/i), KEY);
 
@@ -665,7 +685,7 @@ describe("the queue status block", () => {
     });
     countAllQueued.mockResolvedValue(2);
 
-    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
     expect(await screen.findByTestId("meeting-log-stranded")).toBeInTheDocument();
     expect(screen.queryByTestId("meeting-log-queue-status")).toBeNull();
@@ -1112,5 +1132,34 @@ describe("the auto-select switch", () => {
 
     const toggle = await screen.findByRole("switch", { name: "Add meeting attendees automatically" });
     expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+});
+
+describe("Notion-only Integrations page", () => {
+  it("Notion-only: Integrations page shows no 'Odoo' text until 'Show other integrations' is pressed", async () => {
+    setupHooks.notion = true;
+    storage.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    const { container } = renderPage();
+
+    expect(await screen.findByTestId("notion-card")).toBeInTheDocument();
+    expect(screen.getByTestId("page-description")).toHaveTextContent(
+      "Connect Notion to send your meeting notes to your team.",
+    );
+    expect(container.textContent?.toLowerCase()).not.toContain("odoo");
+    expect(screen.queryByText("Calendar")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show other integrations" }));
+    expect(screen.getByRole("button", { name: "Test connection" })).toBeInTheDocument();
+    expect(screen.getByText("Calendar")).toBeInTheDocument();
+    expect(container.textContent?.toLowerCase()).toContain("odoo");
+  });
+
+  it("keeps the full page, and the Odoo description, when Odoo is set up", async () => {
+    setupHooks.notion = true;
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Test connection" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show other integrations" })).toBeNull();
+    expect(screen.getByTestId("page-description")).toHaveTextContent(/^Connect Odoo to pick contacts/);
   });
 });

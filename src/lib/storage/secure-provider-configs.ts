@@ -399,3 +399,40 @@ export async function migrateProviderConfigsToSecureStorage(): Promise<void> {
     console.error("[SecureStorage] Migration failed:", error);
   }
 }
+
+const SUMMARY_PROVIDER_KEY = "secure_summary_provider";
+
+export interface SummaryProviderSetting {
+  provider: string;
+  variables: Record<string, string>;
+}
+
+/**
+ * The Meeting summaries override, or null ONLY when nothing is stored. A stored
+ * blob that can't be read throws, so the transcript is never rerouted to a
+ * provider the user did not pick for summaries. The message carries no blob text.
+ */
+export async function loadSummaryProvider(): Promise<SummaryProviderSetting | null> {
+  const raw = await secureGet(SUMMARY_PROVIDER_KEY);
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("SUMMARY_PROVIDER_UNREADABLE");
+  }
+  const v = (typeof parsed === "object" && parsed !== null ? parsed : {}) as {
+    provider?: unknown;
+    variables?: unknown;
+  };
+  if (typeof v.provider !== "string" || !v.provider || !v.variables || typeof v.variables !== "object") {
+    throw new Error("SUMMARY_PROVIDER_UNREADABLE");
+  }
+  return { provider: v.provider, variables: v.variables as Record<string, string> };
+}
+
+/** null clears the override. The API key goes to the secure store only. */
+export async function saveSummaryProvider(v: SummaryProviderSetting | null): Promise<void> {
+  if (v === null) await secureDelete(SUMMARY_PROVIDER_KEY);
+  else await secureSet(SUMMARY_PROVIDER_KEY, JSON.stringify(v));
+}

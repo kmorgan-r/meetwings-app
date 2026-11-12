@@ -29,7 +29,7 @@ const action = vi.hoisted(() => ({
   insertQueueRow: vi.fn(async () => true),
   readMeetingMessages: vi.fn(async () => []),
   findHeldRow: vi.fn(async () => null),
-  cancelHeldRow: vi.fn(async () => true),
+  cancelHeldRow: vi.fn(async () => "all"),
   claimRow: vi.fn(async () => true),
   getQueueRow: vi.fn(async () => null),
   pruneTranscripts: vi.fn(async () => 0),
@@ -68,6 +68,17 @@ const config = vi.hoisted(() => ({
   instanceFingerprint: vi.fn((url: string, db: string) => `${url}|${db}`),
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
+
+// Task 15: the hook now also reads Notion config and starts the Notion
+// scheduler. Both are off here so these suites keep testing the Odoo path.
+vi.mock("@/lib/storage/notion-config.storage", () => ({
+  isNotionConfigured: vi.fn(async () => false),
+  isNotionAutoSendEnabled: vi.fn(() => true),
+}));
+vi.mock("@/lib/notion/scheduler", () => ({
+  ensureNotionScheduler: vi.fn(),
+  isNotionSchedulerStarted: vi.fn(() => false),
+}));
 
 const summarizer = vi.hoisted(() => ({
   ensureMeetingSummary: vi.fn(async () => null),
@@ -218,7 +229,7 @@ beforeEach(() => {
   action.insertQueueRow.mockResolvedValue(true);
   action.readMeetingMessages.mockResolvedValue([]);
   action.findHeldRow.mockResolvedValue(null);
-  action.cancelHeldRow.mockResolvedValue(true);
+  action.cancelHeldRow.mockResolvedValue("all");
   action.claimRow.mockResolvedValue(true);
   action.getQueueRow.mockResolvedValue(null);
   action.pruneTranscripts.mockResolvedValue(0);

@@ -115,5 +115,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/meeting-log-queue-v2.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 17: Notion lane on the queue plus the notion_sends record
+        Migration {
+            version: 17,
+            description: "create_notion_sends",
+            sql: include_str!("migrations/notion-sends.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

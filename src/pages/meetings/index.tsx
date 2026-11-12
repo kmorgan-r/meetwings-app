@@ -10,6 +10,7 @@ import { MessageCircleIcon, Search } from "lucide-react";
 // suites, which mock only the leaves the queue needs.
 import { useHistory } from "@/hooks/useHistory";
 import { targetNameOf, useMeetingLogQueue } from "@/hooks/useMeetingLogQueue";
+import { useNotionQueue } from "@/hooks/useNotionQueue";
 import { PageLayout } from "@/layouts";
 import { isNoContactChosen, resolveBadge, resolveBadgeRow } from "@/lib/odoo/meeting-log";
 import { renameConversationManually } from "@/lib/database/chat-history.action";
@@ -19,6 +20,7 @@ import type { ConversationBadgeRow } from "@/types";
 import { AssignDialog } from "./components/AssignDialog";
 import { ConversationList } from "./components/ConversationList";
 import { ProviderConfigReader } from "./components/ProviderConfigReader";
+import { NotionSection } from "./components/NotionSection";
 import { QueueStrip } from "./components/QueueStrip";
 
 function plural(n: number): string {
@@ -46,6 +48,8 @@ export default function Meetings() {
     listener across its lossy async listen() gap on every mount.
   */
   const queue = useMeetingLogQueue();
+  // Independent of Odoo config: a Notion-only user has no Odoo queue to speak of.
+  const notion = useNotionQueue();
   const conversations = useHistory();
   const navigate = useNavigate();
 
@@ -241,11 +245,18 @@ export default function Meetings() {
     [commitRename]
   );
 
+  // A half-filled Odoo config counts as set up: its backlog still shows below.
+  const odooSetUp = queue.configState === "complete" || queue.configState === "incomplete";
+  const description = odooSetUp
+    ? notion.configured
+      ? "Your conversations, and the meetings waiting to reach Odoo and Notion."
+      : "Your conversations, and the meetings waiting to reach Odoo."
+    : notion.configured
+      ? "Your conversations, and the meetings waiting to reach Notion."
+      : "Your conversations.";
+
   return (
-    <PageLayout
-      title="Meetings"
-      description="Your conversations, and the meetings waiting to reach Odoo."
-    >
+    <PageLayout title="Meetings" description={description}>
       {/*
         A LEAF, and OUTSIDE every conditional. AppProvider rebuilds its value
         every render and calls loadData() on cross-window `storage` events, so
@@ -298,7 +309,13 @@ export default function Meetings() {
         </section>
       )}
 
-      {queue.configState !== "loading" && queue.configState !== "complete" && (
+      {queue.configState !== "loading" &&
+        queue.configState !== "complete" &&
+        // Hidden for a user with no Odoo backlog while Notion is on or its setup is
+        // still being read: "0 meetings are waiting. Finish setting Odoo up" would be
+        // Odoo copy a Notion-only user never asked for. An incomplete Odoo setup keeps
+        // its nudge either way.
+        (queue.stranded > 0 || queue.configState === "incomplete" || notion.configured === false) && (
         <p className="text-sm">
           {`${plural(queue.stranded)} Finish setting Odoo up on the `}
           <Link to="/integrations" className="underline">
@@ -307,6 +324,13 @@ export default function Meetings() {
           {" to see and send them."}
         </p>
       )}
+
+      <NotionSection
+        items={notion.items}
+        onSendRows={notion.onSendRows}
+        onRetry={notion.onRetry}
+        onDontSend={notion.onDontSend}
+      />
 
       <QueueStrip
         rows={queue.rows}
@@ -375,6 +399,8 @@ export default function Meetings() {
             onSendToOdoo={
               queue.configState === "complete" ? queue.handleSendConversation : null
             }
+            notionBadges={notion.byConversation}
+            onSendToNotion={notion.configured === true ? notion.onSendConversation : null}
           />
         </div>
       )}

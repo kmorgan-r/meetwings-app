@@ -59,6 +59,7 @@ async function freshDb() {
     "meeting-log-queue.sql",
     "odoo-lead-only-target.sql",
     "odoo-multi-target.sql",
+    "notion-sends.sql",
   ]) {
     db.exec(fs.readFileSync(path.join(MIGRATIONS, m), "utf8"));
   }
@@ -379,6 +380,7 @@ const mockEverything = () => {
         },
       useCalendarAutoSelect: vi.fn(),
       useMeetingLog: () => ({ holding: false, onUndo: vi.fn(), undoBlockedMessage: null }),
+      useNotionPick: () => ({ picked: false, pickedRef: { current: false }, toggle: () => {}, clear: () => {} }),
     };
   });
   vi.doMock("@/pages/app/components", async (orig) => ({

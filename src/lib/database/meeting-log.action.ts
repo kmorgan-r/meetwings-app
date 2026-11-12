@@ -4,6 +4,7 @@ import type {
   MeetingLogListRow,
   MeetingLogStatus,
   MeetingLogTarget,
+  NotionRowStatus,
   SelectedTarget,
   SelectedTargets,
   TranscriptEntry,
@@ -49,7 +50,8 @@ export interface NewQueueRow {
   transcriptStartAt: number;
   transcriptEndAt: number;
   meetingStartedAt: number;
-  status: Extract<MeetingLogStatus, "held" | "unassigned">;
+  status: Extract<MeetingLogStatus, "held" | "unassigned" | "none">;
+  notionStatus: NotionRowStatus | null;
   createdAt: number;
 }
 
@@ -62,6 +64,25 @@ export interface QueueCounts {
 }
 
 /**
+ * True while a row's Notion lane can still send or be undone. TWO-VALUED on
+ * purpose: an Odoo-only row has notion_status NULL, and a bare `NULL IN (...)`
+ * would make `NOT <fragment>` NULL and refuse every Odoo-only delete, hence the
+ * COALESCE. Exported for the Notion statements (notion-queue.action.ts).
+ */
+export const NOTION_LANE_OPEN = `
+(COALESCE(notion_status,'') IN ('held','offered','waiting')
+ OR (COALESCE(notion_status,'') = 'joined' AND EXISTS (SELECT 1 FROM notion_sends s
+      WHERE s.id = meeting_log_queue.notion_send_id
+        AND s.status NOT IN ('sent','already','cancelled'))))`;
+
+/** The Notion lane is finished (or was never used): safe to blank the text. */
+const NOTION_LANE_DONE = `
+(notion_status IS NULL OR notion_status = 'cancelled'
+ OR (notion_status = 'joined' AND EXISTS (SELECT 1 FROM notion_sends s
+      WHERE s.id = meeting_log_queue.notion_send_id
+        AND s.status IN ('sent','already','cancelled'))))`;
+
+/**
  * Every statement, exported so the no-transaction guard can scan these VALUES.
  * A test that scanned the file text would fail on the warning comment above.
  */
@@ -69,8 +90,8 @@ export const QUEUE_SQL = {
   insert: `
 INSERT INTO meeting_log_queue (id, session_key, conversation_id, instance, contact_id,
                                lead_id, transcript, transcript_start_at, transcript_end_at,
-                               meeting_started_at, status, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               meeting_started_at, status, created_at, notion_status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(session_key) DO NOTHING`,
 
   // GLOBAL: no conversation_id predicate and no status predicate. See the
@@ -86,8 +107,26 @@ UPDATE meeting_log_queue
    SET status = 'sending', claimed_at = ?, attempts = attempts + 1
  WHERE id = ? AND status IN ('pending', 'held')`,
 
+  // Cancels whichever lanes are still held, in one statement.
   cancelHeld: `
-UPDATE meeting_log_queue SET status = 'cancelled' WHERE id = ? AND status = 'held'`,
+UPDATE meeting_log_queue
+   SET status        = CASE WHEN status = 'held' THEN 'cancelled' ELSE status END,
+       notion_status = CASE WHEN notion_status = 'held' THEN 'cancelled' ELSE notion_status END
+ WHERE id = ? AND (status = 'held' OR notion_status = 'held')`,
+
+  // CAS held -> waiting on the Notion lane.
+  promoteNotionHeld: `
+UPDATE meeting_log_queue SET notion_status = 'waiting'
+ WHERE id = ? AND notion_status = 'held'`,
+
+  promoteStaleNotionHeld: `
+UPDATE meeting_log_queue SET notion_status = 'waiting'
+ WHERE notion_status = 'held' AND created_at <= ?`,
+
+  pruneSendSummaries: `
+UPDATE notion_sends SET summary_json = NULL
+ WHERE status IN ('sent','already','cancelled')
+   AND summary_json IS NOT NULL AND created_at < ?`,
 
   // CAS, not an unconditional write. Every caller reaches this only after
   // successfully claiming the row, so the predicate never refuses a
@@ -147,7 +186,7 @@ SELECT * FROM meeting_log_queue
 
   heldInWindow: `
 SELECT * FROM meeting_log_queue
- WHERE instance = ? AND status = 'held' AND created_at > ?
+ WHERE ((instance = ? AND status = 'held') OR notion_status = 'held') AND created_at > ?
  ORDER BY created_at DESC LIMIT 1`,
 
   // The needs-attention and waiting arms both gain a matching, complementary
@@ -325,7 +364,8 @@ UPDATE meeting_log_queue
 UPDATE meeting_log_queue SET status = 'deleted', transcript = ''
  WHERE id = ? AND status IN ('held','pending','unassigned','failed')
    AND NOT EXISTS (SELECT 1 FROM meeting_log_targets
-                    WHERE row_id = meeting_log_queue.id AND status = 'sent')`,
+                    WHERE row_id = meeting_log_queue.id AND status = 'sent')
+   AND NOT ${NOTION_LANE_OPEN}`,
 
   // Complement of deleteRow, widened the same way and for the same reason: a
   // partially-sent row derives `pending` or `failed`, so without the OR arm
@@ -350,9 +390,10 @@ UPDATE meeting_log_queue SET status = 'deleted', transcript = ''
    AND status <> 'sending'
    AND (status IN ('sent','cancelled')
         OR EXISTS (SELECT 1 FROM meeting_log_targets
-                    WHERE row_id = meeting_log_queue.id AND status = 'sent'))`,
+                    WHERE row_id = meeting_log_queue.id AND status = 'sent'))
+   AND NOT ${NOTION_LANE_OPEN}`,
 
-  // Every column EXCEPT transcript - loading a whole meeting's text for every
+  // Every column EXCEPT transcript and the Notion lane - loading a whole meeting's text for every
   // row to render a COLLAPSED list is invisible with three rows and painful
   // with forty.
   //
@@ -417,7 +458,8 @@ SELECT COUNT(*) AS n FROM meeting_log_queue
   // prior call already blanked.
   prune: `
 UPDATE meeting_log_queue SET transcript = ''
- WHERE status IN ('sent','cancelled')
+ WHERE status IN ('sent','cancelled','none')
+   AND ${NOTION_LANE_DONE}
    AND transcript <> ''
    AND created_at < ?`,
 
@@ -605,14 +647,14 @@ export async function insertQueueRow(row: NewQueueRow): Promise<boolean> {
 
   // QUEUE_SQL.insert's column order: (id, session_key, conversation_id,
   // instance, contact_id, lead_id, transcript, transcript_start_at,
-  // transcript_end_at, meeting_started_at, status, created_at). Only the two
+  // transcript_end_at, meeting_started_at, status, created_at, notion_status). Only the two
   // id columns changed to null here - the target rows are the source of
   // truth now, and these two stay on disk purely as pre-migration-14 history.
   const result = await db.execute(QUEUE_SQL.insert, [
     row.id, row.sessionKey, row.conversationId, row.instance,
     null, null, // contact_id, lead_id
     row.transcript, row.transcriptStartAt, row.transcriptEndAt,
-    row.meetingStartedAt, row.status, row.createdAt,
+    row.meetingStartedAt, row.status, row.createdAt, row.notionStatus,
   ]);
   // 0 means the other trigger already enqueued this meeting. That is a NORMAL
   // outcome, not an error: the caller returns silently - no hold, no push, no
@@ -760,10 +802,32 @@ export async function claimRow(id: string, now: number): Promise<boolean> {
   return (result.rowsAffected ?? 0) === 1;
 }
 
-export async function cancelHeldRow(id: string): Promise<boolean> {
+/**
+ * "all": every held lane is cancelled and nothing else is live. "partial": a
+ * lane is still live (the scheduler promoted Notion, or the Odoo push started,
+ * just before the click). "none": nothing was held.
+ */
+export async function cancelHeldRow(id: string): Promise<"all" | "partial" | "none"> {
   const db = await getDatabase();
   const result = await db.execute(QUEUE_SQL.cancelHeld, [id]);
+  if ((result.rowsAffected ?? 0) === 0) return "none";
+  const row = await getQueueRow(id);
+  if (!row) return "none";
+  const odooLive = row.status !== "cancelled" && row.status !== "none";
+  const notionLive = row.notion_status != null && row.notion_status !== "cancelled";
+  return odooLive || notionLive ? "partial" : "all";
+}
+
+export async function promoteHeldNotionRow(id: string): Promise<boolean> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.promoteNotionHeld, [id]);
   return (result.rowsAffected ?? 0) === 1;
+}
+
+export async function promoteStaleHeldNotionRows(olderThan: number): Promise<number> {
+  const db = await getDatabase();
+  const result = await db.execute(QUEUE_SQL.promoteStaleNotionHeld, [olderThan]);
+  return result.rowsAffected ?? 0;
 }
 
 export async function releaseRowToPending(
@@ -847,10 +911,11 @@ export async function selectSweepable(
 }
 
 export async function findHeldRow(
-  instance: string, now: number
+  instance: string | null, now: number
 ): Promise<DbMeetingLogRow | null> {
   const db = await getDatabase();
   const rows = await db.select<Record<string, unknown>[]>(QUEUE_SQL.heldInWindow, [
+    // A null instance never equals a column, so the Odoo arm drops out.
     instance,
     now - HOLD_MS,
   ]);
@@ -1254,6 +1319,8 @@ export async function countActionableQueued(): Promise<number> {
 /** Retention. Returns how many rows it blanked. */
 export async function pruneTranscripts(now: number): Promise<number> {
   const db = await getDatabase();
-  const result = await db.execute(QUEUE_SQL.prune, [pruneCutoff(now)]);
-  return result.rowsAffected ?? 0;
+  const cutoff = pruneCutoff(now);
+  const result = await db.execute(QUEUE_SQL.prune, [cutoff]);
+  const sends = await db.execute(QUEUE_SQL.pruneSendSummaries, [cutoff]);
+  return (result.rowsAffected ?? 0) + (sends.rowsAffected ?? 0);
 }

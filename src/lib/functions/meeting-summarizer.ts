@@ -14,7 +14,7 @@ import {
   applySummaryTitleToConversation,
 } from "@/lib/database";
 import { fetchAIResponse } from "./ai-response.function";
-import { shouldUseMeetwingsAPI } from "./meetwings.api";
+import { resolveSummaryProvider, type ProviderConfig } from "./summary-provider";
 import { getUserIdentity, hasUserIdentity } from "@/lib/storage";
 import { renderTranscript } from "@/lib/odoo/meeting-log";
 
@@ -317,12 +317,6 @@ export function chatMessagesToTranscriptEntries(
     }));
 }
 
-/** The provider shape every caller in this file already threads through. */
-type ProviderConfig = {
-  provider: any;
-  selectedProvider: { provider: string; variables: Record<string, string> };
-};
-
 /** Below this, a persisted summary would permanently lock the conversation's
  * canonical row to a fragment - see the design spec's shared-helper step 4. */
 export const MIN_PERSIST_ENTRIES = 4;
@@ -387,23 +381,27 @@ export async function ensureMeetingSummary(
       return null;
     }
 
-    const useMeetwingsAPI = await shouldUseMeetwingsAPI();
-    if (!useMeetwingsAPI && !providerConfig) {
+    const resolved = await resolveSummaryProvider(providerConfig);
+    if (resolved.kind === "none") {
       console.log("No AI provider configured for meeting summarization");
       return null;
     }
+    const aiConfig = resolved.kind === "meetwings" ? undefined : resolved.config;
 
     const userMessage =
       `MEETING TRANSCRIPT:\n${renderTranscript(entries)}\n\nProvide the JSON summary:`;
 
     let fullResponse = "";
     for await (const chunk of fetchAIResponse({
-      provider: useMeetwingsAPI ? undefined : providerConfig?.provider,
-      selectedProvider: providerConfig?.selectedProvider || { provider: "", variables: {} },
+      provider: aiConfig?.provider,
+      selectedProvider: aiConfig?.selectedProvider || { provider: "", variables: {} },
       systemPrompt: SUMMARIZATION_PROMPT + getUserIdentityInstruction(),
       history: [],
       userMessage,
       imagesBase64: [],
+      // The override key may be shared: keep Context Memory off it.
+      skipMeetwingsAPI: resolved.kind === "override",
+      rawSystemPrompt: resolved.kind === "override",
     })) {
       fullResponse += chunk;
     }

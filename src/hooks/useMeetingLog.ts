@@ -8,10 +8,19 @@ import {
   getQueueRow,
   getTranscriptWatermark,
   insertQueueRow,
+  promoteHeldNotionRow,
   readMeetingMessages,
   sweepOrphanTargets,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
+import type { ProviderConfig } from "@/lib/functions/summary-provider";
+import { decideDestinations } from "@/lib/notion/destinations";
+import { notionErrorText } from "@/lib/notion/errors";
+import {
+  ensureNotionScheduler,
+  isNotionSchedulerStarted,
+  type SchedulerDeps,
+} from "@/lib/notion/scheduler";
 import { createOdooClient } from "@/lib/odoo/client";
 import {
   HOLD_MS,
@@ -26,6 +35,7 @@ import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
+import { isNotionAutoSendEnabled, isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import {
   instanceFingerprint,
   loadOdooConfigState,
@@ -33,11 +43,6 @@ import {
 } from "@/lib/storage/odoo-config.storage";
 import type { SelectedTargets, TranscriptEntry } from "@/types";
 import type { RefObject } from "react";
-
-type ProviderConfig = {
-  provider: any;
-  selectedProvider: { provider: string; variables: Record<string, string> };
-};
 
 /**
  * Once per PROCESS, not once per mount. See the sweep effect below.
@@ -125,6 +130,11 @@ export interface UseMeetingLogOptions {
    * `targetRef.current` directly.
    */
   targetRef: RefObject<SelectedTargets>;
+  /**
+   * Whether the user picked Notion for the current meeting (useNotionPick's
+   * `pickedRef`). Optional so callers with no Notion pill compile unchanged.
+   */
+  notionPickedRef?: RefObject<boolean>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
   meetingAssistMode: boolean;
@@ -151,7 +161,8 @@ export interface UseMeetingLogReturn {
  * Windows-only watcher.
  */
 export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogReturn {
-  const { targetRef, meetingTranscript, currentConversationId, meetingAssistMode } = options;
+  const { targetRef, notionPickedRef, meetingTranscript, currentConversationId, meetingAssistMode } =
+    options;
 
   // Synchronous and stable. getCurrentWindow().label is read synchronously in
   // this repo (useOdooTarget.ts:296, useMeetingAutoRecord.ts:121-124), so this
@@ -179,6 +190,26 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     transcriptRef.current = meetingTranscript;
     conversationIdRef.current = currentConversationId;
     providerConfigRef.current = options.providerConfig;
+    depsRef.current = {
+      now: () => Date.now(),
+      liveLastLineAt: (c) =>
+        c === conversationIdRef.current && transcriptRef.current.length
+          ? Math.max(...transcriptRef.current.map((e) => e.timestamp))
+          : null,
+      fallbackProvider: () => providerConfigRef.current,
+    };
+  });
+
+  // What the Notion scheduler reads about the live meeting. Rewritten in the
+  // layout effect below (never during render), so a scheduler started once
+  // keeps seeing current values.
+  const depsRef = useRef<SchedulerDeps>({
+    now: () => Date.now(),
+    liveLastLineAt: () => null,
+    fallbackProvider: () => undefined,
+  });
+  useEffect(() => {
+    if (isOwner && isNotionSchedulerStarted()) ensureNotionScheduler(depsRef.current);
   });
 
   /**
@@ -212,7 +243,22 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const pushHeldRow = useCallback(async (rowId: string) => {
     try {
       const row = await getQueueRow(rowId);
-      if (!row || row.status !== "held") return; // undone, or someone else claimed it
+      if (!row) return;
+      // The Notion lane first, in its OWN try: an Odoo failure below must never
+      // undo the promotion, and a failed promotion must never block the Odoo
+      // push. If it fails the row stays `held` and the scheduler's stale-held
+      // promotion owns it. Logged by code only.
+      if (row.notion_status === "held") {
+        try {
+          await promoteHeldNotionRow(rowId);
+        } catch (err) {
+          console.error("[notion] held-row promotion failed:", notionErrorText(err).code);
+        }
+      }
+      // Undone, or someone else claimed it. Also the Notion-only case
+      // (`none`): requireOdooConfig throws with Odoo absent, and the log would
+      // blame Odoo for a hold that never involved it.
+      if (row.status !== "held") return;
       const config = await requireOdooConfig();
       await pushQueuedRow(row, {
         client: createOdooClient(config),
@@ -275,6 +321,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
     const targets = targetRef.current;
+    // Same reason as `targets`: the pick is per-meeting and must not change
+    // under an await.
+    const notionPicked = notionPickedRef?.current ?? false;
     const conversationId = conversationIdRef.current;
 
     // The consumed span, from the SAME synchronous snapshot.
@@ -295,8 +344,27 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     };
 
     try {
+      // Every config read is INSIDE the try, after the synchronous snapshot: a
+      // throw lands in the catch below (toast, skip-mark) and startup recovery
+      // rescues the meeting later from the saved messages.
       const state = await loadOdooConfigState();
-      if (state.state === "incomplete") {
+      // An unreadable Notion config means "Notion off", the same rule recovery
+      // uses: an Odoo user with a corrupt Notion blob keeps logging to Odoo.
+      let notion = false;
+      try {
+        notion = await isNotionConfigured();
+      } catch (err) {
+        console.warn("[notion] config unreadable:", notionErrorText(err).code);
+      }
+      const decision = decideDestinations({
+        source: "live",
+        odoo: state.state,
+        notion,
+        autoSend: isNotionAutoSendEnabled(),
+        odooTargets: targets.length,
+        notionPicked,
+      });
+      if (decision.toastIncomplete && state.state === "incomplete") {
         // Set up, then a field got cleared. The sweep already goes out of its
         // way to recordErrorOnUnsent for exactly this state "because nothing
         // else can" - here there is no row to record it on at all, so the
@@ -305,17 +373,19 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         toast.error(
           `Odoo is set up but incomplete - fill in ${state.missing.join(", ")} in Settings > Integrations`
         );
-        skipUnwritten();
-        return;
       }
-      if (state.state === "absent") {
-        // Odoo was never set up. Nothing to tell the user that isn't already
-        // obvious from the picker never having offered Odoo at all.
+      if (!decision.queue) {
+        // Nothing to send anywhere. For an absent Odoo there is nothing to tell
+        // the user that the picker never offering Odoo did not already say.
         skipUnwritten();
         return;
       }
 
-      const instance = instanceFingerprint(state.config.url, state.config.db);
+      // Only a fully set-up Odoo has an instance to key the row to.
+      const instance =
+        state.state === "complete" ? instanceFingerprint(state.config.url, state.config.db) : "";
+      // A Notion-only row (odooStatus 'none') carries no Odoo targets.
+      const rowTargets = decision.odooStatus === "none" ? [] : targets;
       // The skip watermark can only ever push this FORWARD of the real one: a
       // row that IS written always advances getTranscriptWatermark() past
       // whatever an earlier skip recorded, so max() never resurrects a span a
@@ -374,12 +444,13 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // getActiveConversationId(), losing the link slice 3 needs.
         conversationId: recoveryId,
         instance,
-        targets,
+        targets: rowTargets,
         transcript: renderTranscript(slice.entries),
         transcriptStartAt: slice.startAt,
         transcriptEndAt: slice.endAt,
         meetingStartedAt: slice.startAt,
-        status: targets.length ? "held" : "unassigned",
+        status: decision.odooStatus,
+        notionStatus: decision.notionStatus,
         createdAt: Date.now(),
       });
 
@@ -389,25 +460,25 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       if (!created) return;
       // An unassigned row has no hold and no push - slice 3 owns it. Telling
       // the user a meeting is being logged when nothing will be sent is worse
-      // than saying nothing.
+      // than saying nothing. A Notion lane that is `held` does have one.
       //
       // `startHold` is the SOLE writer of heldRowIdRef. Do not assign it here:
       // Task 10's startHold reads the previous value to decide whether a
       // displaced row needs pushing, and a pre-assignment here would make
       // `displaced === rowId` on every call, silently disabling that branch.
-      if (targets.length) startHold(rowId);
+      if (decision.odooStatus === "held" || decision.notionStatus === "held") startHold(rowId);
     } catch (err) {
       // SURFACED, not just logged. Reaching here means no row was written, so
       // to the user this is indistinguishable from "the meeting was silent" -
       // which is the exact failure the write-ahead design exists to prevent.
       // The repo already toasts transcript loss from useCompletion.ts:415.
       console.error("[Odoo] meeting log trigger failed:", err);
-      toast.error("This meeting could not be queued for Odoo.");
+      toast.error("This meeting could not be queued.");
       skipUnwritten();
     } finally {
       inFlightRef.current = false;
     }
-  }, [isOwner, startHold, targetRef]);
+  }, [isOwner, startHold, targetRef, notionPickedRef]);
 
   const triggerRef = useRef(trigger);
   useLayoutEffect(() => {
@@ -550,9 +621,20 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // credentials, which it checks itself. Last in the chain because it is
       // the only leg that WRITES rows - running it ahead of the sweep would
       // hand that sweep a queue it has just changed, for no benefit, since
-      // every row recovery writes is `unassigned` and no sweep pushes those.
+      // no sweep pushes a recovered row: it is `unassigned`, or Notion-only
+      // (`none`), whose lane the Notion scheduler owns.
       // Carries its own try/catch, so no trailing .catch here either.
-      .then(() => runMeetingRecovery());
+      .then(() => runMeetingRecovery())
+      // The Notion scheduler starts only once recovery has written its rows, so
+      // the first tick sees them. Sync and never throws, but a throw must be
+      // logged rather than left as an unhandled rejection in this chain.
+      .then(() => {
+        try {
+          ensureNotionScheduler(depsRef.current);
+        } catch (err) {
+          console.error("[notion] scheduler start failed:", notionErrorText(err).code);
+        }
+      });
     // NO trailing .catch here. `runTranscriptPrune`, `runOrphanSweep` and
     // `runMeetingRecovery` all swallow and log their own failure, so a second
     // catch carrying one of their messages would be dead code in production
@@ -573,8 +655,13 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     void (async () => {
       try {
         const config = await loadOdooConfigState();
-        if (config.state !== "complete" || cancelled) return;
-        const instance = instanceFingerprint(config.config.url, config.config.db);
+        if (cancelled) return;
+        // No Odoo gate: a Notion-only hold has no instance, and a null one
+        // drops the Odoo arm of the query so only the Notion arm can match.
+        const instance =
+          config.state === "complete"
+            ? instanceFingerprint(config.config.url, config.config.db)
+            : null;
         const now = Date.now();
         const row = await findHeldRow(instance, now);
         if (!row || cancelled) return;
@@ -645,17 +732,19 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // CAS. Whichever writer wins, the loser's rowsAffected is 0 - and the
         // loser here is the USER, who clicked Undo and whose meeting posts
         // anyway. Saying so is the whole point of the window.
-        if (await cancelHeldRow(rowId)) {
+        if ((await cancelHeldRow(rowId)) === "all") {
           // Only if nothing newer has taken the ref since this undo started -
           // a hold that started while this cancel was in flight owns it now,
           // and clearing unconditionally would lie about THAT row's state.
           // Without this at all, a second onUndo() after a successful cancel
           // re-runs cancelHeldRow on an already-cancelled row, gets 0 rows
-          // back, and tells the user "already being sent to Odoo" - the
-          // opposite of the truth.
+          // back, and tells the user "already being sent" - the opposite of
+          // the truth.
           if (heldRowIdRef.current === rowId) heldRowIdRef.current = null;
         } else {
-          showUndoBlocked("This meeting is already being sent to Odoo.");
+          // "none" is the lost race; "partial" is one lane that had already
+          // left (the Notion lane promoted, say) while the other was cancelled.
+          showUndoBlocked("This meeting is already being sent.");
         }
       } catch (err) {
         // The CAS write itself failed - this is not a lost race. The timer

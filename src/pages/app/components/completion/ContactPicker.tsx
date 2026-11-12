@@ -11,6 +11,7 @@ import type {
   SelectedTargets,
 } from "@/types";
 import { CheckIcon, ChevronDownIcon, StarIcon, UsersIcon } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CalendarProposal } from "./CalendarProposal";
 
 export const MAX_RENDERED_ROWS = 100;
@@ -199,6 +200,10 @@ export interface ContactPickerProps {
     onPickCandidate: (eventId: string) => void;
     onRetry: () => void;
   };
+  /** True only when Odoo is set up AND Notion is configured. */
+  notionAvailable: boolean;
+  notionSelected: boolean;
+  onToggleNotion: () => void; // useCallback-stable
 }
 
 export const ContactPicker = memo(function ContactPicker({
@@ -233,6 +238,9 @@ export const ContactPicker = memo(function ContactPicker({
   open,
   onOpenChange,
   calendar,
+  notionAvailable,
+  notionSelected,
+  onToggleNotion,
 }: ContactPickerProps) {
   const [query, setQuery] = useState("");
   // Task 12: which contact rows' own deal disclosure is open. Purely local
@@ -391,6 +399,12 @@ export const ContactPicker = memo(function ContactPicker({
               onPickCandidate={calendar.onPickCandidate}
               onRetry={calendar.onRetry}
             />
+          )}
+          {notionAvailable && (
+            <label className="flex items-center gap-2 text-xs" data-testid="notion-pick-row">
+              <Checkbox checked={notionSelected} onCheckedChange={() => onToggleNotion()} />
+              Notion: Weekly Team Meetings
+            </label>
           )}
           {targets.length > 0 && (
             <div

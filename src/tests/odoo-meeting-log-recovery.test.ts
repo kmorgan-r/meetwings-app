@@ -13,6 +13,13 @@ const config = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/storage/odoo-config.storage", () => config);
 
+const notion = vi.hoisted(() => ({
+  isNotionConfigured: vi.fn(async () => false),
+  isNotionAutoSendEnabled: vi.fn(() => true),
+  getNotionSetupAt: vi.fn(() => null as number | null),
+}));
+vi.mock("@/lib/storage/notion-config.storage", () => notion);
+
 // Stateful for the same reason useMeetingLog.enqueue.test.tsx's is: setup.ts
 // swaps the global localStorage for an inert stub, so the real module would
 // silently read 0 forever and the skip-watermark case would pass against an
@@ -48,6 +55,9 @@ beforeEach(() => {
   action.readUnloggedMessages.mockResolvedValue([]);
   action.insertQueueRow.mockResolvedValue(true);
   config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
+  notion.isNotionConfigured.mockResolvedValue(false);
+  notion.isNotionAutoSendEnabled.mockReturnValue(true);
+  notion.getNotionSetupAt.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -273,5 +283,149 @@ describe("runMeetingRecovery", () => {
     // rejection there is an unhandled promise, not an error anyone sees.
     action.readUnloggedMessages.mockRejectedValue(new Error("db down"));
     await expect(runMeetingRecovery()).resolves.toBe(0);
+  });
+});
+
+describe("runMeetingRecovery with Notion", () => {
+  beforeEach(() => {
+    notion.isNotionConfigured.mockResolvedValue(true);
+    notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
+    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+  });
+
+  /** A reader that honours the floor, like the real query. */
+  function storeHolds(...entries: ReturnType<typeof said>[]) {
+    action.readUnloggedMessages.mockImplementation((async (floor: number) =>
+      entries.filter((e) => e.timestamp > floor)) as never);
+  }
+
+  it("a Notion-only crash with no Odoo config rescues the meeting as status 'none', notion 'waiting'", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+
+    expect(await runMeetingRecovery()).toBe(1);
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "waiting",
+      targets: [],
+    });
+  });
+
+  it("Notion-only with auto-send off rescues as 'offered'", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.isNotionAutoSendEnabled.mockReturnValue(false);
+
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "none",
+      notionStatus: "offered",
+    });
+  });
+
+  it("Odoo set up: rescued meetings stay unassigned with no Notion lane", async () => {
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: INSTANCE,
+      status: "unassigned",
+      notionStatus: null,
+    });
+  });
+
+  it("Odoo half-filled with Notion on rescues as 'none' + 'offered' under no instance", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "incomplete", missing: ["apiKey"] });
+
+    await runMeetingRecovery();
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: "",
+      status: "none",
+      notionStatus: "offered",
+    });
+  });
+
+  it("treats a throw from isNotionConfigured as Notion off, so Odoo recovery still runs", async () => {
+    notion.isNotionConfigured.mockRejectedValue(new Error("unreadable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await runMeetingRecovery()).toBe(1);
+
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      instance: INSTANCE,
+      status: "unassigned",
+      notionStatus: null,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "[meeting-log] notion config unreadable:",
+      "NOTION_INTERNAL"
+    );
+    warn.mockRestore();
+    err.mockRestore();
+  });
+
+  it("does not backfill a Notion-only meeting that predates the Notion setup", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(NOW);
+    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(0);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+  });
+
+  it("rescues a crash-lost meeting that happened after the Notion setup", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
+    storeHolds(said("conv-1", NOW - 30 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(1);
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "none",
+      notionStatus: "waiting",
+    });
+  });
+
+  it("rescues nothing when no setup time is stored", async () => {
+    config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
+    notion.getNotionSetupAt.mockReturnValue(null);
+    storeHolds(said("conv-1", NOW - 30 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(0);
+  });
+
+  it("keeps today's floor for an Odoo-complete row with no Notion lane", async () => {
+    notion.getNotionSetupAt.mockReturnValue(NOW);
+    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+
+    expect(await runMeetingRecovery()).toBe(1);
+    expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
+      status: "unassigned",
+      notionStatus: null,
+    });
+  });
+
+  it("is single-flight: a concurrent call joins the first and resolves after its inserts", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const finished: string[] = [];
+    action.insertQueueRow.mockImplementation((async () => {
+      await gate;
+      finished.push("insert");
+      return true;
+    }) as never);
+
+    const first = runMeetingRecovery();
+    const second = runMeetingRecovery();
+    void second.then(() => finished.push("second"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(finished).toEqual([]);
+
+    release();
+    expect(await first).toBe(1);
+    expect(await second).toBe(1);
+    expect(finished).toEqual(["insert", "second"]);
+    expect(await runMeetingRecovery()).toBe(0);
   });
 });

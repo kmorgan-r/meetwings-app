@@ -79,6 +79,14 @@ export const STORAGE_KEYS = {
   // Per-provider configuration storage (remembers API keys when switching providers)
   AI_PROVIDER_CONFIGS: "ai_provider_configs",
   STT_PROVIDER_CONFIGS: "stt_provider_configs",
+
+  // Notion meeting notes (see notion-config.storage.ts).
+  // NOTION_PICKED: whether the user picked Notion for the current meeting
+  // (useNotionPick boolean); cleared together with the Odoo targets.
+  NOTION_AUTO_SEND: "notion_auto_send",
+  NOTION_PICKED: "notion_picked",
+  // When Notion first read as fully set up (ms epoch); floors crash recovery.
+  NOTION_SETUP_AT: "notion_setup_at",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the

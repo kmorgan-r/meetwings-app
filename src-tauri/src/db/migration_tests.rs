@@ -96,6 +96,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn notion_sends_migration_is_version_17_and_points_at_its_own_file() {
+        let m = migrations()
+            .into_iter()
+            .find(|m| m.description == "create_notion_sends")
+            .expect("notion sends migration must be registered");
+        assert_eq!(m.version, 17, "notion sends migration must be version 17");
+        assert_eq!(
+            m.sql,
+            include_str!("migrations/notion-sends.sql"),
+            "notion sends migration must embed migrations/notion-sends.sql"
+        );
+    }
+
     /// Same reasoning again. This one rebuilds a table migration 11 already
     /// created, so registering it at an ALREADY-APPLIED version would not
     /// merely collide on a checksum - the rebuild would never run at all on an

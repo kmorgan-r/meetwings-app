@@ -6,6 +6,8 @@ import { CheckCircle2, Circle, XCircle } from "lucide-react";
 import { Button, Input, Label, StatusIcon, Switch } from "@/components";
 import { isCalendarAutoSelectEnabled, setCalendarAutoSelectEnabled } from "@/lib/calendar/auto-select";
 import { PageLayout } from "@/layouts";
+import { useNotionConfigured } from "@/hooks/useNotionConfigured";
+import { NotionSettingsCard } from "./components/NotionSettingsCard";
 import { cn } from "@/lib/utils";
 import { reportOdooError, type OdooErrorReport } from "@/lib/odoo/errors";
 import { runSync, testOdooConnection } from "@/lib/odoo";
@@ -369,6 +371,14 @@ export default function OdooSettings() {
 
   const [autoSelect, setAutoSelect] = useState(isCalendarAutoSelectEnabled);
 
+  // Notion alone: everything Odoo- or calendar-related waits behind a button.
+  const notionConfigured = useNotionConfigured();
+  // Filled by the Odoo state read the queue effect below already does.
+  const [odooSetup, setOdooSetup] = useState<"absent" | "incomplete" | "complete" | null>(null);
+  const [showOther, setShowOther] = useState(false);
+  const notionOnly = notionConfigured === true && odooSetup === "absent";
+  const hideOther = notionOnly && !showOther;
+
   // "Saved" is only true of the config that was actually written. The next
   // keystroke makes it stale, so it is cleared on every field edit rather
   // than left to read as confirmation of unsaved changes.
@@ -448,6 +458,7 @@ export default function OdooSettings() {
         // renders nothing. loadOdooConfigState returns a state instead of
         // throwing.
         const state = await loadOdooConfigState();
+        if (!cancelled) setOdooSetup(state.state);
         if (state.state === "complete") {
           const instance = instanceFingerprint(state.config.url, state.config.db);
           const counts = await getQueueCounts(instance);
@@ -783,8 +794,22 @@ export default function OdooSettings() {
   return (
     <PageLayout
       title="Integrations"
-      description="Connect Odoo to pick contacts and log meetings from your CRM, and your calendar to propose the current meeting's attendees."
+      description={
+        notionOnly
+          ? "Connect Notion to send your meeting notes to your team."
+          : "Connect Odoo to pick contacts and log meetings from your CRM, and your calendar to propose the current meeting's attendees."
+      }
     >
+      <NotionSettingsCard />
+
+      {notionOnly && !showOther && (
+        <Button type="button" variant="outline" className="mt-6" onClick={() => setShowOther(true)}>
+          Show other integrations
+        </Button>
+      )}
+
+      {!hideOther && (
+        <>
       {loadStatus && <StatusLine status={loadStatus} testId="odoo-load-status" />}
 
       <OdooSetupCard
@@ -959,6 +984,8 @@ export default function OdooSettings() {
           />
         </div>
       </div>
+        </>
+      )}
     </PageLayout>
   );
 }
