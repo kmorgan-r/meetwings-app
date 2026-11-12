@@ -193,6 +193,33 @@ describe("groupAttendees", () => {
     expect(groups.otherGuests).toEqual(["x@gmail.com"]);
   });
 
+  it("a mixed-case invite address still groups with the team", () => {
+    const snap = buildSnapshot(
+      event({
+        participants: [
+          participant("me@example.org", { name: "Me", isOrganizer: true }),
+          participant("Kim@EXAMPLE.org"),
+        ],
+      }),
+      "me@example.org"
+    );
+    const groups = groupAttendees(snap);
+    expect(groups.team).toEqual(["Me", "Kim@EXAMPLE.org"]);
+    expect(groups.external).toEqual([]);
+    expect(groups.otherGuests).toEqual([]);
+
+    // domainOf lowercases on its own, so only a free-mail own address shows the
+    // participant key's case: no team domain can rescue a missed own-address match.
+    const freeMail = groupAttendees(
+      buildSnapshot(
+        event({ participants: [participant("Me@GMAIL.com", { name: "Me" }), participant("x@gmail.com")] }),
+        "me@gmail.com"
+      )
+    );
+    expect(freeMail.team).toEqual(["Me"]);
+    expect(freeMail.otherGuests).toEqual(["x@gmail.com"]);
+  });
+
   it("the MAX_ATTENDEES boundary is exact", () => {
     const at = (n: number) =>
       groupAttendees(

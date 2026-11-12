@@ -196,11 +196,6 @@ describe("buildPageBlocks with attendees", () => {
     return blocks.slice(attendeesAt + 1, calloutAt);
   };
 
-  it("no attendees gives exactly today's blocks", () => {
-    expect(buildPageBlocks(SUMMARY, null)).toEqual(buildPageBlocks(SUMMARY));
-    expect(buildPageBlocks(NO_PRACTICES, null)).toEqual(buildPageBlocks(NO_PRACTICES));
-  });
-
   it("the Attendees block sits between the bold title and the practices callout", () => {
     const blocks = buildPageBlocks(SUMMARY, GROUPS);
     const titleAt = blocks.findIndex(

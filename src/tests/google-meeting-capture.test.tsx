@@ -242,10 +242,10 @@ describe("useGoogleMeetingCapture", () => {
     try {
       setup("c1");
       fetchCurrentGoogleMeetings.mockRejectedValueOnce(new Error("boom"));
-      expect(() => window.dispatchEvent(new CustomEvent("meetingCaptureStarted"))).not.toThrow();
+      window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
       await settle();
       fetchCurrentGoogleMeetings.mockReturnValueOnce(new Promise(() => {}));
-      expect(() => window.dispatchEvent(new CustomEvent("meetingCaptureStarted"))).not.toThrow();
+      window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
       await settle();
       await Promise.resolve();
       expect(unhandled).not.toHaveBeenCalled();

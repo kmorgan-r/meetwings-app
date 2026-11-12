@@ -83,9 +83,9 @@ function heading3(text: string): NotionBlockInput {
  * "Agenda" and "Action Items" are always present, even when their lists are
  * empty; the callout is conditional - a page without practices has nothing to
  * flag - and so is the Attendees list, which needs `attendees`. The Attendees
- * blocks sit between the bold title and the callout but name only people and
- * domains, never section headings, so the same-meeting judge below the page
- * reads the same with or without them.
+ * blocks sit between the bold title and the callout. Their "Attendees"
+ * heading_3 has no counterpart on the summary side, so the same-meeting
+ * judge's headingsOf skips it on the page side to keep both sides comparable.
  */
 export function buildPageBlocks(
   s: NotionSummary,

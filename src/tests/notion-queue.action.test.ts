@@ -119,6 +119,19 @@ describe("createSendAndLink", () => {
     expect(await sendOf("r1")).toMatchObject({ status: "retry", next_at: 0 });
   });
 
+  it("a re-run after a crash between insert and link keeps the first calendar_json", async () => {
+    seedRow({ id: "r1" });
+    seedRow({ id: "r2" });
+    // Inserted, never linked: the crash.
+    await createSendAndLink(sendInit({ calendarJson: '{"key":"A"}' }), []);
+    expect((await rowOf("r1")).notion_send_id).toBeNull();
+    await createSendAndLink(sendInit({ calendarJson: '{"key":"B"}' }), ["r1", "r2"]);
+    expect((await sendOf("r1")).calendar_json).toBe('{"key":"A"}');
+    for (const id of ["r1", "r2"]) {
+      expect(await rowOf(id)).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    }
+  });
+
   it("never relinks a row already joined to another send", async () => {
     seedRow({ id: "r1" });
     seedRow({ id: "r2" });

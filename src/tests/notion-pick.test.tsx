@@ -85,6 +85,37 @@ describe("useNotionPick", () => {
     expect(calls[1]).toEqual(["notion_picked", "true"]);
   });
 
+  it("unticking writes NOTION_PICKED before the source key", () => {
+    const toggled = renderHook(() => useNotionPick());
+    act(() => toggled.result.current.toggle());
+    ls.safeLocalStorage.setItem.mockClear();
+    act(() => toggled.result.current.toggle());
+    expect(ls.safeLocalStorage.setItem.mock.calls).toEqual([
+      ["notion_picked", "false"],
+      ["notion_pick_source", "hand"],
+    ]);
+
+    ls.map.set("notion_picked", "true");
+    ls.map.set("notion_pick_source", "auto");
+    const cleared = renderHook(() => useNotionPick());
+    ls.safeLocalStorage.setItem.mockClear();
+    act(() => cleared.result.current.clear());
+    expect(ls.safeLocalStorage.setItem.mock.calls).toEqual([
+      ["notion_picked", "false"],
+      ["notion_pick_source", "hand"],
+    ]);
+
+    ls.map.clear();
+    const auto = renderHook(() => useNotionPick());
+    act(() => auto.result.current.autoTick(0));
+    ls.safeLocalStorage.setItem.mockClear();
+    act(() => auto.result.current.autoUntick());
+    expect(ls.safeLocalStorage.setItem.mock.calls).toEqual([
+      ["notion_picked", "false"],
+      ["notion_pick_source", "auto"],
+    ]);
+  });
+
   it("a stored tick with no source key reads as hand", () => {
     ls.map.set("notion_picked", "true");
     const { result } = renderHook(() => useNotionPick());

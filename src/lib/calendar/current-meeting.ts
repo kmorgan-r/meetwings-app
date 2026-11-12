@@ -47,8 +47,8 @@ export function isMeetingEvent(event: CalendarEvent): boolean {
 /**
  * Whether a recording span sits mostly inside an event: the overlap is at
  * least half the span's own length. A span that is empty or ends before it
- * starts never counts, whatever its overlap. Tolerates the joined meeting
- * sprawling far past the calendar entry.
+ * starts never counts, whatever its overlap. This tolerates some spill past
+ * either edge of the entry, but not a recording that is mostly outside it.
  */
 export function insideEvent(
   span: { start: number; end: number },

@@ -343,6 +343,18 @@ describe("calendar snapshot copy at send creation", () => {
     expect(await calJson("r1")).toBeNull();
   });
 
+  it("a joined send's snapshot span starts at its first row", async () => {
+    // Span T0..T0+50 overlaps the T0+40..T0+100 event by 10 of 50 min: not inside.
+    // From the last row's start (T0+40..T0+50) it would be wholly inside.
+    seedRow({ id: "r1", transcript_start_at: T0, transcript_end_at: T0 + 30 * MIN });
+    seedRow({ id: "r2", transcript_start_at: T0 + 40 * MIN, transcript_end_at: T0 + 50 * MIN });
+    await saveCalendarSnapshot("c1", event(T0 + 40 * MIN, T0 + 100 * MIN), T0);
+    await runNotionTick(deps(T0 + 50 * MIN + 2 * GAP));
+    expect(await sends()).toHaveLength(1);
+    expect((await rowOf("r2")).notion_send_id).toBe("r1");
+    expect(await calJson("r1")).toBeNull();
+  });
+
   it("a conversation's second meeting gets no snapshot", async () => {
     seedRow({ id: "r1", transcript_start_at: T0, transcript_end_at: T0 + 10 * MIN });
     seedRow({ id: "r2", transcript_start_at: T0 + 10 * MIN + 2 * GAP, transcript_end_at: T0 + 20 * MIN + 2 * GAP });

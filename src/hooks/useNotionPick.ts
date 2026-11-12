@@ -58,8 +58,14 @@ export function useNotionPick(): UseNotionPickReturn {
     pickedRef.current = next;
     sourceRef.current = nextSource;
     setPicked(next);
-    safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICK_SOURCE, nextSource);
-    safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICKED, String(next));
+    // Untick writes PICKED first, tick the source first: an interrupted write never stores `true` with a source it was not given.
+    if (next) {
+      safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICK_SOURCE, nextSource);
+      safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICKED, "true");
+    } else {
+      safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICKED, "false");
+      safeLocalStorage.setItem(STORAGE_KEYS.NOTION_PICK_SOURCE, nextSource);
+    }
   }, []);
 
   const toggle = useCallback(() => {

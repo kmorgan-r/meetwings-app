@@ -106,9 +106,8 @@ function boldTitleOf(children: NotionBlock[]): string {
 /**
  * Every heading_3's text except "Action Items" and "Attendees" - the section
  * headings of the page. The Attendees heading is ours, not a section: the
- * page can grow the calendar's invite list between the two records being
- * compared without either meeting being different, so the judge must never
- * see it.
+ * summary side has no Attendees section, so it is skipped here to keep both
+ * sides comparable.
  */
 function headingsOf(children: NotionBlock[]): string[] {
   const out: string[] = [];
