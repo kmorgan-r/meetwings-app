@@ -91,7 +91,8 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
   - `enum GatedInput { Active(String), Inactive, Hold }`
   - `enum GatedEvent { CandidateStarted(u64), CandidateEnded(u64), EnteredCall(String), LeftCall(String) }`, derive `Debug, Clone, PartialEq, Eq`.
   - `struct GatedState`: `Default`, `Clone`, `Debug`, `PartialEq`. Private fields: phase `Idle | Candidate(u64) | Confirmed(u64)`, `active_streak`, `inactive_streak`, `current_process: Option<String>`, `last_confirmed_end_ms: Option<i64>`.
-  - `impl GatedState { fn in_call_process(&self) -> Option<&str> }`: `Some` only while `Confirmed`.
+  - Every `gate.rs` item above and below carries `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]`, like the `mod.rs` siblings (`mod.rs:17`, `:28`, `:55`). Its only non-test caller is `tick`, which only the Windows `poll_loop` calls. Add no accessor that no caller uses: clippy runs with `-D warnings`.
+  - `impl GatedState { fn candidate_episode(&self) -> Option<u64> }`: `Some(e)` only while the phase is `Candidate(e)`. Task 2's re-announce reads it.
   - `fn gated_step(state: GatedState, input: GatedInput, now_ms: i64, confirmed: Option<u64>, next_episode: &mut dyn FnMut() -> u64) -> (GatedState, Vec<GatedEvent>)`
 
 **Transition table.** The pre-step runs on every input, `Hold` included: if the phase is `Candidate(e)` and `confirmed == Some(e)`, it becomes `Confirmed(e)` and emits `EnteredCall(current_process)`. The streaks are kept. Then:
@@ -123,7 +124,7 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
   - `carry_over_at_exactly_two_minutes_is_a_candidate`: the start poll at `t + 120_000` gives `CandidateStarted(2)`.
   - `an_unconfirmed_end_arms_no_carry_over`: candidate ends at `t`; `[A, A]` at `t + 10_000` gives `CandidateStarted(2)`.
   - `a_long_wall_clock_gap_does_not_carry_over`: confirmed episode leaves at `t`; the next two `A` polls at `t + 3_600_000` and `t + 3_602_000` give `CandidateStarted(2)`.
-  - `in_call_process_is_some_only_while_confirmed`.
+  - `candidate_episode_is_some_only_while_a_candidate`: `None` when idle, `Some(1)` after `[A, A]`, `None` once confirmed.
 
 - [ ] **Step 2: Run them, expect compile failure / FAIL**
 
@@ -164,11 +165,12 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
     - Return order: candidate events, then combined events in the order they occurred (direct edges first, then gated), then `Degraded`/`Stopped`.
   - `static NEXT_EPISODE: AtomicU64 = AtomicU64::new(1);`. `poll_loop` passes `&mut || NEXT_EPISODE.fetch_add(1, Ordering::SeqCst)`. It is process-wide, so episode ids stay unique across watcher restarts.
   - Commands, each returning `Err(UNSUPPORTED_PLATFORM)` off Windows like their siblings:
-    - `start_meeting_watcher(app, direct: Vec<String>, gated: Vec<String>) -> Result<(), String>`. Same plan as today; it stores `WatchLists { direct, gated }`.
+    - `start_meeting_watcher(app, direct: Vec<String>, gated: Vec<String>) -> Result<(), String>`. Same plan as today; it stores `WatchLists { direct, gated }`. On the `StartAction::UpdateWatchList` path (`mod.rs:545`) it also stores `true` in a new `MeetingWatcherState.reannounce: Arc<AtomicBool>`. That path is what a webview reload takes: the reloaded frontend re-sends the start, and its fresh gate has `live = null`, so a candidate that is already live would otherwise never be checked.
     - `update_meeting_watch_lists(app, direct, gated) -> Result<(), String>`. It writes the lists **only while `running`**; otherwise it returns `Ok(())` and does nothing. It never spawns. The logic sits in a pure `fn apply_list_update(running: bool, slot: &Mutex<WatchLists>, lists: WatchLists)`.
-    - `confirm_meeting_candidate(app, episode: u64) -> Result<(), String>` sets `*confirmed = Some(episode)` and emits nothing.
+    - `confirm_meeting_candidate(app, episode: u64) -> Result<(), String>` emits nothing. While `running`, it sets `*confirmed = Some(episode)` and returns `Ok(())`. Otherwise it returns `Err("WATCHER_NOT_RUNNING")` and leaves the slot alone, so the frontend's rejection path (Review Focus 4) is real. The logic sits in a pure `fn apply_confirm(running: bool, slot: &Mutex<Option<u64>>, episode: u64) -> Result<(), String>`. `start_meeting_watcher` resets the slot to `None` when it spawns.
   - Events emitted by `poll_loop`: `meeting-candidate-started { episode }` and `meeting-candidate-ended { episode }`, through a new `#[derive(Serialize, Clone)] struct EpisodePayload { episode: u64 }`. `meeting-detected` and `meeting-ended` keep `ProcessPayload`.
   - `poll_loop`: reads `watch_list` and `confirmed` at the top of each poll. On `Ok(sessions)` it builds `PollOutcome::Classified(classify(&sessions, &lists.direct, own_pid))` and the same for `lists.gated`; on an error or panic, both are `Failed`. The existing `error_episode` / recovered logic keeps reading the **direct** outcome. `now_ms` comes from `SystemTime::now()` since `UNIX_EPOCH`, in milliseconds. It emits every returned event and breaks after `Stopped`, as today.
+  - Re-announce, on the poll thread, so the poll thread stays the only emitter: at the top of each poll, `if reannounce.swap(false, Ordering::SeqCst)`, emit whatever the pure `fn reannounce(core: &WatcherCore) -> Option<WatcherEvent>` returns. It returns `CandidateStarted(e)` while `core.gated.candidate_episode() == Some(e)`, and `None` otherwise. The frontend gate ignores a re-announce for its own live episode (Task 7).
 
 - [ ] **Step 1: Write the failing tests** in `mod.rs` tests.
 
@@ -183,8 +185,11 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
   - `ended_carries_the_process_that_opened_the_call`: Teams opens, Meet is confirmed, Teams ends, then Meet ends: one `Ended("ms-teams.exe")`.
   - `teams_only_sequences_are_unchanged`: the R1/R2/R3 sequences fed as `(seq[i], inactive(), None)` give exactly the events `run(seq)` gives.
   - `one_bad_poll_raises_one_degraded`: 15 polls of `(unknown(), unknown())` give exactly one `Degraded`. 30 polls of `(failed(), failed())` give exactly one `Stopped`.
-  - `emptying_the_gated_list_ends_a_live_episode_after_the_debounce`: confirmed Meet; then sessions still show chrome active but are classified against an empty gated list. That is `Inactive`, and the fifth such poll gives `Ended`.
+  - `emptying_the_gated_list_ends_a_live_episode_after_the_debounce`: confirmed Meet; then sessions that still show chrome active. Build each gated outcome with `PollOutcome::Classified(classify(&chrome_active_sessions, &[], pid))`, assert that classification is `Inactive`, and feed it to `tick`. The fifth such poll gives `Ended("chrome.exe")`.
+  - `bad_polls_hold_a_confirmed_meet_call`: confirmed Meet, direct side idle; 10 polls of `(unknown(), unknown())`, then 10 of `(failed(), failed())`, give no `Ended`. Then `chrome()` resumes, and 5 `inactive()` polls give exactly one `Ended("chrome.exe")`, with no second `Detected` in between.
   - `list_update_is_ignored_while_not_running`: `apply_list_update(false, ..)` leaves the slot unchanged; `true` replaces it.
+  - `reannounce_repeats_only_a_live_candidate`: `None` for a fresh core; `Some(CandidateStarted(1))` after two gated `chrome()` polls; `None` once that episode is confirmed, and `None` after it ends.
+  - `confirm_is_rejected_while_not_running`: `apply_confirm(false, &slot, 7)` is `Err("WATCHER_NOT_RUNNING")` and the slot stays `None`; `apply_confirm(true, &slot, 7)` is `Ok` and the slot is `Some(7)`.
 
 - [ ] **Step 2: Run, expect FAIL.** Command: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml meeting_detect`
 
@@ -210,7 +215,7 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
 - Modify: `src-tauri/src/graph/calendar.rs:214` (`has_meet_link: false`)
 - Modify: `src-tauri/src/google/calendar.rs:11` (`EVENT_FIELDS`), `:237` (parse), tests
 - Modify: `src/types/calendar.ts:69-80`
-- Test: `src/tests/current-meeting.test.ts`, `src/tests/fetch-google-meetings.test.ts` (fixtures)
+- Test: `src/tests/current-meeting.test.ts`, `src/tests/fetch-google-meetings.test.ts`, `src/tests/google-meeting-capture.test.tsx:35` (fixtures)
 
 **Interfaces:**
 - Produces:
@@ -229,13 +234,13 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
 
 - [ ] **Step 2: Run, expect FAIL.** `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml calendar`
 
-- [ ] **Step 3: Implement** the field, the parse and the literals. In TS, add `hasMeetLink: boolean` to `CalendarEvent` with a one-line doc ("Google: Meet link present; Graph: always false"). Add `hasMeetLink: false` to the event builders in the two test files named above.
+- [ ] **Step 3: Implement** the field, the parse and the literals. In TS, add `hasMeetLink: boolean` to `CalendarEvent` with a one-line doc ("Google: Meet link present; Graph: always false"). Add `hasMeetLink: false` to every `CalendarEvent` builder in a test file this plan touches: `current-meeting.test.ts:21`, `google-meeting-capture.test.tsx:35` (`eventWith`), and any literal in `fetch-google-meetings.test.ts` and `useCalendarAutoSelect.test.tsx` (grep `CalendarEvent` in each). Tests are not type-checked, so a missed builder only surfaces at exit gate 7.
 
 - [ ] **Step 4: Run** Step 2's command and `npm run type-check`, then `npx vitest run src/tests/current-meeting.test.ts src/tests/fetch-google-meetings.test.ts`. Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
-  `git add src-tauri/src/graph/mod.rs src-tauri/src/graph/calendar.rs src-tauri/src/google/calendar.rs src/types/calendar.ts src/tests/current-meeting.test.ts src/tests/fetch-google-meetings.test.ts`
+  `git add src-tauri/src/graph/mod.rs src-tauri/src/graph/calendar.rs src-tauri/src/google/calendar.rs src/types/calendar.ts src/tests/current-meeting.test.ts src/tests/fetch-google-meetings.test.ts src/tests/google-meeting-capture.test.tsx src/tests/useCalendarAutoSelect.test.tsx` (stage only the ones that changed)
   `git commit -m "feat(calendar): read the Google Meet link into CalendarEvent"`
 
 ---
@@ -324,17 +329,21 @@ It never stops or starts the watcher. Rust ignores the update when no watcher is
 export const RESTART_QUIET_MS = 120_000;
 export const ENDED_CARD_DELAY_MS = 30_000;
 export const AMBER_SNOOZE_MS = 3_600_000;
+export const RECORDING_CARD_MS = 6_000;
+export const ENDED_CARD_MS = 5_000;
 export const BAR_HEIGHT = 54;
 export const CARD_GAP = 8;
 export const PILL_CARD_WIDTH = 300;
 export interface CardEvent { title: string | null; startMs: number; endMs: number; initials: string[]; extraCount: number }
-export type MeetingCard =
+// Named MeetingCardState, not MeetingCard: Task 9's component is `MeetingCard`,
+// and importing a same-named type into that file is TS2440.
+export type MeetingCardState =
   | { kind: "recording"; recordingId: number; app: string; startedAt: number; event: CardEvent | null }
   | { kind: "ended"; app: string; title: string | null; durationMs: number }
   | { kind: "amber"; variant: AmberKind; episode: number; error: string | null }
   | null;
 export interface ActiveAutoRecording { id: number; app: string; gated: boolean; startedAt: number; event: CardEvent | null }
-export function getMeetingCard(): MeetingCard;            // stored reference (useSyncExternalStore)
+export function getMeetingCard(): MeetingCardState;       // stored reference (useSyncExternalStore)
 export function subscribeToMeetingCard(l: () => void): () => void;
 export function autoRecordingStarted(input: { app: string; gated: boolean; stop: () => void }, now?: number): number;
 export function autoRecordingStopped(now?: number): void; // idempotent
@@ -346,8 +355,9 @@ export function setAmberError(message: string | null): void;
 export function snoozeAmber(now?: number): void;
 export function dismissAmber(): void;                     // clears only an amber card
 export function dismissCard(): void;                      // clears whatever is shown
-export function cardHeight(card: MeetingCard, compact: boolean): number; // 0 for null
-export function pillWindowSize(style: OverlayPillStyle, card: MeetingCard): { width: number; height: number };
+export function holdCard(held: boolean, now?: number): void; // hover: pause/resume the shown card's timer
+export function cardHeight(card: MeetingCardState, compact: boolean): number; // 0 for null
+export function pillWindowSize(style: OverlayPillStyle, card: MeetingCardState): { width: number; height: number };
 export function resetMeetingCardsForTests(): void;
 ```
 
@@ -368,6 +378,7 @@ Rules (one slot, so the last writer wins, with the exceptions below):
   - schedules the ended card after `ENDED_CARD_DELAY_MS`, with `durationMs = now - startedAt` and `title = event?.title ?? null`. When the timer fires, the ended card is skipped if the slot holds an amber card.
 - **`setCardEvent(id, ev)`**: ignored unless `id` is the active recording's id. It sets `active.event`, and the card if the card is that recording's.
   - `initials` come from `participantsOf(ev)`: the first letters of the first and last words of the name, or else the first letter of the address. At most 3 are kept, and the rest go to `extraCount`.
+- **Card lifetime is store-owned.** A recording card leaves `RECORDING_CARD_MS` after it is shown, and an ended card `ENDED_CARD_MS` after. An amber card has no timer. The timer belongs to the card object: replacing or clearing the card cancels it. `holdCard(true)` pauses it and keeps the remaining time; `holdCard(false)` resumes with that remainder. Components never dismiss on a CSS event. A `display:none` subtree (minimized, hidden bar) runs no animation, the compact form has no drain bar, and reduced motion drops the animation, so an `animationend`-driven card would stay up for the whole call.
 - **`showAmber`**: a no-op while `now < snoozedUntil` or while an auto recording is active. Otherwise the slot becomes amber with `error: null`. `snoozeAmber` sets `snoozedUntil = now + AMBER_SNOOZE_MS` and dismisses the amber card.
 
 - [ ] **Step 1: Write the failing tests** (fake timers; `resetMeetingCardsForTests()` in `beforeEach`).
@@ -386,6 +397,10 @@ Rules (one slot, so the last writer wins, with the exceptions below):
   - `getMeetingCard is reference-stable between changes` (`Object.is`).
   - `pillWindowSize`: `null` → `PILL_DIMENSIONS["icon-only"]`; with a card → width 300 and height `52 + 8 + cardHeight(card, true)`.
   - `stopActiveRecording calls the registered stop once`.
+  - `the red card leaves after 6s on its own`: shown at 0; present at +5_999; `null` at +6_000. No DOM, no animation event.
+  - `holding the red card pauses it and resumes with the remainder`: shown at 0, `holdCard(true)` at +2_000, still shown at +12_000; `holdCard(false)` at +12_000; shown at +15_999, `null` at +16_000.
+  - `the ended card leaves 5s after it shows`.
+  - `a replaced card's timer does not clear its successor`: red card A at 0, a different app's red card B at +3_000; B is shown at +6_000 and `null` at +9_000.
 
 - [ ] **Step 2: Run, expect FAIL.** `npx vitest run src/tests/meeting-cards.store.test.ts`
 - [ ] **Step 3: Implement.**
@@ -435,21 +450,22 @@ export function defaultMeetGateDeps(): MeetGateDeps;
 - `gatedRecordingRunning` = `getActiveAutoRecording()?.gated === true`.
 - `confirm` = `invoke("confirm_meeting_candidate", { episode })`.
 
-Controller behaviour. State: `live: number | null`, `inFlight: number | null`, `rerun: boolean`, `timer`, `amberShownFor: number | null`.
+Controller behaviour. State: `live: number | null`, `inFlight: number | null`, `rerun: boolean`, `timer`, `amberShownFor: number | null`. `schedule(e)` clears any existing timer before it sets one, so at most one re-check chain exists.
 - `candidateStarted(e)`:
-  - sets `live = e`, clears the timer, sets `amberShownFor = null`;
-  - if `gatedRecordingRunning()` (the watcher restarted under a gate-confirmed recording), it calls `confirm(e)` with no fetch and sets `live = null`;
+  - if `live === e`, it returns: Rust re-announces a live candidate after a webview reload (Task 2), and an episode already being checked needs nothing;
+  - sets `live = e`, clears the timer, sets `rerun = false` and `amberShownFor = null`;
+  - if `gatedRecordingRunning()` (the watcher restarted under a gate-confirmed recording), it calls `confirm(e)` with no fetch, with a logged catch, and sets `live = null`;
   - otherwise it calls `runCheck(e)`.
 - `runCheck(e)`:
   - if `inFlight === e`, set `rerun = true` and return;
-  - otherwise `inFlight = e`, `configState = await loadConfigState()`, `result = await fetchMeetings(now())`, `inFlight = null`;
-  - if `live !== e`, return (the result is discarded).
+  - otherwise `inFlight = e`, `configState = await loadConfigState()`, `result = await fetchMeetings(now())`, then `if (inFlight === e) inFlight = null`. A newer episode's check may own the slot by now, and clearing it would let a `connectionChanged()` start a second concurrent check;
+  - if `live !== e`, return (the result is discarded). The same `live !== e` return follows every later await (`captureRunning`, `confirm`).
 - Result handling:
   - **`ok` with a qualifying event:** `await confirm(e)`. On success: `live = null`, `dismissAmber()`, return. On rejection: log it and fall through to scheduling.
   - **`ok` with no qualifying event:** `dismissAmber()`. The calendar is reachable, so the card's claim no longer holds. *(My call, see the PR body.)*
   - **`error`:** if `amberShownFor !== e` and `!(await captureRunning())`, set `amberShownFor = e` and call `showAmber({ variant: amberKindFor(code, configState), episode: e })`.
   - **`absent`:** nothing.
-- Then: if `rerun`, clear it and `runCheck(e)` now; otherwise schedule `runCheck(e)` in `MEET_RECHECK_MS`.
+- Then: if `rerun`, clear it and `runCheck(e)` now; otherwise `schedule(e)` in `MEET_RECHECK_MS`.
 - `connectionChanged()`: if `live !== null`, clear the timer and call `runCheck(live)`.
 - `candidateEnded(e)`: if `live === e`, set `live = null`, clear the timer and `dismissAmber()`. `stop()` does the same unconditionally.
 
@@ -461,6 +477,7 @@ Wiring in `useMeetingDetection`:
   - `GOOGLE_CONNECTION_CHANGED_EVENT` → `connectionChanged()`, alongside Task 5's list update.
 - `meeting-watcher-stopped` also calls `gateRef.current?.stop()`.
 - Effect 1's `meeting-detection-setting-changed` calls `gateRef.current?.stop()` when `enabled` is false.
+- Effect 1's Retry op calls `gateRef.current?.stop()` right after `await invoke("stop_meeting_watcher")` (`useMeetingDetection.ts:133`). A stopped watcher emits no `meeting-candidate-ended`, so without this the old episode stays `live` and keeps fetching every 60s for a call the fresh watcher never saw.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -474,17 +491,26 @@ Wiring in `useMeetingDetection`:
   - `connection change checks at once`: a pending 60s timer; `connectionChanged()` gives an immediate fetch.
   - `connection change during a check reruns once`: two `connectionChanged()` calls mid-fetch give exactly one more fetch, which starts after the first resolves.
   - `new episode during an in-flight check`: `candidateStarted(2)` while fetch 1 is pending gives fetch 2 at once; fetch 1's qualifying result gives no `confirm(1)`.
+  - `a stale check does not free the new episode's slot`: fetch 1 held; `candidateEnded(1)`; `candidateStarted(2)` (fetch 2 held); resolve fetch 1; `connectionChanged()`. No third fetch starts until fetch 2 resolves, then exactly one rerun fetch, and one 60s timer after that.
+  - `a re-announced live episode is ignored`: `candidateStarted(1)` twice gives one fetch, and the amber once-per-episode state is kept.
+  - `an episode that ends while confirm is pending is left alone`: `confirm` held; `candidateEnded(1)`; resolve `confirm`. Nothing more happens: one `dismissAmber` (the end's own), no fetch, no timer.
   - `confirm rejection keeps the loop`: `confirm` rejects; no unhandled rejection; the next fetch comes at +60s.
   - `the amber card shows once per episode`: two failing checks give one `showAmber`. The variant is `"reconnect"` for `GOOGLE_AUTH_EXPIRED` and `"settings"` when `loadConfigState` gives `"unreadable"`.
   - `no amber while a capture is running`.
   - `a gated recording already running confirms without a check`: `gatedRecordingRunning() === true` gives `confirm(1)` and no fetch.
   - `a successful read with no Meet event dismisses the amber card`.
+  - `defaultMeetGateDeps` with `invoke` mocked and the real store (`resetMeetingCardsForTests()`):
+    - `captureRunning is true when get_capture_status is true`;
+    - `captureRunning is false when get_capture_status rejects`;
+    - `captureRunning is true when the status is false but an auto recording is active`;
+    - `gatedRecordingRunning is false for a Teams recording and true for a Meet one` (`autoRecordingStarted` with `gated: false`, then with `gated: true`).
 
   `useMeetingDetection.lifecycle.test.tsx`: mock `@/lib/meet-gate` so `createMeetGate` returns spies.
   - `candidate listener is subscribed before the first start`.
   - `candidate events reach the gate only while auto-record is on`.
   - `turning auto-record off stops the gate`.
   - `meeting-watcher-stopped stops the gate`.
+  - `Retry stops the gate before restarting the watcher`: the gate's `stop` is called after `stop_meeting_watcher` and before `start_meeting_watcher`.
   - `StrictMode creates one live gate`: the first gate's `stop` is called on the discarded mount.
 
 - [ ] **Step 2: Run, expect FAIL.** `npx vitest run src/tests/meet-gate.test.ts src/tests/useMeetingDetection.lifecycle.test.tsx`
@@ -508,7 +534,7 @@ Wiring in `useMeetingDetection`:
 Pinned edits:
 - `register("meeting-detected", (payload) => enqueue(() => handleDetected(payload?.process)))`.
 - **Meeting mode.** In the `start-meeting` branch, in the same synchronous block, call `autoRecordingStarted({ app: meetingLabel(process), gated: isGatedProcess(process), stop: () => setEnableVADRef.current(false) })` right **before** `setEnableVADRef.current(true)`. That way, when `meetingCaptureStarted` fires, the capture hooks see the new recording.
-- **Transcribing mode.** Right after `startedModeRef.current = "transcribing"`, call the same with `stop: () => void systemAudioRef.current.stopCapture()`.
+- **Transcribing mode.** Right after `startedModeRef.current = "transcribing"`, call the same with `stop: () => void enqueue(handleStop)`. Not a bare `stopCapture()`: `useMeetingAutoRecord.ts:561-566` explains why (it bypasses `chainRef` and skips `decideOnEnded`, the provenance clear and the post-stop confirmation query). The `meeting-ended` listener uses the same form at `:598-600`.
 - **`autoRecordingStopped()` on all four stop paths:**
   - `handleStop`, right after the `startedModeRef.current = null` at `:497`;
   - the layout effect's release branch, next to `startedModeRef.current = null` at `:178`;
@@ -531,13 +557,18 @@ Pinned edits:
   - `the internal stop before a VAD start publishes nothing`: the `startCapture` mock fires `capture-stopped` before resolving, and the recording is still active afterwards.
   - `unmount during an auto recording publishes the stop`.
   - `the card's Stop closes the mic in meeting mode`: `stopActiveRecording()` gives `setEnableVAD(false)`.
+  - `the card's Stop takes the meeting-ended path in transcribing mode`: `stopActiveRecording()` gives the same calls a `meeting-ended` gives (one `stopCapture`, then the post-stop confirmation query F49 counts).
 
   `google-meeting-capture.test.tsx`:
   - `a gated auto recording gets the picked event`;
   - `several or no events leave the card empty`;
-  - `no auto recording publishes nothing`.
+  - `no auto recording publishes nothing`;
+  - `a Teams auto recording gets no Google event` (`gated: false`);
+  - `a result that lands after the recording stopped publishes nothing` (`autoRecordingStopped()` while the fetch is pending).
 
-  `useCalendarAutoSelect.test.tsx`: `a Teams auto recording gets the picked Outlook event`.
+  `useCalendarAutoSelect.test.tsx`:
+  - `a Teams auto recording gets the picked Outlook event`;
+  - `a Meet auto recording gets no Outlook event` (`gated: true`).
 
 - [ ] **Step 2: Run, expect FAIL.** `npx vitest run src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/google-meeting-capture.test.tsx src/tests/useCalendarAutoSelect.test.tsx`
 - [ ] **Step 3: Implement.**
@@ -551,7 +582,8 @@ Pinned edits:
 **Files:**
 - Create: `src/pages/app/components/MeetingCard.tsx` (export it from `src/pages/app/components/index.ts`)
 - Create: `src/lib/calendar/google-connect.ts`
-- Modify: `src/pages/odoo/components/GoogleCalendarCard.tsx:20-27` (import the shared broadcast)
+- Modify: `src/pages/odoo/components/GoogleCalendarCard.tsx:20-27` (import the shared broadcast) and `:62-83` (`handleConnect` broadcasts in its `finally`, like `handleDisconnect` at `:93-95`. `saveGoogleConfig` runs before `google_connect`, so a failed first sign-in leaves the config `complete`, and Task 5's list update must still hear about it)
+- Test: `src/tests/google-calendar-card.test.tsx` (`a failed connect still broadcasts the connection change`)
 - Modify: `src/pages/app/index.tsx` (render the card, host effects)
 - Modify: `src/hooks/useMeetingDetection.ts:178-185` (drop the `meeting-detected` / `meeting-ended` toasts)
 - Modify: `src-tauri/src/shortcuts.rs`, `src-tauri/src/lib.rs` (`reveal_overlay`)
@@ -565,7 +597,7 @@ Pinned edits:
     - a config that is not `complete` gives `{ ok: false, code: "GOOGLE_AUTH_REJECTED" }` with no invoke;
     - otherwise `invoke("google_connect", { clientId, clientSecret })` from the saved config, then `await broadcastGoogleConnectionChanged()`, then `{ ok: true }`;
     - a rejection gives `{ ok: false, code: toGoogleCode(err) }`.
-  - `export function MeetingCard({ card, compact }: { card: NonNullable<MeetingCard>; compact?: boolean })`
+  - `export function MeetingCard({ card, compact }: { card: NonNullable<MeetingCardState>; compact?: boolean })`
   - Rust `#[tauri::command] pub fn reveal_overlay(app: AppHandle) -> Result<(), String>`.
     - **Windows:** set `WindowVisibility.is_hidden` to `true`, emit `toggle-window-visibility` with `true`, then `window.show()`, and **no** `set_focus` (it must not steal focus from the call). This is the existing inverted polarity: `useApp.ts:69` sets `isHidden = !payload`, and `handle_toggle_window` never calls `hide()` on Windows. Do not rename the flag.
     - **Elsewhere:** `show()` if `!is_visible()`.
@@ -574,8 +606,8 @@ Card content (mockups in spec 6.3/6.6):
 - **recording**:
   - top row `◉ REC  {app} · recording started  mm:ss`, a 1s ticking timer from `startedAt`, and a `■ Stop` button calling `stopActiveRecording()`;
   - when `event` is set: the title, `HH:MM – HH:MM`, and up to 3 initials chips plus `+N`;
-  - a bottom drain bar that is a CSS animation of about 6s. Its `onAnimationEnd` calls `dismissCard()`. Hovering the card sets `data-paused="true"` and `animation-play-state: paused`.
-- **ended**: `✓  Recording saved` and `{title ?? app}  ·  {N} min`; `dismissCard()` after 5s.
+  - a bottom drain bar, purely visual: a CSS animation `RECORDING_CARD_MS` long. The store's timer dismisses the card (Task 6), never `onAnimationEnd`. `mouseEnter`/`mouseLeave` on the card call `holdCard(true)`/`holdCard(false)` and set `data-paused` with `animation-play-state: paused`.
+- **ended**: `✓  Recording saved` and `{title ?? app}  ·  {N} min`. The store removes it after `ENDED_CARD_MS`.
 - **amber**, per variant:
   - `reconnect`: `Not now` → `snoozeAmber()`; `Reconnect Google` → `reconnectGoogle()`, and on failure `setAmberError(GOOGLE_COPY[code])` with the button kept.
   - `settings`: body `Meetwings can't read your saved Google Calendar setup. Open Integrations → Google Calendar in settings to fix it.`; `Not now`; `Open settings` → `invoke("open_dashboard")`. There is no deep link, because the dashboard has no route-navigation event.
@@ -585,7 +617,7 @@ Card content (mockups in spec 6.3/6.6):
 - **Styling:** red, green and amber accents, light and dark themes. Each root has `style={{ height: cardHeight(card, compact) }}`. The pulse and the slide use `tw-animate-css` / Tailwind classes, all prefixed `motion-safe:`. Under reduced motion only a fade remains.
 
 Host:
-- Create `src/hooks/useMeetingCardHost.ts`: `export function useMeetingCardHost(pillStyle: OverlayPillStyle): MeetingCard`.
+- Create `src/hooks/useMeetingCardHost.ts`: `export function useMeetingCardHost(pillStyle: OverlayPillStyle): MeetingCardState`.
   - It reads `useSyncExternalStore(subscribeToMeetingCard, getMeetingCard)` and returns it.
   - In an effect on `card?.kind`: when it becomes `"amber"`, it calls `invoke("reveal_overlay")` with a logged catch. Red and ended cards never reveal.
   - Task 10 adds the resize subscription here.
@@ -603,7 +635,8 @@ Host:
   - `the recording card shows app, timer and Stop`: `"Google Meet · recording started"`, `00:04` after 4s, Stop → stop spy.
   - `the recording card fills in the event`: title, time range, 3 initials and `+2`.
   - `without an event only the top row shows`.
-  - `the drain bar dismisses at its end and pauses on hover`: `fireEvent.animationEnd` → card `null`; `mouseEnter` → `data-paused="true"`.
+  - `hovering holds the red card`: `mouseEnter` gives `data-paused="true"` and the card is still up 10s later (fake timers); `mouseLeave` resumes, and the card leaves after the remainder.
+  - `the red card leaves without an animation event, full and compact`: render each form from the store, advance 6s, and the card is gone with no `fireEvent.animationEnd`.
   - `the ended card shows title and minutes, then leaves`: `"Recording saved"`, `"42 min"`; gone after 5s.
   - `amber reconnect: headline, Not now snoozes, Reconnect failure shows Google copy and keeps the button`.
   - `amber settings opens the dashboard`.
@@ -618,7 +651,7 @@ Host:
 - [ ] **Step 2: Run, expect FAIL.** `npx vitest run src/tests/meeting-card.test.tsx src/tests/google-connect.test.ts src/tests/useMeetingDetection.lifecycle.test.tsx src/tests/google-calendar-card.test.tsx`
 - [ ] **Step 3: Implement.** Register `shortcuts::reveal_overlay` in `lib.rs`.
 - [ ] **Step 4: Run** Step 2's command, plus `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`. Expected: PASS and clean.
-- [ ] **Step 5: Commit** `git add src/pages/app/components/MeetingCard.tsx src/pages/app/components/index.ts src/hooks/useMeetingCardHost.ts src/lib/calendar/google-connect.ts src/pages/odoo/components/GoogleCalendarCard.tsx src/pages/app/index.tsx src/hooks/useMeetingDetection.ts src-tauri/src/shortcuts.rs src-tauri/src/lib.rs src/tests/meeting-card.test.tsx src/tests/google-connect.test.ts src/tests/useMeetingDetection.lifecycle.test.tsx`, then `git commit -m "feat(cards): recording, ended and calendar-warning cards"`
+- [ ] **Step 5: Commit** `git add src/pages/app/components/MeetingCard.tsx src/pages/app/components/index.ts src/hooks/useMeetingCardHost.ts src/lib/calendar/google-connect.ts src/pages/odoo/components/GoogleCalendarCard.tsx src/pages/app/index.tsx src/hooks/useMeetingDetection.ts src-tauri/src/shortcuts.rs src-tauri/src/lib.rs src/tests/meeting-card.test.tsx src/tests/google-connect.test.ts src/tests/useMeetingDetection.lifecycle.test.tsx src/tests/google-calendar-card.test.tsx`, then `git commit -m "feat(cards): recording, ended and calendar-warning cards"`
 
 ---
 
@@ -663,7 +696,7 @@ Pinned edits:
 
 - [ ] **Step 2: Run, expect FAIL.** `npx vitest run src/tests/useWindow.minimize-gate.test.ts src/tests/meeting-card-window.test.tsx`, then `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml window`
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** Step 2's commands, plus `npx vitest run src/tests/minimized-pill.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/overlay-minimize-rehydrate.test.tsx src/tests/settings-page.overlay-pill.test.tsx`. Expected: PASS. `overlay-minimize-keeps-mounted` is a known full-run flake, so run it alone if it times out.
+- [ ] **Step 4: Run** Step 2's commands, plus `npx vitest run src/tests/hidden-and-minimized.test.tsx src/tests/minimized-pill.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/overlay-minimize-rehydrate.test.tsx src/tests/settings-page.overlay-pill.test.tsx`. Expected: PASS. `overlay-minimize-keeps-mounted` is a known full-run flake, so run it alone if it times out.
 - [ ] **Step 5: Commit** `git add src/hooks/useWindow.ts src/hooks/useMeetingCardHost.ts src/pages/app/index.tsx src-tauri/src/window.rs src/tests/useWindow.minimize-gate.test.ts src/tests/meeting-card-window.test.tsx`, then `git commit -m "feat(cards): window and pill grow to fit the card"`
 
 ---
@@ -719,7 +752,7 @@ Run all of these at the final commit. Each must pass before P5:
 3. `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --all-features`
 4. `npm run lint`: 0 errors. The warning count must not rise above main's baseline.
 5. `npm run type-check`: clean.
-6. Scoped Vitest over every test file this plan touched or created (`npx vitest run <files>`). Not the full suite: the full suite has known load flakes on main.
+6. Scoped Vitest over every test file this plan touched or created, plus Task 10 Step 4's regression files, which cover App code this plan changes without editing their tests (`npx vitest run <files>`). Not the full suite: the full suite has known load flakes on main.
 7. A scratch `tsc` over the touched tests: a `tsconfig` in the scratchpad that extends the repo one and `include`s exactly those test files. Pre-existing errors on untouched lines are allowed, new ones are not.
 
 The manual Windows checks 1-15 (spec section 9) run with Kevin after the PR is open, through `npm run tauri dev` with the installed Meetwings quit first.
