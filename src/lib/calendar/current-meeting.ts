@@ -23,7 +23,7 @@ export const ENDED_GRACE_MS = 10 * 60 * 1000;
  * `tentativelyAccepted` all survive: a tentative meeting the user is sitting
  * in is still the meeting they are in.
  */
-function isDeclined(event: CalendarEvent): boolean {
+export function isDeclined(event: CalendarEvent): boolean {
   return event.ownResponse.toLowerCase() === "declined";
 }
 
