@@ -33,7 +33,9 @@ function event(over: Partial<CalendarEvent> = {}): CalendarEvent {
 
 describe("hasQualifyingMeetEvent", () => {
   it("requires a Meet link", () => {
-    expect(hasQualifyingMeetEvent([event({ hasMeetLink: false })], NOW)).toBe(false);
+    const inWindow = NOW + 8 * MIN;
+    expect(hasQualifyingMeetEvent([event()], inWindow)).toBe(true);
+    expect(hasQualifyingMeetEvent([event({ hasMeetLink: false })], inWindow)).toBe(false);
   });
   it("accepts now == startMs - EARLY_JOIN_MS", () => {
     const e = event();
