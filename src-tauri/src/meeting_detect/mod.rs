@@ -4,6 +4,10 @@
 //! compiles and is unit-tested on every target including the Linux CI runner.
 //! `win32.rs` / `stub.rs` contribute only session enumeration.
 
+// Calendar-gated detection for Chrome (Google Meet): a second, independent
+// pure state machine, driven by the same poll loop.
+mod gate;
+
 #[cfg(target_os = "windows")]
 mod win32;
 #[cfg(target_os = "windows")]
@@ -78,7 +82,7 @@ fn classify(sessions: &[SessionInfo], watch_list: &[String], own_pid: u32) -> Po
 }
 
 /// Two consecutive Active polls (~4s) enter a call.
-const START_DEBOUNCE: u32 = 2;
+pub(crate) const START_DEBOUNCE: u32 = 2;
 /// Three consecutive Inactive polls (~6s) end it. Survives a short reconnect.
 const END_DEBOUNCE: u32 = 3;
 /// 30 consecutive failed polls (~60s) is terminal. Deliberately far clear of
