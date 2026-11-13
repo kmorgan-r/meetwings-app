@@ -172,9 +172,10 @@ Events:
   recording while the user is still in the other call: `useMeetingAutoRecord` stops on any
   `meeting-ended`. The event carries the process that opened the combined call.
 - **Confirming.** When the frontend confirms a candidate (6.2), it calls a new command with the episode
-  id. The command does **not** emit anything. It records "episode N confirmed" in state shared with the
-  poll thread, under the same lock the poll loop holds while it steps and emits. The poll thread acts on
-  it at its next step: if episode N is still the live gated episode, the gated machine enters its call
+  id. The command does **not** emit anything. It records "episode N confirmed" in a slot shared with the
+  poll thread, the same way the watch list is shared today (`watch_list`, read at the top of every poll,
+  `mod.rs:439`). The poll thread is the only place that compares it with the live episode and emits, so
+  there is no race between the two. The poll thread acts on it at its next step: if episode N is still the live gated episode, the gated machine enters its call
   and the combined stream emits as above. A confirmation for an episode that has ended, or for any other
   episode id, does nothing. Confirming twice is the same as confirming once. So every `meeting-detected`
   is followed by the poll thread's own `meeting-ended`, **unless the watcher stops** (an explicit stop,
@@ -373,8 +374,10 @@ chat on 2026-11-13:
 Shown briefly, then it slides away. The duration runs from the recording's start to its stop. The title
 line falls back to the app name.
 
-**Pill (bar minimized):** a compact one-line card under the pill, e.g. `◉ REC  Weekly IC sync  00:04`.
-The ended and amber cards get equally compact forms. Showing a card **must not un-minimize the bar**.
+**Pill (bar minimized):** a compact one-line card next to the pill, e.g. `◉ REC  Weekly IC sync  00:04`.
+The pill is anchored to the bottom-right of the work area (`minimize_overlay`, `window.rs:283-307`), so
+the window grows **upward** and the card sits **above** the pill. The ended and amber cards get equally
+compact forms. Showing a card **must not un-minimize the bar**.
 
 **Amber warning:** the card in 6.3. Same shape, amber accent, no timeout.
 
@@ -409,9 +412,11 @@ Rules:
   height: `max(popover open ? 600 : 54, card height)`, used by `resizeWindow`, the MutationObserver and
   the mouseup handler alike. Otherwise the observer shrinks the window to 54px under a visible card on
   the next transcript segment.
-- **The pill grows too.** While minimized, `resizeWindow` returns early and the pill size is fixed, so a
-  card under the pill needs its own path: a card-aware pill window size set through the minimize command
-  or a sibling command. Restoring from the pill takes the card height into account.
+- **The pill grows too.** While minimized, `resizeWindow` returns early and `set_window_height` is a
+  no-op (`window.rs:250-257`), so a card next to the pill uses the existing restyle path instead:
+  `minimize_overlay` with `restyle: true` and a card-aware size (pill width or card width, whichever is
+  larger; pill height plus card height). The settings restyle uses the same size function, so a style
+  change while a card is up does not clip it. Restoring from the pill takes the card height into account.
 - If the bar is hidden (window not visible), the **amber** card shows the window so the warning can't
   be missed. The red and ended cards do not force the window open. *(My call.)*
 - Light and dark themes both. Motion respects `prefers-reduced-motion`: no pulse and no slide, only a
@@ -564,8 +569,9 @@ link. The existing URL test gets the new fields.
 2. Stay in the call for at least 3 minutes, muting and unmuting several times. Still recording throughout
    (re-tests the unexplained 18s run in section 4).
 3. Leave. Recording stops within about 20s, and the ended card shows.
-4. Wait more than 2 minutes (the carry-over). No calendar event: open `meet.new` and join. No card, no
-   recording, and no new row on the Meetings page.
+4. Delete (or end) check 1's event, which otherwise still satisfies `now < endMs`, and wait more than 2
+   minutes (the carry-over). With no Meet event now: open `meet.new` and join. No card, no recording, and
+   no new row on the Meetings page.
 5. No Meet event now: use Chrome's mic for something else (voice typing in Google Docs, or a WhatsApp Web
    voice note). No card, no recording.
 6. An event starting in 8 minutes: join now. Nothing yet; recording starts once the event is within 5
