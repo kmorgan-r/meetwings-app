@@ -128,7 +128,8 @@ describe("useMeetingDetection", () => {
     await flush();
 
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -142,7 +143,8 @@ describe("useMeetingDetection", () => {
     fire("meeting-detection-setting-changed", { enabled: true });
     await flush();
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -420,7 +422,8 @@ describe("useMeetingDetection", () => {
       expect(registered(event)).toBe(1);
     }
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -450,7 +453,8 @@ describe("useMeetingDetection", () => {
     await flush();
     expect(invoke).toHaveBeenCalledWith("stop_meeting_watcher");
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
 
     fire("meeting-detection-setting-changed", { enabled: false });

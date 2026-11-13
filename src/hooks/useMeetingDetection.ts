@@ -92,7 +92,7 @@ export const useMeetingDetection = () => {
   };
 
   const startWatcher = () =>
-    invoke("start_meeting_watcher", { processes: MEETING_DETECT_PROCESSES });
+    invoke("start_meeting_watcher", { direct: MEETING_DETECT_PROCESSES, gated: [] });
 
   // Effect 1: the setting and retry channels. Mount-only - putting the setting
   // listener in the [enabled] effect means the first toggle-on is never received,
