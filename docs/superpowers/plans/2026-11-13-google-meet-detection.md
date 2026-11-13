@@ -153,7 +153,7 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
 - Consumes: Task 1's `gated_step`, `GatedInput`, `GatedEvent`, `GatedState`.
 - Produces:
   - `#[derive(Debug, Clone, Default, PartialEq, Eq)] pub struct WatchLists { pub direct: Vec<String>, pub gated: Vec<String> }`. `MeetingWatcherState.watch_list` becomes `Arc<Mutex<WatchLists>>`. One mutex holds both lists, so a poll never reads a torn pair.
-  - `MeetingWatcherState.confirmed: Arc<Mutex<Option<u64>>>`, passed into `poll_loop`.
+  - `MeetingWatcherState.confirmed: Arc<Mutex<Option<u64>>>`, passed into `poll_loop` inside `PollSlots` (below).
   - `WatcherEvent` gains `CandidateStarted(u64)` and `CandidateEnded(u64)`.
   - `struct Combined { direct: bool, gated: bool, open: Option<String> }` (`Default`) with `fn apply(&mut self, side: Side, entered: bool, process: &str) -> Option<WatcherEvent>`, where `enum Side { Direct, Gated }`.
     - It emits `Detected(process)` when neither side was in a call before.
@@ -169,8 +169,9 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
     - `update_meeting_watch_lists(app, direct, gated) -> Result<(), String>`. It writes the lists **only while `running`**; otherwise it returns `Ok(())` and does nothing. It never spawns. The logic sits in a pure `fn apply_list_update(running: bool, slot: &Mutex<WatchLists>, lists: WatchLists)`.
     - `confirm_meeting_candidate(app, episode: u64) -> Result<(), String>` emits nothing. While `running`, it sets `*confirmed = Some(episode)` and returns `Ok(())`. Otherwise it returns `Err("WATCHER_NOT_RUNNING")` and leaves the slot alone, so the frontend's rejection path (Review Focus 4) is real. The logic sits in a pure `fn apply_confirm(running: bool, slot: &Mutex<Option<u64>>, episode: u64) -> Result<(), String>`. `start_meeting_watcher` resets the slot to `None` when it spawns.
   - Events emitted by `poll_loop`: `meeting-candidate-started { episode }` and `meeting-candidate-ended { episode }`, through a new `#[derive(Serialize, Clone)] struct EpisodePayload { episode: u64 }`. `meeting-detected` and `meeting-ended` keep `ProcessPayload`.
-  - `poll_loop`: reads `watch_list` and `confirmed` at the top of each poll. On `Ok(sessions)` it builds `PollOutcome::Classified(classify(&sessions, &lists.direct, own_pid))` and the same for `lists.gated`; on an error or panic, both are `Failed`. The existing `error_episode` / recovered logic keeps reading the **direct** outcome. `now_ms` comes from `SystemTime::now()` since `UNIX_EPOCH`, in milliseconds. It emits every returned event and breaks after `Stopped`, as today.
-  - Re-announce, on the poll thread, so the poll thread stays the only emitter: at the top of each poll, `if reannounce.swap(false, Ordering::SeqCst)`, emit whatever the pure `fn reannounce(core: &WatcherCore) -> Option<WatcherEvent>` returns. It returns `CandidateStarted(e)` while `core.gated.candidate_episode() == Some(e)`, and `None` otherwise. The frontend gate ignores a re-announce for its own live episode (Task 7).
+  - `poll_loop`: reads `slots.lists` and `slots.confirmed` at the top of each poll. On `Ok(sessions)` it builds `PollOutcome::Classified(classify(&sessions, &lists.direct, own_pid))` and the same for `lists.gated`; on an error or panic, both are `Failed`. The existing `error_episode` / recovered logic keeps reading the **direct** outcome. `now_ms` comes from `SystemTime::now()` since `UNIX_EPOCH`, in milliseconds. It emits every returned event and breaks after `Stopped`, as today.
+  - `poll_loop` takes 7 parameters today (`mod.rs:392-400`), and clippy's `too_many_arguments` limit is 7, with `-D warnings`. So the three per-poll slots travel as one: `#[derive(Clone)] struct PollSlots { lists: Arc<Mutex<WatchLists>>, confirmed: Arc<Mutex<Option<u64>>>, reannounce: Arc<AtomicBool> }` replaces the `watch_list` parameter, and `poll_loop` stays at 7.
+  - Re-announce, on the poll thread, so the poll thread stays the only emitter: at the top of each poll, `if slots.reannounce.swap(false, Ordering::SeqCst)`, emit whatever the pure `fn reannounce_event(core: &WatcherCore) -> Option<WatcherEvent>` returns. It returns `CandidateStarted(e)` while `core.gated.candidate_episode() == Some(e)`, and `None` otherwise. The frontend gate ignores a re-announce for its own live episode (Task 7).
 
 - [ ] **Step 1: Write the failing tests** in `mod.rs` tests.
 
@@ -188,7 +189,7 @@ The seams for step 2 that land here: the watcher takes separate `direct`/`gated`
   - `emptying_the_gated_list_ends_a_live_episode_after_the_debounce`: confirmed Meet; then sessions that still show chrome active. Build each gated outcome with `PollOutcome::Classified(classify(&chrome_active_sessions, &[], pid))`, assert that classification is `Inactive`, and feed it to `tick`. The fifth such poll gives `Ended("chrome.exe")`.
   - `bad_polls_hold_a_confirmed_meet_call`: confirmed Meet, direct side idle; 10 polls of `(unknown(), unknown())`, then 10 of `(failed(), failed())`, give no `Ended`. Then `chrome()` resumes, and 5 `inactive()` polls give exactly one `Ended("chrome.exe")`, with no second `Detected` in between.
   - `list_update_is_ignored_while_not_running`: `apply_list_update(false, ..)` leaves the slot unchanged; `true` replaces it.
-  - `reannounce_repeats_only_a_live_candidate`: `None` for a fresh core; `Some(CandidateStarted(1))` after two gated `chrome()` polls; `None` once that episode is confirmed, and `None` after it ends.
+  - `reannounce_event_repeats_only_a_live_candidate`: `None` for a fresh core; `Some(CandidateStarted(1))` after two gated `chrome()` polls; `None` once that episode is confirmed, and `None` after it ends.
   - `confirm_is_rejected_while_not_running`: `apply_confirm(false, &slot, 7)` is `Err("WATCHER_NOT_RUNNING")` and the slot stays `None`; `apply_confirm(true, &slot, 7)` is `Ok` and the slot is `Some(7)`.
 
 - [ ] **Step 2: Run, expect FAIL.** Command: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml meeting_detect`
@@ -378,7 +379,7 @@ Rules (one slot, so the last writer wins, with the exceptions below):
   - schedules the ended card after `ENDED_CARD_DELAY_MS`, with `durationMs = now - startedAt` and `title = event?.title ?? null`. When the timer fires, the ended card is skipped if the slot holds an amber card.
 - **`setCardEvent(id, ev)`**: ignored unless `id` is the active recording's id. It sets `active.event`, and the card if the card is that recording's.
   - `initials` come from `participantsOf(ev)`: the first letters of the first and last words of the name, or else the first letter of the address. At most 3 are kept, and the rest go to `extraCount`.
-- **Card lifetime is store-owned.** A recording card leaves `RECORDING_CARD_MS` after it is shown, and an ended card `ENDED_CARD_MS` after. An amber card has no timer. The timer belongs to the card object: replacing or clearing the card cancels it. `holdCard(true)` pauses it and keeps the remaining time; `holdCard(false)` resumes with that remainder. Components never dismiss on a CSS event. A `display:none` subtree (minimized, hidden bar) runs no animation, the compact form has no drain bar, and reduced motion drops the animation, so an `animationend`-driven card would stay up for the whole call.
+- **Card lifetime is store-owned.** A recording card leaves `RECORDING_CARD_MS` after it is shown, and an ended card `ENDED_CARD_MS` after. An amber card has no timer. The timer follows the recording, not the card object: replacing the card with another card, or clearing it, cancels the timer, but `setCardEvent` filling in the same recording's card keeps the running timer, its remaining time and its hold state. `holdCard(true)` pauses it and keeps the remaining time; `holdCard(false)` resumes with that remainder. Components never dismiss on a CSS event. A `display:none` subtree (minimized, hidden bar) runs no animation, the compact form has no drain bar, and reduced motion drops the animation, so an `animationend`-driven card would stay up for the whole call.
 - **`showAmber`**: a no-op while `now < snoozedUntil` or while an auto recording is active. Otherwise the slot becomes amber with `error: null`. `snoozeAmber` sets `snoozedUntil = now + AMBER_SNOOZE_MS` and dismisses the amber card.
 
 - [ ] **Step 1: Write the failing tests** (fake timers; `resetMeetingCardsForTests()` in `beforeEach`).
@@ -399,6 +400,7 @@ Rules (one slot, so the last writer wins, with the exceptions below):
   - `stopActiveRecording calls the registered stop once`.
   - `the red card leaves after 6s on its own`: shown at 0; present at +5_999; `null` at +6_000. No DOM, no animation event.
   - `holding the red card pauses it and resumes with the remainder`: shown at 0, `holdCard(true)` at +2_000, still shown at +12_000; `holdCard(false)` at +12_000; shown at +15_999, `null` at +16_000.
+  - `the event arriving keeps the red card's timer`: shown at 0, `setCardEvent` at +2_000; shown (with the event) at +5_999, `null` at +6_000.
   - `the ended card leaves 5s after it shows`.
   - `a replaced card's timer does not clear its successor`: red card A at 0, a different app's red card B at +3_000; B is shown at +6_000 and `null` at +9_000.
 
