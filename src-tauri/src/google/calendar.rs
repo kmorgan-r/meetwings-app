@@ -8,7 +8,7 @@ use crate::graph::{CalendarEvent, CalendarParticipant};
 pub const EVENTS_ENDPOINT: &str = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
 /// The description is never requested.
-pub const EVENT_FIELDS: &str = "items(iCalUID,status,summary,start,end,originalStartTime,organizer(email,displayName,self),attendees(email,displayName,self,organizer,resource,optional,responseStatus))";
+pub const EVENT_FIELDS: &str = "items(iCalUID,status,summary,start,end,originalStartTime,organizer(email,displayName,self),attendees(email,displayName,self,organizer,resource,optional,responseStatus),hangoutLink,conferenceData(conferenceSolution(key(type))))";
 
 pub fn events_url(start_iso: &str, end_iso: &str) -> String {
     url::Url::parse_with_params(
@@ -250,6 +250,11 @@ pub fn parse_events(body: &str) -> Result<(Option<String>, Vec<CalendarEvent>), 
                 .to_string()
             }),
             participants,
+            has_meet_link: str_of(item, "hangoutLink").is_some_and(|s| !s.is_empty())
+                || item
+                    .pointer("/conferenceData/conferenceSolution/key/type")
+                    .and_then(|v| v.as_str())
+                    == Some("hangoutsMeet"),
         });
     }
     Ok((self_address, events))
@@ -524,5 +529,48 @@ mod tests {
             assert!(url.contains(needle), "{needle}");
         }
         assert!(!url.contains("description"));
+    }
+
+    #[test]
+    fn event_fields_ask_for_the_meet_link() {
+        assert!(EVENT_FIELDS.contains("hangoutLink"));
+        assert!(EVENT_FIELDS.contains("conferenceData(conferenceSolution(key(type)))"));
+        assert!(!EVENT_FIELDS.contains("description"));
+    }
+
+    fn has_meet(extra: &str) -> bool {
+        let item = ONE_OFF.replacen('{', &format!("{{{extra}"), 1);
+        parse_events(&body(&item)).unwrap().1[0].has_meet_link
+    }
+
+    #[test]
+    fn meet_link_from_hangout_link() {
+        assert!(has_meet(
+            r#""hangoutLink":"https://meet.google.com/abc-defg-hij","#
+        ));
+    }
+
+    #[test]
+    fn meet_link_from_a_hangouts_meet_conference() {
+        assert!(has_meet(
+            r#""conferenceData":{"conferenceSolution":{"key":{"type":"hangoutsMeet"}}},"#
+        ));
+    }
+
+    #[test]
+    fn another_conference_type_is_not_a_meet_link() {
+        assert!(!has_meet(
+            r#""conferenceData":{"conferenceSolution":{"key":{"type":"addOn"}}},"#
+        ));
+    }
+
+    #[test]
+    fn no_conference_is_not_a_meet_link() {
+        assert!(!parse_events(&body(ONE_OFF)).unwrap().1[0].has_meet_link);
+    }
+
+    #[test]
+    fn malformed_conference_data_does_not_fail_the_parse() {
+        assert!(!has_meet(r#""conferenceData":"x","hangoutLink":7,"#));
     }
 }

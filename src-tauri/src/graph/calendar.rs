@@ -220,6 +220,7 @@ pub fn parse_events(body: &str) -> Result<Vec<CalendarEvent>, String> {
             is_all_day,
             own_response,
             participants,
+            has_meet_link: false,
         });
     }
     Ok(events)
@@ -396,6 +397,7 @@ mod tests {
         assert_eq!(events[0].start_ms, 1_788_357_600_000);
         assert_eq!(events[0].end_ms, 1_788_359_400_000);
         assert!(!events[0].is_cancelled);
+        assert!(!events[0].has_meet_link);
         assert_eq!(events[0].own_response, "accepted");
         // organizer + attendees, unioned. participantsOf dedupes in TS.
         assert_eq!(events[0].participants.len(), 2);

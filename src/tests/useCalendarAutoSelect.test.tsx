@@ -53,6 +53,7 @@ function meetingWith(...people: CalendarParticipant[]) {
       {
         id: "ev1", subject: "Sync", startMs: now - 5 * MIN, endMs: now + 25 * MIN,
         isCancelled: false, isAllDay: false, ownResponse: "accepted",
+        hasMeetLink: false,
         participants: [
           { address: "me@corp.test", name: "Me", type: "required" as const, isOrganizer: true },
           ...people,

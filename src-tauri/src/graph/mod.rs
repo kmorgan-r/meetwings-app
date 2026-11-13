@@ -41,6 +41,9 @@ pub struct CalendarEvent {
     pub is_all_day: bool,
     pub own_response: String,
     pub participants: Vec<CalendarParticipant>,
+    /// Google: a Meet link is present. Graph: always false.
+    #[serde(default)]
+    pub has_meet_link: bool,
 }
 
 /// NO TOKEN FIELD, EVER - enforced by the test at the bottom of this file.
@@ -896,6 +899,7 @@ mod tests {
                     is_cancelled: false,
                     is_all_day: false,
                     own_response: "accepted".into(),
+                    has_meet_link: false,
                     participants: vec![CalendarParticipant {
                         address: "cfo@acme.example".into(),
                         name: None,

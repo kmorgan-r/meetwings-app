@@ -42,6 +42,7 @@ function eventWith(id: string): CalendarEvent {
     isCancelled: false,
     isAllDay: false,
     ownResponse: "accepted",
+    hasMeetLink: false,
     participants: [
       { address: "me@example.org", name: "Me", type: "required", isOrganizer: true },
       { address: `${id}@guest.example`, name: `Guest ${id}`, type: "required", isOrganizer: false },
