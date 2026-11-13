@@ -42,10 +42,10 @@ Anti-goals (failures even if the feature "works"):
   time passing must not stop a recording while the user is still in the call.
 - **Chrome mic use that is not a Meet call becomes a "meeting".** Voice typing, a WhatsApp Web voice note
   or any other Chrome mic use outside a Meet calendar event must produce no recording and no meeting-log
-  row. While the calendar can't be checked, the amber card in 6.3 may show for such use. It is limited
-  there (no Chrome watching after a deliberate Disconnect, a 1-hour snooze) and worded so it doesn't
-  claim a Meet call. *(My call: the silent-miss anti-goal wins over "no pop-up" only while the calendar
-  is broken, and only in that limited form.)*
+  row. While the calendar can't be checked (including after the user pressed Disconnect), the amber card
+  in 6.3 may show for such use. It is limited there by a 1-hour snooze and worded so it doesn't claim a
+  Meet call. *(My call: the silent-miss anti-goal and Kevin's "notice with a Reconnect button" win over
+  "no pop-up" only while the calendar can't be checked, and only in that limited form.)*
 - **A silent miss.** If the app cannot check the calendar, the user is told, not left to find out later
   that nothing was recorded.
 - **A Teams regression.** Chrome holding the mic must never hide or delay a Teams call.
@@ -84,10 +84,13 @@ shared `crate::graph::CalendarEvent` (`graph/mod.rs:33`), so a new field changes
 and every struct literal too.
 
 **The Google connection.** `google_status` returns `{ connected, sessionOnly }`. An expired or rejected
-refresh keeps the stored credential (`invalid_grant_keeps_the_credential`, `google/mod.rs:644`), so
-`connected` stays true and calls fail with `GOOGLE_AUTH_EXPIRED`. Only the Disconnect button
-(`google_disconnect`) forgets it. Connect and Disconnect both broadcast the Google connection-changed
-event (`GoogleCalendarCard.tsx:77`, `:95`).
+refresh keeps the stored credential (`invalid_grant_keeps_the_credential`, `google/mod.rs:644`), and
+calls fail with `GOOGLE_AUTH_EXPIRED`. The credential is forgotten by the Disconnect button
+(`google_disconnect`), and a session-only connection (no usable keychain) also ends when the app quits;
+`google_status` itself rejects with `GOOGLE_NO_KEYCHAIN` when the keychain can't be read. So
+"not connected" does not mean "the user chose to disconnect", and the watch rule in 6.1 does not use it.
+Connect and Disconnect both broadcast the Google connection-changed event (`GoogleCalendarCard.tsx:77`,
+`:95`).
 
 **Attendees.** `useGoogleMeetingCapture` already captures the Google event when capture starts
 (`onCaptureStarted`), so a Meet-triggered recording gets its attendees with no extra work. It picks the
@@ -173,8 +176,11 @@ Events:
   poll thread, under the same lock the poll loop holds while it steps and emits. The poll thread acts on
   it at its next step: if episode N is still the live gated episode, the gated machine enters its call
   and the combined stream emits as above. A confirmation for an episode that has ended, or for any other
-  episode id, does nothing. Confirming twice is the same as confirming once. So a `meeting-detected` can
-  never be emitted without the poll thread later emitting its `meeting-ended`.
+  episode id, does nothing. Confirming twice is the same as confirming once. So every `meeting-detected`
+  is followed by the poll thread's own `meeting-ended`, **unless the watcher stops** (an explicit stop,
+  or a terminal stop after repeated failures, `mod.rs:434-437`, `:509-512`), which emits no
+  `meeting-ended`. Consumers already handle that case through `meeting-watcher-stopped`
+  (`useMeetingAutoRecord.ts:613-627`) and the setting-changed path.
 - An unconfirmed episode that ends emits only the candidate-ended event.
 
 This keeps every `meeting-*` event coming from Rust and leaves all five consumers untouched. *(Builder:
@@ -191,14 +197,18 @@ flap during an overrun (event already ended) or while Google is unreachable woul
 good. The cost is that Chrome mic use within 2 minutes of leaving a call (a voice note) is recorded too,
 and the 30-minute transcript gap rule folds it into the same meeting. *(My call.)*
 
-**When Chrome is watched.** Chrome is on the gated list **only while Google holds an account**:
-`loadGoogleConfigState()` is not `absent` **and** `google_status` reports `connected`. Users who never set
-up Google, which includes every Teams-only user, watch exactly what they watch today. A user whose sign-in
-expired or was rejected is still `connected` (3), so Chrome stays watched and the notice in 6.3 reaches
-them. A user who pressed **Disconnect** chose to turn Google off: Chrome is no longer watched and no card
-nags them. *(My call.)* The list is recomputed on the Google connection-changed event and sent to the
-running watcher with the existing in-place `UpdateWatchList` path, **never by restarting the watcher**: a
-restart would drop a confirmed episode's state while its recording keeps running.
+**When Chrome is watched.** Chrome is on the gated list **only when Google Calendar is set up**
+(`loadGoogleConfigState()` is not `absent`). Users who never set up Google, which includes every
+Teams-only user, watch exactly what they watch today. A user who set Google up and is now disconnected,
+for any reason (expired, rejected, session-only relaunch, keychain error, or the Disconnect button),
+still watches Chrome, so the notice in 6.3 reaches them, as Kevin asked (section 5). *(My call.)* The
+list is recomputed on the Google connection-changed event. It is sent to the watcher with the existing
+in-place `UpdateWatchList` path, **never by restarting the watcher** (a restart would drop a confirmed
+episode's state while its recording keeps running), and only while auto-record is on and the watcher is
+running: `start_meeting_watcher` is the only route to `UpdateWatchList` and spawns a watcher when none is
+running (`mod.rs:226-232`, `:545-553`). The call goes through `useMeetingDetection`'s serialized command
+queue (`enqueue`, `useMeetingDetection.ts:52-63`), like every other watcher command, because overlapping
+starts are only safe while serialized (`mod.rs:556-567`).
 
 If the watcher restarts anyway (the Retry after a watcher failure does stop then start,
 `useMeetingDetection.ts:133-134`), a gated candidate that starts while an auto recording started by a
@@ -221,7 +231,9 @@ The loop:
   turns auto-record off, and when the watcher stops. Rust's explicit stop emits no candidate-ended, so the
   setting and watcher-stopped paths must tear the loop down themselves.
 - Runs a check at once on the Google connection-changed event, so a Reconnect done anywhere (the card in
-  6.3, Settings, the Odoo page in another window) is noticed straight away.
+  6.3, Settings, the Odoo page in another window) is noticed straight away. A Disconnect during a live
+  candidate therefore shows the amber Reconnect card at once (unless snoozed). That is intended: Chrome
+  is on the mic and the calendar can no longer be checked.
 - Discards a result that returns after its episode ended. (Rust ignores a stale confirmation anyway,
   6.1.)
 - Is one effect, cleaned up on unmount. Its handlers are registered once, like the existing ones
@@ -317,9 +329,10 @@ Meet. There is no second toggle. *(My call.)* Its copy changes from Teams-only t
 work, the copy names Google Meet only. The toggle is rendered on Mac as well as Windows (lift the gate
 at `settings/index.tsx:39`, in the Mac step, section 8).
 
-On Mac the direct list is empty, so with Google not connected the watcher watches nothing. The settings
-section then shows a note, "Connect Google Calendar to auto-record Meet calls", with a link to the
-Google Calendar settings, so a Mac user is never left with a toggle that silently does nothing.
+On Mac the direct list is empty, so with Google not set up (config `absent`) the watcher watches
+nothing. The settings section then shows a note, "Connect Google Calendar to auto-record Meet calls",
+with a link to the Google Calendar settings, so a Mac user is never left with a toggle that silently does
+nothing.
 
 ### 6.6 The meeting cards (decided with Kevin)
 
@@ -372,9 +385,12 @@ Where the state lives:
   setup-status flip (`useMeetingAutoRecord.ts:87-108`). Timers are cleared on teardown.
 - `useMeetingAutoRecord` publishes "auto recording started" and "auto recording stopped" into it. Start
   is the moment it turns capture on (in meeting mode the mic flag flipping is the only start signal,
-  `useMeetingAutoRecord.ts:407-409`). Stop must be published from **all three** stop paths: `handleStop`
-  (`:481-541`), the release branch for a user-closed mic (`:166-201`) and the unmount cleanup
-  (`:551-571`).
+  `useMeetingAutoRecord.ts:407-409`). Stop must be published from **every** stop path: `handleStop`
+  (`:481-541`), the release branch for a user-closed mic in meeting mode (`:166-201`), the
+  `capture-stopped` listener that clears an auto recording stopped by hand in transcribing mode
+  (`:602-611`; the card's own Stop goes this way in that mode), and the unmount cleanup (`:551-571`). The
+  `capture-stopped` publish must ignore the internal stop that `startCapture` issues before every VAD
+  start.
 - The attendee and calendar capture hooks publish the resolved event into the same store, keyed to the
   recording that asked.
 
@@ -415,7 +431,8 @@ objects**:
 The process objects arrived in macOS 14.2, the same release the existing process tap needs. Use
 `cidre`'s `core_audio` wrappers, which are already a dependency, if they expose these. `image_name`
 carries the **bundle ID** on Mac. `stub.rs` remains for Linux only. Only the enumeration is Mac-only;
-matching and every decision stay in the cfg-free pure code, tested on every target.
+matching and every decision stay in the cfg-free pure code, whose tests run in the Linux and the new
+macOS CI jobs (the Windows CI job runs clippy only, `ci.yml:128-129`; Kevin runs `cargo test` locally).
 
 Chrome on Mac does its audio in helper processes, so the identity seen is expected to be
 `com.google.Chrome` and/or `com.google.Chrome.helper`. **This is not verified.** The gated list for Mac
@@ -438,8 +455,10 @@ polls by "30 consecutive failed polls" (`mod.rs:373`).
 `useMeetingDetection.ts:36` and `useMeetingAutoRecord.ts:122` (`isWindows()` becomes Windows or Mac),
 `settings/index.tsx:39`, and `UNSUPPORTED_PLATFORM`'s wording and the cfg gates in `mod.rs`.
 `MEETING_DETECT_PROCESSES` becomes per-platform: Windows direct = Teams and gated = `chrome.exe`; Mac
-direct = none and gated = the Chrome bundle IDs. All of these land together in the Mac step (section 8),
-so no build ever shows Mac users a toggle that does nothing.
+direct = none and gated = the Chrome bundle IDs. All of these land together in the Mac step (section 8).
+The first Mac build, for the teammate only, carries a **provisional** gated list (the expected IDs in
+7.1), corrected from what the readout shows. No build that reaches users shows Mac users a toggle that
+does nothing.
 
 ### 7.3 Diagnostic readout
 
@@ -447,7 +466,9 @@ Release builds show no console logs (DevTools and the log plugin are off). So th
 checked inside the app. The auto-record settings section gets a small readout listing the apps
 currently on the microphone, and whether each one is watched, gated or ignored. A new read-only command
 **enumerates the sessions on demand** with the same code the detector uses, so it works with auto-record
-off. It is the **first Mac deliverable**. The teammate opens Settings with a Meet call running and
+off. On Windows that enumeration needs COM on the calling thread (`win32.rs:8-10`), so the command
+initialises COM (multithreaded) on its own thread the way `poll_loop` does (`mod.rs:412-427`), or runs
+the enumeration on such a thread. It is the **first Mac deliverable**. The teammate opens Settings with a Meet call running and
 reports what it lists, and the gated Mac list is set from that. It stays in the product on both platforms
 afterwards, as the answer to "why didn't it record?". *(My call.)*
 
@@ -487,8 +508,8 @@ Branch: `feat/google-meet-detection`, cut from `main` (PR #96 merged). *(My call
 
 ## 9. Checks before rollout
 
-**Automated, Rust** (`meeting_detect/mod.rs`, pure and cfg-free, so they run on every CI target
-including the new macOS job):
+**Automated, Rust** (`meeting_detect/mod.rs`, pure and cfg-free, so they run in the Linux and the new
+macOS CI jobs, and in Kevin's local `cargo test` on Windows):
 - `classify` per list: mixed Chrome and Teams sessions in **both** enumeration orders, each list
   matching only its own app; the existing single-list cases (case-insensitive match, own-pid exclusion,
   Unknown) repeated for `chrome.exe`; the Mac gated prefix rule (if used) matching helpers while Teams
@@ -518,20 +539,23 @@ link. The existing URL test gets the new fields.
 - Check loop: the next check starts 60s after the previous one finishes and never overlaps; the loop
   stops on confirm, on candidate end, on auto-record off and on watcher stopped; a result arriving after
   its episode ended is discarded; the connection-changed event triggers a check at once.
-- Watch list: Chrome absent when Google config is absent or `google_status` is not connected; the list
-  is sent with `UpdateWatchList` (never a restart) on the connection-changed event; after a watcher
-  restart, a candidate during a running gate-confirmed recording is confirmed without a check.
+- Watch list: Chrome absent when Google config is absent and present otherwise, whether or not Google is
+  connected; on the connection-changed event the list is sent through the command queue with
+  `UpdateWatchList` (never a restart), and not at all while auto-record is off or the watcher is not
+  running; after a watcher restart, a candidate during a running gate-confirmed recording is confirmed
+  without a check.
 - Notice: once per episode; Reconnect group vs Can't-reach group vs unreadable config (settings button);
   Reconnect success broadcasts before the immediate check; Reconnect failure shows `GOOGLE_COPY` and
   keeps the button; Not now / Got it snooze for 1 hour; no card while a capture is running.
 - Cards: no red card for a same-app restart within 2 minutes; a different app's start within 2 minutes
   does get one; an ended card cancelled by a same-app restart within its 30s wait; no card for detection
-  that starts no recording; each of the three stop paths publishes the ended card; a late capture result
+  that starts no recording; each of the four stop paths publishes the ended card, and the internal stop
+  before a VAD start does not; a late capture result
   fills the card in; no card content when the capture resolves no single event.
 - Window: while a card is up, a transcript mutation does not shrink the window; a card shown while
   minimized never calls the normal `set_window_height` path and never un-minimizes.
 - Platform (platform mocked to Mac): the toggle renders; the copy names Google Meet only; the "Connect
-  Google Calendar" note shows with Google not connected; per-platform watch lists (Mac direct = none); an
+  Google Calendar" note shows with Google not set up; per-platform watch lists (Mac direct = none); an
   unsupported-macOS start error stays visible after the toggle flips off.
 
 **Manual, on Windows (Kevin)**, with auto-record on and Google connected:
@@ -549,9 +573,13 @@ link. The existing URL test gets the new fields.
 7. Revoke Meetwings' access in the Google Account (Security → third-party connections), so the saved
    sign-in is rejected. Join a Meet event. The amber card appears with Reconnect. Reconnect, sign in,
    and recording starts without rejoining.
-8. Press Disconnect on the Google Calendar card, then join a Meet event. Nothing: no card, no recording.
-9. On the preview screen of a Meet event, turn Wi-Fi off. The amber "can't reach" card appears with Got
-   it. Turn Wi-Fi back on: recording starts within about a minute.
+8. Press Disconnect on the Google Calendar card, then join a Meet event. The amber card appears with
+   Reconnect. Press Not now, leave, and join again within the hour: no card (the snooze). Reconnect from
+   the Google Calendar card: recording starts without rejoining.
+9. Create a Meet event starting in about 7 minutes and open its preview screen (Chrome on the mic). The
+   first check finds no event in the window, silently. Turn Wi-Fi off before the next re-check: the amber
+   "can't reach" card appears with Got it. Once the event is within 5 minutes, turn Wi-Fi back on:
+   recording starts within about a minute.
 10. Hide the bar, then repeat check 7's trigger. The amber card shows the window.
 11. With `meet.new` open on its preview screen (Chrome holding the mic), start a Teams call. Teams is
     detected as today.
