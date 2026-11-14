@@ -30,7 +30,12 @@
 2. **Edits that don't append a line** (translation arriving, speaker assigned) replace entries in the array without changing its length. Expected: they restart neither the silence timer nor the grace. Tests in Tasks 7 and 8.
 3. **Clear transcript during the grace.** The system-line count drops to 0. Expected: no re-arm or stop from the drop itself; a later system line re-arms the grace as usual. Test in Task 8.
 4. **An auto-stop fires while the user is reading an AI answer.** Expected: the answer stays open; only the transcript view is hidden. Test in Task 4.
-5. **Remount mid-call with a hand-opened mic.** Expected: the unmount flush runs (recovery has the lines), and a later `meeting-ended` with the mic closed still runs the meeting-log trigger. Tests in Tasks 4 and 7.
+5. **Remount mid-call with a hand-opened mic, or inside the grace.** Expected: the unmount flush runs (recovery has the lines); an unmount while recording runs the meeting-log trigger once (inside the grace no later edge or `meeting-ended` would); a later `meeting-ended` with the mic closed still runs the trigger. Tests in Tasks 4 and 7.
+
+## Accepted residuals
+
+- STT lines that land after a grace stop sit past the trigger's consumed end. If the next recording starts within `IDLE_FLUSH_MS`, before the idle trigger skips them as a scrap, they open the next meeting's row.
+- A call detected after the grace stop has already run, but within the 30-minute conversation gap (`useCompletion.ts:1571`), keeps call A's conversation and Odoo targets. Task 9's last test pins this.
 
 ## Test paths (P4 gate runs exactly these)
 
@@ -62,6 +67,12 @@ src/tests/settings-page.meeting-auto-record.test.tsx
 src/tests/summarize-current-conversation.slice.test.tsx
 src/tests/odoo-target-new-chat-entry-points.test.tsx
 src/tests/useSystemAudio.new-conversation.test.tsx
+src/tests/AutoSpeechVad.errored.test.tsx
+src/tests/useCompletion.responded-model.test.tsx
+src/tests/overlay-minimize-picker-dismiss.test.tsx
+src/tests/overlay-minimize-rehydrate.test.tsx
+src/tests/hidden-and-minimized.test.tsx
+src/tests/useMeetingDetection.lifecycle.test.tsx
 ```
 
 ## Routing
@@ -97,7 +108,7 @@ Tasks 1-3 are short, self-contained pure-module work: suitable for the ollama wo
   - `recovery skips a lone scrap` — a conversation with only 2 lines → `insertQueueRow` not called, returns 0, and `setSkipWatermark` is not called.
   - Update any existing fixture that expects a row but is under the thresholds (fewer than 3 lines or under 60 s) so it meets them.
 - [ ] **Step 5: Implement** at `meeting-log-recovery.ts:195`: `for (const slice of mergeScraps(segmentByGap(group, IDLE_FLUSH_MS)))`.
-- [ ] **Step 6: Run** `npx vitest run src/tests/odoo-meeting-log-slice.test.ts src/tests/odoo-meeting-log-recovery.test.ts`. Expected: PASS.
+- [ ] **Step 6: Run** `npx vitest run src/tests/odoo-meeting-log-slice.test.ts src/tests/odoo-meeting-log-recovery.test.ts` and `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 7: Commit**
 ```bash
 git add src/lib/odoo/meeting-log.ts src/lib/odoo/meeting-log-recovery.ts src/tests/odoo-meeting-log-slice.test.ts src/tests/odoo-meeting-log-recovery.test.ts
@@ -133,7 +144,7 @@ git commit -m "feat(meeting-log): scrap rule; recovery merges short segments"
 - [ ] **Step 5: Implement** `EndedCard`: headline/body from `STOP_NOTICE_TEXT[card.reason]`; keep `data-kind="ended"`, `role="status"` and the heights from `cardHeight`.
 - [ ] **Step 6: Lifecycle case.** At `useMeetingAutoRecord.lifecycle.test.tsx` ~:2010-2020 drop the `ENDED_CARD_DELAY_MS` import and assert that no ended card appears after an auto-record stop (the 30 s card is gone).
 - [ ] **Step 7: Live styling** (no test, class only). `AutoSpeechVad.tsx` button: `className={cn("cursor-pointer", vad.listening && "bg-red-600 text-white hover:bg-red-600/90 animate-pulse")}` (import `cn` from `@/lib/utils`). `MinimizedPill.tsx` `Square`: add `animate-pulse`. Note: PR #98 also edits `AutoSpeechVad.tsx`; touch only the button's `className`.
-- [ ] **Step 8: Run** `npx vitest run src/tests/meeting-cards.store.test.ts src/tests/meeting-card.test.tsx src/tests/meeting-card-window.test.tsx src/tests/minimized-pill.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx` and `npm run type-check`. Expected: PASS, 0 errors.
+- [ ] **Step 8: Run** `npx vitest run src/tests/meeting-cards.store.test.ts src/tests/meeting-card.test.tsx src/tests/meeting-card-window.test.tsx src/tests/minimized-pill.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/AutoSpeechVad.errored.test.tsx` and `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 9: Commit**
 ```bash
 git add src/lib/meeting-cards.store.ts src/pages/app/components/MeetingCard.tsx src/pages/app/components/completion/AutoSpeechVad.tsx src/pages/app/components/MinimizedPill.tsx src/tests/meeting-cards.store.test.ts src/tests/meeting-card.test.tsx src/tests/meeting-card-window.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx
@@ -164,7 +175,7 @@ git commit -m "feat(cards): immediate stop notice; live record button"
   - `meeting-detect.test.ts`: `meetingLabel("Zoom.exe")` is `"Zoom"`; `isGatedProcess("Zoom.exe")` is `false`; `MEETING_DETECT_PROCESSES` contains `"Zoom.exe"`.
 - [ ] **Step 2: Run** `npx vitest run src/tests/current-meeting.test.ts src/tests/meeting-auto-record.decisions.test.ts src/tests/meeting-detect.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement** the Interfaces above.
-- [ ] **Step 4: Run** the same command plus `npm run type-check`. Expected: PASS, 0 errors.
+- [ ] **Step 4: Run** the same command plus `src/tests/useMeetingDetection.lifecycle.test.tsx` (it passes `MEETING_DETECT_PROCESSES` through as the `direct` list), then `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 5: Commit**
 ```bash
 git add src/lib/calendar/current-meeting.ts src/lib/functions/meeting-auto-record.ts src/config/constants.ts src/lib/recording-stop-cap.ts src/tests/current-meeting.test.ts src/tests/meeting-auto-record.decisions.test.ts src/tests/meeting-detect.test.ts
@@ -182,8 +193,9 @@ Meeting mode still exists after this task (the toggle goes in Task 6); everythin
 - Modify: `src/types/completion.hook.ts` (add the three new members)
 - Modify: `src/hooks/useMeetingLog.ts` — options (:128-152, :173-181), mirror (:202-217), `meeting-ended` listener (:562-577), edge (:579-594), idle effect (:632-636)
 - Modify: `src/hooks/useMeetingAutoRecord.ts` — delete the flush at :182 (release branch) and at :526 (`stop-meeting`), and rewrite the comments that justify them (:173-181, :197-204, :513-517) to say G1's edge in `useCompletion` owns the flush
-- Modify: `src/pages/app/components/completion/Input.tsx:93-95`
+- Modify: `src/pages/app/components/completion/Input.tsx:74-79` (`showMeetingPanel`), :93-95
 - Modify: `src/pages/app/components/completion/index.tsx:179-189` (`useMeetingLog`), :236 (`setPillData`)
+- Create: `src/tests/completion-ask-box.test.tsx` (the `Input` harness only; Task 10 extends it)
 - Test: `src/tests/useCompletion.meeting-assist.test.tsx`, `src/tests/useMeetingLog.enqueue.test.tsx`, `src/tests/useMeetingLog.hold.test.tsx`, `src/tests/meeting-log-entry-points.test.tsx`, `src/tests/meeting-log-auto-notion.test.tsx`, `src/tests/useMeetingAutoRecord.lifecycle.test.tsx` (flush-count cases, e.g. F55)
 
 **Interfaces:**
@@ -204,11 +216,14 @@ Meeting mode still exists after this task (the toggle goes in Task 6); everythin
   - `a trailing line after the stop does not reopen the panel`.
   - `starting again clears the hide`.
   - `a stop starts no conversation` — no `newConversationStarted` event dispatched, `currentConversationId` unchanged.
+  - Rewrite `queues one transcript flush when StrictMode disables meeting assist` (:181) to close the mic under StrictMode (one save): it exercises the setter flush this task deletes.
+  - `completion-ask-box.test.tsx` (new; render `Input` with a typed partial props object, mock `@/contexts` and the four child panels `MessageHistory`, `QuickActions`, `MeetingTranscriptPanel`, `ActiveModels` to test-id stubs): `a hidden transcript stays hidden while an error holds the popover open` — `isPopoverOpen` true, `error` set, transcript lines, `meetingTranscriptHidden` true → no `MeetingTranscriptPanel` stub; `false` → the stub renders.
 - [ ] **Step 2: Write the failing `useMeetingLog` tests** (switch the existing harnesses from driving `meetingAssistMode` to driving `recording`; transcript fixtures must meet the scrap threshold from now on, ≥3 lines over ≥60 s, because Task 5 adds the filter):
   - `recording true->false triggers once`; `mount with recording false triggers nothing`.
   - `meeting-ended while recording does not trigger`; `meeting-ended with the mic closed triggers` (Review Focus 5).
   - `the idle trigger does not arm while recording` — mount with entries and `recording` true, advance `IDLE_FLUSH_MS` → no `insertQueueRow`. `the idle trigger arms with the mic closed` — mount with entries and `recording` false (no edge, so only the idle timer can fire), advance `IDLE_FLUSH_MS` → the trigger runs once.
-- [ ] **Step 3: Run** `npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx src/tests/meeting-log-entry-points.test.tsx`. Expected: FAIL.
+  - `unmount while recording triggers once` (Review Focus 5: inside the grace no edge or `meeting-ended` follows); `unmount with the mic closed triggers nothing`.
+- [ ] **Step 3: Run** `npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/completion-ask-box.test.tsx`. Expected: FAIL.
 - [ ] **Step 4: Implement `useCompletion`.**
   - `const [meetingTranscriptHidden, setMeetingTranscriptHidden] = useState(false);`
   - `hasMeetingTranscript = meetingAssistMode && meetingTranscript.length > 0 && !meetingTranscriptHidden`.
@@ -224,13 +239,13 @@ Meeting mode still exists after this task (the toggle goes in Task 6); everythin
     }, [meetingCaptureActive, flushUnsavedMeetingTranscript]);
     ```
   - Delete the flush in the setter wrapper (:580-584); return `recording: meetingCaptureActive`, `meetingTranscriptHidden`, `setMeetingTranscriptHidden`; add them to `UseCompletionReturn`.
-- [ ] **Step 5: Implement `useMeetingLog`** with the three polarities above. Mirror `recording` into `recordingRef` in the existing layout mirror (:205-217); rename `prevPillRef` to `prevRecordingRef`. Update the hook's doc comment (:160-172), which still speaks of the pill.
-- [ ] **Step 6: Wire it.** `index.tsx`: `useMeetingLog({ ..., recording: completion.recording })` and `setPillData({ ..., recording: completion.recording })`. `Input.tsx` `onOpenChange`: `if (open) { setMeetingPanelHidden(false); setMeetingTranscriptHidden(false); }`. Destructure the new prop.
+- [ ] **Step 5: Implement `useMeetingLog`** with the three polarities above. Mirror `recording` into `recordingRef` in the existing layout mirror (:205-217); rename `prevPillRef` to `prevRecordingRef`. Unmount: in the existing teardown effect (:763-766), `if (recordingRef.current) void triggerRef.current();` (unmount closes the mic, so it is a recording stop; a held row's push already runs detached, :261-267). Existing cases that end with `recording` true now fire a trigger during RTL's cleanup, which can land in the next case: end them with `recording` false or unmount and drain inside the case. Update the hook's doc comment (:160-172), which still speaks of the pill.
+- [ ] **Step 6: Wire it.** `index.tsx`: `useMeetingLog({ ..., recording: completion.recording })` and `setPillData({ ..., recording: completion.recording })`. `Input.tsx`: destructure `meetingTranscriptHidden` and `setMeetingTranscriptHidden`; `showMeetingPanel` adds `&& !meetingTranscriptHidden`; `onOpenChange`: `if (open) { setMeetingPanelHidden(false); setMeetingTranscriptHidden(false); }`. `hasContent` (:82) and `xHidesPanel` (:87) keep the raw transcript length: they guard `reset()` (:101), which would drop the conversation and its targets.
 - [ ] **Step 7: Remove the auto-record flushes** at `useMeetingAutoRecord.ts:182` and `:526`. In `useMeetingAutoRecord.lifecycle.test.tsx`, cases that count `flushTranscript` calls on a stop now expect 0 from the hook; the unmount flush case (:575-583) is unchanged.
-- [ ] **Step 8: Run** the Step 3 command plus `src/tests/meeting-log-auto-notion.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/useSystemAudio.new-conversation.test.tsx`, then `npm run type-check`. Expected: PASS, 0 errors.
+- [ ] **Step 8: Run** the Step 3 command plus `src/tests/meeting-log-auto-notion.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/useSystemAudio.new-conversation.test.tsx src/tests/useCompletion.responded-model.test.tsx`, then `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 9: Commit**
 ```bash
-git add src/hooks/useCompletion.ts src/types/completion.hook.ts src/hooks/useMeetingLog.ts src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/Input.tsx src/pages/app/components/completion/index.tsx src/tests/useCompletion.meeting-assist.test.tsx src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/meeting-log-auto-notion.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx
+git add src/hooks/useCompletion.ts src/types/completion.hook.ts src/hooks/useMeetingLog.ts src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/Input.tsx src/pages/app/components/completion/index.tsx src/tests/completion-ask-box.test.tsx src/tests/useCompletion.meeting-assist.test.tsx src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/meeting-log-auto-notion.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx
 git commit -m "feat(meeting): recording edge cuts the row, flushes, hides transcript"
 ```
 
@@ -292,11 +307,11 @@ git commit -m "feat(meeting-log): skip scraps, cap grace-stop rows at call end"
 - `useMeetingAutoRecord` keeps its `meetingAssistMode` option. Completion passes the constant `true`, so the pill-off branch (:185-207) and the transcribing start become unreachable in production. They stay as they are: deleting that pipeline is a non-goal, and the lifecycle suite keeps covering it with `meetingAssistMode: false`.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `useCompletion.meeting-assist.test.tsx`: `meeting mode is on at first render even when storage says "false"`; `no setter is returned` (`result.current.setMeetingAssistMode` is `undefined`); `nothing writes meeting_assist_mode_enabled` (`localStorage.setItem` never called with `STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED` across mount and mic toggles). Replace the old persistence and setter-flush cases with these.
-  - `usePillRecordAction.test.tsx`: `stop closes the mic only` → `setEnableVAD(false)`, nothing else; `start opens the mic` → `setEnableVAD(true)`.
+  - `useCompletion.meeting-assist.test.tsx`: `meeting mode is on at first render even when storage says "false"`; `no setter is returned` (`result.current.setMeetingAssistMode` is `undefined`); `nothing writes meeting_assist_mode_enabled` (`localStorage.setItem` never called with `STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED` across mount and mic toggles). Replace the old persistence cases with these, and delete every `result.current.setMeetingAssistMode(true)` setup call in the file (:187, :212, :455, :502, :699, :722, :770, :811, :937, :975, :1011; meeting mode is already on, and the call would throw).
+  - `usePillRecordAction.test.tsx`: `stop closes the mic only` → `setEnableVAD(false)`, nothing else; `start opens the mic` → `setEnableVAD(true)`. Rewrite the existing cases to the new options; none may pass `meetingAssistMode` or `setMeetingAssistMode`.
 - [ ] **Step 2: Run** `npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/usePillRecordAction.test.tsx`. Expected: FAIL.
 - [ ] **Step 3: Implement** the Files list. `index.tsx`: `usePillRecordAction({ recording: completion.recording, setEnableVAD: completion.setEnableVAD, canRecord: ... })`. Update `usePillRecordAction`'s doc comment (:25-44), which describes the pill flipping meeting mode.
-- [ ] **Step 4: Run** `npm run type-check`, `npm run lint`, and `npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/usePillRecordAction.test.tsx src/tests/completion-calendar-wiring.test.tsx src/tests/completion-notion-picker.test.tsx src/tests/overlay-meeting-targets-survive.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/settings-page.meeting-auto-record.test.tsx src/tests/summarize-current-conversation.slice.test.tsx src/tests/odoo-target-new-chat-entry-points.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx`. Expected: PASS (a known flake in `overlay-minimize-keeps-mounted` passes when re-run alone).
+- [ ] **Step 4: Run** `npm run type-check`, `npm run lint`, and `npx vitest run src/tests/useCompletion.meeting-assist.test.tsx src/tests/usePillRecordAction.test.tsx src/tests/completion-calendar-wiring.test.tsx src/tests/completion-notion-picker.test.tsx src/tests/overlay-meeting-targets-survive.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/settings-page.meeting-auto-record.test.tsx src/tests/summarize-current-conversation.slice.test.tsx src/tests/odoo-target-new-chat-entry-points.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/useCompletion.responded-model.test.tsx src/tests/overlay-minimize-picker-dismiss.test.tsx src/tests/overlay-minimize-rehydrate.test.tsx src/tests/hidden-and-minimized.test.tsx`. Expected: PASS (a known flake in `overlay-minimize-keeps-mounted` passes when re-run alone).
 - [ ] **Step 5: Commit**
 ```bash
 git rm src/pages/app/components/completion/MeetingAssistToggle.tsx
@@ -311,6 +326,7 @@ git commit -m "feat(meeting): meeting mode always on; toggle removed"
 **Files:**
 - Modify: `src/hooks/useMeetingAutoRecord.ts` — options (:77-83), owner memo (:126-129), layout mirror (:164-208), unmount cleanup (:573-595)
 - Modify: `src/pages/app/components/completion/index.tsx:39-45`
+- Modify: `src/tests/useMeetingAutoRecord.lifecycle.test.tsx` (`Probe`, :265-271)
 - Create: `src/tests/useMeetingAutoRecord.auto-stop.test.tsx`
 
 **Interfaces:**
@@ -327,12 +343,15 @@ git commit -m "feat(meeting): meeting mode always on; toggle removed"
   7. `const ok = await confirmMeetingStopped()`; then `setRecordingStopCap(null)` (the edge trigger read it synchronously at the stop commit; this clears a cap no edge consumed, for example a stop and start batched into one commit); toast `MEETING_STOP_FAILED_MESSAGE` on `!ok` with the same guard as :533.
   Always called through `enqueue`.
 
-- [ ] **Step 1: Create the test file.** Copy the hoisted mocks, the listen registry, `emit`/`fire`/`fireActed`/`flush`/`sleep`/`drainStopConfirm`/`makeAudio`/`seedStatus` and the `mount` harness from `useMeetingAutoRecord.lifecycle.test.tsx:1-330`. Extend `Probe` with `meetingTranscript` state (exposed as `appendLine(audioSource)`, `replaceEntry(index)` that keeps the length, and `clearTranscript()`) and a `startNewConversation` spy (Task 9). Override in the constants mock: `STOP_CONFIRM_INTERVAL_MS: 5, SILENCE_STOP_MS: 80, CALL_END_GRACE_MS: 40, SAME_CALL_READ_TIMEOUT_MS: 30`. Mock `@/lib/recording-stop-cap` with spies. Real timers only.
+- [ ] **Step 1: Create the test file.** Copy the hoisted mocks, the listen registry, `emit`/`fire`/`fireActed`/`flush`/`sleep`/`drainStopConfirm`/`makeAudio`/`seedStatus` and the `mount` harness from `useMeetingAutoRecord.lifecycle.test.tsx:1-330`. Extend `Probe` with `meetingTranscript` state (exposed as `appendLine(audioSource)`, `replaceEntry(index)` that keeps the length, and `clearTranscript()`) and a `startNewConversation` spy (Task 9). Override in the constants mock: `STOP_CONFIRM_INTERVAL_MS: 5, SILENCE_STOP_MS: 300, CALL_END_GRACE_MS: 150, SAME_CALL_READ_TIMEOUT_MS: 100` (import them back through the mock as `SILENCE`, `GRACE`, `READ_TIMEOUT`). Mock `@/lib/recording-stop-cap` with spies. Real timers only. Timing rules for every case in this file (the lifecycle file's 20 ms floor makes tighter gaps flake):
+  - "has stopped" is asserted with `waitFor`, never at a fixed sleep;
+  - "not stopped yet" is asserted at most a third of the timer after its last (re)start;
+  - "restarted" vs "not restarted" compares the time the `setEnableVAD(false)` spy recorded (`mockImplementation` pushes `Date.now()`) with the time of the restarting input: a restarted timer stops at or after input + timer (timers never fire early), an untouched one before it.
 - [ ] **Step 2: Write the failing tests:**
-  - `silence closes a hand-opened mic` — `setMicOpen(true)`, wait 80 ms + drain → `setEnableVAD` called with `false`; `getMeetingCard()` is `{ kind: "ended", reason: "silence" }`.
-  - `each appended line restarts the silence timer` — line at 50 ms → open at 100 ms → closed by ~180 ms.
-  - `lines already there at start do not count` — mount with 5 lines, open the mic → closed after ~80 ms.
-  - `editing an entry in place is not an arrival` (Review Focus 2) — `replaceEntry` at 50 ms → closed by ~100 ms.
+  - `silence closes a hand-opened mic` — `setMicOpen(true)` → `waitFor` `setEnableVAD` called with `false`; `getMeetingCard()` is `{ kind: "ended", reason: "silence" }`.
+  - `each appended line restarts the silence timer` — line at `SILENCE * 2/3` → stop recorded at or after line + `SILENCE`.
+  - `lines already there at start do not count` — mount with 5 lines, open the mic → `waitFor` the silence stop.
+  - `editing an entry in place is not an arrival` (Review Focus 2) — `replaceEntry` at `SILENCE * 2/3` → stop recorded before that edit + `SILENCE`.
   - `silence runs on the main window when not Windows` (`mocks.isWindows` → false) and `never on another window` (label "dashboard").
   - `the stop keeps the quiet window for an auto-started call` — auto-start via `meeting-detected`, silence stop, then `autoRecordingStarted` for the same app inside `RESTART_QUIET_MS` takes the quiet branch (no recording card).
   - `an unconfirmed stop warns` — status queue all `true` → `toast.error(MEETING_STOP_FAILED_MESSAGE)`.
@@ -347,11 +366,11 @@ git commit -m "feat(meeting): meeting mode always on; toggle removed"
     // eslint-disable-next-line react-hooks/exhaustive-deps -- enqueue/stopRecording close over refs only (see :672-679)
   }, [isMain, enableVAD, meetingTranscript.length]);
   ```
-  Unmount cleanup: flush when `startedModeRef.current || enableVADRef.current`; `autoRecordingStopped()` stays under `startedModeRef.current`. Pass `meetingTranscript` from `index.tsx`.
+  Unmount cleanup: flush when `startedModeRef.current || enableVADRef.current`; `autoRecordingStopped()` stays under `startedModeRef.current`. Pass `meetingTranscript` from `index.tsx`. Lifecycle `Probe`: pass `meetingTranscript: EMPTY_TRANSCRIPT` (a module-level `const EMPTY_TRANSCRIPT: TranscriptEntry[] = []`); test files are not type-checked, so a missing option only shows as a render-time throw in every case.
 - [ ] **Step 5: Run** `npx vitest run src/tests/useMeetingAutoRecord.auto-stop.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx` and `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 6: Commit**
 ```bash
-git add src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/index.tsx src/tests/useMeetingAutoRecord.auto-stop.test.tsx
+git add src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/index.tsx src/tests/useMeetingAutoRecord.auto-stop.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx
 git commit -m "feat(auto-record): shared stop op, 15-min silence stop"
 ```
 
@@ -374,26 +393,28 @@ git commit -m "feat(auto-record): shared stop op, 15-min silence stop"
 
 Wiring:
 - `meeting-detected` listener: after enqueuing, `lastProcessRef.current = payload?.process`.
-- `meeting-ended` listener: capture `const endedAt = Date.now(), endedProcess = lastProcessRef.current;` synchronously. If `startedModeRef.current === "transcribing"`, enqueue `handleStop({ auto: true })` as today and return. Otherwise `enqueue(async () => { if (enableVADRef.current || startedModeRef.current === "meeting") armGrace(endedAt, endedProcess); })`. The decision runs inside the op because a queued op resumes before the `enableVAD` mirror updates; meeting provenance counts as an open mic.
+- `meeting-ended` listener: capture `const endedAt = Date.now(), endedProcess = lastProcessRef.current;` synchronously, then one op: `enqueue(async () => { if (startedModeRef.current === "transcribing") return handleStop({ auto: true }); if (enableVADRef.current || startedModeRef.current === "meeting") armGrace(endedAt, endedProcess); })`. Both checks run inside the op: a queued start writes its provenance after awaits (:427-447) and resumes before the `enableVAD` mirror updates, so meeting provenance counts as an open mic.
 - System lines: `const systemLineCount = useMemo(() => meetingTranscript.filter((e) => e.audioSource === "system").length, [meetingTranscript]);` and a compare-before-assign layout effect: on `systemLineCount > prev` with `graceRef.current` set, `armGrace(g.endedAt, g.endedProcess)`. A drop (Clear) only updates `prev`.
-- Any `enableVAD` change (compare-before-assign layout effect, no mount edge) → `cancelGrace()`.
+- Any `enableVAD` change (compare-before-assign layout effect, no mount edge) → `cancelGrace()`, except a false→true change while `startedModeRef.current === "meeting"`: that is the hook's own start committing, and a grace armed behind it (previous bullet) must survive it.
 - `meeting-detection-setting-changed` (disabled) and `meeting-watcher-stopped` → `cancelGrace()` before their existing bodies.
 - Unmount cleanup → `cancelGrace()`.
 
-- [ ] **Step 1: Write the failing tests** (`auto-stop` file):
-  - `meeting-ended with the mic open waits the grace, then stops` — hand-opened mic; at 20 ms still open; by ~60 ms closed; card reason `"call-ended"`; `setRecordingStopCap` called with the ended time, earlier (`invocationCallOrder`) than `setEnableVAD(false)`.
-  - `an auto-started recording is no longer stopped at once` — open at 20 ms, closed after the grace.
-  - `meeting-ended with the mic closed arms nothing` — no `setEnableVAD` call within 100 ms.
-  - `a system line restarts the grace; a mic line does not`.
-  - `the user moving the mic cancels the grace` — close at 10 ms, reopen at 20 ms → open at 100 ms.
+- [ ] **Step 1: Write the failing tests** (`auto-stop` file, Task 7's timing rules):
+  - `meeting-ended with the mic open waits the grace, then stops` — hand-opened mic; still open at `GRACE / 3`; `waitFor` closed, stop recorded at or after `meeting-ended` + `GRACE`; card reason `"call-ended"`; `setRecordingStopCap` called with the ended time, earlier (`invocationCallOrder`) than `setEnableVAD(false)`.
+  - `an auto-started recording is no longer stopped at once` — open at `GRACE / 3`, `waitFor` closed after the grace.
+  - `meeting-ended queued behind the auto-start still arms the grace` — `meeting-detected` and `meeting-ended` emitted in one `act` → `waitFor` one `setEnableVAD(false)`.
+  - `meeting-ended behind a queued transcribing start stops it` (`meetingAssistMode: false`; both events in one `act`) → `handleStop` path: one stop, no grace wait.
+  - `meeting-ended with the mic closed arms nothing` — no `setEnableVAD` call within `2 * GRACE`.
+  - `a system line restarts the grace; a mic line does not` — line at `GRACE * 2/3`: system → stop recorded at or after line + `GRACE`; mic → before it.
+  - `the user moving the mic cancels the grace` — close at `GRACE / 6`, reopen at `GRACE / 3` → no `setEnableVAD(false)` from the hook within `2 * GRACE`.
   - `turning auto-record off cancels the grace`; `watcher stopped cancels the grace`.
-  - `a second meeting-ended re-arms and never stacks` — two events 20 ms apart → exactly one `setEnableVAD(false)`.
+  - `a second meeting-ended re-arms and never stacks` — two events `GRACE / 3` apart → exactly one `setEnableVAD(false)`, recorded at or after the second + `GRACE`.
   - `StrictMode runs one grace` — `mount(..., { strict: true })` → exactly one `setEnableVAD(false)`.
-  - `unmount clears the grace` — unmount at 10 ms → no further `setEnableVAD`.
+  - `unmount clears the grace` — unmount at `GRACE / 3` → no further `setEnableVAD` within `2 * GRACE`.
   - `a line arriving after the fire, before the queued stop, still cancels it` — hold the chain with a deferred `get_capture_status`, let the grace fire, append a system line, release → mic still open.
   - `clearing the transcript during the grace neither stops nor re-arms; a later system line re-arms` (Review Focus 3).
 - [ ] **Step 2: Run** `npx vitest run src/tests/useMeetingAutoRecord.auto-stop.test.tsx`. Expected: FAIL.
-- [ ] **Step 3: Implement** the wiring above. In `useMeetingAutoRecord.lifecycle.test.tsx`, rewrite the meeting-mode "`meeting-ended` stops at once" cases to wait the grace (override `CALL_END_GRACE_MS` in that file's constants mock); leave transcribing cases as they are.
+- [ ] **Step 3: Implement** the wiring above. In `useMeetingAutoRecord.lifecycle.test.tsx`: add `CALL_END_GRACE_MS: 30` to the constants mock (:60-63) and a `waitGrace()` helper (`act` around `sleep(Math.max(CALL_END_GRACE_MS, 20) * 3)`, then `drainStopConfirm()`). `grep -n "meeting-ended"` lists about 40 sites (:822-1178, :1329-1746, :1888-2030). For each case running with `meetingAssistMode: true` and an open mic whose following assertions expect a stop (`setEnableVAD(false)` counts such as `toHaveBeenCalledTimes(3)`, the quiet window, the stop card, :2020's quiet-restart case), insert `await waitGrace()` after the event. Cases that expect nothing keep expecting nothing after `waitGrace()`. Transcribing cases (`meetingAssistMode: false`) are unchanged.
 - [ ] **Step 4: Run** `npx vitest run src/tests/useMeetingAutoRecord.auto-stop.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx` and `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 5: Commit**
 ```bash
@@ -408,7 +429,7 @@ git commit -m "feat(auto-record): 2-min call-end grace, restarted by far-end aud
 **Files:**
 - Modify: `src/hooks/useMeetingAutoRecord.ts` — options, layout mirror, `meeting-detected` listener
 - Modify: `src/pages/app/components/completion/index.tsx:39-45`
-- Test: `src/tests/useMeetingAutoRecord.auto-stop.test.tsx` (mock `@/lib/calendar/fetch-current-meetings`)
+- Test: `src/tests/useMeetingAutoRecord.auto-stop.test.tsx` (mock `@/lib/calendar/fetch-current-meetings`); `src/tests/useMeetingAutoRecord.lifecycle.test.tsx` (`Probe` passes `startNewConversation: vi.fn(async () => {})`; mock `@/lib/calendar/fetch-current-meetings` to resolve `{ kind: "absent" }`)
 
 **Interfaces:**
 - Consumes: `isSameCall` (Task 3), `fetchCurrentMeetings` (`src/lib/calendar/fetch-current-meetings.ts:17`), `SAME_CALL_READ_TIMEOUT_MS`, the grace refs (Task 8), `stopRecording` (Task 7).
@@ -427,7 +448,11 @@ git commit -m "feat(auto-record): 2-min call-end grace, restarted by far-end aud
         cancelGrace();
         if (same) return; // recording continues; no card
         await stopRecording({ reason: "call-ended", auto: false, capEndedAt: g.endedAt }); // auto:false: no quiet window for B
-        await startNewConversationRef.current(); // clears A's targets before B
+        try {
+          await startNewConversationRef.current(); // clears A's targets before B
+        } catch (e) {
+          console.error("New-call conversation reset failed:", e); // A's mic is already closed: still record B
+        }
       }
     }
     return handleDetected(process);
@@ -435,18 +460,19 @@ git commit -m "feat(auto-record): 2-min call-end grace, restarted by far-end aud
   ```
 
 - [ ] **Step 1: Write the failing tests:**
-  - `same app and same slot: the grace is cancelled` — auto-start "ms-teams.exe", `meeting-ended`, re-detect "ms-teams.exe" (calendar: one event over both moments) → mic open at 100 ms; the card's `recordingId` unchanged; `startNewConversation` not called.
+  - `same app and same slot: the grace is cancelled` — auto-start "ms-teams.exe", `meeting-ended`, re-detect "ms-teams.exe" (calendar: one event over both moments) → no `setEnableVAD(false)` within `2 * GRACE`; the card's `recordingId` unchanged; `startNewConversation` not called.
   - `a hand-opened mic with no prior detection and an unreadable calendar counts as the same call`.
   - `another app is a new call` — re-detect "Zoom.exe" → `setEnableVAD(false)`, then `startNewConversation`, then `setEnableVAD(true)` in that `invocationCallOrder`; `setRecordingStopCap` received the ended time; a new recording card is shown (non-quiet: new `recordingId`).
   - `the same app in a different slot is a new call`.
-  - `a hung calendar read counts as the same call and frees the chain` (Review Focus 1) — `fetchCurrentMeetings` never resolves → grace cancelled after ~30 ms; a later `meeting-ended` arms a new grace that stops the mic.
+  - `a failed conversation reset still records the new call` — `startNewConversation` rejects on a "Zoom.exe" re-detect → `setEnableVAD(true)` still follows the stop.
+  - `a hung calendar read counts as the same call and frees the chain` (Review Focus 1) — `fetchCurrentMeetings` never resolves → `waitFor` the grace cancelled (no stop within `2 * GRACE` after `READ_TIMEOUT`); a later `meeting-ended` arms a new grace that stops the mic.
   - `a detection after the grace stop already ran starts fresh` — `startNewConversation` not called.
 - [ ] **Step 2: Run** `npx vitest run src/tests/useMeetingAutoRecord.auto-stop.test.tsx`. Expected: FAIL.
-- [ ] **Step 3: Implement** the Interfaces above and pass `startNewConversation` from `index.tsx`.
+- [ ] **Step 3: Implement** the Interfaces above and pass `startNewConversation` from `index.tsx`. Update the lifecycle `Probe` and mocks as listed under Files.
 - [ ] **Step 4: Run** `npx vitest run src/tests/useMeetingAutoRecord.auto-stop.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx src/tests/overlay-meeting-targets-survive.test.tsx` and `npm run type-check`. Expected: PASS, 0 errors.
 - [ ] **Step 5: Commit**
 ```bash
-git add src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/index.tsx src/tests/useMeetingAutoRecord.auto-stop.test.tsx
+git add src/hooks/useMeetingAutoRecord.ts src/pages/app/components/completion/index.tsx src/tests/useMeetingAutoRecord.auto-stop.test.tsx src/tests/useMeetingAutoRecord.lifecycle.test.tsx
 git commit -m "feat(auto-record): back-to-back call starts a new recording"
 ```
 
@@ -458,7 +484,7 @@ git commit -m "feat(auto-record): back-to-back call starts a new recording"
 - Modify: `src/pages/app/components/completion/index.tsx` (state, listener, conditional render :280-305)
 - Modify: `src/pages/app/components/completion/Input.tsx` (props, trigger content :106-149, `PopoverContent` :152-157)
 - Modify: `src/hooks/useCompletion.ts` (`attachInput`; drop `registerInputRef` from the effect at :2445-2456) and `src/types/completion.hook.ts`
-- Create: `src/tests/completion-ask-box.test.tsx`
+- Test: `src/tests/completion-ask-box.test.tsx` (created in Task 4; extend it)
 - Test harnesses that render `<Completion />` and now need `@tauri-apps/api/event` mocked (`listen: vi.fn(async () => () => {})`) where they don't already: `completion-calendar-wiring`, `completion-notion-picker`, `overlay-meeting-targets-survive`, `overlay-minimize-keeps-mounted`, `settings-page.meeting-auto-record`; their `useCompletion` mocks gain `setIsFilesPopoverOpen: vi.fn()`.
 
 **Interfaces:**
@@ -473,7 +499,7 @@ Render contract:
 - Completion, while expanded: `ContactPicker`, `Screenshot` and `Files` are not rendered. `MeetingLogStrip` still renders whenever `holding || undoBlockedMessage`. `Audio` always renders.
 - Collapse: an effect keyed on `[askExpanded, input, focused, isLoading, messageHistoryOpen, isContactPickerOpen, isFilesPopoverOpen]`. When expanded, the input is empty, it isn't focused, nothing is loading and none of the three popovers is open, it sets a `ASK_COLLAPSE_DEBOUNCE_MS` timer whose fire re-checks `document.activeElement !== inputRef.current` and then calls `onAskCollapse()`. The cleanup clears the timer.
 
-- [ ] **Step 1: Write the failing tests** (`completion-ask-box.test.tsx`). For `Input`: render it with a typed partial props object, and mock `@/contexts` and the four child panels (`MessageHistory`, `QuickActions`, `MeetingTranscriptPanel`, `ActiveModels`) to null. For `Completion`: copy `completion-notion-picker.test.tsx`'s harness, mocking `Input` to capture its props and the other children to test-id stubs.
+- [ ] **Step 1: Write the failing tests** (`completion-ask-box.test.tsx`). For `Input`: reuse Task 4's harness. For `Completion`: copy `completion-notion-picker.test.tsx`'s harness, mocking `Input` to capture its props and the other children to test-id stubs.
   - `collapsed shows the Ask icon and no text box`.
   - `clicking the icon expands and clears both hides`.
   - `expanded focuses the text box` (`document.activeElement` is the input).
@@ -486,7 +512,7 @@ Render contract:
   - `Completion: focus-text-input expands`; `the listener is removed on unmount`; `StrictMode registers one listener`.
 - [ ] **Step 2: Run** `npx vitest run src/tests/completion-ask-box.test.tsx`. Expected: FAIL.
 - [ ] **Step 3: Implement** the Interfaces and render contract above.
-- [ ] **Step 4: Run** `npx vitest run src/tests/completion-ask-box.test.tsx src/tests/completion-calendar-wiring.test.tsx src/tests/completion-notion-picker.test.tsx src/tests/overlay-meeting-targets-survive.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/settings-page.meeting-auto-record.test.tsx`, then `npm run type-check` and `npm run lint`. Expected: PASS, 0 errors.
+- [ ] **Step 4: Run** `npx vitest run src/tests/completion-ask-box.test.tsx src/tests/completion-calendar-wiring.test.tsx src/tests/completion-notion-picker.test.tsx src/tests/overlay-meeting-targets-survive.test.tsx src/tests/overlay-minimize-keeps-mounted.test.tsx src/tests/settings-page.meeting-auto-record.test.tsx src/tests/useCompletion.responded-model.test.tsx src/tests/overlay-minimize-picker-dismiss.test.tsx src/tests/overlay-minimize-rehydrate.test.tsx src/tests/hidden-and-minimized.test.tsx`, then `npm run type-check` and `npm run lint`. Expected: PASS, 0 errors.
 - [ ] **Step 5: Commit**
 ```bash
 git add src/pages/app/components/completion/index.tsx src/pages/app/components/completion/Input.tsx src/hooks/useCompletion.ts src/types/completion.hook.ts src/tests
