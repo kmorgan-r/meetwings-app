@@ -519,9 +519,10 @@ export const useMeetingAutoRecord = ({
     const action = decideOnEnded({ startedMode: startedModeRef.current });
     if (action === "ignore") {
       // MUST clear here, not only in `finally`: this early return is before the
-      // try, and an inert meeting-ended is the COMMON case (ignore-off,
-      // ignore-busy, ignore-active and ignore-mic-open all leave provenance
-      // null). Leaving it latched permanently disarms the pill-off branch.
+      // try, and an inert stop is a common case (a setting-off with nothing
+      // auto-started, or a queued pill-off stop whose provenance the mic-close
+      // release already nulled). Leaving it latched permanently disarms the
+      // pill-off branch.
       stopRequestedRef.current = false;
       return;
     }
@@ -796,8 +797,9 @@ export const useMeetingAutoRecord = ({
         // Transcribing provenance ONLY. This fires on any stop - including the
         // one startCapture issues before every VAD start, and including a
         // mid-call useMeetingAudio deps re-run (device or STT-language change).
-        // Clearing meeting provenance here would leave the capture running with
-        // decideOnEnded returning "ignore" and the mic never closing.
+        // Clearing meeting provenance here would end the recording card and the
+        // quiet-restart window mid-call, and disarm the pill-off stop. (The
+        // call-end grace still closes the mic: it needs no provenance.)
         if (startedModeRef.current === "transcribing") {
           startedModeRef.current = null;
           autoRecordingStopped();

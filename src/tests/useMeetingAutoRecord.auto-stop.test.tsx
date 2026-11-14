@@ -845,7 +845,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     seedStatus([false]);
     const h = await openByHand({ lines: 3 });
     await endCall();
-    await sleep(GRACE / 3);
+    await sleep((GRACE * 2) / 3); // same slack as the mic-line case
 
     const clearAt = Date.now();
     await h.clearTranscript();

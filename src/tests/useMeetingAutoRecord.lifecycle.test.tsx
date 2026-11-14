@@ -1094,9 +1094,11 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // This event fires on ANY stop, including the mid-call useMeetingAudio
     // deps re-run that a device or STT-language change triggers - so it
     // arrives with the session very much alive. Clearing meeting provenance
-    // here would leave the mic open with decideOnEnded answering "ignore" for
-    // the rest of the call.
+    // here would end the recording mid-call (card, quiet restart). The mic
+    // count alone no longer shows it - the call-end grace closes the mic with
+    // or without provenance - so the live recording is asserted directly.
     await fireActed("capture-stopped");
+    expect(getActiveAutoRecording()).not.toBeNull();
     await fireActed("meeting-ended");
     await waitGrace();
 
@@ -1173,8 +1175,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // (Audio.tsx:124), so the pill going off unmounts the GUEST half while the
     // mic stays open - and AutoSpeechVad, which branches on the same pill, then
     // starts auto-submitting the user's own speech to the AI. It is the same
-    // physical operation as meeting-ended, so it routes through the same
-    // handleStop rather than closing the mic inline.
+    // physical operation as a call ending, so it routes through handleStop's
+    // confirmed stop rather than closing the mic inline.
     seedStatus([false, false]); // the detect probe, then the first confirm poll
     const audio = makeAudio();
     const h = await startMeeting(audio);
@@ -1200,8 +1202,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
 
     // And the session really is over. handleStop released provenance and
     // closed the mic, so the meeting-ended that ends the same call a moment
-    // later arms no grace and must be inert, even after the grace - a build
-    // that left provenance set would arm one and write the mic again here.
+    // later must be inert, even after the grace: no mic write, no flush, no
+    // second confirm loop.
     await fireActed("meeting-ended");
     await waitGrace();
     expect(h.setEnableVAD).toHaveBeenCalledTimes(2);
