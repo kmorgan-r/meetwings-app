@@ -92,6 +92,7 @@ import { useMeetingLog, resetMeetingLogSweepGuard } from "@/hooks/useMeetingLog"
 import { fetchMeetingsBetween } from "@/lib/calendar/fetch-current-meetings";
 import { decideDestinations } from "@/lib/notion/destinations";
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
+import { setRecordingStopCap } from "@/lib/recording-stop-cap";
 
 const ODOO = { url: "http://h:8069", db: "odoo", login: "me@example.org", apiKey: "sk-secret" };
 const GRAPH_COMPLETE = {
@@ -178,6 +179,8 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     });
     queue.insertQueueRow.mockReset();
     queue.insertQueueRow.mockResolvedValue(true);
+    queue.getTranscriptWatermark.mockResolvedValue(0);
+    setRecordingStopCap(null);
     odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
     odooConfig.requireOdooConfig.mockResolvedValue(ODOO);
     check.autoNotionAllowed.mockReset();
@@ -292,6 +295,52 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     await settle();
     expect(queue.insertQueueRow).toHaveBeenCalledTimes(2);
     expect(check.autoNotionAllowed).toHaveBeenCalledTimes(2);
+  });
+
+  it("a grace stop dropped mid-check hands its cap to the re-run", async () => {
+    const gate = deferred<boolean>();
+    check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
+    const targetRef = { current: ONE_TARGET };
+    const notionPickedRef = { current: true };
+    const notionSourceRef: { current: NotionPickSource } = { current: "auto" };
+    const first = [said(1000), said(31000), said(61000)];
+    const T = 125_000;
+    const later = [
+      ...first,
+      { original: "call 1", timestamp: 70_000, audioSource: "system" as const },
+      { original: "call 2", timestamp: 100_000, audioSource: "system" as const },
+      { original: "call 3", timestamp: 131_000, audioSource: "system" as const },
+      said(150_000),
+      said(200_000),
+    ];
+    const { rerender } = renderHook(
+      (p: { transcript: TranscriptEntry[]; recording: boolean }) =>
+        useMeetingLog({
+          targetRef,
+          notionPickedRef,
+          notionSourceRef,
+          meetingTranscript: p.transcript,
+          currentConversationId: "conv-1",
+          recording: p.recording,
+        }),
+      { initialProps: { transcript: first, recording: true } }
+    );
+    await listening();
+    rerender({ transcript: first, recording: false }); // trigger 1: held in check 2
+    await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
+
+    rerender({ transcript: later, recording: true });
+    setRecordingStopCap(T);
+    rerender({ transcript: later, recording: false }); // dropped, schedules the re-run
+    await settle();
+
+    queue.getTranscriptWatermark.mockResolvedValue(61_000);
+    gate.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(2));
+    const row = rows()[1];
+    expect(String(row.transcript)).toContain("call 3");
+    expect(String(row.transcript)).not.toContain("hello");
+    expect(row.transcriptEndAt).toBe(200_000);
   });
 
   it("a trigger dropped outside check 2 is not re-run", async () => {

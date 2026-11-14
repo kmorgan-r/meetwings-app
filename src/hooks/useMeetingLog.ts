@@ -257,6 +257,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    */
   const checkingRef = useRef(false);
   const pendingRef = useRef(false);
+  // The grace-stop cap a dropped trigger hands to its re-run (see `trigger`).
+  const pendingCapRef = useRef<number | null>(null);
   const heldRowIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -351,13 +353,18 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const trigger = useCallback(async () => {
     // The owner gate stays FIRST: a non-owner must never set pendingRef.
     if (!isOwner) return;
-    // Taken BEFORE the latch so EVERY trigger clears it, including one the
-    // latch drops: a stale cap must never reach a later, unrelated row. The
-    // accepted cost is a grace stop landing while an earlier trigger is still
-    // in flight (that one must run over 2 minutes for the two to meet).
-    const capEndedAt = takeRecordingStopCap();
+    // Every trigger still clears the shared cap, including one the latch
+    // drops, so a stale cap never reaches a later, unrelated row. A drop that
+    // schedules a re-run hands its cap to that re-run through `pendingCapRef`;
+    // a drop without one discards it (that needs an earlier trigger stuck
+    // outside the Notion check across a whole recording plus the grace).
+    const capEndedAt = takeRecordingStopCap() ?? pendingCapRef.current;
+    pendingCapRef.current = null;
     if (inFlightRef.current) {
-      if (checkingRef.current) pendingRef.current = true;
+      if (checkingRef.current) {
+        pendingRef.current = true;
+        if (capEndedAt !== null) pendingCapRef.current = capEndedAt;
+      }
       return;
     }
     inFlightRef.current = true;

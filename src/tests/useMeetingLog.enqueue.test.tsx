@@ -742,7 +742,7 @@ describe("the window-ownership gate", () => {
     await vi.advanceTimersByTimeAsync(50);
     expect(listen).not.toHaveBeenCalled();
     expect(push.runMeetingLogSweep).not.toHaveBeenCalled();
-    rerender({ meetingTranscript: [entry(1000)], recording: false });
+    rerender({ meetingTranscript: MEETING, recording: false });
     await vi.advanceTimersByTimeAsync(50);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
   });
