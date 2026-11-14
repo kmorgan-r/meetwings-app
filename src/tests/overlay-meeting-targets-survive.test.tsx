@@ -353,6 +353,7 @@ const mockEverything = () => {
     const { usePillRecordAction } = await import("@/hooks/usePillRecordAction");
     return {
       useApp: () => ({ isHidden: false, systemAudio: knobs.systemAudio }),
+      useMeetingCardHost: () => null,
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,

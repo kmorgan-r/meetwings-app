@@ -121,6 +121,7 @@ describe("app page mounts the detection hook", () => {
     vi.doMock("@/hooks", () => ({
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: {} }),
+      useMeetingCardHost: () => null,
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
@@ -619,6 +620,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
     vi.doMock("@/hooks", () => ({
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
+      useMeetingCardHost: () => null,
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
