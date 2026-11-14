@@ -2010,9 +2010,15 @@ describe("useMeetingAutoRecord - meeting cards", () => {
     vi.useFakeTimers();
     await fireActed("meeting-ended");
     expect(getActiveAutoRecording()).toBeNull();
-    // No 30 s ended card any more: nothing may show after an auto stop.
+    // The removed delayed ended card showed in [stop + 30_000, stop + 35_000).
+    // The stop here is the fake-timer base (the store stamps Date.now()), so
+    // 31 s in sits inside that window; 60 s is past it.
     await act(async () => {
-      vi.advanceTimersByTime(60_000);
+      vi.advanceTimersByTime(31_000);
+    });
+    expect(getMeetingCard()).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(29_000);
     });
     expect(getMeetingCard()).toBeNull();
   });

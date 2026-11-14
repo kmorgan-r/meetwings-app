@@ -117,7 +117,10 @@ describe("meeting card store", () => {
     expect(getMeetingCard()).toBeNull();
 
     start("Zoom", 40_000);
-    autoRecordingStopped();
+    autoRecordingStopped(); // non-auto, at the fake clock's 30_000
+    // The removed delayed card would have shown in [60_000, 65_000) from here.
+    goto(62_000);
+    expect(getMeetingCard()).toBeNull();
     goto(70_000);
     expect(getMeetingCard()).toBeNull();
     goto(120_000);
