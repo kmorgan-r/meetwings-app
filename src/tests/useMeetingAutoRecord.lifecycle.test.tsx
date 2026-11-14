@@ -86,7 +86,6 @@ import {
   WATCHER_STOPPED_MESSAGE,
 } from "@/hooks/useMeetingAutoRecord";
 import {
-  ENDED_CARD_DELAY_MS,
   getActiveAutoRecording,
   getMeetingCard,
   resetMeetingCardsForTests,
@@ -2011,10 +2010,11 @@ describe("useMeetingAutoRecord - meeting cards", () => {
     vi.useFakeTimers();
     await fireActed("meeting-ended");
     expect(getActiveAutoRecording()).toBeNull();
+    // No 30 s ended card any more: nothing may show after an auto stop.
     await act(async () => {
-      vi.advanceTimersByTime(ENDED_CARD_DELAY_MS);
+      vi.advanceTimersByTime(60_000);
     });
-    expect(getMeetingCard()?.kind).toBe("ended");
+    expect(getMeetingCard()).toBeNull();
   });
 
   it("only meeting-ended is an auto stop: it restarts quietly, the card's Stop does not", async () => {

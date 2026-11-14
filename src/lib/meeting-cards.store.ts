@@ -5,7 +5,6 @@ import type { OverlayPillStyle } from "@/lib/storage";
 import type { CalendarEvent } from "@/types";
 
 export const RESTART_QUIET_MS = 120_000;
-export const ENDED_CARD_DELAY_MS = 30_000;
 export const AMBER_SNOOZE_MS = 3_600_000;
 export const RECORDING_CARD_MS = 6_000;
 export const ENDED_CARD_MS = 5_000;
@@ -25,9 +24,17 @@ export interface CardEvent {
 // and importing a same-named type into that file is TS2440.
 export type MeetingCardState =
   | { kind: "recording"; recordingId: number; app: string; startedAt: number; event: CardEvent | null }
-  | { kind: "ended"; app: string; title: string | null; durationMs: number }
+  | { kind: "ended"; reason: StopNoticeReason }
   | { kind: "amber"; variant: AmberKind; episode: number; error: string | null }
   | null;
+
+/** Why an automatic stop happened; drives the stop notice's copy. */
+export type StopNoticeReason = "call-ended" | "silence";
+
+export const STOP_NOTICE_TEXT: Record<StopNoticeReason, string> = {
+  "call-ended": "Recording stopped - call ended",
+  silence: "Recording stopped - 15 min of silence",
+};
 
 export interface ActiveAutoRecording {
   id: number;
@@ -57,7 +64,6 @@ let seq = 0;
 let snoozedUntil = 0;
 let cardTimer: CardTimer | null = null;
 const lastStops = new Map<string, LastStop>();
-const endedTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const listeners = new Set<() => void>();
 
 const notify = (): void => listeners.forEach((l) => l());
@@ -131,9 +137,8 @@ export function autoRecordingStarted(
   const quiet = last !== undefined && now - last.at < RESTART_QUIET_MS;
   stopFn = input.stop;
   if (quiet) {
-    const pending = endedTimers.get(input.app);
-    if (pending) clearTimeout(pending);
-    endedTimers.delete(input.app);
+    // A notice from the earlier stop is now stale: the call is back on.
+    if (card?.kind === "ended") clearCard();
     lastStops.delete(input.app);
     active = { id, app: input.app, gated: input.gated, startedAt: last.startedAt, event: last.event };
     return id;
@@ -163,23 +168,21 @@ export function autoRecordingStopped(
   if (auto) lastStops.set(app, { at: now, startedAt, event });
   else lastStops.delete(app);
   if (card?.kind === "recording" && card.recordingId === id) clearCard();
-  const prior = endedTimers.get(app);
-  if (prior) clearTimeout(prior);
-  endedTimers.set(
-    app,
-    setTimeout(() => {
-      endedTimers.delete(app);
-      if (card?.kind === "amber") return;
-      setCard(
-        { kind: "ended", app, title: event?.title ?? null, durationMs: now - startedAt },
-        ENDED_CARD_MS,
-        Date.now(),
-      );
-    }, ENDED_CARD_DELAY_MS),
-  );
+  // A reason-specific stop notice, when wanted, comes from showStopNotice()
+  // (or Task 3+'s automatic stops); a bare auto stop publishes nothing.
 }
 
 export const getActiveAutoRecording = (): ActiveAutoRecording | null => active;
+
+/**
+ * Immediate, reason-specific notice that an automatic stop produced. An amber
+ * card keeps its slot (it carries actionable buttons); everything else —
+ * including a recording card left over from a hand-opened mic — is replaced.
+ */
+export function showStopNotice(reason: StopNoticeReason, now: number = Date.now()): void {
+  if (card?.kind === "amber") return;
+  setCard({ kind: "ended", reason }, ENDED_CARD_MS, now);
+}
 
 export function stopActiveRecording(): void {
   stopFn?.();
@@ -269,8 +272,6 @@ export function pillWindowSize(
 
 export function resetMeetingCardsForTests(): void {
   clearCardTimer();
-  endedTimers.forEach((h) => clearTimeout(h));
-  endedTimers.clear();
   lastStops.clear();
   card = null;
   active = null;

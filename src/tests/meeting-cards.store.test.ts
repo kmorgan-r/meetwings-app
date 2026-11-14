@@ -6,16 +6,18 @@ import {
   cardHeight,
   dismissAmber,
   dismissCard,
+  ENDED_CARD_MS,
   getActiveAutoRecording,
   getMeetingCard,
   holdCard,
   pillWindowSize,
+  RESTART_QUIET_MS,
   resetMeetingCardsForTests,
   setCardEvent,
   showAmber,
+  showStopNotice,
   snoozeAmber,
   stopActiveRecording,
-  subscribeToMeetingCard,
   type MeetingCardState,
 } from "@/lib/meeting-cards.store";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
@@ -68,27 +70,17 @@ describe("meeting card store", () => {
     }
   });
 
-  it("same-app restart within 2 minutes shows no red card and cancels the ended card", () => {
+  it("same-app restart within 2 minutes shows no red card", () => {
     start("Google Meet", 0);
     autoRecordingStopped({ auto: true }, 0);
     dismissCard();
     goto(60_000);
     start("Google Meet", 60_000);
     expect(getMeetingCard()).toBeNull();
-    goto(90_000);
-    expect(getMeetingCard()).toBeNull();
-    // Short gap: the ended card from this stop would show in [120_000, 125_000).
     autoRecordingStopped({ auto: true }, 90_000);
     goto(100_000);
     start("Google Meet", 100_000);
-    const listener = vi.fn();
-    subscribeToMeetingCard(listener);
-    goto(120_000);
     expect(getMeetingCard()).toBeNull();
-    goto(122_000);
-    expect(getMeetingCard()).toBeNull();
-    goto(125_000);
-    expect(listener).not.toHaveBeenCalled();
   });
 
   it("a different app within 2 minutes gets its own red card", () => {
@@ -117,16 +109,19 @@ describe("meeting card store", () => {
     if (card?.kind === "recording") expect(card.startedAt).toBe(60_000);
   });
 
-  it("the ended card waits 30s", () => {
+  it("autoRecordingStopped arms no card", () => {
     start("Google Meet", 0);
-    goto(10_000);
-    autoRecordingStopped({ auto: true }, 10_000);
-    goto(39_999);
+    autoRecordingStopped({ auto: true }, 0);
+    // The old delayed card showed in [30_000, 35_000).
+    goto(30_000);
     expect(getMeetingCard()).toBeNull();
-    goto(40_000);
-    const card = getMeetingCard();
-    expect(card?.kind).toBe("ended");
-    if (card?.kind === "ended") expect(card.durationMs).toBe(10_000);
+
+    start("Zoom", 40_000);
+    autoRecordingStopped();
+    goto(70_000);
+    expect(getMeetingCard()).toBeNull();
+    goto(120_000);
+    expect(getMeetingCard()).toBeNull();
   });
 
   it("a quiet restart carries the start time and event", () => {
@@ -136,27 +131,48 @@ describe("meeting card store", () => {
     autoRecordingStopped({ auto: true }, 60_000);
     goto(90_000);
     start("Google Meet", 90_000);
-    goto(300_000);
-    autoRecordingStopped({ auto: true }, 300_000);
-    goto(330_000);
-    const card = getMeetingCard();
-    expect(card?.kind).toBe("ended");
-    if (card?.kind === "ended") {
-      expect(card.durationMs).toBe(300_000);
-      expect(card.title).toBe("Weekly sync");
-    }
+    const active = getActiveAutoRecording();
+    expect(active?.startedAt).toBe(0);
+    expect(active?.event?.title).toBe("Weekly sync");
   });
 
-  it("stopping twice schedules one ended card", () => {
+  it("showStopNotice shows the ended card at once with no active recording", () => {
+    showStopNotice("silence", 0);
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "silence" });
+  });
+
+  it("showStopNotice does nothing over an amber card", () => {
+    showAmber({ variant: "reconnect", episode: 1 }, 0);
+    showStopNotice("call-ended", 0);
+    const card = getMeetingCard();
+    expect(card?.kind).toBe("amber");
+    if (card?.kind === "amber") expect(card.episode).toBe(1);
+  });
+
+  it("the quiet restart clears a showing notice", () => {
+    start("Teams", 0);
+    autoRecordingStopped({ auto: true }, 0);
+    showStopNotice("call-ended", 1_000);
+    expect(getMeetingCard()?.kind).toBe("ended");
+    start("Teams", RESTART_QUIET_MS - 1);
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("a fresh start replaces the notice with the recording card", () => {
+    showStopNotice("silence", 0);
+    start("Google Meet", 1_000);
+    const card = getMeetingCard();
+    expect(card?.kind).toBe("recording");
+    if (card?.kind === "recording") expect(card.app).toBe("Google Meet");
+  });
+
+  it("stopping twice arms no card", () => {
     start("Google Meet", 0);
     autoRecordingStopped({ auto: true }, 0);
     autoRecordingStopped({ auto: true }, 5_000);
     goto(30_000);
-    const first = getMeetingCard();
-    expect(first?.kind).toBe("ended");
-    goto(35_000); // ended card leaves after 5s; a second scheduled card would not
     expect(getMeetingCard()).toBeNull();
-    goto(100_000);
+    goto(60_000);
     expect(getMeetingCard()).toBeNull();
   });
 
@@ -206,13 +222,13 @@ describe("meeting card store", () => {
     expect(getMeetingCard()?.kind).toBe("recording");
   });
 
-  it("a red card replaces amber; an ended card never does", () => {
+  it("a red card replaces amber; an auto stop does not resurrect it", () => {
     showAmber({ variant: "settings", episode: 1 }, 0);
     start("Google Meet", 0);
     expect(getMeetingCard()?.kind).toBe("recording");
     autoRecordingStopped({ auto: true }, 0);
     showAmber({ variant: "settings", episode: 2 }, 0);
-    goto(30_000);
+    goto(60_000);
     expect(getMeetingCard()?.kind).toBe("amber");
   });
 
@@ -285,14 +301,11 @@ describe("meeting card store", () => {
     expect(getMeetingCard()).toBeNull();
   });
 
-  it("the ended card leaves 5s after it shows", () => {
-    start("Google Meet", 0);
-    autoRecordingStopped({ auto: true }, 0);
-    goto(30_000);
+  it("the notice leaves 5s after it shows", () => {
+    showStopNotice("call-ended", 0);
+    goto(ENDED_CARD_MS - 1);
     expect(getMeetingCard()?.kind).toBe("ended");
-    goto(34_999);
-    expect(getMeetingCard()?.kind).toBe("ended");
-    goto(35_000);
+    goto(ENDED_CARD_MS);
     expect(getMeetingCard()).toBeNull();
   });
 

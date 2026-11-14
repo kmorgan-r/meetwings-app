@@ -24,6 +24,7 @@ import {
   setAmberError,
   setCardEvent,
   showAmber,
+  showStopNotice,
   subscribeToMeetingCard,
 } from "@/lib/meeting-cards.store";
 import { MeetingCard } from "@/pages/app/components/MeetingCard";
@@ -188,26 +189,28 @@ describe("MeetingCard", () => {
     resetMeetingCardsForTests();
 
     render(<Harness />);
-    run(() => {
-      start();
-      autoRecordingStopped();
-      vi.advanceTimersByTime(30_000);
-    });
+    run(() => showStopNotice("call-ended"));
     expect(screen.getByTestId("meeting-card").getAttribute("data-kind")).toBe("ended");
     expect(screen.getByTestId("meeting-card").getAttribute("role")).toBe("status");
     expect(hidden("✓")).toBe("true");
   });
 
-  it("the ended card shows title and minutes, then leaves", () => {
-    render(<Harness />);
-    run(() => setCardEvent(start(), event("Weekly IC sync", 2)));
-    vi.setSystemTime(T0 + 42 * 60_000);
-    run(() => autoRecordingStopped({ auto: true }, Date.now()));
-    tick(30_000);
-    expect(screen.getByText("Recording saved")).toBeTruthy();
-    expect(screen.getByText(/Weekly IC sync/).textContent).toContain("42 min");
+  it("the ended card shows the stop reason, compact and full, then leaves", () => {
+    for (const compact of [false, true]) {
+      render(<Harness compact={compact} />);
+      run(() => showStopNotice("call-ended"));
+      expect(screen.getByText("Recording stopped - call ended")).toBeTruthy();
+      expect(screen.getByTestId("meeting-card").style.height).toBe(
+        `${cardHeight(getMeetingCard(), compact)}px`
+      );
+      cleanup();
+      resetMeetingCardsForTests();
+    }
+    render(<Harness compact />);
+    run(() => showStopNotice("silence"));
+    expect(screen.getByText("Recording stopped - 15 min of silence")).toBeTruthy();
     tick(5000);
-    expect(screen.queryByText("Recording saved")).toBeNull();
+    expect(screen.queryByTestId("meeting-card")).toBeNull();
   });
 
   it("amber reconnect: headline, Not now snoozes, Reconnect failure shows Google copy and keeps the button", async () => {
@@ -312,11 +315,7 @@ describe("MeetingCard", () => {
     const scenarios: Array<() => void> = [
       () => setCardEvent(start(), event("X")),
       () => void start(),
-      () => {
-        setCardEvent(start(), event("X", 2));
-        autoRecordingStopped();
-        vi.advanceTimersByTime(30_000);
-      },
+      () => showStopNotice("silence"),
       () => showAmber({ variant: "reconnect", episode: 1 }),
       () => {
         showAmber({ variant: "settings", episode: 1 });
