@@ -1,6 +1,6 @@
 # Recording follows the call: always-on meeting mode, auto-stop, Ask icon
 
-Date: 2026-11-14. Branch: `fix/meeting-ux-batch` (based on origin/main 159fdb4).
+Date: 2026-11-14. Branch: `feat/recording-follows-the-call` (based on main 159fdb4).
 
 ## Why
 
