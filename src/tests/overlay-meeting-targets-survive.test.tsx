@@ -394,9 +394,6 @@ const mockEverything = () => {
   vi.doMock("@/pages/app/components/completion/Audio", () => ({ Audio: () => null }));
   vi.doMock("@/pages/app/components/completion/Screenshot", () => ({ Screenshot: () => null }));
   vi.doMock("@/pages/app/components/completion/Files", () => ({ Files: () => null }));
-  vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-    MeetingAssistToggle: () => null,
-  }));
   vi.doMock("@/pages/app/components/completion/MessageHistory", () => ({
     MessageHistory: () => null,
   }));
@@ -470,7 +467,6 @@ async function closePicker() {
 /** Meeting assist on, mic (VAD) open, transcript lines present. */
 async function startMeetingByHand(lines = ["Hello everyone", "Let's begin"]) {
   act(() => {
-    probe.completion.setMeetingAssistMode(true);
     probe.completion.setEnableVAD(true);
   });
   for (const line of lines) {
@@ -655,7 +651,6 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
     await mountApp();
     await addTwoTargetsViaPicker();
     await closePicker();
-    act(() => probe.completion.setMeetingAssistMode(true));
 
     // The call starts: auto-record's start-meeting opens the mic.
     await act(async () => emitTauri("meeting-detected"));

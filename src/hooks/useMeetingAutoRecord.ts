@@ -61,7 +61,7 @@ export const STOP_FAILED_MESSAGE =
 export const MEETING_STOP_FAILED_MESSAGE =
   "Recording may still be running — restart Meetwings if audio keeps being captured";
 export const MEETING_WATCHER_STOPPED_MESSAGE =
-  "Meeting detection stopped — still recording this call. Turn the Meeting pill off to end it.";
+  "Meeting detection stopped — still recording this call. Press the record button to end it.";
 export const WATCHER_STOPPED_MESSAGE =
   "Meeting detection stopped — still recording. Stop manually when the call ends.";
 

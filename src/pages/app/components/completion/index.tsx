@@ -20,7 +20,6 @@ import { Screenshot } from "./Screenshot";
 import { Files } from "./Files";
 import { Audio } from "./Audio";
 import { Input } from "./Input";
-import { MeetingAssistToggle } from "./MeetingAssistToggle";
 import { ContactPicker } from "./ContactPicker";
 import { MeetingLogStrip } from "./MeetingLogStrip";
 
@@ -62,7 +61,9 @@ export const Completion = ({
   const toggleNotionPick = notionPick.toggle;
   const onToggleNotion = useCallback(() => toggleNotionPick(), [toggleNotionPick]);
   const odoo = useOdooTarget({
-    meetingAssistMode: completion.meetingAssistMode,
+    // Meeting mode is always on now, so the app-start sync's "skip while in a
+    // meeting" rule keys on an actual recording, not the constant.
+    meetingAssistMode: completion.recording,
     isPickerOpen: completion.isContactPickerOpen,
     setIsPickerOpen: completion.setIsContactPickerOpen,
     // Task 12: permanent wiring, not a bridge to remove later - useCompletion
@@ -251,9 +252,7 @@ export const Completion = ({
   // boolean. Opening the mic without a provider that can transcribe turns the
   // pill red and collects nothing.
   usePillRecordAction({
-    meetingAssistMode: completion.meetingAssistMode,
-    setMeetingAssistMode: completion.setMeetingAssistMode,
-    enableVAD: completion.enableVAD,
+    recording: completion.recording,
     setEnableVAD: completion.setEnableVAD,
     canRecord: Boolean(meetwingsApiEnabled || selectedSttProvider.provider),
   });
@@ -271,11 +270,6 @@ export const Completion = ({
 
   return (
     <>
-      <MeetingAssistToggle
-        meetingAssistMode={completion.meetingAssistMode}
-        setMeetingAssistMode={completion.setMeetingAssistMode}
-        meetingTranscript={completion.meetingTranscript}
-      />
       {meetingLog.holding || meetingLog.undoBlockedMessage ? (
         <MeetingLogStrip
           holding={meetingLog.holding}

@@ -76,7 +76,6 @@ describe("summarizeCurrentConversation per-conversation slicing", () => {
   it("summarizes only entries added since the CURRENT conversation started, not the whole session", async () => {
     const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
-    act(() => { result.current.setMeetingAssistMode(true); });
 
     // Conversation A: two entries.
     act(() => { result.current.addMeetingTranscript("A-1"); });

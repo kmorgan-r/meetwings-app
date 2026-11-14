@@ -173,7 +173,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
         recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript,
@@ -272,9 +271,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
     }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
-    }));
     // ContactPicker (index.tsx:67) is NOT stubbed here - F34b's app-page path
     // stubs Completion itself, but F34 mounts the real Completion, and
     // Completion renders the real ContactPicker straight from @/components.
@@ -347,7 +343,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
         recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
@@ -423,9 +418,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     vi.doMock("@/components", () => ({
       Popover: ({ children }: any) => <>{children}</>,
@@ -503,7 +495,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
         recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
@@ -588,9 +579,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     vi.doMock("@/components", () => ({
       Popover: ({ children }: any) => <>{children}</>,

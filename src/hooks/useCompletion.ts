@@ -1,10 +1,9 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, Dispatch, SetStateAction } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
 import { toast } from "sonner";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import {
   MAX_FILES,
-  STORAGE_KEYS,
   MEETING_ASSIST_SYSTEM_PROMPT,
   DEFAULT_SYSTEM_PROMPT,
   MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL,
@@ -174,12 +173,8 @@ export const useCompletion = () => {
     null
   );
 
-  // Meeting Assist Mode state
-  const [meetingAssistMode, setMeetingAssistModeState] = useState(() => {
-    const stored = localStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
-    return stored === "true";
-  });
-  const meetingAssistModeRef = useRef(meetingAssistMode);
+  // Meeting mode is always on: a call is recorded whenever the mic is open.
+  const meetingAssistMode = true;
   const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
 
   // Session-level speaker mapping (resets when meeting transcript is cleared)
@@ -201,11 +196,6 @@ export const useCompletion = () => {
   useEffect(() => {
     conversationHistoryRef.current = state.conversationHistory;
   }, [state.conversationHistory]);
-
-  // Persist Meeting Assist Mode setting
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED, String(meetingAssistMode));
-  }, [meetingAssistMode]);
 
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -566,23 +556,6 @@ export const useCompletion = () => {
 
     return autoSaveMeetingTranscript();
   }, [autoSaveMeetingTranscript]);
-
-  // Wraps the raw state setter so the mode ref moves with the state. The
-  // transcript flush is not here: closing the mic is the meeting-end signal,
-  // and the recording-stop layout edge below owns it.
-  const setMeetingAssistMode = useCallback<Dispatch<SetStateAction<boolean>>>(
-    (value) => {
-      const previous = meetingAssistModeRef.current;
-      const next =
-        typeof value === "function"
-          ? (value as (p: boolean) => boolean)(previous)
-          : value;
-
-      meetingAssistModeRef.current = next;
-      setMeetingAssistModeState(next);
-    },
-    []
-  );
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));
@@ -2528,7 +2501,6 @@ export const useCompletion = () => {
     setMeetingTranscriptHidden,
     // Meeting Assist Mode
     meetingAssistMode,
-    setMeetingAssistMode,
     meetingTranscript,
     addMeetingTranscript,
     addMeetingTranscriptEntries,

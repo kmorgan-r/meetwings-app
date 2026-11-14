@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { useCompletion } from "@/hooks/useCompletion";
-import { MEETING_CONVERSATION_GAP_MS } from "@/config/constants";
+import { MEETING_CONVERSATION_GAP_MS, STORAGE_KEYS } from "@/config/constants";
 import {
   appendMessagesToConversation,
   fetchAIResponse,
@@ -178,13 +178,31 @@ describe("useCompletion meeting assist mode", () => {
     vi.mocked(generateConversationId).mockReset();
   });
 
+  it('meeting mode is on at first render even when storage says "false"', () => {
+    vi.mocked(localStorage.getItem).mockReturnValue("false");
+    const { result } = renderHook(() => useCompletion());
+    expect(result.current.meetingAssistMode).toBe(true);
+  });
+
+  it("returns no meeting-mode setter", () => {
+    const { result } = renderHook(() => useCompletion());
+    expect((result.current as Record<string, unknown>).setMeetingAssistMode).toBeUndefined();
+  });
+
+  it("nothing writes meeting_assist_mode_enabled across mount and mic toggles", () => {
+    const { result } = renderHook(() => useCompletion());
+    act(() => result.current.setEnableVAD(true));
+    act(() => result.current.setEnableVAD(false));
+    const keys = vi.mocked(localStorage.setItem).mock.calls.map((c) => c[0]);
+    expect(keys).not.toContain(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
+  });
+
   it("queues one transcript flush when StrictMode closes the mic", async () => {
     const { result } = renderHook(() => useCompletion(), {
       wrapper: strictModeWrapper,
     });
 
     act(() => {
-      result.current.setMeetingAssistMode(true);
       result.current.setEnableVAD(true);
     });
     expect(result.current.meetingAssistMode).toBe(true);
@@ -210,9 +228,6 @@ describe("useCompletion meeting assist mode", () => {
       wrapper: strictModeWrapper,
     });
 
-    act(() => {
-      result.current.setMeetingAssistMode(true);
-    });
 
     // Fewer than MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL (4, config/constants.ts:128),
     // so the periodic autosave effect never fires and any save observed below
@@ -453,9 +468,6 @@ describe("useCompletion meeting assist mode", () => {
       wrapper: strictModeWrapper,
     });
 
-    act(() => {
-      result.current.setMeetingAssistMode(true);
-    });
 
     // Two full autosave intervals' worth, with monotonic timestamps the way
     // useMeetingAudio mints them (Date.now() once fetchSTT resolves). No
@@ -500,9 +512,6 @@ describe("useCompletion meeting assist mode", () => {
       wrapper: strictModeWrapper,
     });
 
-    act(() => {
-      result.current.setMeetingAssistMode(true);
-    });
 
     // MessageHistory and Input both render `conversationHistory.sort(...)`,
     // and Array.prototype.sort reorders in place - so displaying the message
@@ -698,7 +707,6 @@ describe("useCompletion meeting assist mode", () => {
     const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
     await act(async () => {
-      result.current.setMeetingAssistMode(true);
       result.current.setEnableVAD(true);
     });
 
@@ -721,7 +729,6 @@ describe("useCompletion meeting assist mode", () => {
       const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
       act(() => {
-        result.current.setMeetingAssistMode(true);
         result.current.setEnableVAD(true);
       });
       act(() => {
@@ -769,7 +776,6 @@ describe("useCompletion meeting assist mode", () => {
       const meetingEndedAt = Date.now();
 
       act(() => {
-        result.current.setMeetingAssistMode(true);
         result.current.setEnableVAD(true);
       });
       act(() => {
@@ -810,7 +816,6 @@ describe("useCompletion meeting assist mode", () => {
 
       vi.setSystemTime(Date.now() + MEETING_CONVERSATION_GAP_MS + 60_000);
       await act(async () => {
-        result.current.setMeetingAssistMode(true);
         result.current.setEnableVAD(true);
       });
       act(() => {
@@ -936,7 +941,6 @@ describe("useCompletion meeting assist mode", () => {
 
     // The meta cache is only populated by a successful save, so do one first.
     await act(async () => {
-      result.current.setMeetingAssistMode(true);
       result.current.addMeetingTranscript("Opening", undefined, "microphone");
     });
     await act(async () => {
@@ -974,7 +978,6 @@ describe("useCompletion meeting assist mode", () => {
     const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
     await act(async () => {
-      result.current.setMeetingAssistMode(true);
       result.current.addMeetingTranscript("Opening", undefined, "microphone");
     });
     await act(async () => {
@@ -1010,7 +1013,6 @@ describe("useCompletion meeting assist mode", () => {
     const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
 
     await act(async () => {
-      result.current.setMeetingAssistMode(true);
       result.current.addMeetingTranscript("Opening", undefined, "microphone");
     });
     await act(async () => {
@@ -1044,7 +1046,6 @@ describe("useCompletion meeting assist mode", () => {
     function micOn() {
       const hook = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
       act(() => {
-        hook.result.current.setMeetingAssistMode(true);
         hook.result.current.setEnableVAD(true);
       });
       return hook;

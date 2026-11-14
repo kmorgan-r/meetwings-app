@@ -228,9 +228,6 @@ const mockEverything = () => {
   vi.doMock("@/pages/app/components/completion/Files", () => ({
     Files: () => null,
   }));
-  vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-    MeetingAssistToggle: () => null,
-  }));
   vi.doMock("react-error-boundary", () => ({
     ErrorBoundary: ({ children }: any) => <>{children}</>,
   }));

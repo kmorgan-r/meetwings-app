@@ -143,8 +143,6 @@ export interface UseCompletionReturn {
   // Meeting Assist Mode
   /** Whether Meeting Assist Mode is enabled (accumulates transcripts instead of auto-responding) */
   meetingAssistMode: boolean;
-  /** Function to toggle Meeting Assist Mode */
-  setMeetingAssistMode: Dispatch<SetStateAction<boolean>>;
   /** Accumulated meeting transcript segments with translations */
   meetingTranscript: TranscriptEntry[];
   /** Function to add a transcript segment to the meeting transcript with optional speaker info */
