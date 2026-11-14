@@ -209,10 +209,11 @@ export const STOP_CONFIRM_INTERVAL_MS = 300;
 // module is the only way to override it from a test.
 export const CALL_END_GRACE_MS = 2 * 60 * 1000;
 
-// The outer bound of a still-recording capture whose call stopped being
-// re-detected. Fifteen minutes: long enough never to cut a healthy call whose
-// detection missed a beat, short enough that a hung watcher cannot keep
-// recording a dead call indefinitely.
+// Stop a still-recording capture after fifteen minutes with no NEW transcript
+// entry — counted by arrival (when a line is appended, not its timestamp) —
+// whether or not a call is detected, on every platform the main window runs
+// on. Fifteen minutes sits above the longest in-call silence measured (13
+// minutes), so only a genuinely dead capture trips it.
 export const SILENCE_STOP_MS = 15 * 60 * 1000;
 
 // Bound on reading the calendar inside the same-call check. The answer decides

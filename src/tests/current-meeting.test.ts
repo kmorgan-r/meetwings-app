@@ -287,8 +287,9 @@ describe("slotEventAt", () => {
   it("prefers the later-starting of two overlapping events", () => {
     const a = event({ id: "a" }); // NOW-5 .. NOW+25
     const b = event({ id: "b", startMs: NOW, endMs: NOW + 30 * MIN });
-    expect(slotEventAt([a, b], NOW + 10 * MIN)?.id).toBe("b");
-    expect(slotEventAt([a, b], NOW - 1 * MIN)?.id).toBe("a");
+    // [b, a]: input order, not ascending. Selection must sort, not take last as-is.
+    expect(slotEventAt([b, a], NOW + 10 * MIN)?.id).toBe("b");
+    expect(slotEventAt([b, a], NOW - 1 * MIN)?.id).toBe("a");
   });
 
   // Pinned by sorting with ascending localeCompare and taking the last entry:
@@ -296,7 +297,9 @@ describe("slotEventAt", () => {
   it("breaks a startMs tie by id, taking the last after ascending order", () => {
     const a = event({ id: "a" });
     const b = event({ id: "b", subject: "Other" });
-    expect(slotEventAt([a, b], NOW)?.id).toBe("b");
+    // [b, a]: with equal startMs a stable sort keeps input order, so dropping
+    // the localeCompare tie-break would leave "a" last and fail this test.
+    expect(slotEventAt([b, a], NOW)?.id).toBe("b");
   });
 
   it("ignores cancelled, declined, all-day and solo events", () => {
