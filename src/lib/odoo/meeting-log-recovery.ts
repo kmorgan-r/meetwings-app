@@ -4,7 +4,13 @@ import {
   readUnloggedMessages,
   type UnloggedTranscriptEntry,
 } from "@/lib/database/meeting-log.action";
-import { IDLE_FLUSH_MS, renderTranscript, segmentByGap, sessionKeyFor } from "./meeting-log";
+import {
+  IDLE_FLUSH_MS,
+  mergeScraps,
+  renderTranscript,
+  segmentByGap,
+  sessionKeyFor,
+} from "./meeting-log";
 import { decideDestinations } from "@/lib/notion/destinations";
 import { notionErrorText } from "@/lib/notion/errors";
 import {
@@ -192,7 +198,12 @@ async function recover(): Promise<number> {
 
     let created = 0;
     for (const [conversationId, group] of groupByConversation(entries)) {
-      for (const slice of segmentByGap(group, IDLE_FLUSH_MS)) {
+      // mergeScraps AFTER the cut: a fragment too short or too thin to be its
+      // own row is folded into its nearer neighbour here - a crashed run's
+      // 30-second tail must become part of the meeting it trailed, not its
+      // own unassigned row. A scrap left alone in its conversation is dropped
+      // instead: a two-line stutter is not a meeting anyone can assign.
+      for (const slice of mergeScraps(segmentByGap(group, IDLE_FLUSH_MS))) {
         try {
           const inserted = await insertQueueRow({
             id: crypto.randomUUID(),
