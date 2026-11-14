@@ -951,6 +951,77 @@ pub fn get_meeting_watcher_status(app: AppHandle) -> Result<WatcherStatus, Strin
     })
 }
 
+/// One app holding the microphone, for the settings readout.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSession {
+    pub name: String,
+    pub pid: u32,
+    pub active: bool,
+    /// "direct", "gated" or "ignored".
+    pub kind: &'static str,
+}
+
+/// Same matching rule as `classify`: case-insensitive exact image name.
+fn describe_sessions(
+    sessions: &[SessionInfo],
+    lists: &WatchLists,
+    own_pid: u32,
+) -> Vec<MicSession> {
+    let listed = |list: &[String], name: &str| list.iter().any(|w| w.eq_ignore_ascii_case(name));
+    let mut rows: Vec<MicSession> = sessions
+        .iter()
+        .filter(|s| s.pid != own_pid)
+        .filter_map(|s| {
+            let name = s.image_name.as_ref()?;
+            let kind = if listed(&lists.direct, name) {
+                "direct"
+            } else if listed(&lists.gated, name) {
+                "gated"
+            } else {
+                "ignored"
+            };
+            Some(MicSession {
+                name: name.clone(),
+                pid: s.pid,
+                active: s.active,
+                kind,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    rows
+}
+
+/// Lists every app on the microphone and whether the watcher would watch it.
+/// Needs no watcher, so it works with auto-record off.
+#[tauri::command]
+pub async fn list_capture_sessions(
+    direct: Vec<String>,
+    gated: Vec<String>,
+) -> Result<Vec<MicSession>, String> {
+    if cfg!(not(target_os = "windows")) {
+        return Err(UNSUPPORTED_PLATFORM.to_string());
+    }
+    let lists = WatchLists { direct, gated };
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        let com_initialized = {
+            use ::windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok()
+        };
+        let sessions = enumerate_capture_sessions();
+        // Only pair CoUninitialize with a SUCCESSFUL init.
+        #[cfg(target_os = "windows")]
+        if com_initialized {
+            unsafe { ::windows::Win32::System::Com::CoUninitialize() };
+        }
+        Ok(describe_sessions(&sessions?, &lists, std::process::id()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,6 +1036,37 @@ mod tests {
             image_name: name.map(|n| n.to_string()),
             active,
         }
+    }
+
+    #[test]
+    fn describe_sessions_marks_each_list() {
+        let lists = WatchLists {
+            direct: vec!["ms-teams.exe".to_string()],
+            gated: vec!["chrome.exe".to_string()],
+        };
+        let rows = describe_sessions(
+            &[
+                session(1, Some("spotify.exe"), false),
+                session(2, Some("MS-TEAMS.EXE"), false),
+                session(3, Some("chrome.exe"), true),
+                session(4, None, true),
+                session(99, Some("chrome.exe"), true),
+            ],
+            &lists,
+            99,
+        );
+        let got: Vec<(&str, bool, &str)> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.active, r.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("chrome.exe", true, "gated"),
+                ("MS-TEAMS.EXE", false, "direct"),
+                ("spotify.exe", false, "ignored"),
+            ]
+        );
     }
 
     // R12

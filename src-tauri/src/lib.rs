@@ -237,6 +237,7 @@ pub fn run() {
             meeting_detect::get_meeting_watcher_status,
             meeting_detect::update_meeting_watch_lists,
             meeting_detect::confirm_meeting_candidate,
+            meeting_detect::list_capture_sessions,
             // The four commands below return GraphStatus or CurrentMeetings.
             // Both are scanned for credential-shaped keys by
             // graph::tests::no_exposed_command_return_type_serializes_a_credential

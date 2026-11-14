@@ -14,7 +14,7 @@ vi.mock("@/lib/platform", () => ({
 // whether the settings page renders it.
 vi.mock("@/pages/settings/components/MeetingAutoRecordToggle", () => ({
   MeetingAutoRecordToggle: () => (
-    <div aria-label="Automatically record Teams calls" />
+    <div aria-label="Automatically record Teams and Google Meet calls" />
   ),
 }));
 
@@ -49,14 +49,14 @@ describe("settings page auto-record gate", () => {
   it("renders the toggle on Windows only", () => {
     const { unmount } = render(<Settings />);
     expect(
-      screen.queryByLabelText(/automatically record teams calls/i)
+      screen.queryByLabelText(/automatically record teams and google meet calls/i)
     ).not.toBeNull();
     unmount();
 
     onWindows = false;
     render(<Settings />);
     expect(
-      screen.queryByLabelText(/automatically record teams calls/i)
+      screen.queryByLabelText(/automatically record teams and google meet calls/i)
     ).toBeNull();
   });
 });
