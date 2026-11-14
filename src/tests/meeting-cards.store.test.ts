@@ -15,6 +15,7 @@ import {
   showAmber,
   snoozeAmber,
   stopActiveRecording,
+  subscribeToMeetingCard,
   type MeetingCardState,
 } from "@/lib/meeting-cards.store";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
@@ -69,14 +70,25 @@ describe("meeting card store", () => {
 
   it("same-app restart within 2 minutes shows no red card and cancels the ended card", () => {
     start("Google Meet", 0);
-    goto(40_000);
-    autoRecordingStopped(40_000);
+    autoRecordingStopped(0);
     dismissCard();
     goto(60_000);
     start("Google Meet", 60_000);
     expect(getMeetingCard()).toBeNull();
+    goto(90_000);
+    expect(getMeetingCard()).toBeNull();
+    // Short gap: the ended card from this stop would show in [120_000, 125_000).
+    autoRecordingStopped(90_000);
+    goto(100_000);
+    start("Google Meet", 100_000);
+    const listener = vi.fn();
+    subscribeToMeetingCard(listener);
     goto(120_000);
     expect(getMeetingCard()).toBeNull();
+    goto(122_000);
+    expect(getMeetingCard()).toBeNull();
+    goto(125_000);
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it("a different app within 2 minutes gets its own red card", () => {
@@ -112,8 +124,8 @@ describe("meeting card store", () => {
     setCardEvent(id, event("Weekly sync"));
     goto(60_000);
     autoRecordingStopped(60_000);
-    goto(85_000);
-    start("Google Meet", 85_000);
+    goto(90_000);
+    start("Google Meet", 90_000);
     goto(300_000);
     autoRecordingStopped(300_000);
     goto(330_000);
