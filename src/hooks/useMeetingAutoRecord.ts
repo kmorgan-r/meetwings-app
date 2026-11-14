@@ -504,8 +504,7 @@ export const useMeetingAutoRecord = ({
     // Release ownership BEFORE writing the mic. The write commits during the
     // confirm loop's first sleep, and the ownership layout effect has no dep
     // array - so with provenance still "meeting" it would take its release
-    // branch and flush a SECOND time (measured: 2 flushes on every healthy
-    // stop). The action is already captured, so nulling here is safe.
+    // branch and call autoRecordingStopped() a SECOND time. The action is already captured, so nulling here is safe.
     startedModeRef.current = null;
     autoRecordingStopped({ auto });
 

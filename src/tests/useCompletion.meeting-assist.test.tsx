@@ -1065,9 +1065,10 @@ describe("useCompletion meeting assist mode", () => {
     });
 
     it("mount is no edge", async () => {
-      renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
       await act(async () => {});
       expect(saveConversation).not.toHaveBeenCalled();
+      expect(result.current.meetingTranscriptHidden).toBe(false);
     });
 
     it("a stop and a start in one commit is no edge", async () => {

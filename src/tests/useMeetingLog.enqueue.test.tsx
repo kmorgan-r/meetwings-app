@@ -336,10 +336,11 @@ describe("the meeting-ended trigger", () => {
 
 describe("both triggers for one meeting", () => {
   it("produces exactly one enqueue call", async () => {
-    const { rerender } = render({ recording: true });
+    const { rerender } = render({ recording: true, meetingTranscript: MEETING });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    // The edge first, then meeting-ended in the same tick: both triggers race.
+    rerender({ meetingTranscript: MEETING, recording: false });
     fireMeetingEnded();
-    rerender({ meetingTranscript: [entry(1000)], recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(10);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
@@ -351,8 +352,8 @@ describe("the recording-stop trigger", () => {
     // The positive control. Without it, an implementation with NO recording-stop
     // trigger at all passes the not-on-mount case trivially and "both triggers
     // -> one row" via the meeting-ended listener alone.
-    const { rerender } = render({ recording: true });
-    rerender({ meetingTranscript: [entry(1000)], recording: false });
+    const { rerender } = render({ recording: true, meetingTranscript: MEETING });
+    rerender({ meetingTranscript: MEETING, recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
   });
 
@@ -360,7 +361,7 @@ describe("the recording-stop trigger", () => {
     // Recording false is its DEFAULT state, so a naive
     // useEffect([recording]) attempts a push on every mount -
     // including StrictMode's second and every mid-call remount.
-    render({ recording: false });
+    render({ recording: false, meetingTranscript: MEETING });
     await vi.advanceTimersByTimeAsync(50);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
   });

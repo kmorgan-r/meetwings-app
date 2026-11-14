@@ -170,6 +170,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD,
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
         setMeetingAssistMode: vi.fn(),
@@ -343,6 +344,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD: vi.fn(),
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
         setMeetingAssistMode: vi.fn(),
@@ -442,7 +444,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       // Task 17: who set the Notion tick, so an auto tick gets check 2.
       notionSourceRef: { current: "hand" },
       meetingTranscript: [],
-      meetingAssistMode: expect.any(Boolean),
+      recording: expect.any(Boolean),
     });
     // The provider config must RESOLVE, not merely be spelled.
     // `toHaveProperty("providerConfig")` would pass on a key holding
@@ -498,6 +500,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD: vi.fn(),
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
         setMeetingAssistMode: vi.fn(),
