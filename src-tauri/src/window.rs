@@ -269,6 +269,14 @@ pub fn set_window_height(
     Ok(())
 }
 
+/// A restyle (`restyle == true`) only makes sense while minimized. One that
+/// lands after `restore_overlay` has cleared the flag (a card timer firing
+/// during the frontend's `await restore_overlay`) must not re-shrink the
+/// restored bar.
+fn restyle_is_stale(restyle: bool, minimized: bool) -> bool {
+    restyle && !minimized
+}
+
 /// Minimize the overlay to a pill in the bottom-right of the current
 /// monitor's work area. `width`/`height` are LOGICAL pill dimensions,
 /// converted to physical via the window's scale factor.
@@ -288,6 +296,10 @@ pub fn minimize_overlay(
     restyle: bool,
 ) -> Result<(), String> {
     let state = app.state::<OverlayMinimizeState>();
+
+    if restyle_is_stale(restyle, *state.minimized.lock().unwrap()) {
+        return Ok(());
+    }
 
     // current_monitor() keeps the pill on whichever screen the overlay is on;
     // fall back to primary, and refuse (leaving the overlay un-minimized) only
@@ -572,6 +584,14 @@ mod tests {
 
         returns_a_future(open_dashboard);
         returns_a_future(toggle_dashboard);
+    }
+
+    #[test]
+    fn stale_restyle_is_a_noop() {
+        assert!(restyle_is_stale(true, false));
+        assert!(!restyle_is_stale(true, true));
+        assert!(!restyle_is_stale(false, false));
+        assert!(!restyle_is_stale(false, true));
     }
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> PhysicalRect<i32, u32> {

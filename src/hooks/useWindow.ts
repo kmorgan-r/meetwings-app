@@ -2,6 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useCallback, useEffect } from "react";
 
+import {
+  BAR_HEIGHT,
+  CARD_GAP,
+  cardHeight,
+  getMeetingCard,
+} from "@/lib/meeting-cards.store";
 import { getMinimized } from "@/lib/overlay-minimize.store";
 
 // Helper function to check if any popover is open in the DOM. Exported: the
@@ -32,7 +38,13 @@ export const resizeWindow = async (expanded: boolean): Promise<void> => {
       return;
     }
 
-    const newHeight = expanded ? 600 : 54;
+    // The bar never shrinks below its card: the MutationObserver and mouseup
+    // paths route through here too, so every path agrees on the same height.
+    const card = getMeetingCard();
+    const newHeight = Math.max(
+      expanded ? 600 : BAR_HEIGHT,
+      card ? BAR_HEIGHT + CARD_GAP + cardHeight(card, false) : BAR_HEIGHT
+    );
 
     await invoke("set_window_height", {
       window,

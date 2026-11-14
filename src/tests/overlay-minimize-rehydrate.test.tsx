@@ -68,6 +68,7 @@ const mockAppPage = () => {
       sttConfigured: true,
     }),
     useMeetingDetection: () => ({}),
+    useMeetingCardHost: () => null,
   }));
 };
 

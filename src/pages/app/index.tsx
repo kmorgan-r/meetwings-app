@@ -22,6 +22,7 @@ import {
   setMinimized,
   subscribeToMinimized,
 } from "@/lib/overlay-minimize.store";
+import { getMeetingCard, pillWindowSize } from "@/lib/meeting-cards.store";
 import type { OverlayPillStyle } from "@/lib/storage";
 
 const App = () => {
@@ -62,7 +63,7 @@ const App = () => {
     // re-snapshot the window's own pill geometry as the "pre-minimize" rect —
     // corrupting the restore target.
     if (getMinimized()) return;
-    const dims = PILL_DIMENSIONS[pillStyle];
+    const dims = pillWindowSize(pillStyle, getMeetingCard());
     setMinimized(true);
     try {
       await invoke("minimize_overlay", {
@@ -112,7 +113,7 @@ const App = () => {
         const style = event.payload.style;
         setOverlayPillStyle(style);
         if (getMinimized()) {
-          const dims = PILL_DIMENSIONS[style];
+          const dims = pillWindowSize(style, getMeetingCard());
           invoke("minimize_overlay", {
             width: dims.width,
             height: dims.height,
@@ -263,11 +264,13 @@ const App = () => {
             </div>
           )}
         </div>
-        {/* Compact card above the pill; window sizing is Task 10's. */}
+        {/* Compact card above the pill. The window grows upward from the
+            bottom-right anchor (useMeetingCardHost sizes it); the pill keeps
+            its exact box at the bottom-right. */}
         {minimized && card ? (
-          <div className="flex h-full w-full flex-col justify-end gap-2">
+          <div className="w-full h-full flex flex-col items-end justify-end gap-2">
             <MeetingCard card={card} compact />
-            <div className="shrink-0" style={{ height: PILL_DIMENSIONS[pillStyle].height }}>
+            <div className="shrink-0" style={PILL_DIMENSIONS[pillStyle]}>
               <MinimizedPill style={pillStyle} />
             </div>
           </div>
