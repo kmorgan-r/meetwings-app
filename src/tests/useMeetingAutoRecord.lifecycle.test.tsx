@@ -98,6 +98,10 @@ import {
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
 } from "@/config/constants";
+import type { TranscriptEntry } from "@/types/completion";
+
+// Module-level so the reference is stable across renders.
+const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 
 const registered = (event: string) => listeners.get(event)?.size ?? 0;
 
@@ -267,6 +271,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
       setEnableVAD: stableSetEnableVAD,
       meetingAssistMode,
       flushUnsavedMeetingTranscript: flushTranscript,
+      meetingTranscript: EMPTY_TRANSCRIPT,
     });
     return null;
   };

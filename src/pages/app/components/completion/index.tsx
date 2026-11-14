@@ -41,6 +41,7 @@ export const Completion = ({
     setEnableVAD: completion.setEnableVAD,
     meetingAssistMode: completion.meetingAssistMode,
     flushUnsavedMeetingTranscript: completion.flushUnsavedMeetingTranscript,
+    meetingTranscript: completion.meetingTranscript,
   });
 
   // Mounted HERE, beside useMeetingAutoRecord, because slice 2's useMeetingLog

@@ -22,8 +22,13 @@ import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
 import {
   autoRecordingStarted,
   autoRecordingStopped,
+  showStopNotice,
+  type StopNoticeReason,
 } from "@/lib/meeting-cards.store";
+import { setRecordingStopCap } from "@/lib/recording-stop-cap";
+import type { TranscriptEntry } from "@/types/completion";
 import {
+  SILENCE_STOP_MS,
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
   STORAGE_KEYS,
@@ -80,6 +85,8 @@ export type MeetingAutoRecordOptions = {
   setEnableVAD: Dispatch<SetStateAction<boolean>>;
   meetingAssistMode: boolean;
   flushUnsavedMeetingTranscript: () => Promise<void>;
+  /** Session-wide transcript; only its LENGTH is read (silence timer). */
+  meetingTranscript: TranscriptEntry[];
 };
 
 /**
@@ -122,11 +129,13 @@ export const useMeetingAutoRecord = ({
   setEnableVAD,
   meetingAssistMode,
   flushUnsavedMeetingTranscript,
+  meetingTranscript,
 }: MeetingAutoRecordOptions) => {
-  const isOwner = useMemo(
-    () => getCurrentWindow().label === "main" && isWindows(),
-    []
-  );
+  // Two gates. The silence timer and the shared stop op need only the main
+  // window (they act on this window's own mic, whatever the platform); the
+  // detection listeners and grace logic also need Windows.
+  const isMain = useMemo(() => getCurrentWindow().label === "main", []);
+  const isOwner = isMain && isWindows();
 
   // Every mutable value a listener reads comes from a ref. The listeners are
   // registered once per window lifetime, and startCapture/stopCapture are
@@ -552,6 +561,52 @@ export const useMeetingAutoRecord = ({
     }
   };
 
+  /**
+   * The one stop every AUTOMATIC stop goes through (silence now, call-end grace
+   * later). Unlike handleStop it does not depend on provenance: it also closes a
+   * hand-opened mic. Always call it through `enqueue`.
+   */
+  const stopRecording = async (o: {
+    reason: StopNoticeReason;
+    auto: boolean;
+    capEndedAt: number | null;
+  }): Promise<void> => {
+    if (!mountedRef.current || !enableVADRef.current) return;
+
+    // Before the write, so the ownership layout effect's release branch never
+    // runs and never calls autoRecordingStopped() without `auto`.
+    startedModeRef.current = null;
+    autoRecordingStopped({ auto: o.auto });
+    showStopNotice(o.reason);
+    setRecordingStopCap(o.capEndedAt);
+    setEnableVADRef.current(false);
+
+    const ok = await confirmMeetingStopped();
+    // The edge trigger read the cap synchronously at the stop commit; this
+    // clears one no edge consumed (a stop and start batched into one commit).
+    setRecordingStopCap(null);
+    if (!ok && !enableVADRef.current && !systemAudioRef.current.capturing) {
+      toast.error(MEETING_STOP_FAILED_MESSAGE);
+    }
+  };
+
+  // Silence: counted by transcript-line ARRIVAL (length), so an in-place edit of
+  // an entry does not reset it, and lines already present when the mic opens do
+  // not count. enqueue/stopRecording close over refs only (see the listener
+  // effect's argument below).
+  useEffect(() => {
+    if (!isMain || !enableVAD) return;
+    const t = setTimeout(
+      () =>
+        void enqueue(() =>
+          stopRecording({ reason: "silence", auto: true, capEndedAt: null })
+        ),
+      SILENCE_STOP_MS
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMain, enableVAD, meetingTranscript.length]);
+
   useEffect(() => {
     // The CREATE body is MANDATORY, not decoration. StrictMode runs
     // create -> destroy -> create on mount WITHOUT recreating refs, so a
@@ -562,12 +617,15 @@ export const useMeetingAutoRecord = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (startedModeRef.current) {
+      if (startedModeRef.current || enableVADRef.current) {
         // useCompletion dies with the tree, taking meetingTranscript and
         // conversationHistoryRef with it, and there is no unmount flush in
         // useCompletion today - up to MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL - 1
-        // segments would vanish silently.
+        // segments would vanish silently. A hand-opened mic (no provenance)
+        // records into the same transcript, so it flushes too.
         void flushRef.current?.().catch(reportFlushFailure);
+      }
+      if (startedModeRef.current) {
         // Idempotent: a transcribing handleStop enqueued below publishes again.
         autoRecordingStopped();
       }
