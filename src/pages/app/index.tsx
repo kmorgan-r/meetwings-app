@@ -15,7 +15,7 @@ import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
 import { getPlatform } from "@/lib";
 import { AlertCircle, Minimize2 } from "lucide-react";
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 import {
   getMinimized,
   PILL_DIMENSIONS,
@@ -23,7 +23,7 @@ import {
   subscribeToMinimized,
 } from "@/lib/overlay-minimize.store";
 import { getMeetingCard, pillWindowSize } from "@/lib/meeting-cards.store";
-import type { OverlayPillStyle } from "@/lib/storage";
+import { getCustomizableState, type OverlayPillStyle } from "@/lib/storage";
 
 const App = () => {
   const { isHidden, systemAudio } = useApp();
@@ -33,7 +33,7 @@ const App = () => {
     aiConfigured,
     sttConfigured,
   } = useSetupStatus();
-  // Teams call detection. Self-gating: inert outside the `main` window and off
+  // Teams and Google Meet call detection. Self-gating: inert outside the `main` window and off
   // Windows. Takes no arguments and never touches capture state.
   useMeetingDetection();
   const { customizable, setOverlayPillStyle } = useAppContext();
@@ -41,10 +41,6 @@ const App = () => {
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
   const card = useMeetingCardHost(pillStyle);
-  const pillStyleRef = useRef(pillStyle);
-  useEffect(() => {
-    pillStyleRef.current = pillStyle;
-  }, [pillStyle]);
 
   const openDashboard = async () => {
     try {
@@ -95,13 +91,16 @@ const App = () => {
   // A reload also empties the card store while the window keeps its card-aware
   // size, so a minimized rehydrate restyles to the size for the CURRENT card
   // (none, after a reload). restyle: true never re-snapshots the restore rect.
-  // The style comes from a ref so this mount-only effect needs no extra dep.
+  // The style is read from storage at use time: AppProvider starts at the
+  // default style and loads the stored one in its own mount effect, which this
+  // IPC round trip is not guaranteed to outlast.
   useEffect(() => {
     invoke<boolean>("is_overlay_minimized")
       .then((isMinimized) => {
         if (!isMinimized) return;
         setMinimized(true);
-        const dims = pillWindowSize(pillStyleRef.current, getMeetingCard());
+        const style = getCustomizableState().overlayPill.style;
+        const dims = pillWindowSize(style, getMeetingCard());
         return invoke("minimize_overlay", {
           width: dims.width,
           height: dims.height,

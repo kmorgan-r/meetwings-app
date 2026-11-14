@@ -167,8 +167,17 @@ describe("minimized state rehydration on mount", () => {
     for (const [, args] of calls) expect(args?.restyle).toBe(true);
   });
 
-  it("a minimized rehydrate restyles the window to the plain pill size", async () => {
+  it("a minimized rehydrate restyles the window to the plain pill size of the STORED style", async () => {
     // The reload emptied the card store, but the window kept its card-aware size.
+    // The context mock still reports the provider's pre-load default
+    // (status-count); the stored style is what the user picked.
+    // setup.ts replaces localStorage with no-op vi.fn()s; answer the read.
+    const { STORAGE_KEYS } = await import("@/config/constants");
+    vi.mocked(localStorage.getItem).mockImplementation((k: string) =>
+      k === STORAGE_KEYS.CUSTOMIZABLE
+        ? JSON.stringify({ overlayPill: { style: "icon-only" } })
+        : null
+    );
     mockAppPage();
     invokeMock.mockImplementation((cmd) =>
       cmd === "is_overlay_minimized"
@@ -176,15 +185,19 @@ describe("minimized state rehydration on mount", () => {
         : Promise.resolve(undefined)
     );
 
-    await renderApp();
+    try {
+      await renderApp();
 
-    const { PILL_DIMENSIONS } = await import("@/lib/overlay-minimize.store");
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
-        ...PILL_DIMENSIONS["status-count"],
-        restyle: true,
+      const { PILL_DIMENSIONS } = await import("@/lib/overlay-minimize.store");
+      await waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+          ...PILL_DIMENSIONS["icon-only"],
+          restyle: true,
+        });
       });
-    });
+    } finally {
+      vi.mocked(localStorage.getItem).mockReset();
+    }
   });
 
   it("an expanded rehydrate does not touch the window size", async () => {
