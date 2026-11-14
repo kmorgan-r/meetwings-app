@@ -60,7 +60,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/config/constants", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   STOP_CONFIRM_INTERVAL_MS: 5,
-  SILENCE_STOP_MS: 300,
+  // Above 2 * CALL_END_GRACE_MS plus headroom: a grace case watches the mic
+  // for 2 * GRACE after meeting-ended, and a silence stop landing inside that
+  // window would read as the grace firing when it should have been cancelled.
+  SILENCE_STOP_MS: 600,
   CALL_END_GRACE_MS: 150,
   SAME_CALL_READ_TIMEOUT_MS: 100,
 }));
@@ -110,6 +113,9 @@ import {
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
   SILENCE_STOP_MS as SILENCE,
+  CALL_END_GRACE_MS as GRACE,
+  // Task 9's same-call read bound; imported here so it arrives mocked too.
+  SAME_CALL_READ_TIMEOUT_MS as READ_TIMEOUT,
 } from "@/config/constants";
 import type { TranscriptEntry } from "@/types/completion";
 
@@ -532,6 +538,338 @@ describe("useMeetingAutoRecord - silence stop", () => {
       expect(mocks.toast.error).toHaveBeenCalledWith(MEETING_STOP_FAILED_MESSAGE)
     );
     expect(h.setEnableVAD).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("useMeetingAutoRecord - call-end grace", () => {
+  // Same timing rules as the silence block, against GRACE.
+
+  /**
+   * `stopped`, plus the reason: a silence stop would satisfy a bare `stopped`
+   * (and does, against a hook with no grace at all).
+   */
+  const stoppedByGrace = async (h: ReturnType<typeof mount>) => {
+    await stopped(h);
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
+  };
+
+  /** A hand-opened mic in meeting mode (the production default). */
+  const openByHand = async (opts: MountOptions = {}) => {
+    const h = mount(makeAudio(), { meetingAssistMode: true, ...opts });
+    await flush();
+    await h.setMicOpen(true);
+    return h;
+  };
+
+  /** Fires meeting-ended; returns the Date.now() taken just before it. */
+  const endCall = async () => {
+    const at = Date.now();
+    await fireActed("meeting-ended");
+    return at;
+  };
+
+  it("meeting-ended with the mic open waits the grace, then stops", async () => {
+    seedStatus([false]); // the stop's confirm poll
+    const h = await openByHand();
+
+    const endedAt = await endCall();
+    const afterEnd = Date.now();
+    await sleep(GRACE / 3);
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+
+    await stoppedByGrace(h);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
+
+    // The cap is the call's end time, set before the mic write.
+    const caps = stopCap.set.mock;
+    const capIdx = caps.calls.findIndex(([v]) => v !== null);
+    expect(capIdx).toBeGreaterThanOrEqual(0);
+    expect(caps.calls[capIdx][0]).toBeGreaterThanOrEqual(endedAt);
+    expect(caps.calls[capIdx][0]).toBeLessThanOrEqual(afterEnd);
+    const closeIdx = h.setEnableVAD.mock.calls.findIndex(([v]) => v === false);
+    expect(caps.invocationCallOrder[capIdx]).toBeLessThan(
+      h.setEnableVAD.mock.invocationCallOrder[closeIdx]
+    );
+
+    // Step 7: once confirmed, the cap is cleared - after it was set.
+    await drainStopConfirm();
+    expect(stopCap.set).toHaveBeenLastCalledWith(null);
+    expect(caps.invocationCallOrder[caps.calls.length - 1]).toBeGreaterThan(
+      caps.invocationCallOrder[capIdx]
+    );
+  });
+
+  it("an auto-started recording is no longer stopped at once", async () => {
+    seedStatus([false, false]); // probe, then the stop's confirm poll
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await fireActed("meeting-detected");
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledWith(true));
+
+    const endedAt = await endCall();
+    await sleep(GRACE / 3);
+    expect(h.setEnableVAD).not.toHaveBeenCalledWith(false);
+
+    await stoppedByGrace(h);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+  });
+
+  it("meeting-ended queued behind the auto-start still arms the grace", async () => {
+    seedStatus([false, false]); // probe, then the stop's confirm poll
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+
+    const endedAt = Date.now();
+    await act(async () => {
+      emit("meeting-detected");
+      emit("meeting-ended");
+      await flush();
+    });
+
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]])
+    );
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    await drainStopConfirm();
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
+  });
+
+  it("a grace armed before the auto-start commits survives that commit", async () => {
+    // The case above, in PRODUCTION ordering. Under act() React commits the
+    // start within a few microtasks, before the queued meeting-ended op runs,
+    // so the op sees the mic open and the enableVAD exception is never needed
+    // (measured: deleting it leaves the case above green). Outside act the
+    // commit lands on a macrotask, so the op runs first, arms on "meeting"
+    // provenance, and the start's false->true commit must not cancel it.
+    // RTL's own waitFor drops the act environment the same way.
+    seedStatus([false, false]); // probe, then the stop's confirm poll
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const prevEnv = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      const observedAtArm: boolean[] = [];
+      emit("meeting-detected");
+      emit("meeting-ended");
+      // Both ops have run (microtasks) and the start has not committed yet.
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      observedAtArm.push(...h.observedVAD);
+      expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+      expect(observedAtArm).toEqual([false]);
+
+      await waitFor(() =>
+        expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]])
+      );
+      expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
+      await sleep(STOP_CONFIRM_ATTEMPTS * Math.max(STOP_CONFIRM_INTERVAL_MS, 20) * 2);
+    } finally {
+      env.IS_REACT_ACT_ENVIRONMENT = prevEnv;
+    }
+  });
+
+  it("meeting-ended behind a queued transcribing start stops it", async () => {
+    seedStatus([true, false]); // confirm the start, then the post-stop query
+    const stopAt: number[] = [];
+    const audio = makeAudio({
+      stopCapture: vi.fn(async () => {
+        stopAt.push(Date.now());
+      }),
+    });
+    mount(audio); // meetingAssistMode false: the transcribing path
+
+    await flush();
+    const endedAt = Date.now();
+    await act(async () => {
+      emit("meeting-detected");
+      emit("meeting-ended");
+      await flush();
+    });
+
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    expect(stopAt[0]).toBeLessThan(endedAt + GRACE); // no grace wait
+    await sleep(GRACE * 2);
+    expect(audio.stopCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it("meeting-ended with the mic closed arms nothing", async () => {
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+
+    await endCall();
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("a system line restarts the grace", async () => {
+    seedStatus([false]);
+    const h = await openByHand();
+    await endCall();
+    await sleep((GRACE * 2) / 3);
+
+    const lineAt = Date.now();
+    await h.appendLine("system");
+    await stoppedByGrace(h);
+
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
+  });
+
+  it("a mic line does not restart the grace", async () => {
+    seedStatus([false]);
+    const h = await openByHand();
+    await endCall();
+    await sleep((GRACE * 2) / 3);
+
+    const lineAt = Date.now();
+    await h.appendLine("microphone");
+    await stoppedByGrace(h);
+
+    expect(h.closeTimes[0]).toBeLessThan(lineAt + GRACE);
+  });
+
+  it("the user moving the mic cancels the grace", async () => {
+    const h = await openByHand();
+    await endCall();
+
+    await sleep(GRACE / 6);
+    await h.setMicOpen(false);
+    await sleep(GRACE / 6);
+    await h.setMicOpen(true);
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+  });
+
+  it("turning auto-record off cancels the grace", async () => {
+    const h = await openByHand();
+    await endCall();
+    await sleep(GRACE / 3);
+
+    await fireActed("meeting-detection-setting-changed", { enabled: false });
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]);
+  });
+
+  it("watcher stopped cancels the grace", async () => {
+    const h = await openByHand();
+    await endCall();
+    await sleep(GRACE / 3);
+
+    await fireActed("meeting-watcher-stopped");
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]);
+  });
+
+  it("a second meeting-ended re-arms and never stacks", async () => {
+    seedStatus([false]);
+    const h = await openByHand();
+    await endCall();
+    await sleep(GRACE / 3);
+
+    const secondAt = await endCall();
+    await stoppedByGrace(h);
+    await sleep(GRACE);
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[false]]);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(secondAt + GRACE);
+  });
+
+  it("StrictMode runs one grace", async () => {
+    seedStatus([false]);
+    const h = await openByHand({ strict: true });
+    await endCall();
+
+    await stoppedByGrace(h);
+    await sleep(GRACE);
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[false]]);
+  });
+
+  it("unmount clears the grace", async () => {
+    const h = await openByHand();
+    await endCall();
+    await sleep(GRACE / 3);
+
+    h.unmount();
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("a line arriving after the fire, before the queued stop, still cancels it", async () => {
+    // Park the chain on a detection's probe, so the grace stop the timer
+    // enqueues sits behind it.
+    let releaseProbe!: (held: boolean) => void;
+    let probes = 0;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd !== "get_capture_status") return undefined;
+      probes += 1;
+      if (probes === 1) {
+        return new Promise<boolean>((resolve) => {
+          releaseProbe = resolve;
+        });
+      }
+      return false; // the re-armed stop's confirm poll
+    });
+    const h = await openByHand();
+    await endCall();
+    await fireActed("meeting-detected"); // parks on its probe
+    await waitFor(() => expect(statusCalls()).toBe(1));
+
+    await sleep(GRACE * 1.5); // the timer has fired; its stop is queued
+    const lineAt = Date.now();
+    await h.appendLine("system");
+    await act(async () => {
+      releaseProbe(true); // ignore-active: the detection starts nothing
+      await flush();
+    });
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]);
+
+    // The re-armed grace still stops it, a full grace after the line.
+    await stoppedByGrace(h);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
+  });
+
+  it("clearing the transcript during the grace neither stops nor re-arms", async () => {
+    seedStatus([false]);
+    const h = await openByHand({ lines: 3 });
+    await endCall();
+    await sleep(GRACE / 3);
+
+    const clearAt = Date.now();
+    await h.clearTranscript();
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+
+    await stoppedByGrace(h);
+    expect(h.closeTimes[0]).toBeLessThan(clearAt + GRACE);
+  });
+
+  it("after a clear, a later system line re-arms", async () => {
+    seedStatus([false]);
+    const h = await openByHand({ lines: 3 });
+    await endCall();
+    await sleep(GRACE / 6);
+    await h.clearTranscript();
+    await sleep(GRACE / 3);
+
+    // One system line after the drop: a count compared against the pre-clear
+    // value (3) would not see it as new.
+    const lineAt = Date.now();
+    await h.appendLine("system");
+    await stoppedByGrace(h);
+
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
   });
 });
 
