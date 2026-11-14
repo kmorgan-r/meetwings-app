@@ -90,6 +90,10 @@ export interface UseCompletionReturn {
   setKeepEngaged: Dispatch<SetStateAction<boolean>>;
   /** Hide the response panel without clearing anything (the X during a meeting) */
   setMeetingPanelHidden: Dispatch<SetStateAction<boolean>>;
+  /** The mic is on (meeting mode and VAD): the meeting-end signal. */
+  recording: boolean;
+  meetingTranscriptHidden: boolean;
+  setMeetingTranscriptHidden: Dispatch<SetStateAction<boolean>>;
 
   // Screenshot functionality
   /** Current screenshot configuration settings */

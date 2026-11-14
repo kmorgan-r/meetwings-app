@@ -160,9 +160,9 @@ function render(initial: Record<string, unknown> = {}) {
         currentConversationId: ("currentConversationId" in props
           ? props.currentConversationId
           : "conv-1") as string | null,
-        meetingAssistMode: ("meetingAssistMode" in props
-          ? props.meetingAssistMode
-          : true) as boolean,
+        recording: ("recording" in props
+          ? props.recording
+          : false) as boolean,
         providerConfig: PROVIDER_CONFIG,
       });
     },

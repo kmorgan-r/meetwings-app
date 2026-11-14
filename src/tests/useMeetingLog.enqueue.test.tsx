@@ -138,6 +138,10 @@ function entry(timestamp: number, original = "hello"): TranscriptEntry {
   return { original, timestamp, audioSource: "microphone" };
 }
 
+// A real meeting: at least 3 lines over at least 60 s, so it survives the
+// scrap filter.
+const MEETING = [entry(1000), entry(31000), entry(61000)];
+
 // Task 14: `targetRef` now carries the flat multi-target list directly - the
 // exact shape `useOdooTarget`'s `targetsRef` mirrors - rather than a single
 // contact/lead pick adapted through `resolvedToSelected`. One target,
@@ -165,9 +169,9 @@ function render(initial: Record<string, unknown> = {}) {
         currentConversationId: ("currentConversationId" in props
           ? props.currentConversationId
           : "conv-1") as string | null,
-        meetingAssistMode: ("meetingAssistMode" in props
-          ? props.meetingAssistMode
-          : true) as boolean,
+        recording: ("recording" in props
+          ? props.recording
+          : false) as boolean,
         providerConfig: PROVIDER_CONFIG,
       });
     },
@@ -332,47 +336,82 @@ describe("the meeting-ended trigger", () => {
 
 describe("both triggers for one meeting", () => {
   it("produces exactly one enqueue call", async () => {
-    const { rerender } = render({ meetingAssistMode: true });
+    const { rerender } = render({ recording: true });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
-    rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
+    rerender({ meetingTranscript: [entry(1000)], recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     await vi.advanceTimersByTimeAsync(10);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("the pill-off trigger", () => {
-  it("fires when the pill goes true then false", async () => {
-    // The positive control. Without it, an implementation with NO pill-off
+describe("the recording-stop trigger", () => {
+  it("fires when recording goes true then false", async () => {
+    // The positive control. Without it, an implementation with NO recording-stop
     // trigger at all passes the not-on-mount case trivially and "both triggers
     // -> one row" via the meeting-ended listener alone.
-    const { rerender } = render({ meetingAssistMode: true });
-    rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
+    const { rerender } = render({ recording: true });
+    rerender({ meetingTranscript: [entry(1000)], recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
   });
 
-  it("does NOT fire on mount when the pill is already off", async () => {
-    // The pill being off is its DEFAULT state, so a naive
-    // useEffect([meetingAssistMode]) attempts a push on every mount -
+  it("does NOT fire on mount when recording is already false", async () => {
+    // Recording false is its DEFAULT state, so a naive
+    // useEffect([recording]) attempts a push on every mount -
     // including StrictMode's second and every mid-call remount.
-    render({ meetingAssistMode: false });
+    render({ recording: false });
     await vi.advanceTimersByTimeAsync(50);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
   });
 
-  it("enqueues once across many re-renders after the pill went off", async () => {
+  it("enqueues once across many re-renders after recording stopped", async () => {
     // <Completion /> re-renders on every streamed AI chunk. Assert the CALL
     // count, not a row count: the watermark and UNIQUE(session_key) dedup rows
     // and would hide a leak entirely.
-    const { rerender } = render({ meetingAssistMode: true });
-    rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
+    const { rerender } = render({ recording: true });
+    rerender({ meetingTranscript: [entry(1000)], recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     for (let i = 0; i < 5; i++) {
-      rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
+      rerender({ meetingTranscript: [entry(1000)], recording: false });
     }
     await vi.advanceTimersByTimeAsync(10);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("recording as the meeting-end signal", () => {
+  it("meeting-ended while recording does not trigger", async () => {
+    const { unmount } = render({ recording: true, meetingTranscript: MEETING });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    unmount();
+    await vi.advanceTimersByTimeAsync(50);
+  });
+
+  it("meeting-ended with the mic closed triggers", async () => {
+    render({ recording: false, meetingTranscript: MEETING });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+  });
+
+  it("unmount while recording triggers once", async () => {
+    const { unmount } = render({ recording: true, meetingTranscript: MEETING });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    unmount();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+  });
+
+  it("unmount with the mic closed triggers nothing", async () => {
+    const { unmount } = render({ recording: false, meetingTranscript: MEETING });
+    await vi.advanceTimersByTimeAsync(50);
+    unmount();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
   });
 });
 
@@ -396,7 +435,7 @@ describe("startup recovery", () => {
 });
 
 describe("the idle-flush trigger", () => {
-  it("enqueues once the pill has sat idle for the whole window", async () => {
+  it("enqueues once the mic has sat closed for the whole window", async () => {
     // The trigger that closes the real gap: with Auto-record off the Rust
     // `meeting-ended` never fires, so a user who leaves the pill on and closes
     // the app loses the meeting entirely.
@@ -434,10 +473,20 @@ describe("the idle-flush trigger", () => {
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
   });
 
-  it("stays disarmed while the pill is off", async () => {
-    render({ meetingAssistMode: false });
+  it("stays disarmed while recording", async () => {
+    const { unmount } = render({ recording: true, meetingTranscript: MEETING });
     await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS * 2);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
+    // Unmounting while recording is itself a stop: drain it in the case.
+    unmount();
+    await vi.advanceTimersByTimeAsync(50);
+  });
+
+  it("arms with the mic closed", async () => {
+    // Mounted with recording false: no edge, so only the idle timer can fire.
+    render({ recording: false, meetingTranscript: MEETING });
+    await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
   });
 
   it("stays disarmed with nothing said yet", async () => {
@@ -673,11 +722,11 @@ describe("the window-ownership gate", () => {
     // including the dashboard's full React app - stays green on every other
     // case in this file.
     windowLabel.value = "dashboard";
-    const { rerender } = render({ meetingAssistMode: true });
+    const { rerender } = render({ recording: true });
     await vi.advanceTimersByTimeAsync(50);
     expect(listen).not.toHaveBeenCalled();
     expect(push.runMeetingLogSweep).not.toHaveBeenCalled();
-    rerender({ meetingTranscript: [entry(1000)], meetingAssistMode: false });
+    rerender({ meetingTranscript: [entry(1000)], recording: false });
     await vi.advanceTimersByTimeAsync(50);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
   });

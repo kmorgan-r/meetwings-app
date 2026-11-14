@@ -184,7 +184,7 @@ export const Completion = ({
     notionSourceRef: notionPick.sourceRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
-    meetingAssistMode: completion.meetingAssistMode,
+    recording: completion.recording,
     providerConfig,
   });
 
@@ -233,12 +233,11 @@ export const Completion = ({
       // that mirrors the transcribing pipeline's own capture (the headphones
       // button), a different subsystem, and its `error` would mask a healthy
       // meeting. Same pair useMeetingAudio is gated on (Audio.tsx:124).
-      recording: completion.meetingAssistMode && completion.enableVAD,
+      recording: completion.recording,
     });
   }, [
     completion.meetingTranscript,
-    completion.meetingAssistMode,
-    completion.enableVAD,
+    completion.recording,
     systemAudio.error,
     systemAudio.capturing,
   ]);

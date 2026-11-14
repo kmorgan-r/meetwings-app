@@ -171,22 +171,19 @@ export const useMeetingAutoRecord = ({
     if (startedModeRef.current !== "meeting") return;
     if (!enableVAD) {
       // Someone closed the mic - the user, or us. Either way we no longer own
-      // it. Flush before releasing: this is the same physical operation as the
-      // pill-off path, and nothing else will save the tail - the periodic
-      // autosave is length-driven, and setMeetingAssistMode's flush only fires
-      // when the PILL moves, which here it did not.
+      // it. No flush here: the recording-stop edge in useCompletion owns the
+      // flush of the unsaved tail for every close of the mic.
       //
       // handleStop releases provenance BEFORE it writes the mic, so this branch
       // never double-fires against it; it is reached only for a close this hook
       // did not perform.
-      void flushRef.current?.().catch(reportFlushFailure);
       startedModeRef.current = null;
       autoRecordingStopped();
     } else if (!meetingAssistMode && !stopRequestedRef.current) {
       // Pill off mid-call: the guest half unmounts but the mic stays open and
       // starts auto-submitting to the AI. Do NOT close it inline - enqueue the
-      // ordinary stop, so this path gets the same flush and the same
-      // confirmation as meeting-ended.
+      // ordinary stop, so this path gets the same confirmation as
+      // meeting-ended.
       //
       // stopRequestedRef is a chain-length optimisation, not a correctness
       // guard: this effect has no dependency array and <Completion /> re-renders
@@ -194,14 +191,8 @@ export const useMeetingAutoRecord = ({
       // op runs enqueues another handleStop. Correctness comes from handleStop
       // nulling provenance, after which repeats decide "ignore".
       //
-      // THIS PATH FLUSHES TWICE IN PRODUCTION, and that is accepted rather than
-      // an oversight. setMeetingAssistMode's wrapper already flushes on the
-      // true->false transition (useCompletion.ts:481-485) and handleStop flushes
-      // again; the second sees unsavedCount <= 0 and resolves without writing.
-      // F55 measures ONE flush only because the harness owns meetingAssistMode
-      // and never runs that wrapper - so a green suite is NOT licence to delete
-      // either flush. The wrapper covers every other way the pill goes off; this
-      // one covers a stop that was never a pill move at all.
+      // The flush is not here: handleStop closes the mic, and the
+      // recording-stop edge in useCompletion flushes on that close.
       stopRequestedRef.current = true;
       enqueue(handleStop);
     }
@@ -522,8 +513,8 @@ export const useMeetingAutoRecord = ({
       if (action === "stop-meeting") {
         // Closing the mic IS the stop: AutoSpeechVad, useMeetingAudio and the
         // diarization buffer are all gated on enableVAD. Nothing here touches
-        // the transcribing pipeline's startCapture/stopCapture.
-        void flushRef.current?.().catch(reportFlushFailure);
+        // the transcribing pipeline's startCapture/stopCapture. The unsaved
+        // tail is flushed by the recording-stop edge in useCompletion.
         setEnableVADRef.current(false);
 
         const ok = await confirmMeetingStopped();

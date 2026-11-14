@@ -49,6 +49,8 @@ export const Input = ({
   keepEngaged,
   setKeepEngaged,
   setMeetingPanelHidden,
+  meetingTranscriptHidden,
+  setMeetingTranscriptHidden,
   enableVAD,
   quickActions,
   onQuickActionClick,
@@ -69,11 +71,14 @@ export const Input = ({
   // Show meeting transcript panel when:
   // - Meeting mode is ON
   // - Has transcripts
+  // - The stop did not hide them (hasContent and xHidesPanel below keep the
+  //   raw length: they guard reset(), which would drop the conversation)
   // - No AI response yet (once response comes, show normal view)
   // - Conversation mode is OFF (when ON, show conversation history instead)
   const showMeetingPanel =
     meetingAssistMode &&
     meetingTranscript.length > 0 &&
+    !meetingTranscriptHidden &&
     !response &&
     !keepEngaged &&
     !isLoading;
@@ -92,7 +97,10 @@ export const Input = ({
         open={isPopoverOpen}
         onOpenChange={(open) => {
           // Clicking the input brings back a panel the X hid.
-          if (open) setMeetingPanelHidden(false);
+          if (open) {
+            setMeetingPanelHidden(false);
+            setMeetingTranscriptHidden(false);
+          }
           // Only reset if popover is closing AND:
           // - Not loading
           // - Not in conversation mode

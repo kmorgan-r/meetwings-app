@@ -134,8 +134,9 @@ function renderLog(
       notionSourceRef,
       meetingTranscript: transcript,
       currentConversationId: conversationId,
-      // Off: no pill-off edge and no idle flush, so only endMeeting() triggers.
-      meetingAssistMode: false,
+      // Mic closed from mount: no recording-stop edge, so only endMeeting()
+      // triggers (the idle flush needs IDLE_FLUSH_MS of silence).
+      recording: false,
     })
   );
   return { ...view, notionPickedRef, notionSourceRef };

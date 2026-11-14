@@ -164,6 +164,10 @@ export const useCompletion = () => {
   // (issue #72). New transcript lines keep it hidden; the input, a new
   // request, or a new conversation shows it again.
   const [meetingPanelHidden, setMeetingPanelHidden] = useState(false);
+  // Set when the mic closes (the meeting is over), cleared when it opens again
+  // or the user reopens the panel. Hides the transcript panel only: an answer
+  // being read stays up.
+  const [meetingTranscriptHidden, setMeetingTranscriptHidden] = useState(false);
   // The model behind the answer in the panel. Only the panel's own requests
   // set it, so a background call (titles, translation) can't overwrite it.
   const [respondedModel, setRespondedModel] = useState<RespondedModel | null>(
@@ -563,9 +567,9 @@ export const useCompletion = () => {
     return autoSaveMeetingTranscript();
   }, [autoSaveMeetingTranscript]);
 
-  // Wraps the raw state setter so turning meeting mode off flushes any
-  // unsaved transcript segments first. Transition state lives in a ref because
-  // invoking persistence from a React state updater is unsafe in StrictMode.
+  // Wraps the raw state setter so the mode ref moves with the state. The
+  // transcript flush is not here: closing the mic is the meeting-end signal,
+  // and the recording-stop layout edge below owns it.
   const setMeetingAssistMode = useCallback<Dispatch<SetStateAction<boolean>>>(
     (value) => {
       const previous = meetingAssistModeRef.current;
@@ -576,14 +580,8 @@ export const useCompletion = () => {
 
       meetingAssistModeRef.current = next;
       setMeetingAssistModeState(next);
-
-      if (previous && !next) {
-        void flushUnsavedMeetingTranscript().catch((error) => {
-          console.error("Meeting-mode flush failed:", error);
-        });
-      }
     },
-    [flushUnsavedMeetingTranscript]
+    []
   );
 
   const setInput = useCallback((value: string) => {
@@ -1590,6 +1588,24 @@ export const useCompletion = () => {
     })().catch((err) => console.error("Meeting capture rollover failed:", err));
   }, [meetingCaptureActive, startNewConversation]);
 
+  // Recording stop = the meeting is over. A layout effect that compares before
+  // it assigns, seeded from the first render (no edge on mount): a stop and a
+  // start inside one commit leave prev === current and so are no edge. Placed
+  // after the capture-edge effect so the transcript length mirror (a layout
+  // effect) has already run in this commit when the flush reads it.
+  const prevRecordingRef = useRef(meetingCaptureActive);
+  useLayoutEffect(() => {
+    const prev = prevRecordingRef.current;
+    prevRecordingRef.current = meetingCaptureActive;
+    if (prev === meetingCaptureActive) return;
+    setMeetingTranscriptHidden(!meetingCaptureActive);
+    if (prev) {
+      void flushUnsavedMeetingTranscript().catch((e) =>
+        console.error("Recording-stop flush failed:", e)
+      );
+    }
+  }, [meetingCaptureActive, flushUnsavedMeetingTranscript]);
+
   const saveCurrentConversation = useCallback(
     async (
       userMessage: string,
@@ -2056,7 +2072,10 @@ export const useCompletion = () => {
   );
 
   // Check if meeting transcript should trigger popover
-  const hasMeetingTranscript = meetingAssistMode && meetingTranscript.length > 0;
+  const hasMeetingTranscript =
+    meetingAssistMode &&
+    meetingTranscript.length > 0 &&
+    !meetingTranscriptHidden;
 
   // Popover opens when there's content to show
   const isPopoverOpen =
@@ -2504,6 +2523,9 @@ export const useCompletion = () => {
     keepEngaged,
     setKeepEngaged,
     setMeetingPanelHidden,
+    recording: meetingCaptureActive,
+    meetingTranscriptHidden,
+    setMeetingTranscriptHidden,
     // Meeting Assist Mode
     meetingAssistMode,
     setMeetingAssistMode,

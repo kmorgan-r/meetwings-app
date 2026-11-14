@@ -147,7 +147,12 @@ export interface UseMeetingLogOptions {
   notionSourceRef?: RefObject<NotionPickSource>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
-  meetingAssistMode: boolean;
+  /**
+   * The mic is on (useCompletion's `recording`). Closing it is the meeting-end
+   * signal: the edge, the idle timer's arming and the unmount trigger all key
+   * on it.
+   */
+  recording: boolean;
   providerConfig?: ProviderConfig;
 }
 
@@ -166,7 +171,7 @@ export interface UseMeetingLogReturn {
  * meeting would push nothing.
  *
  * The owner gate is the `main` window label ALONE, with no isWindows(): the
- * pill-off trigger works where the Rust watcher never runs. Contrast
+ * recording-stop trigger works where the Rust watcher never runs. Contrast
  * useMeetingAutoRecord.ts:122, which gates on both because it drives the
  * Windows-only watcher.
  */
@@ -177,7 +182,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     notionSourceRef,
     meetingTranscript,
     currentConversationId,
-    meetingAssistMode,
+    recording,
   } = options;
 
   // Synchronous and stable. getCurrentWindow().label is read synchronously in
@@ -202,7 +207,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const transcriptRef = useRef(meetingTranscript);
   const conversationIdRef = useRef(currentConversationId);
   const providerConfigRef = useRef(options.providerConfig);
+  const recordingRef = useRef(recording);
   useLayoutEffect(() => {
+    recordingRef.current = recording;
     transcriptRef.current = meetingTranscript;
     conversationIdRef.current = currentConversationId;
     providerConfigRef.current = options.providerConfig;
@@ -566,7 +573,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // listen() returns a PROMISE of the unlisten fn. Under StrictMode the first
     // mount's listen() resolves AFTER the first cleanup ran, so without the
     // flag the second handler leaks permanently. See useOdooTarget.ts:346-364.
-    void listen("meeting-ended", () => void triggerRef.current()).then((fn) => {
+    // Only with the mic closed: while recording, the call is still on (a
+    // remount leaves the mic closed, and the trigger's DB union still writes
+    // the row).
+    void listen("meeting-ended", () => {
+      if (!recordingRef.current) void triggerRef.current();
+    }).then((fn) => {
       if (cancelled) fn();
       else un = fn;
     });
@@ -577,7 +589,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   }, [isOwner]);
 
   /**
-   * The pill-off edge. COMPARE BEFORE ASSIGN, in ONE layout effect.
+   * The recording-stop edge. COMPARE BEFORE ASSIGN, in ONE layout effect.
    *
    * Every other ref mirror in this repo is a write-only useLayoutEffect, so
    * this is spelled out deliberately: mirroring here and comparing in a passive
@@ -586,12 +598,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * silently remove the only trigger that works where the Rust watcher does not
    * run, i.e. all logging on macOS and Linux.
    */
-  const prevPillRef = useRef(meetingAssistMode);
+  const prevRecordingRef = useRef(recording);
   useLayoutEffect(() => {
-    const prev = prevPillRef.current;
-    prevPillRef.current = meetingAssistMode;
-    if (prev && !meetingAssistMode) void triggerRef.current();
-  }, [meetingAssistMode]);
+    const prev = prevRecordingRef.current;
+    prevRecordingRef.current = recording;
+    if (prev && !recording) void triggerRef.current();
+  }, [recording]);
 
   /**
    * When the newest thing anyone said arrived. 0 means nothing yet.
@@ -625,15 +637,15 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * cannot re-arm itself: one silence produces one trigger, not one every five
    * minutes for the rest of the session.
    *
-   * `newestEntryAt === 0` is the empty transcript. The pill is on by default
+   * `newestEntryAt === 0` is the empty transcript. The mic is closed by default
    * with no meeting under way, and arming there would fire a pointless trigger
    * every five minutes the app is open.
    */
   useEffect(() => {
-    if (!isOwner || !meetingAssistMode || newestEntryAt === 0) return;
+    if (!isOwner || recording || newestEntryAt === 0) return;
     const timer = setTimeout(() => void triggerRef.current(), IDLE_FLUSH_MS);
     return () => clearTimeout(timer);
-  }, [isOwner, meetingAssistMode, newestEntryAt]);
+  }, [isOwner, recording, newestEntryAt]);
 
   // App start - and ONCE PER PROCESS, not once per mount.
   //
@@ -761,6 +773,10 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   // Closes over the stable ref OBJECTS, not their values, so teardown reads
   // whatever the latest startHold wrote.
   useEffect(() => () => {
+    // Unmount closes the mic, so with it open this is a recording stop: no
+    // edge or meeting-ended follows inside the grace. A held row's push runs
+    // detached, so it survives the teardown.
+    if (recordingRef.current) void triggerRef.current();
     if (timerRef.current) clearTimeout(timerRef.current);
     if (blockedTimerRef.current) clearTimeout(blockedTimerRef.current);
   }, []);

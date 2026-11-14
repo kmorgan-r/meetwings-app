@@ -178,15 +178,17 @@ describe("useCompletion meeting assist mode", () => {
     vi.mocked(generateConversationId).mockReset();
   });
 
-  it("queues one transcript flush when StrictMode disables meeting assist", async () => {
+  it("queues one transcript flush when StrictMode closes the mic", async () => {
     const { result } = renderHook(() => useCompletion(), {
       wrapper: strictModeWrapper,
     });
 
     act(() => {
       result.current.setMeetingAssistMode(true);
+      result.current.setEnableVAD(true);
     });
     expect(result.current.meetingAssistMode).toBe(true);
+    expect(result.current.recording).toBe(true);
 
     act(() => {
       result.current.addMeetingTranscript("First segment");
@@ -194,7 +196,7 @@ describe("useCompletion meeting assist mode", () => {
     expect(result.current.meetingTranscript).toHaveLength(1);
 
     act(() => {
-      result.current.setMeetingAssistMode(false);
+      result.current.setEnableVAD(false);
     });
 
     await waitFor(() => {
@@ -1036,5 +1038,137 @@ describe("useCompletion meeting assist mode", () => {
 
     const lastAppend = vi.mocked(appendMessagesToConversation).mock.calls.at(-1);
     expect(lastAppend?.[1]).toBe(originalTitle);
+  });
+
+  describe("the recording stop", () => {
+    function micOn() {
+      const hook = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      act(() => {
+        hook.result.current.setMeetingAssistMode(true);
+        hook.result.current.setEnableVAD(true);
+      });
+      return hook;
+    }
+
+    it("closing the mic flushes the unsaved transcript once", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+      expect(saveConversation).not.toHaveBeenCalled();
+
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      await waitFor(() => expect(saveConversation).toHaveBeenCalledTimes(1));
+    });
+
+    it("mount is no edge", async () => {
+      renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      await act(async () => {});
+      expect(saveConversation).not.toHaveBeenCalled();
+    });
+
+    it("a stop and a start in one commit is no edge", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+
+      act(() => {
+        result.current.setEnableVAD(false);
+        result.current.setEnableVAD(true);
+      });
+      await act(async () => {});
+
+      expect(saveConversation).not.toHaveBeenCalled();
+      expect(result.current.meetingTranscriptHidden).toBe(false);
+    });
+
+    it("the stop hides the transcript only", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+      expect(result.current.isPopoverOpen).toBe(true);
+
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      expect(result.current.isPopoverOpen).toBe(false);
+      expect(result.current.meetingTranscriptHidden).toBe(true);
+      await waitFor(() => expect(saveConversation).toHaveBeenCalledTimes(1));
+    });
+
+    it("an answer being read survives a stop", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+        result.current.setResponse("answer");
+      });
+      expect(result.current.isPopoverOpen).toBe(true);
+
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      expect(result.current.isPopoverOpen).toBe(true);
+      await waitFor(() => expect(saveConversation).toHaveBeenCalledTimes(1));
+    });
+
+    it("a trailing line after the stop does not reopen the panel", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      act(() => {
+        result.current.addMeetingTranscript("Trailing", undefined, "microphone");
+      });
+
+      expect(result.current.isPopoverOpen).toBe(false);
+      await waitFor(() => expect(saveConversation).toHaveBeenCalled());
+    });
+
+    it("starting again clears the hide", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+      expect(result.current.meetingTranscriptHidden).toBe(true);
+
+      await act(async () => {
+        result.current.setEnableVAD(true);
+      });
+
+      expect(result.current.meetingTranscriptHidden).toBe(false);
+      expect(result.current.isPopoverOpen).toBe(true);
+    });
+
+    it("a stop starts no conversation", async () => {
+      const { result } = micOn();
+      act(() => {
+        result.current.addMeetingTranscript("One line", undefined, "microphone");
+      });
+      const id = result.current.currentConversationId;
+      const events = recordCaptureEvents();
+
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+      await waitFor(() => expect(saveConversation).toHaveBeenCalledTimes(1));
+
+      expect(events.seen).not.toContain("newConversationStarted");
+      expect(result.current.currentConversationId).toBe(id);
+      events.stop();
+    });
   });
 });
