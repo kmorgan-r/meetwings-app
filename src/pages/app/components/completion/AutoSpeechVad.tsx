@@ -11,6 +11,61 @@ import { useTranslation } from "@/hooks";
 import { isUsableTranscription } from "@/lib/functions/stt.function";
 import { toast } from "sonner";
 
+type OrtModule = Parameters<
+  NonNullable<Parameters<typeof useMicVAD>[0]["ortConfig"]>
+>[0];
+type OrtSession = Awaited<ReturnType<OrtModule["InferenceSession"]["create"]>>;
+
+let sharedCreate: unknown = null;
+
+/**
+ * Builds the VAD's onnxruntime session once and hands every later mount that
+ * same session.
+ *
+ * vad-web 0.0.24 builds a fresh session on every MicVAD.new()
+ * (models/legacy.js:43) and its destroy() never releases it
+ * (real-time-vad.js:110-120, 197-204). onnxruntime-web keeps each one alive in
+ * a module-level map (ort-web.js:26466) inside WebAssembly memory, which never
+ * shrinks, and onnxruntime-common 1.14 has no public release(). This component
+ * remounts on every enableVAD toggle and mic change, so each recording start
+ * used to leak a session for the life of the app.
+ *
+ * Sharing is safe: the silero model's recurrent state (h/c) lives on each
+ * SileroLegacy instance and is passed into every run(), never in the session.
+ * Stream and AudioContext teardown are untouched, so the mic still closes on
+ * every stop.
+ *
+ * `ortConfig` is the seam: vad-web calls it with its own `ort` right before
+ * each model build (real-time-vad.js:135-143), and vad-react forwards it.
+ *
+ * ponytail: keyed on model byte length and assumes vad-web's one call shape,
+ * create(ArrayBuffer). Nothing else in the renderer uses onnxruntime. Drop
+ * this when vad-web is upgraded to a release whose destroy() releases its
+ * session (0.0.31 does, but needs onnxruntime-web >=1.17 and changes the
+ * default thresholds).
+ */
+const shareVadSession = (ort: OrtModule) => {
+  const factory = ort.InferenceSession;
+  if (factory.create === sharedCreate) return;
+
+  const create = factory.create.bind(factory) as (
+    model: ArrayBuffer
+  ) => Promise<OrtSession>;
+  const sessions = new Map<number, Promise<OrtSession>>();
+  const shared = (model: ArrayBuffer) => {
+    let session = sessions.get(model.byteLength);
+    if (!session) {
+      session = create(model);
+      sessions.set(model.byteLength, session);
+      // A failed build (offline, wasm fetch) must not break every later start.
+      session.catch(() => sessions.delete(model.byteLength));
+    }
+    return session;
+  };
+  factory.create = shared as typeof factory.create;
+  sharedCreate = shared;
+};
+
 interface AutoSpeechVADProps {
   submit: UseCompletionReturn["submit"];
   setState: UseCompletionReturn["setState"];
@@ -44,6 +99,7 @@ const AutoSpeechVADInternal = ({
     userSpeakingThreshold: 0.6,
     startOnLoad: true,
     additionalAudioConstraints: audioConstraints,
+    ortConfig: shareVadSession,
     onSpeechEnd: async (audio) => {
       try {
         // convert float32array to blob
