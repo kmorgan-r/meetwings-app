@@ -75,32 +75,63 @@ signal.
     calls `setEnableVAD(false)` and confirms the stop like the `stop-meeting` path
     (`useMeetingAutoRecord.ts:522-536`). It is enqueued on the op chain
     (`useMeetingAutoRecord.ts:290-298`), never run directly. Flushing is left to G1's edge.
-  - **The row a grace stop cuts ends at the call's end**, not at the stop: its end is the
+  - **The row a grace stop cuts ends at the call's end**, not at the stop: its cap is the
     later of the `meeting-ended` time and the newest system-audio line's timestamp. Lines
-    after that (mic-only room talk during the grace) are consumed, not written, so they
-    never reach a customer-visible note (`src/lib/odoo/meeting-log.ts:116-118`) or the
-    next meeting's row. They stay in the conversation.
+    after the cap (mic-only room talk during the grace) are consumed, not written, so they
+    never reach a customer-visible note (`src/lib/odoo/meeting-log.ts:116-118`), the next
+    meeting's row, or a recovered row. They stay in the conversation.
+    - **Consumed for real:** the queue watermark is `MAX(transcript_end_at)`
+      (`meeting-log.ts:161-162`) and a written row sets no skip mark
+      (`useMeetingLog.ts:518-521`), while recovery reads only the queue watermark
+      (`meeting-log-recovery.ts:150-179`). So the capped row is written with
+      `transcript_end_at` = the consumed end (G4's definition: the newest timestamp the
+      trigger read), and only the lines up to the cap are rendered into it.
+    - **Channel:** `trigger` fires on G1's edge whoever stopped the mic, so it must learn
+      "this stop is a grace stop, cap at T". The grace stop sets that cap in a shared value
+      before `setEnableVAD(false)`, and the next trigger reads and clears it. The builder
+      picks the channel (a ref passed through `useCompletion`, or a small module store),
+      but it must be named in the plan and cleared on every trigger so a stale cap never
+      applies to a later stop.
 - **Cancelling and restarting the grace:**
   - A `meeting-detected` during the grace for the **same call** cancels the timer;
     recording continues with no interruption and no new "recording" card. (Detection drops
     out mid-call; 9-13 detection sessions have been measured in one call, and nobody has
     measured how long a dropout lasts.)
-  - **Same call** means the same `payload.process` (`useMeetingAutoRecord.ts:618-619`) and
-    the same current calendar event as at `meeting-ended` (both none counts as the same; an
-    unreadable calendar counts as the same). A detection that differs in either is a **new
-    call** (back-to-back calls usually start within 2 minutes): the grace ends at once,
-    the grace stop runs (cutting call A's row with A's targets), and the detection is
-    handled as a fresh one, enqueued behind that stop on the op chain, so it sees the mic
-    closed and starts a new recording with calendar auto-select as today.
+  - **Same call** means the same process and the same current calendar event as at
+    `meeting-ended`. A detection that differs in either is a **new call** (back-to-back
+    calls usually start within 2 minutes).
+    - **Process:** the `meeting-ended` handler gets no payload
+      (`useMeetingAutoRecord.ts:622-625`), so the process "at `meeting-ended`" is the last
+      `meeting-detected` payload's process (`:618-619`). Unknown (for example a call
+      already running at launch, `:100-101`) counts as the same call.
+    - **Current calendar event** at a moment: the event whose slot `[start, end)` contains
+      it, without the early-join allowance; if two do, the later-starting one; none if none.
+      Both none counts as the same; an unreadable calendar counts as the same.
+    - The same/new decision needs an async calendar read, so it runs as an op on the chain,
+      not inside the listener.
+    - **New call:** the grace stop runs at once, cutting call A's row (the edge trigger
+      snapshots A's targets synchronously, `useMeetingLog.ts:352-353`). Then, still before
+      B's start, a **new conversation starts**, which clears the targets
+      (`useCompletion.ts:1540-1541`, `completion/index.tsx:75-76`). Without it B would join
+      A's conversation, because the new-conversation rule is gap-based (30 min,
+      `useCompletion.ts:1544-1553`), and auto-select runs once per fresh meeting capture
+      (`completion/index.tsx:94-96`), so B's row could carry A's targets. This is a
+      new-call start action, not part of the stop, so G5's "targets survive every stop"
+      still holds for the stop itself. Then the detection is handled as a fresh one,
+      enqueued behind the stop, so it sees the mic closed and starts a new recording with
+      calendar auto-select as today. The new-call stop does not open the quiet-restart
+      window (it stops with `auto: false`, `meeting-cards.store.ts:163`), or B would take
+      the quiet branch (`:130-139`) and inherit A's card start time and event.
   - **Any new other-side transcript line (`audioSource === 'system'`) restarts the
     2-minute grace.** The call's far end only arrives via system audio, while room chatter
     only arrives via the mic, so a forgotten mic still stops 2 minutes after the far end
     goes quiet, but a detection dropout, a long self-mute, or a Meet call running past its
     calendar slot (which the Chrome gate will not re-detect, `src/lib/meeting-detect.ts:60-61`)
     does not cut a live call.
-  - "New" is counted by **arrival**, not by the entry's `timestamp`: entries are appended
-    with caller-supplied timestamps (`useCompletion.ts:644-649, 692-696`), so array order
-    and timestamps are not arrival order. Only system lines appended after the grace was
+  - "New" is counted by **arrival**, not by the entry's `timestamp`: some entries are
+    appended with caller-supplied timestamps (`useCompletion.ts:681-696`), so array order
+    and timestamps are not arrival order. System lines are appended at
+    `useCompletion.ts:784-817`. Only system lines appended after the grace was
     armed count; mic lines never restart it. `useMeetingAutoRecord` takes no transcript
     today (`useMeetingAutoRecord.ts:77-90`), so it gains an input for this (for example a
     layout-mirrored count or arrival stamp of system lines, so the effect is not re-run on
@@ -113,8 +144,9 @@ signal.
   cancel above, and on re-arm (a second `meeting-ended` never stacks timers). Its fire
   callback re-reads `enableVADRef` (no-op if the mic is already closed) and enqueues the
   stop. The queued stop re-checks a grace generation counter when it runs, so a
-  `meeting-detected` or system line arriving between the fire and the queued op still
-  cancels it. Under StrictMode double-mount there is exactly one live timer.
+  same-call detection (decided on the chain, above) or a system line arriving between the
+  fire and the queued op still cancels it. A new-call detection never cancels the stop: it
+  lets the stop run, then starts fresh. Under StrictMode double-mount there is exactly one live timer.
 - This replaces today's immediate stop on `meeting-ended` for auto-started recordings: all
   call-end stops wait the grace.
 - **Meeting-log triggers:**
@@ -168,9 +200,13 @@ signal.
   `endAt - startAt < 60_000` **or** it has fewer than 3 entries. Exactly 60 s, or exactly
   3 lines, is kept.
 - **Live trigger** (`useMeetingLog.ts` `trigger`, before `insertQueueRow`, for all of its
-  callers): a scrap writes no row and advances the skip watermark to the slice's consumed
-  end, as `skipUnwritten()` does (`useMeetingLog.ts:373-375, 420, 431-450`), so it is never
-  glued onto the next meeting's row. No "could not be queued" toast, no `insertQueueRow`,
+  callers): a scrap writes no row and advances the skip watermark to the **consumed end**,
+  so it is never glued onto the next meeting's row. The consumed end is the newest
+  timestamp across everything the trigger read: the in-memory snapshot plus the DB
+  recovery union, before any G2 cap. That is not what `skipUnwritten()` uses today
+  (`consumedTo` is the newest timestamp in the in-memory snapshot only,
+  `useMeetingLog.ts:372-375`); after a remount that snapshot is empty, and a scrap
+  recovered from the DB (`:430-450`) would never be consumed. No "could not be queued" toast, no `insertQueueRow`,
   no Outlook read for it. With G2's changes the live trigger only cuts at a real recording
   stop, a `meeting-ended` with the mic closed, or after the mic has been closed for 5
   minutes, so a short slice there is a genuine scrap (a mic opened and closed by accident,
@@ -205,8 +241,9 @@ signal.
   - `autoRecordingStopped` no longer arms the delayed ended card in either case: the
     notice replaces it for auto stops, and a user stop shows nothing. It keeps managing
     `active` and the quiet-restart window (`RESTART_QUIET_MS`) as today.
-  - `autoRecordingStarted` replaces a showing notice with the recording card, as it
-    replaces any card today.
+  - `autoRecordingStarted` replaces a showing notice with the recording card. Its quiet
+    branch (`meeting-cards.store.ts:130-139`) returns before `setCard` today, so it must
+    clear a showing stop notice itself.
   - An amber card keeps precedence: if one is showing, the notice is not shown (same rule
     as `:172`).
 - A user-initiated stop shows no notice.
@@ -326,8 +363,9 @@ Existing suites assert behaviour this removes, and must be updated, not deleted:
   timers and listeners must follow the same patterns (cancelled flags on async `listen`,
   cleanup on unmount, enqueue through the chain rather than calling capture commands
   directly).
-- The quiet-restart window in `meeting-cards.store.ts` (`RESTART_QUIET_MS`) exists for
-  auto stop -> re-detect; it should keep working, but with the grace it will rarely matter.
+- The quiet-restart window in `meeting-cards.store.ts` (`RESTART_QUIET_MS`, 120 s) exists
+  for auto stop -> re-detect of the same call; it keeps working for grace and silence
+  stops, and is skipped by the new-call stop (G2).
 - Tests: Vitest, scoped runs (full-suite has known flakes). Test files are not
   type-checked by `npm run type-check` (tsconfig excludes `src/tests`). Timers are tested
   with fake timers; layout claims are tested as the DOM contract in G6, not as geometry
@@ -359,8 +397,13 @@ Existing suites assert behaviour this removes, and must be updated, not deleted:
   another app (a video) after a call keeps a forgotten mic on until it goes quiet for 2
   minutes. Accepted risk.
 - A re-detect during the grace is the same call only if it is the same app and the same
-  calendar event; otherwise the first call's recording stops and a new one starts. Two
-  back-to-back calls in the same app with no calendar events still merge into one row.
+  calendar event; otherwise the first call's recording stops, a new conversation starts,
+  and a new recording starts. Residual cases, accepted:
+  - Two back-to-back calls in the same app with no calendar events still merge into one row.
+  - A call that ends early, with the next call joined before the first call's slot ends,
+    merges too (the calendar still says the first slot).
+  - A detection dropout straddling a slot boundary splits one overrunning call into two
+    rows.
 - A grace stop's row ends at the call's end; room talk during the grace is consumed, not
   logged.
 - `meeting-ended` stops firing the meeting-log trigger while recording (it still fires with
@@ -368,7 +411,10 @@ Existing suites assert behaviour this removes, and must be updated, not deleted:
 - Silence timer runs even during a detected call (15 min is above the longest measured
   in-call silence, 13 min); it cannot stop a forgotten mic in a talking room on its own.
 - Speech-to-text results still in flight at a stop are not added to the row just cut.
-- Startup recovery merges short segments into a neighbour instead of dropping them.
+- Startup recovery merges short segments into a neighbour instead of dropping them. A scrap
+  the live trigger skipped can therefore be merged into a later unlogged call's recovered
+  row (app killed mid-call). Accepted: recovered rows carry no targets until the user
+  picks one (`meeting-log-recovery.ts:86-92`).
 - Every stop hides the transcript only, not an AI answer the user is reading.
 - Manual Send-to-Odoo/Notion stays unfiltered.
 - The show-window shortcut also opens the Ask box (it shares Rust's event with Ctrl+Shift+I).
