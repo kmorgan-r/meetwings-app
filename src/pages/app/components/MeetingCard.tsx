@@ -64,7 +64,7 @@ function Chips({ event }: { event: CardEvent }) {
 const SHELL =
   "relative w-full overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg " +
   "transition-opacity duration-300 starting:opacity-0 " +
-  "motion-safe:animate-in motion-safe:slide-in-from-top-3";
+  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-3";
 
 function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recording" }>; compact: boolean }) {
   const elapsed = useElapsed(card.startedAt);
@@ -109,7 +109,6 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
     <div
       data-testid="meeting-card"
       data-kind="recording"
-      role="status"
       data-paused={paused ? "true" : "false"}
       className={cn(SHELL, "border-destructive/40 bg-gradient-to-br from-destructive/10 to-card")}
       style={{ height: cardHeight(card, compact) }}
@@ -121,7 +120,8 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
           <span className="flex items-center gap-1.5 font-bold tracking-wide text-destructive">
             <span aria-hidden="true" className="motion-safe:animate-pulse">◉</span> REC
           </span>
-          <span className="min-w-0 flex-1 truncate font-medium">
+          {/* The live region is the static headline only: the ticking timer stays outside it. */}
+          <span role="status" className="min-w-0 flex-1 truncate font-medium">
             {compact ? (event?.title ?? card.app) : `${card.app} · recording started`}
           </span>
           <span className="tabular-nums text-muted-foreground" data-testid="meeting-card-timer">

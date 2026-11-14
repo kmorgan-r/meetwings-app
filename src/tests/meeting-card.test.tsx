@@ -164,11 +164,35 @@ describe("MeetingCard", () => {
     expect(stop.parentElement?.className).toContain("justify-end");
   });
 
-  it("decorative glyphs are hidden from assistive tech and red and ended cards are status regions", () => {
+  it("glyphs are aria-hidden, and only static text is a live region", () => {
+    const hidden = (g: string) => screen.getByText(g).getAttribute("aria-hidden");
     render(<Harness />);
     run(() => void start());
-    expect(screen.getByTestId("meeting-card").getAttribute("role")).toBe("status");
+    expect(hidden("◉")).toBe("true");
     expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+    // Red card: the root is not a live region; the timer sits outside the one that exists.
+    expect(screen.getByTestId("meeting-card").getAttribute("role")).toBeNull();
+    const region = screen.getByRole("status");
+    expect(region.contains(screen.getByTestId("meeting-card-timer"))).toBe(false);
+    expect(region.textContent).toBe("Google Meet · recording started");
+    cleanup();
+    resetMeetingCardsForTests();
+
+    render(<Harness />);
+    run(() => showAmber({ variant: "offline", episode: 1 }));
+    expect(hidden("⚠")).toBe("true");
+    cleanup();
+    resetMeetingCardsForTests();
+
+    render(<Harness />);
+    run(() => {
+      start();
+      autoRecordingStopped();
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(screen.getByTestId("meeting-card").getAttribute("data-kind")).toBe("ended");
+    expect(screen.getByTestId("meeting-card").getAttribute("role")).toBe("status");
+    expect(hidden("✓")).toBe("true");
   });
 
   it("the ended card shows title and minutes, then leaves", () => {

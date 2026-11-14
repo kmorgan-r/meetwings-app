@@ -180,7 +180,8 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     {
         builder = builder.manage(shortcuts::WindowVisibility {
-            is_hidden: Mutex::new(false),
+            // Inverted flag: `true` means the bar is showing (see `reveal_overlay`).
+            is_hidden: Mutex::new(true),
         });
     }
     #[allow(unused_mut)]
