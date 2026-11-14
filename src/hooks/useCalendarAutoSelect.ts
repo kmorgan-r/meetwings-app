@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { isCalendarAutoSelectEnabled, planAutoSelect } from "@/lib/calendar/auto-select";
+import { pickCurrentMeeting } from "@/lib/calendar/current-meeting";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
+import { getActiveAutoRecording, setCardEvent } from "@/lib/meeting-cards.store";
 import type {
   CalendarParticipant,
   CreateContactResult,
@@ -86,6 +88,7 @@ export function useCalendarAutoSelect(inputs: AutoSelectInputs): void {
 
   useEffect(() => {
     const run = async () => {
+      const rec = getActiveAutoRecording();
       if (inFlight.current) return;
       inFlight.current = true;
       try {
@@ -96,6 +99,10 @@ export function useCalendarAutoSelect(inputs: AutoSelectInputs): void {
 
         const fetched = await fetchCurrentMeetings();
         if (fetched.kind !== "ok") return;
+        if (rec && !rec.gated) {
+          const pick = pickCurrentMeeting(fetched.events, Date.now());
+          if (pick.kind === "one") setCardEvent(rec.id, pick.event);
+        }
         const plan = planAutoSelect({
           events: fetched.events,
           ownAddress: fetched.ownAddress,

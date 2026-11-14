@@ -29,6 +29,15 @@ import { STORAGE_KEYS } from "@/config/constants";
 import { OUTLOOK_CHECK_TIMEOUT_MS } from "@/lib/calendar/auto-notion";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import type { CalendarEvent } from "@/types";
+import {
+  autoRecordingStarted,
+  autoRecordingStopped,
+  getActiveAutoRecording,
+  resetMeetingCardsForTests,
+} from "@/lib/meeting-cards.store";
+
+const startRecording = (gated: boolean) =>
+  autoRecordingStarted({ app: gated ? "Google Meet" : "Microsoft Teams", gated, stop: () => {} });
 
 const MIN = 60_000;
 
@@ -104,6 +113,7 @@ function savedKeys(): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMeetingCardsForTests();
   listeners.clear();
   saveCalendarSnapshot.mockReset();
   saveCalendarSnapshot.mockResolvedValue(undefined);
@@ -331,6 +341,62 @@ describe("useGoogleMeetingCapture", () => {
     expect(saveCalendarSnapshot).not.toHaveBeenCalled();
     expect(deleteCalendarSnapshot).toHaveBeenCalledTimes(2);
     expect(deleteCalendarSnapshot).toHaveBeenCalledWith("c1");
+  });
+});
+
+describe("useGoogleMeetingCapture card content", () => {
+  it("a gated auto recording gets the picked event", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    startRecording(true);
+    setup("c1");
+    await dispatch();
+    await settle();
+    expect(getActiveAutoRecording()?.event?.title).toBe("Meeting A");
+  });
+
+  it("several or no events leave the card empty", async () => {
+    startRecording(true);
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(several);
+    await dispatch();
+    await settle();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(none);
+    await dispatch();
+    await settle();
+    expect(getActiveAutoRecording()?.event).toBeNull();
+  });
+
+  it("no auto recording publishes nothing", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    setup("c1");
+    await dispatch();
+    await settle();
+    expect(getActiveAutoRecording()).toBeNull();
+  });
+
+  it("a Teams auto recording gets no Google event", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValue(one("A"));
+    startRecording(false);
+    setup("c1");
+    await dispatch();
+    await settle();
+    expect(getActiveAutoRecording()?.event).toBeNull();
+  });
+
+  it("a result that lands after the recording stopped publishes nothing", async () => {
+    const d = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
+    startRecording(true);
+    setup("c1");
+    await dispatch();
+    autoRecordingStopped();
+    // A newer recording must not inherit the older read's event either.
+    startRecording(true);
+    await act(async () => {
+      d.resolve(one("A"));
+    });
+    await settle();
+    expect(getActiveAutoRecording()?.event).toBeNull();
   });
 });
 
