@@ -24,6 +24,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel }),
 }));
 vi.mock("@/lib/platform", () => ({ isWindows: () => onWindows }));
+vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
+  ...(await importActual<Record<string, unknown>>()),
+  loadGoogleConfigState: vi.fn(),
+}));
 
 // vi.hoisted is mandatory: vi.mock is hoisted above the imports, so a factory
 // that dereferences a plain `const toast` declared below runs while that binding
@@ -59,6 +63,14 @@ vi.mock("@/lib", async (importOriginal) => {
 
 import { useMeetingDetection } from "@/hooks/useMeetingDetection";
 import { MEETING_DETECT_PROCESSES, STORAGE_KEYS } from "@/config/constants";
+import {
+  GOOGLE_CONNECTION_CHANGED_EVENT,
+  loadGoogleConfigState,
+} from "@/lib/storage/google-config.storage";
+
+const loadState = vi.mocked(loadGoogleConfigState);
+const cmdCount = (cmd: string) =>
+  invoke.mock.calls.filter(([c]) => c === cmd).length;
 
 const DETECTION_EVENTS = [
   "meeting-detected",
@@ -102,6 +114,7 @@ beforeEach(() => {
   listen.mockImplementation(registerImmediately);
   invoke.mockResolvedValue(undefined);
   emit.mockResolvedValue(undefined);
+  loadState.mockResolvedValue({ state: "absent", config: null } as never);
   windowLabel = "main";
   onWindows = true;
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
@@ -501,6 +514,81 @@ describe("useMeetingDetection", () => {
     fire("meeting-detected", { process: "unknown.exe" });
     expect(toast.info.mock.calls[0][0]).toContain("Meeting call detected");
     expect(toast.info.mock.calls[0][0]).not.toContain("undefined");
+  });
+
+  it("starts with Chrome gated once Google is set up", async () => {
+    for (const state of ["complete", "unreadable"]) {
+      listeners.clear();
+      vi.clearAllMocks();
+      listen.mockImplementation(registerImmediately);
+      invoke.mockResolvedValue(undefined);
+      emit.mockResolvedValue(undefined);
+      loadState.mockResolvedValue({ state, config: null } as never);
+      const { unmount } = renderHook(() => useMeetingDetection());
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
+          direct: MEETING_DETECT_PROCESSES,
+          gated: ["chrome.exe"],
+        })
+      );
+      unmount();
+    }
+  });
+
+  it("a connection change updates the lists in place", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+    loadState.mockResolvedValue({ state: "complete", config: null } as never);
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("update_meeting_watch_lists", {
+        direct: MEETING_DETECT_PROCESSES,
+        gated: ["chrome.exe"],
+      })
+    );
+    expect(cmdCount("update_meeting_watch_lists")).toBe(1);
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+    expect(cmdCount("stop_meeting_watcher")).toBe(0);
+  });
+
+  it("no list update while auto-record is off", async () => {
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "false" };
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await flush();
+    await flush();
+    expect(cmdCount("update_meeting_watch_lists")).toBe(0);
+  });
+
+  it("the list update waits behind an in-flight watcher command", async () => {
+    let releaseStart: () => void = () => {};
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "start_meeting_watcher") {
+        await new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        });
+      }
+      return undefined;
+    });
+
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await flush();
+    await flush();
+    expect(cmdCount("update_meeting_watch_lists")).toBe(0);
+
+    await act(async () => {
+      releaseStart();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(cmdCount("update_meeting_watch_lists")).toBe(1));
   });
 
   // F33 - the end payload carries the process, so a reload cannot orphan the label

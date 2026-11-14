@@ -5,17 +5,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
 import { isWindows } from "@/lib/platform";
-import {
-  MEETING_DETECT_FALLBACK_LABEL,
-  MEETING_DETECT_LABELS,
-  MEETING_DETECT_PROCESSES,
-  STOP_TIMED_OUT,
-  STORAGE_KEYS,
-} from "@/config/constants";
-
-const label = (process?: string) =>
-  (process && MEETING_DETECT_LABELS[process.toLowerCase()]) ||
-  MEETING_DETECT_FALLBACK_LABEL;
+import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
+import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
+import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 
 const readSetting = () =>
   safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) === "true";
@@ -91,8 +83,10 @@ export const useMeetingDetection = () => {
     return chainRef.current;
   };
 
-  const startWatcher = () =>
-    invoke("start_meeting_watcher", { direct: MEETING_DETECT_PROCESSES, gated: [] });
+  // Always called inside an enqueued op: the lists are read from secure storage
+  // asynchronously, so computing them before enqueueing could go stale.
+  const startWatcher = async () =>
+    invoke("start_meeting_watcher", { ...(await currentWatchLists()) });
 
   // Effect 1: the setting and retry channels. Mount-only - putting the setting
   // listener in the [enabled] effect means the first toggle-on is never received,
@@ -177,11 +171,22 @@ export const useMeetingDetection = () => {
 
     Promise.all([
       register("meeting-detected", (payload) => {
-        toast.info(`${label(payload?.process)} call detected`);
+        toast.info(`${meetingLabel(payload?.process)} call detected`);
       }),
 
       register("meeting-ended", (payload) => {
-        toast.info(`${label(payload?.process)} call ended`);
+        toast.info(`${meetingLabel(payload?.process)} call ended`);
+      }),
+
+      // Updates the lists in place; never starts or stops. Rust ignores it when
+      // no watcher is running.
+      register(GOOGLE_CONNECTION_CHANGED_EVENT, () => {
+        enqueue(async () => {
+          if (!enabledRef.current) return;
+          await invoke("update_meeting_watch_lists", {
+            ...(await currentWatchLists()),
+          });
+        });
       }),
 
       register("meeting-watcher-error", (payload) => {
