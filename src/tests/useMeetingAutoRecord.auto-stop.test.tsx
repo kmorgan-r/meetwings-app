@@ -452,9 +452,13 @@ describe("useMeetingAutoRecord - silence stop", () => {
     seedStatus([false]);
     const h = mount(makeAudio(), { lines: 5 });
     await flush();
+    const openAt = Date.now();
     await h.setMicOpen(true);
 
     await stopped(h);
+
+    // Not at once: old lines must not read as "already silent for 15 min".
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(openAt + SILENCE);
   });
 
   it("editing an entry in place is not an arrival", async () => {
