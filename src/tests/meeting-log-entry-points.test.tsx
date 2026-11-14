@@ -245,7 +245,8 @@ function renderLog(opts: { targets?: SelectedTargets; picked?: boolean; recordin
       return useMeetingLog({
         targetRef,
         notionPickedRef,
-        meetingTranscript: [said(1000)],
+        // A real meeting (3 lines over 60 s), not a scrap.
+        meetingTranscript: [said(1000), said(31000), said(61000)],
         currentConversationId: "conv-1",
         recording: props.recording,
       });
@@ -538,7 +539,7 @@ describe("the hook: who sends where", () => {
     const deps = scheduler.ensureNotionScheduler.mock.calls[0][0] as {
       liveLastLineAt: (c: string) => number | null;
     };
-    expect(deps.liveLastLineAt("conv-1")).toBe(1000);
+    expect(deps.liveLastLineAt("conv-1")).toBe(61000);
     expect(deps.liveLastLineAt("other")).toBeNull();
   });
 

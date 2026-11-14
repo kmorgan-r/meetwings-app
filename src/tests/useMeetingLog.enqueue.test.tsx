@@ -130,6 +130,7 @@ import { resetMeetingLogSweepGuard, resetOrphanSweepGuard, useMeetingLog } from 
 // mocked here, so the real single-flight latch stays under test.
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
 import { IDLE_FLUSH_MS } from "@/lib/odoo/meeting-log";
+import { setRecordingStopCap, takeRecordingStopCap } from "@/lib/recording-stop-cap";
 import type { SelectedTargets, TranscriptEntry } from "@/types";
 
 const CONFIG = { url: "http://h:8069", db: "odoo", login: "me@x.io", apiKey: "sk-secret" };
@@ -157,7 +158,7 @@ const DEFAULT_TARGETS: SelectedTargets = [{ model: "res.partner", resId: 42, nam
  * conversation id anywhere) could not be expressed at all.
  */
 function render(initial: Record<string, unknown> = {}) {
-  const props0 = { meetingTranscript: [entry(1000)], ...initial };
+  const props0 = { meetingTranscript: MEETING, ...initial };
   return renderHook(
     (props: Record<string, unknown>) => {
       const targets = ("targets" in props ? props.targets : DEFAULT_TARGETS) as SelectedTargets;
@@ -215,6 +216,7 @@ beforeEach(() => {
   // leak into the next in file order.
   watermarkStorage.state.skip = 0;
   conversationStorage.state.id = null;
+  setRecordingStopCap(null);
   listen.mockImplementation(async (name: string, handler: (e: unknown) => void) => {
     listeners.set(name, handler);
     // Models real deregistration. A bare `unlisten` spy that left the handler
@@ -265,7 +267,7 @@ describe("the meeting-ended trigger", () => {
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
       status: "held",
       transcriptStartAt: 1000,
-      transcriptEndAt: 1000,
+      transcriptEndAt: 61000,
       targets: [{ model: "res.partner", resId: 42, name: null }],
     });
   });
@@ -276,7 +278,7 @@ describe("the meeting-ended trigger", () => {
     // bakes it into the closure and passes against the broken implementation.
     const { rerender } = render({ meetingTranscript: [] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
-    rerender({ meetingTranscript: [entry(1000, "said after mount")] });
+    rerender({ meetingTranscript: [entry(1000, "said after mount"), entry(31000), entry(61000)] });
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     expect(action.insertQueueRow.mock.calls[0][0].transcript).toContain("said after mount");
@@ -284,7 +286,14 @@ describe("the meeting-ended trigger", () => {
 
   it("slices above the watermark, so a second meeting is its own row", async () => {
     action.getTranscriptWatermark.mockResolvedValue(1000);
-    render({ meetingTranscript: [entry(1000, "meeting one"), entry(9000, "meeting two")] });
+    render({
+      meetingTranscript: [
+        entry(1000, "meeting one"),
+        entry(9000, "meeting two"),
+        entry(40000),
+        entry(70000),
+      ],
+    });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
@@ -371,10 +380,10 @@ describe("the recording-stop trigger", () => {
     // count, not a row count: the watermark and UNIQUE(session_key) dedup rows
     // and would hide a leak entirely.
     const { rerender } = render({ recording: true });
-    rerender({ meetingTranscript: [entry(1000)], recording: false });
+    rerender({ meetingTranscript: MEETING, recording: false });
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     for (let i = 0; i < 5; i++) {
-      rerender({ meetingTranscript: [entry(1000)], recording: false });
+      rerender({ meetingTranscript: MEETING, recording: false });
     }
     await vi.advanceTimersByTimeAsync(10);
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
@@ -456,7 +465,7 @@ describe("the idle-flush trigger", () => {
     // mount. Without the rearm, every meeting longer than the window is split.
     const { rerender } = render();
     await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS - 1000);
-    rerender({ meetingTranscript: [entry(1000), entry(2000, "still talking")] });
+    rerender({ meetingTranscript: [...MEETING, entry(62000, "still talking")] });
     await vi.advanceTimersByTimeAsync(2000);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(IDLE_FLUSH_MS);
@@ -517,7 +526,9 @@ describe("the in-flight latch", () => {
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
 
     action.getTranscriptWatermark.mockResolvedValue(1000);
-    rerender({ meetingTranscript: [entry(1000), entry(9000, "second meeting")] });
+    rerender({
+      meetingTranscript: [entry(1000), entry(9000, "second meeting"), entry(40000), entry(70000)],
+    });
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
   });
@@ -530,7 +541,7 @@ describe("the in-flight latch", () => {
     await vi.advanceTimersByTimeAsync(10);
 
     action.getTranscriptWatermark.mockResolvedValue(0);
-    rerender({ meetingTranscript: [entry(9000)] });
+    rerender({ meetingTranscript: [entry(9000), entry(40000), entry(70000)] });
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
   });
@@ -560,7 +571,11 @@ describe("the messages fallback", () => {
     // fixture below that floor would be recovering a span the fix is
     // supposed to exclude, which is not what THIS test is checking.
     const recoveredAt = Date.now() + 10_000;
-    action.readMeetingMessages.mockResolvedValue([entry(recoveredAt, "said before the remount")]);
+    action.readMeetingMessages.mockResolvedValue([
+      entry(recoveredAt, "said before the remount"),
+      entry(recoveredAt + 30_000),
+      entry(recoveredAt + 60_000),
+    ]);
     render({ meetingTranscript: [] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
@@ -578,18 +593,18 @@ describe("the messages fallback", () => {
     // "recovery found something", not the containment this fix adds.
     const base = Date.now() + 10_000;
     action.readMeetingMessages.mockResolvedValue([entry(base, "before"), entry(base + 2000, "dup")]);
-    render({ meetingTranscript: [entry(base + 2000, "dup"), entry(base + 4000, "after")] });
+    render({ meetingTranscript: [entry(base + 2000, "dup"), entry(base + 61_000, "after")] });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
     const row = action.insertQueueRow.mock.calls[0][0];
     expect(row.transcriptStartAt).toBe(base);
-    expect(row.transcriptEndAt).toBe(base + 4000);
+    expect(row.transcriptEndAt).toBe(base + 61_000);
     expect(row.transcript.match(/dup/g)).toHaveLength(1);
   });
 
   it("issues NO fallback read when there is no conversation id anywhere", async () => {
-    render({ currentConversationId: null, meetingTranscript: [entry(1000)] });
+    render({ currentConversationId: null, meetingTranscript: MEETING });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalled());
@@ -744,13 +759,22 @@ describe("the skip watermark", () => {
     // meeting one's entries too - one customer's transcript, posted as a
     // chatter note on whichever contact is selected for the NEXT meeting.
     action.insertQueueRow.mockRejectedValueOnce(new Error("db down"));
-    const { rerender } = render({ meetingTranscript: [entry(1000, "meeting one")] });
+    const { rerender } = render({
+      meetingTranscript: [entry(1000, "meeting one"), entry(31000), entry(61000)],
+    });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
 
     rerender({
-      meetingTranscript: [entry(1000, "meeting one"), entry(9000, "meeting two")],
+      meetingTranscript: [
+        entry(1000, "meeting one"),
+        entry(31000),
+        entry(61000),
+        entry(70000, "meeting two"),
+        entry(100000),
+        entry(131000),
+      ],
     });
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
@@ -758,7 +782,7 @@ describe("the skip watermark", () => {
     const secondRow = action.insertQueueRow.mock.calls[1][0];
     expect(secondRow.transcript).toContain("meeting two");
     expect(secondRow.transcript).not.toContain("meeting one");
-    expect(secondRow.transcriptStartAt).toBe(9000);
+    expect(secondRow.transcriptStartAt).toBe(70000);
   });
 });
 
@@ -802,14 +826,14 @@ describe("session-key remount stability", () => {
     // DIFFERENT session keys for the SAME meeting - "c1:1000" vs "1000" -
     // so ON CONFLICT(session_key) DO NOTHING never catches the duplicate and
     // two `held` rows get written for one meeting.
-    const first = render({ currentConversationId: "c1", meetingTranscript: [entry(1000)] });
+    const first = render({ currentConversationId: "c1", meetingTranscript: MEETING });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
     first.unmount();
 
     conversationStorage.state.id = "c1";
-    render({ currentConversationId: null, meetingTranscript: [entry(1000)] });
+    render({ currentConversationId: null, meetingTranscript: MEETING });
     await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
     fireMeetingEnded();
     await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
@@ -865,7 +889,11 @@ describe("the recovery floor", () => {
     // remount the floor is not supposed to touch.
     const afterStart = Date.now() + 10_000;
     action.readMeetingMessages.mockImplementation(async (_id: string, wm: number) =>
-      [entry(afterStart, "said after this process started")].filter((e) => e.timestamp > wm)
+      [
+        entry(afterStart, "said after this process started"),
+        entry(afterStart + 30_000),
+        entry(afterStart + 60_000),
+      ].filter((e) => e.timestamp > wm)
     );
     conversationStorage.state.id = "c1";
     render({ currentConversationId: null, meetingTranscript: [] });
@@ -875,5 +903,119 @@ describe("the recovery floor", () => {
     expect(action.insertQueueRow.mock.calls[0][0].transcript).toContain(
       "said after this process started"
     );
+  });
+});
+
+// --- Scraps and grace-stop caps -----------------------------------------
+
+function sys(timestamp: number, original = "from the call"): TranscriptEntry {
+  return { original, timestamp, audioSource: "system" };
+}
+function mic(timestamp: number, original = "room talk"): TranscriptEntry {
+  return { original, timestamp, audioSource: "microphone" };
+}
+
+describe("scraps", () => {
+  it("a 2-line slice writes no row and skip-marks its end", async () => {
+    render({ meetingTranscript: [entry(1000), entry(2000)] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+    expect(watermarkStorage.getSkipWatermark()).toBe(2000);
+  });
+
+  it("59 s of 5 lines is a scrap; 60 s of 3 lines is a row", async () => {
+    const short = render({
+      meetingTranscript: [entry(1000), entry(10000), entry(20000), entry(30000), entry(60000)],
+    });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    short.unmount();
+
+    watermarkStorage.state.skip = 0;
+    listeners.clear();
+    render({ meetingTranscript: [entry(1000), entry(30000), entry(61000)] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+  });
+
+  it("a scrap recovered from the DB after a remount is consumed", async () => {
+    const at = Date.now() + 10_000;
+    action.readMeetingMessages.mockResolvedValue([entry(at), entry(at + 1000)]);
+    render({ meetingTranscript: [] });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    fireMeetingEnded();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    expect(watermarkStorage.getSkipWatermark()).toBe(at + 1000);
+  });
+});
+
+describe("a grace stop caps the row at the call's end", () => {
+  const T = 100_000;
+
+  function stopWith(transcript: TranscriptEntry[]) {
+    const { rerender } = render({ recording: true, meetingTranscript: transcript });
+    setRecordingStopCap(T);
+    rerender({ meetingTranscript: transcript, recording: false });
+  }
+
+  it("a grace stop's row ends at the call", async () => {
+    stopWith([sys(10_000, "c1"), mic(30_000, "m1"), sys(95_000, "c2"), mic(130_000, "room1"), mic(190_000, "room2")]);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    const row = action.insertQueueRow.mock.calls[0][0];
+    expect(row.transcript).toContain("c2");
+    expect(row.transcript).not.toContain("room1");
+    expect(row.transcript).not.toContain("room2");
+    expect(row.transcriptStartAt).toBe(10_000);
+    expect(row.transcriptEndAt).toBe(190_000);
+  });
+
+  it("the cap follows a later system line", async () => {
+    stopWith([
+      sys(10_000, "c1"), mic(30_000, "m1"), sys(95_000, "c2"), sys(130_000, "late call line"), mic(160_000, "room1"),
+    ]);
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    const row = action.insertQueueRow.mock.calls[0][0];
+    expect(row.transcript).toContain("late call line");
+    expect(row.transcript).not.toContain("room1");
+    expect(row.transcriptEndAt).toBe(160_000);
+  });
+
+  it("a capped slice that is a scrap writes no row and consumes the room talk", async () => {
+    stopWith([sys(10_000), sys(95_000), mic(150_000)]);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    expect(watermarkStorage.getSkipWatermark()).toBe(150_000);
+  });
+
+  it("the cap is cleared by every trigger", async () => {
+    let release: (v: unknown) => void = () => {};
+    config.loadOdooConfigState.mockImplementationOnce(
+      () => new Promise((r) => (release = r))
+    );
+    const { rerender } = render({ recording: true, meetingTranscript: MEETING });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    rerender({ meetingTranscript: MEETING, recording: false }); // trigger 1, held in flight
+    setRecordingStopCap(70_000);
+    fireMeetingEnded(); // trigger 2: dropped by the latch, but clears the cap
+    release({ state: "complete", config: CONFIG });
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(50);
+
+    action.getTranscriptWatermark.mockResolvedValue(61_000);
+    const later = [...MEETING, mic(130_000, "after1"), mic(160_000, "after2"), mic(190_000, "after3")];
+    rerender({ meetingTranscript: later, recording: false });
+    fireMeetingEnded();
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(2));
+    const row = action.insertQueueRow.mock.calls[1][0];
+    expect(row.transcript).toContain("after1");
+    expect(row.transcript).toContain("after3");
+    expect(takeRecordingStopCap()).toBeNull();
   });
 });

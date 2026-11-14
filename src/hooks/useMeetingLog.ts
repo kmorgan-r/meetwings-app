@@ -29,6 +29,7 @@ import {
   HOLD_MS,
   IDLE_FLUSH_MS,
   UNDO_BLOCKED_MS,
+  isScrap,
   renderTranscript,
   sessionKeyFor,
   sliceTranscript,
@@ -36,6 +37,7 @@ import {
 import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
 import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
+import { takeRecordingStopCap } from "@/lib/recording-stop-cap";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
@@ -349,6 +351,11 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const trigger = useCallback(async () => {
     // The owner gate stays FIRST: a non-owner must never set pendingRef.
     if (!isOwner) return;
+    // Taken BEFORE the latch so EVERY trigger clears it, including one the
+    // latch drops: a stale cap must never reach a later, unrelated row. The
+    // accepted cost is a grace stop landing while an earlier trigger is still
+    // in flight (that one must run over 2 minutes for the two to meet).
+    const capEndedAt = takeRecordingStopCap();
     if (inFlightRef.current) {
       if (checkingRef.current) pendingRef.current = true;
       return;
@@ -376,7 +383,10 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // transcript as a chatter note on whatever contact is selected for the
     // NEXT one. `skipUnwritten` closes that gap on every exit that reaches
     // it - see meeting-log-watermark.storage.ts.
-    const consumedTo = entries.length ? Math.max(...entries.map((e) => e.timestamp)) : 0;
+    // `let`: widened below once the recovery union is known, and read by
+    // `skipUnwritten` at call time. Every exit before that keeps the
+    // snapshot-only end, as before.
+    let consumedTo = entries.length ? Math.max(...entries.map((e) => e.timestamp)) : 0;
     const skipUnwritten = () => {
       if (consumedTo > 0) setSkipWatermark(consumedTo);
     };
@@ -454,8 +464,33 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         }
       }
 
+      // The recovered entries were read too, so they are consumed whether or
+      // not they are written (a scrap, or the room talk a cap drops below).
+      for (const e of all) consumedTo = Math.max(consumedTo, e.timestamp);
+
       const slice = sliceTranscript(all, watermark);
       if (!slice) return; // a genuinely silent meeting is not a meeting
+
+      // A call-end grace stop writes only what belongs to the call: up to its
+      // end, or the newest system line if the call outran the signal. The
+      // room talk after it is consumed (consumedTo), never put in the
+      // customer's note.
+      let written: typeof slice | null = slice;
+      if (capEndedAt !== null) {
+        let cap = capEndedAt;
+        for (const e of slice.entries) {
+          if (e.audioSource === "system" && e.timestamp > cap) cap = e.timestamp;
+        }
+        written = sliceTranscript(
+          slice.entries.filter((e) => e.timestamp <= cap),
+          watermark
+        );
+      }
+      // A scrap is too short to be a meeting: no row, no toast, no Outlook read.
+      if (!written || isScrap(written)) {
+        skipUnwritten();
+        return;
+      }
 
       // The window rule and check 2 (spec 8.3): an AUTO tick is held only for a
       // row inside the saved Google event with no Outlook meeting over it. Any
@@ -465,7 +500,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         checkingRef.current = true;
         try {
           allowed = await autoNotionAllowed({
-            span: { start: slice.startAt, end: slice.endAt },
+            span: { start: written.startAt, end: written.endAt },
             snapshot: recoveryId ? await getCalendarSnapshot(recoveryId) : null,
             outlookAbsent: (await loadGraphConfigState()).state === "absent",
             readOutlook: fetchMeetingsBetween,
@@ -503,20 +538,22 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // session keys, so ON CONFLICT(session_key) DO NOTHING never catches
         // the duplicate and two `held` rows get written for it. Keying both
         // on recoveryId makes them collide as intended. This cannot falsely
-        // collide two DIFFERENT meetings: slice.startAt is always strictly
+        // collide two DIFFERENT meetings: written.startAt is always strictly
         // above the watermark, and every already-stored row's
         // transcript_start_at <= transcript_end_at <= that same watermark.
-        sessionKey: sessionKeyFor(recoveryId, slice.startAt),
+        sessionKey: sessionKeyFor(recoveryId, written.startAt),
         // Stored as recoveryId too - the fallback path used to persist NULL
         // here even when it had just recovered the conversation via
         // getActiveConversationId(), losing the link slice 3 needs.
         conversationId: recoveryId,
         instance,
         targets: rowTargets,
-        transcript: renderTranscript(slice.entries),
-        transcriptStartAt: slice.startAt,
-        transcriptEndAt: slice.endAt,
-        meetingStartedAt: slice.startAt,
+        transcript: renderTranscript(written.entries),
+        transcriptStartAt: written.startAt,
+        // The consumed end, so a capped row's span covers the room talk too
+        // (equal to slice.endAt when uncapped).
+        transcriptEndAt: consumedTo,
+        meetingStartedAt: written.startAt,
         status: decision.odooStatus,
         notionStatus: decision.notionStatus,
         createdAt: Date.now(),

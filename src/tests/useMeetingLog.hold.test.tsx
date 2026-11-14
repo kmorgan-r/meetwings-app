@@ -148,7 +148,8 @@ const DEFAULT_TARGETS: SelectedTargets = [{ model: "res.partner", resId: 42, nam
  * conversation id anywhere) could not be expressed at all.
  */
 function render(initial: Record<string, unknown> = {}) {
-  const props0 = { meetingTranscript: [entry(1000)], ...initial };
+  // A real meeting (3 lines over 60 s), not a scrap.
+  const props0 = { meetingTranscript: [entry(1000), entry(31000), entry(61000)], ...initial };
   return renderHook(
     (props: Record<string, unknown>) => {
       const targets = ("targets" in props ? props.targets : DEFAULT_TARGETS) as SelectedTargets;
@@ -377,7 +378,9 @@ describe("two meetings inside one hold window", () => {
       "row-2" as `${string}-${string}-${string}-${string}-${string}`
     );
     action.getTranscriptWatermark.mockResolvedValue(1000);
-    rerender({ meetingTranscript: [entry(1000), entry(9000, "second meeting")] });
+    rerender({
+      meetingTranscript: [entry(1000), entry(9000, "second meeting"), entry(40000), entry(70000)],
+    });
     fireMeetingEnded();
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
     expect(push.pushQueuedRow.mock.calls[0][0]).toMatchObject({ id: "row-1" });

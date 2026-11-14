@@ -112,7 +112,7 @@ function said(timestamp: number): TranscriptEntry {
   return { original: "hello", timestamp, audioSource: "microphone" };
 }
 
-/** Odoo complete, Notion ticked automatically, one contact, a 1000-4000 row. */
+/** Odoo complete, Notion ticked automatically, one contact, a 1000-61000 row. */
 function renderLog(
   opts: {
     targets?: SelectedTargets;
@@ -125,7 +125,7 @@ function renderLog(
   const targetRef = { current: opts.targets ?? ONE_TARGET };
   const notionPickedRef = { current: true };
   const notionSourceRef: { current: NotionPickSource } = { current: opts.source ?? "auto" };
-  const transcript = opts.transcript ?? [said(1000), said(4000)];
+  const transcript = opts.transcript ?? [said(1000), said(31000), said(61000)];
   const conversationId = opts.conversationId === undefined ? "conv-1" : opts.conversationId;
   const view = renderHook(() =>
     useMeetingLog({
@@ -245,6 +245,18 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     expect(rows()[0]).toMatchObject({ status: "held", notionStatus: "held" });
   });
 
+  it("a scrap reads no Outlook and writes no row", async () => {
+    renderLog({ transcript: [said(1000), said(2000)] });
+    await listening();
+    endMeeting();
+
+    await settle();
+    expect(queue.insertQueueRow).not.toHaveBeenCalled();
+    expect(check.autoNotionAllowed).not.toHaveBeenCalled();
+    expect(snapshots.getCalendarSnapshot).not.toHaveBeenCalled();
+    expect(skipMark.value).toBe(2000);
+  });
+
   it("a toggle mid-check does not change the enqueued row", async () => {
     const gate = deferred<boolean>();
     check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
@@ -328,14 +340,14 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     "check 2 is called with the row's span, the conversation's snapshot and the Outlook config state (%s)",
     async (_name, graphState, outlookAbsent) => {
       graph.loadGraphConfigState.mockResolvedValue(graphState);
-      renderLog({ transcript: [said(4000), said(1000), said(2500)] });
+      renderLog({ transcript: [said(61000), said(1000), said(31000)] });
       await listening();
       endMeeting();
 
       await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
       expect(snapshots.getCalendarSnapshot).toHaveBeenCalledWith("conv-1");
       expect(check.autoNotionAllowed).toHaveBeenCalledWith({
-        span: { start: 1000, end: 4000 },
+        span: { start: 1000, end: 61000 },
         snapshot: SNAPSHOT,
         outlookAbsent,
         // The span read, NOT fetchCurrentMeetings' now-relative one.
