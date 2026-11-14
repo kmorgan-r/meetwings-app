@@ -4,10 +4,25 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { Switch, Label, Header, Button } from "@/components";
 import { safeLocalStorage } from "@/lib";
 import { STORAGE_KEYS } from "@/config/constants";
+import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
+import { cn } from "@/lib/utils";
 
 interface MeetingAutoRecordToggleProps {
   className?: string;
 }
+
+interface MicSession {
+  name: string;
+  pid: number;
+  active: boolean;
+  kind: "direct" | "gated" | "ignored";
+}
+
+type Readout =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "ok"; sessions: MicSession[] }
+  | { kind: "failed"; reason: string };
 
 type Status =
   | { kind: "pending" }
@@ -129,6 +144,21 @@ export const MeetingAutoRecordToggle = ({
     }
   };
 
+  const [readout, setReadout] = useState<Readout>({ kind: "idle" });
+
+  const handleCheck = async () => {
+    setReadout({ kind: "checking" });
+    try {
+      const sessions = await invoke<MicSession[]>("list_capture_sessions", {
+        ...(await currentWatchLists()),
+      });
+      setReadout({ kind: "ok", sessions });
+    } catch (error) {
+      console.error("Failed to list microphone apps:", error);
+      setReadout({ kind: "failed", reason: String(error) });
+    }
+  };
+
   const handleRetry = async () => {
     try {
       await emit("meeting-detection-retry-requested", undefined);
@@ -149,27 +179,28 @@ export const MeetingAutoRecordToggle = ({
     <div id="meeting-auto-record" className={`space-y-2 ${className ?? ""}`}>
       <Header
         title="Auto-record meetings"
-        description="Record Microsoft Teams calls automatically"
+        description="Record Teams and Google Meet calls automatically"
         isMainTitle
       />
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div>
             <Label className="text-sm font-medium">
-              Automatically record Teams calls
+              Automatically record Teams and Google Meet calls
             </Label>
             <p className="text-xs text-muted-foreground mt-1">
-              Starts recording when a Teams call begins and stops when it ends.
-              Requires voice detection to be enabled in audio settings. Windows
-              only. Participants may need to be told the call is being recorded —
-              rules vary by country.
+              Starts recording when a Teams call begins, or when a Google Meet
+              call on your Google Calendar starts in Chrome, and stops when it
+              ends. Requires voice detection to be enabled in audio settings.
+              Windows only. Participants may need to be told the call is being
+              recorded — rules vary by country.
             </p>
           </div>
         </div>
         <Switch
           checked={isEnabled}
           onCheckedChange={handleSwitchChange}
-          aria-label="Automatically record Teams calls"
+          aria-label="Automatically record Teams and Google Meet calls"
         />
       </div>
       {showNote && (
@@ -185,6 +216,50 @@ export const MeetingAutoRecordToggle = ({
           </Button>
         </div>
       )}
+      <div className="space-y-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleCheck}
+          disabled={readout.kind === "checking"}
+        >
+          Check microphone apps
+        </Button>
+        {readout.kind === "failed" && (
+          <p className="text-xs text-destructive">
+            Couldn't list microphone apps.
+            <span className="text-muted-foreground"> — {readout.reason}</span>
+          </p>
+        )}
+        {readout.kind === "ok" && readout.sessions.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No apps are using the microphone.
+          </p>
+        )}
+        {readout.kind === "ok" &&
+          readout.sessions.map((session, i) => (
+            <div
+              key={`${session.pid}-${i}`}
+              className="flex items-center justify-between gap-3 text-xs"
+            >
+              <span className="font-medium">{session.name}</span>
+              <span className="text-muted-foreground">
+                {session.active ? "On the microphone" : "Idle"}
+              </span>
+              <span
+                className={cn(
+                  session.kind === "ignored" && "text-muted-foreground"
+                )}
+              >
+                {session.kind === "direct"
+                  ? `Watched (${meetingLabel(session.name)})`
+                  : session.kind === "gated"
+                    ? `Watched after a calendar check (${meetingLabel(session.name)})`
+                    : "Not watched"}
+              </span>
+            </div>
+          ))}
+      </div>
     </div>
   );
 };

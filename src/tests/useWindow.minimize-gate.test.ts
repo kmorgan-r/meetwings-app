@@ -22,7 +22,16 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ label: "main" }),
 }));
 
-import { isAnyPopoverOpen, resizeWindow } from "@/hooks/useWindow";
+import { renderHook, waitFor } from "@testing-library/react";
+import { isAnyPopoverOpen, resizeWindow, useWindowResize } from "@/hooks/useWindow";
+import {
+  autoRecordingStarted,
+  BAR_HEIGHT,
+  CARD_GAP,
+  cardHeight,
+  getMeetingCard,
+  resetMeetingCardsForTests,
+} from "@/lib/meeting-cards.store";
 
 describe("resizeWindow minimize gate", () => {
   beforeEach(() => {
@@ -72,6 +81,49 @@ describe("resizeWindow minimize gate", () => {
     expect(typeof isAnyPopoverOpen).toBe("function");
     // No popovers in the test DOM: false.
     expect(isAnyPopoverOpen()).toBe(false);
+  });
+});
+
+describe("resizeWindow under a meeting card", () => {
+  beforeEach(() => {
+    getMinimizedMock.mockReturnValue(false);
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValue(undefined);
+    resetMeetingCardsForTests();
+  });
+
+  const startRecording = () =>
+    autoRecordingStarted({ app: "google-meet", gated: false, stop: () => {} });
+
+  it("a transcript mutation does not shrink the window under a card", async () => {
+    startRecording();
+    const card = getMeetingCard();
+    const { unmount } = renderHook(() => useWindowResize());
+    document.body.appendChild(document.createElement("div"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cmd: "set_window_height",
+          height: BAR_HEIGHT + CARD_GAP + cardHeight(card, false),
+        })
+      )
+    );
+    unmount();
+  });
+
+  it("a popover still wins with 600", async () => {
+    startRecording();
+    await resizeWindow(true);
+    expect(invokeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "set_window_height", height: 600 })
+    );
+  });
+
+  it("no card keeps 54", async () => {
+    await resizeWindow(false);
+    expect(invokeMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cmd: "set_window_height", height: BAR_HEIGHT })
+    );
   });
 });
 

@@ -103,7 +103,20 @@ describe("GoogleCalendarCard", () => {
     await user.type(screen.getByLabelText("Client secret"), "s");
     await user.click(screen.getByRole("button", { name: "Connect" }));
     expect(screen.getByText(GOOGLE_COPY.GOOGLE_AUTH_REJECTED)).toBeTruthy();
-    expect(h.emit).not.toHaveBeenCalled();
+  });
+
+  // saveGoogleConfig runs first, so a cancelled sign-in leaves a complete config
+  // the running watcher has not heard about.
+  it("a failed connect still broadcasts the connection change", async () => {
+    h.invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "google_connect") throw "GOOGLE_AUTH_CANCELLED";
+      return undefined;
+    });
+    const user = await renderCard();
+    await user.type(screen.getByLabelText("Client ID"), "id");
+    await user.type(screen.getByLabelText("Client secret"), "s");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(h.emit).toHaveBeenCalledWith("google-connection-changed");
   });
 
   it("shows the session-only note", async () => {

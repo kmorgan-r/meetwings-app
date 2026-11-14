@@ -24,6 +24,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel }),
 }));
 vi.mock("@/lib/platform", () => ({ isWindows: () => onWindows }));
+vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
+  ...(await importActual<Record<string, unknown>>()),
+  loadGoogleConfigState: vi.fn(),
+}));
 
 // vi.hoisted is mandatory: vi.mock is hoisted above the imports, so a factory
 // that dereferences a plain `const toast` declared below runs while that binding
@@ -36,6 +40,29 @@ const toast = vi.hoisted(() => ({
   info: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast }));
+
+// Every createMeetGate() call yields a fresh spy gate, kept in order so the
+// StrictMode test can tell the discarded mount's gate from the live one.
+const gates = vi.hoisted(() => [] as Array<{
+  candidateStarted: ReturnType<typeof vi.fn>;
+  candidateEnded: ReturnType<typeof vi.fn>;
+  connectionChanged: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+}>);
+vi.mock("@/lib/meet-gate", () => ({
+  createMeetGate: () => {
+    const g = {
+      candidateStarted: vi.fn(),
+      candidateEnded: vi.fn(),
+      connectionChanged: vi.fn(),
+      stop: vi.fn(),
+    };
+    gates.push(g);
+    return g;
+  },
+  defaultMeetGateDeps: () => ({}),
+}));
+const lastGate = () => gates[gates.length - 1];
 
 let windowLabel = "main";
 let onWindows = true;
@@ -59,10 +86,18 @@ vi.mock("@/lib", async (importOriginal) => {
 
 import { useMeetingDetection } from "@/hooks/useMeetingDetection";
 import { MEETING_DETECT_PROCESSES, STORAGE_KEYS } from "@/config/constants";
+import {
+  GOOGLE_CONNECTION_CHANGED_EVENT,
+  loadGoogleConfigState,
+} from "@/lib/storage/google-config.storage";
+
+const loadState = vi.mocked(loadGoogleConfigState);
+const cmdCount = (cmd: string) =>
+  invoke.mock.calls.filter(([c]) => c === cmd).length;
 
 const DETECTION_EVENTS = [
-  "meeting-detected",
-  "meeting-ended",
+  "meeting-candidate-started",
+  "meeting-candidate-ended",
   "meeting-watcher-error",
   "meeting-watcher-stopped",
 ];
@@ -96,30 +131,28 @@ const registerImmediately = async (
 
 beforeEach(() => {
   listeners.clear();
+  gates.length = 0;
   vi.clearAllMocks();
   // clearAllMocks wipes call history but NOT implementations, so any test that
   // overrides listen/invoke would leak into the next one. Restore both here.
   listen.mockImplementation(registerImmediately);
   invoke.mockResolvedValue(undefined);
   emit.mockResolvedValue(undefined);
+  loadState.mockResolvedValue({ state: "absent", config: null } as never);
   windowLabel = "main";
   onWindows = true;
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
 });
 
 describe("useMeetingDetection", () => {
-  // F1
-  it("toasts on detection and on call end", async () => {
+  // F1 - the cards report recording, not detection: this hook does not listen
+  // to meeting-detected / meeting-ended at all.
+  it("does not subscribe to meeting-detected or meeting-ended", async () => {
     renderHook(() => useMeetingDetection());
     await flush();
 
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call detected");
-
-    fire("meeting-ended", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(2);
-    expect(toast.info.mock.calls[1][0]).toContain("Teams call ended");
+    expect(registered("meeting-detected")).toBe(0);
+    expect(registered("meeting-ended")).toBe(0);
   });
 
   // F2
@@ -128,7 +161,8 @@ describe("useMeetingDetection", () => {
     await flush();
 
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -142,7 +176,8 @@ describe("useMeetingDetection", () => {
     fire("meeting-detection-setting-changed", { enabled: true });
     await flush();
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -236,7 +271,7 @@ describe("useMeetingDetection", () => {
   // in effects 1, 2 and 3 exists solely for the mount -> cleanup -> mount cycle.
   // Effect 3's flag specifically keeps the in-flight start from the first mount
   // from double-firing after its cleanup enqueues a stop, so starts <= 1 holds.
-  it("keeps one watcher and one toast under StrictMode", async () => {
+  it("keeps one watcher and one listener per event under StrictMode", async () => {
     renderHook(() => useMeetingDetection(), { wrapper: StrictMode });
     await flush();
 
@@ -248,9 +283,6 @@ describe("useMeetingDetection", () => {
     for (const event of DETECTION_EVENTS) {
       expect(registered(event)).toBe(1);
     }
-
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
   });
 
   // F10 - the echo-suppression regression the spec names by hand. An
@@ -353,8 +385,6 @@ describe("useMeetingDetection", () => {
   it("never touches capture commands", async () => {
     renderHook(() => useMeetingDetection());
     await flush();
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    fire("meeting-ended", { process: "ms-teams.exe" });
     fire("meeting-watcher-stopped", { reason: "x" });
     await flush();
 
@@ -420,7 +450,8 @@ describe("useMeetingDetection", () => {
       expect(registered(event)).toBe(1);
     }
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
   });
 
@@ -450,7 +481,8 @@ describe("useMeetingDetection", () => {
     await flush();
     expect(invoke).toHaveBeenCalledWith("stop_meeting_watcher");
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
-      processes: MEETING_DETECT_PROCESSES,
+      direct: MEETING_DETECT_PROCESSES,
+      gated: [],
     });
 
     fire("meeting-detection-setting-changed", { enabled: false });
@@ -483,30 +515,198 @@ describe("useMeetingDetection", () => {
     );
   });
 
-  // F32 - label lookup is case-normalized with a fallback
-  it("normalizes the toast label and falls back for unknown processes", async () => {
-    renderHook(() => useMeetingDetection());
-    await flush();
-
-    fire("meeting-detected", { process: "MS-TEAMS.EXE" });
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call detected");
-
-    fire("meeting-ended", { process: "MS-TEAMS.EXE" });
-    toast.info.mockClear();
-
-    fire("meeting-detected", { process: "unknown.exe" });
-    expect(toast.info.mock.calls[0][0]).toContain("Meeting call detected");
-    expect(toast.info.mock.calls[0][0]).not.toContain("undefined");
+  it("starts with Chrome gated once Google is set up", async () => {
+    for (const state of ["complete", "unreadable"]) {
+      listeners.clear();
+      vi.clearAllMocks();
+      listen.mockImplementation(registerImmediately);
+      invoke.mockResolvedValue(undefined);
+      emit.mockResolvedValue(undefined);
+      loadState.mockResolvedValue({ state, config: null } as never);
+      const { unmount } = renderHook(() => useMeetingDetection());
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
+          direct: MEETING_DETECT_PROCESSES,
+          gated: ["chrome.exe"],
+        })
+      );
+      unmount();
+    }
   });
 
-  // F33 - the end payload carries the process, so a reload cannot orphan the label
-  it("labels the end toast from the payload", async () => {
+  it("a connection change updates the lists in place", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+    loadState.mockResolvedValue({ state: "complete", config: null } as never);
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("update_meeting_watch_lists", {
+        direct: MEETING_DETECT_PROCESSES,
+        gated: ["chrome.exe"],
+      })
+    );
+    expect(cmdCount("update_meeting_watch_lists")).toBe(1);
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+    expect(cmdCount("stop_meeting_watcher")).toBe(0);
+  });
+
+  it("no list update while auto-record is off", async () => {
+    stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "false" };
     renderHook(() => useMeetingDetection());
     await flush();
 
-    // No preceding meeting-detected in this document, as after a window reload.
-    fire("meeting-ended", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call ended");
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await flush();
+    await flush();
+    expect(cmdCount("update_meeting_watch_lists")).toBe(0);
+  });
+
+  it("the list update waits behind an in-flight watcher command", async () => {
+    let releaseStart: () => void = () => {};
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "start_meeting_watcher") {
+        await new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        });
+      }
+      return undefined;
+    });
+
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    await flush();
+    await flush();
+    expect(cmdCount("update_meeting_watch_lists")).toBe(0);
+
+    await act(async () => {
+      releaseStart();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(cmdCount("update_meeting_watch_lists")).toBe(1));
+  });
+
+  it("candidate listener is subscribed before the first start", async () => {
+    // Hold ONLY the candidate listens; every other listen registers at once.
+    const held: Array<() => void> = [];
+    listen.mockImplementation(
+      (event: string, cb: (e: { payload: unknown }) => void) => {
+        if (!event.startsWith("meeting-candidate-")) {
+          return registerImmediately(event, cb);
+        }
+        return new Promise((resolve) => {
+          held.push(() => {
+            if (!listeners.has(event)) listeners.set(event, new Set());
+            listeners.get(event)!.add(cb);
+            resolve(() => listeners.get(event)?.delete(cb));
+          });
+        });
+      }
+    );
+
+    renderHook(() => useMeetingDetection());
+    await flush();
+    await flush();
+    expect(held.length).toBe(2);
+    expect(cmdCount("start_meeting_watcher")).toBe(0);
+
+    await act(async () => {
+      held.forEach((release) => release());
+      await Promise.resolve();
+    });
+    await flush();
+    await waitFor(() => expect(cmdCount("start_meeting_watcher")).toBe(1));
+  });
+
+  it("a candidate just before toggle-off still gets the gate stopped", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    const g = lastGate();
+    fire("meeting-candidate-started", { episode: 5 });
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await waitFor(() => expect(cmdCount("stop_meeting_watcher")).toBe(1));
+    // One stop from the setting handler, one from the watcher teardown.
+    expect(g.stop.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(g.candidateStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      g.stop.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("candidate events reach the gate only while auto-record is on", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    fire("meeting-candidate-started", { episode: 3 });
+    fire("meeting-candidate-ended", { episode: 3 });
+    expect(lastGate().candidateStarted).toHaveBeenCalledWith(3);
+    expect(lastGate().candidateEnded).toHaveBeenCalledWith(3);
+
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await flush();
+    lastGate().candidateStarted.mockClear();
+    fire("meeting-candidate-started", { episode: 4 });
+    expect(lastGate().candidateStarted).not.toHaveBeenCalled();
+  });
+
+  it("a connection change pokes the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    expect(lastGate().connectionChanged).toHaveBeenCalledTimes(1);
+    expect(registered(GOOGLE_CONNECTION_CHANGED_EVENT)).toBe(1);
+  });
+
+  it("turning auto-record off stops the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(lastGate().stop).not.toHaveBeenCalled();
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await flush();
+    expect(lastGate().stop).toHaveBeenCalled();
+  });
+
+  it("meeting-watcher-stopped stops the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    fire("meeting-watcher-stopped", { reason: "x" });
+    expect(lastGate().stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry stops the gate before restarting the watcher", async () => {
+    const order: string[] = [];
+    renderHook(() => useMeetingDetection());
+    await flush();
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(cmd);
+      if (cmd === "stop_meeting_watcher") order.push("after-stop");
+      return undefined;
+    });
+    lastGate().stop.mockImplementation(() => order.push("gate.stop"));
+
+    fire("meeting-detection-retry-requested");
+    await flush();
+    await waitFor(() => expect(order).toContain("start_meeting_watcher"));
+    expect(order.indexOf("gate.stop")).toBeGreaterThan(
+      order.indexOf("stop_meeting_watcher")
+    );
+    expect(order.indexOf("gate.stop")).toBeLessThan(
+      order.indexOf("start_meeting_watcher")
+    );
+  });
+
+  it("StrictMode creates one live gate", async () => {
+    renderHook(() => useMeetingDetection(), { wrapper: StrictMode });
+    await flush();
+    expect(gates.length).toBe(2);
+    expect(gates[0].stop).toHaveBeenCalled();
+    expect(gates[1].stop).not.toHaveBeenCalled();
+
+    fire("meeting-candidate-started", { episode: 1 });
+    expect(gates[0].candidateStarted).not.toHaveBeenCalled();
+    expect(gates[1].candidateStarted).toHaveBeenCalledWith(1);
   });
 });

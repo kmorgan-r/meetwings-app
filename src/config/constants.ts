@@ -102,9 +102,17 @@ export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe"];
 export const MEETING_DETECT_LABELS: Record<string, string> = {
   "ms-teams.exe": "Teams",
   "teams.exe": "Teams",
+  "chrome.exe": "Google Meet",
 };
 
 export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
+
+// Processes that only count as a call when a calendar event with a Meet link is
+// live: Chrome is running for every browsing session, so audio alone proves nothing.
+export const MEETING_DETECT_GATED_PROCESSES = ["chrome.exe"];
+
+// How often a gated process is re-checked against the calendar.
+export const MEET_RECHECK_MS = 60_000;
 
 // The serialized form of the Rust StopOutcome::TimedOut variant. Kept here so
 // the string that gates the disable-failure ladder has exactly one home; a

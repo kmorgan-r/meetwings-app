@@ -15,6 +15,11 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { useCalendarAutoSelect } from "@/hooks/useCalendarAutoSelect";
+import {
+  autoRecordingStarted,
+  getActiveAutoRecording,
+  resetMeetingCardsForTests,
+} from "@/lib/meeting-cards.store";
 import type {
   CalendarParticipant,
   CreateContactResult,
@@ -53,6 +58,7 @@ function meetingWith(...people: CalendarParticipant[]) {
       {
         id: "ev1", subject: "Sync", startMs: now - 5 * MIN, endMs: now + 25 * MIN,
         isCancelled: false, isAllDay: false, ownResponse: "accepted",
+        hasMeetLink: false,
         participants: [
           { address: "me@corp.test", name: "Me", type: "required" as const, isOrganizer: true },
           ...people,
@@ -104,10 +110,28 @@ async function settle() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetMeetingCardsForTests();
   listeners.clear();
   vi.mocked(localStorage.getItem).mockReset();
   fetchCurrentMeetings.mockReset();
   fetchCurrentMeetings.mockImplementation(async () => meetingWith(AT_CFO));
+});
+
+describe("useCalendarAutoSelect card content", () => {
+  it("a Teams auto recording gets the picked Outlook event", async () => {
+    autoRecordingStarted({ app: "Microsoft Teams", gated: false, stop: () => {} });
+    setup();
+    await captureStarts();
+    await waitFor(() => expect(getActiveAutoRecording()?.event?.title).toBe("Sync"));
+  });
+
+  it("a Meet auto recording gets no Outlook event", async () => {
+    autoRecordingStarted({ app: "Google Meet", gated: true, stop: () => {} });
+    const { addTarget } = setup();
+    await captureStarts();
+    await waitFor(() => expect(addTarget).toHaveBeenCalled());
+    expect(getActiveAutoRecording()?.event).toBeNull();
+  });
 });
 
 describe("useCalendarAutoSelect", () => {

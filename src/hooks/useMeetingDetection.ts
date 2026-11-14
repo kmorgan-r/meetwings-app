@@ -5,23 +5,22 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
 import { isWindows } from "@/lib/platform";
+import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
+import { currentWatchLists } from "@/lib/meeting-detect";
+import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import {
-  MEETING_DETECT_FALLBACK_LABEL,
-  MEETING_DETECT_LABELS,
-  MEETING_DETECT_PROCESSES,
-  STOP_TIMED_OUT,
-  STORAGE_KEYS,
-} from "@/config/constants";
-
-const label = (process?: string) =>
-  (process && MEETING_DETECT_LABELS[process.toLowerCase()]) ||
-  MEETING_DETECT_FALLBACK_LABEL;
+  createMeetGate,
+  defaultMeetGateDeps,
+  type MeetGate,
+} from "@/lib/meet-gate";
 
 const readSetting = () =>
   safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) === "true";
 
 /**
- * Owns the Teams call detection watcher and its toasts.
+ * Owns the Teams and Google Meet call detection watcher and the Meet calendar
+ * gate. Recording and its cards belong to useMeetingAutoRecord and
+ * meeting-cards.store; this hook shows only the watcher-stopped toast.
  *
  * Single-owner: Tauri events broadcast to every window, so only the main window may
  * drive the watcher. Today only `main` renders the app page, but a capture-overlay
@@ -62,7 +61,11 @@ export const useMeetingDetection = () => {
   // check, no test - will catch it. Fix them there first.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
 
-  // Resolves once the four detection listeners are actually registered. listen()
+  // The Meet calendar check loop. Created and stopped by effect 2. It never
+  // touches the watcher, so it needs no place in the command queue.
+  const gateRef = useRef<MeetGate | null>(null);
+
+  // Resolves once the detection listeners are actually registered. listen()
   // is async, so without this gate the first start_meeting_watcher reliably wins
   // the race and an immediate-failure meeting-watcher-stopped fires into a void.
   // `useRef<T>()` with no argument does not type-check: @types/react 19 removed
@@ -91,8 +94,10 @@ export const useMeetingDetection = () => {
     return chainRef.current;
   };
 
-  const startWatcher = () =>
-    invoke("start_meeting_watcher", { processes: MEETING_DETECT_PROCESSES });
+  // Always called inside an enqueued op: the lists are read from secure storage
+  // asynchronously, so computing them before enqueueing could go stale.
+  const startWatcher = async () =>
+    invoke("start_meeting_watcher", { ...(await currentWatchLists()) });
 
   // Effect 1: the setting and retry channels. Mount-only - putting the setting
   // listener in the [enabled] effect means the first toggle-on is never received,
@@ -114,6 +119,7 @@ export const useMeetingDetection = () => {
     Promise.all([
       register("meeting-detection-setting-changed", (payload) => {
         setEnabled(Boolean(payload?.enabled));
+        if (!payload?.enabled) gateRef.current?.stop();
       }),
 
       register("meeting-detection-retry-requested", () => {
@@ -131,6 +137,9 @@ export const useMeetingDetection = () => {
           // never clears or updates the note.
           try {
             await invoke("stop_meeting_watcher");
+            // A stopped watcher emits no candidate-ended, so the old episode
+            // would stay live and keep polling for a call the fresh one never saw.
+            gateRef.current?.stop();
             await startWatcher();
             await emit("meeting-detection-watcher-restarted", { ok: true });
           } catch (error) {
@@ -151,7 +160,7 @@ export const useMeetingDetection = () => {
     };
   }, [isOwner]);
 
-  // Effect 2: the four detection events. Keyed on isOwner, NOT enabled - they
+  // Effect 2: the detection events. Keyed on isOwner, NOT enabled - they
   // must be in place before any start, and the retry path can start a watcher
   // without `enabled` changing. Subscribing with no watcher running is harmless.
   useEffect(() => {
@@ -165,6 +174,8 @@ export const useMeetingDetection = () => {
     // the second mount's start runs, defeating the ordering it exists to enforce.
     armListenersGate();
     const gate = listenersReadyRef.current!;
+    const meetGate = createMeetGate(defaultMeetGateDeps());
+    gateRef.current = meetGate;
 
     const register = async (
       event: string,
@@ -176,12 +187,24 @@ export const useMeetingDetection = () => {
     };
 
     Promise.all([
-      register("meeting-detected", (payload) => {
-        toast.info(`${label(payload?.process)} call detected`);
+      // Updates the lists in place; never starts or stops. Rust ignores it when
+      // no watcher is running.
+      register("meeting-candidate-started", (payload) => {
+        if (enabledRef.current) gateRef.current?.candidateStarted(payload.episode);
       }),
 
-      register("meeting-ended", (payload) => {
-        toast.info(`${label(payload?.process)} call ended`);
+      register("meeting-candidate-ended", (payload) => {
+        gateRef.current?.candidateEnded(payload.episode);
+      }),
+
+      register(GOOGLE_CONNECTION_CHANGED_EVENT, () => {
+        gateRef.current?.connectionChanged();
+        enqueue(async () => {
+          if (!enabledRef.current) return;
+          await invoke("update_meeting_watch_lists", {
+            ...(await currentWatchLists()),
+          });
+        });
       }),
 
       register("meeting-watcher-error", (payload) => {
@@ -193,6 +216,7 @@ export const useMeetingDetection = () => {
         // The persisted setting deliberately stays on: it is what keeps the
         // settings note and its retry button reachable. The "never persist on with
         // no watcher" rule is scoped to a start that never succeeded.
+        gateRef.current?.stop();
         console.warn("Meeting detection stopped:", payload?.reason);
         toast.info("Meeting detection stopped");
       }),
@@ -208,6 +232,8 @@ export const useMeetingDetection = () => {
     return () => {
       cancelled = true;
       unlisteners.forEach((un) => un());
+      meetGate.stop();
+      if (gateRef.current === meetGate) gateRef.current = null;
     };
   }, [isOwner]);
 
@@ -247,6 +273,10 @@ export const useMeetingDetection = () => {
 
     return () => {
       cancelled = true;
+      // The watcher stop emits neither meeting-watcher-stopped nor
+      // candidate-ended, and enabledRef lags the setting-off path, so a candidate
+      // arriving in that gap would leave the gate polling with auto-record off.
+      gateRef.current?.stop();
       enqueue(async () => {
         // A stop that REJECTS is treated exactly like one that resolves
         // TIMED_OUT. Branching only on the resolved value would let a rejection

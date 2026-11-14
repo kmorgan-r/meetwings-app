@@ -27,6 +27,7 @@ function event(over: Partial<CalendarEvent> = {}): CalendarEvent {
     isCancelled: false,
     isAllDay: false,
     ownResponse: "accepted",
+    hasMeetLink: false,
     participants: [
       participant("me@corp.test", { isOrganizer: true }),
       participant("cfo@acme.example"),

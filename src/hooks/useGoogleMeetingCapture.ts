@@ -13,6 +13,7 @@ import {
   deleteCalendarSnapshot,
   saveCalendarSnapshot,
 } from "@/lib/database/calendar-snapshot.action";
+import { getActiveAutoRecording, setCardEvent } from "@/lib/meeting-cards.store";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import type { UseNotionPickReturn } from "@/hooks/useNotionPick";
 
@@ -113,6 +114,9 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
 
   useEffect(() => {
     const run = async () => {
+      // Read synchronously: a result landing after a newer recording started
+      // must not label it (setCardEvent ignores the stale id).
+      const rec = getActiveAutoRecording();
       const seq = ++readSeq.current;
       const gen = convGen.current;
       // Captured before any await: the touch count at the event, and the
@@ -130,6 +134,7 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       const result = await g;
       if (seq !== readSeq.current || gen !== convGen.current) return;
       const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
+      if (rec?.gated && pick?.kind === "one") setCardEvent(rec.id, pick.event);
       pending.current =
         result.kind === "ok" && pick?.kind === "one"
           ? { kind: "save", snapshot: buildSnapshot(pick.event, result.ownAddress) }

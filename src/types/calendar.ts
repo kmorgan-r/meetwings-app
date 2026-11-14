@@ -77,6 +77,8 @@ export interface CalendarEvent {
   ownResponse: string;
   /** organizer + attendees, unfiltered and undeduped. participantsOf does both. */
   participants: CalendarParticipant[];
+  /** Google: Meet link present; Graph: always false. */
+  hasMeetLink: boolean;
 }
 
 /**

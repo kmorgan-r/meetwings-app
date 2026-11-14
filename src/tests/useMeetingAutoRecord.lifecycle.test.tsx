@@ -85,6 +85,13 @@ import {
   VAD_MESSAGE,
   WATCHER_STOPPED_MESSAGE,
 } from "@/hooks/useMeetingAutoRecord";
+import {
+  ENDED_CARD_DELAY_MS,
+  getActiveAutoRecording,
+  getMeetingCard,
+  resetMeetingCardsForTests,
+  stopActiveRecording,
+} from "@/lib/meeting-cards.store";
 // Through the mock above, so these are the values the HOOK is running on here,
 // not the shipped ones: the drain has to outlast the loop as it actually
 // behaves in this file, and the attempt count has to match what it really does.
@@ -329,6 +336,7 @@ beforeEach(async () => {
   // inherit its polls.
   await drainStopConfirm();
   vi.clearAllMocks();
+  resetMeetingCardsForTests();
   listeners.clear();
   stored = { meeting_auto_record_enabled: "true" };
   mocks.windowLabel.value = "main";
@@ -1943,5 +1951,159 @@ describe("useMeetingAutoRecord - unmount", () => {
     // nothing to flush and nothing to enqueue - the loop is the only thing
     // this case is measuring.
     expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useMeetingAutoRecord - meeting cards", () => {
+  const startTranscribing = async (audio = makeAudio()) => {
+    seedStatus([true, false]); // confirm the start, then the post-stop re-query
+    const h = mount(audio);
+    await flush();
+    await fire("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    return h;
+  };
+  const startMeetingMode = async (audio = makeAudio()) => {
+    seedStatus([false, false]); // the detect probe, then one confirm poll
+    const h = mount(audio, { meetingAssistMode: true });
+    await flush();
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+    return h;
+  };
+
+  it("a transcribing auto start publishes the recording with its app", async () => {
+    await startTranscribing();
+    expect(getActiveAutoRecording()).toMatchObject({
+      app: "Google Meet",
+      gated: true,
+    });
+    expect(getMeetingCard()?.kind).toBe("recording");
+    await drainStopConfirm();
+  });
+
+  it("a meeting-mode auto start publishes before the mic opens", async () => {
+    seedStatus([false]);
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    let activeAtOpen: unknown = "unset";
+    h.setEnableVAD.mockImplementationOnce(() => {
+      activeAtOpen = getActiveAutoRecording();
+    });
+    await flush();
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
+    expect(activeAtOpen).toMatchObject({ app: "Google Meet", gated: true });
+  });
+
+  it("a detection that starts nothing publishes nothing", async () => {
+    stored.meeting_auto_record_enabled = "false";
+    seedStatus([]);
+    mount(makeAudio({ capturing: true }));
+    await flush();
+    await fire("meeting-detected", { process: "chrome.exe" });
+    await flush();
+    expect(getActiveAutoRecording()).toBeNull();
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("meeting-ended publishes the stop", async () => {
+    await startTranscribing();
+    vi.useFakeTimers();
+    await fireActed("meeting-ended");
+    expect(getActiveAutoRecording()).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(ENDED_CARD_DELAY_MS);
+    });
+    expect(getMeetingCard()?.kind).toBe("ended");
+  });
+
+  it("only meeting-ended is an auto stop: it restarts quietly, the card's Stop does not", async () => {
+    const h = await startMeetingMode();
+    await fireActed("meeting-ended");
+    await drainStopConfirm();
+    expect(getMeetingCard()).toBeNull();
+
+    seedStatus([false, false]);
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(3));
+    expect(getActiveAutoRecording()).not.toBeNull();
+    expect(getMeetingCard()).toBeNull(); // auto stop + re-detect < 120s: quiet
+
+    await act(async () => {
+      stopActiveRecording();
+    });
+    await drainStopConfirm();
+    expect(getActiveAutoRecording()).toBeNull();
+
+    seedStatus([false, false]);
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(5));
+    expect(getMeetingCard()?.kind).toBe("recording"); // user stop: not quiet
+    await drainStopConfirm();
+  });
+
+  it("the user closing the mic in meeting mode publishes the stop", async () => {
+    const h = await startMeetingMode();
+    expect(getActiveAutoRecording()).not.toBeNull();
+    await h.setMicOpen(false);
+    expect(getActiveAutoRecording()).toBeNull();
+  });
+
+  it("capture-stopped during a transcribing auto recording publishes the stop", async () => {
+    await startTranscribing();
+    expect(getActiveAutoRecording()).not.toBeNull();
+    await fire("capture-stopped");
+    expect(getActiveAutoRecording()).toBeNull();
+  });
+
+  it("the internal stop before a VAD start publishes nothing", async () => {
+    seedStatus([true]);
+    const audio = makeAudio({
+      startCapture: vi.fn(async () => {
+        emit("capture-stopped"); // the stop startCapture issues before a VAD start
+      }),
+    });
+    mount(audio);
+    await flush();
+    await fire("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(statusCalls()).toBe(1));
+    expect(getActiveAutoRecording()).not.toBeNull();
+  });
+
+  it("a capture-stopped inside a meeting-mode recording publishes nothing", async () => {
+    // The discriminating half of the guard: a recording IS active here, so an
+    // unguarded autoRecordingStopped() would end it (F45's mid-call re-run).
+    await startMeetingMode();
+    await fireActed("capture-stopped");
+    expect(getActiveAutoRecording()).not.toBeNull();
+  });
+
+  it("unmount during an auto recording publishes the stop", async () => {
+    const h = await startMeetingMode();
+    expect(getActiveAutoRecording()).not.toBeNull();
+    h.unmount();
+    await flush();
+    expect(getActiveAutoRecording()).toBeNull();
+  });
+
+  it("the card's Stop closes the mic in meeting mode", async () => {
+    const h = await startMeetingMode();
+    await act(async () => {
+      stopActiveRecording();
+    });
+    expect(h.setEnableVAD).toHaveBeenLastCalledWith(false);
+    await drainStopConfirm();
+  });
+
+  it("the card's Stop takes the meeting-ended path in transcribing mode", async () => {
+    const audio = makeAudio();
+    await startTranscribing(audio);
+    await act(async () => {
+      stopActiveRecording();
+      await flush();
+    });
+    await waitFor(() => expect(audio.stopCapture).toHaveBeenCalledTimes(1));
+    expect(statusCalls()).toBe(2); // the start check, then handleStop's confirmation
+    expect(getActiveAutoRecording()).toBeNull();
   });
 });

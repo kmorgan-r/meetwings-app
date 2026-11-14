@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const listeners = new Map<string, Set<(e: { payload: unknown }) => void>>();
@@ -12,7 +12,7 @@ const listen = vi.fn(async (event: string, cb: (e: { payload: unknown }) => void
   };
 });
 const emit = vi.fn(async () => {});
-const invoke = vi.fn(async () => undefined as unknown);
+const invoke = vi.fn(async (_cmd?: unknown, _args?: unknown) => undefined as unknown);
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...a: Parameters<typeof listen>) => listen(...a),
@@ -20,6 +20,11 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...a: Parameters<typeof invoke>) => invoke(...a),
+}));
+
+vi.mock("@/lib/storage/google-config.storage", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  loadGoogleConfigState: vi.fn(async () => ({ state: "complete" })),
 }));
 
 let stored: Record<string, string> = {};
@@ -40,7 +45,7 @@ vi.mock("@/lib", async (importOriginal) => {
 });
 
 import { MeetingAutoRecordToggle } from "@/pages/settings/components/MeetingAutoRecordToggle";
-import { STORAGE_KEYS } from "@/config/constants";
+import { STORAGE_KEYS, MEETING_DETECT_PROCESSES } from "@/config/constants";
 
 const flush = async () => {
   await act(async () => {
@@ -79,7 +84,7 @@ describe("MeetingAutoRecordToggle", () => {
     renderToggle();
     await flush();
 
-    fireEvent.click(screen.getByLabelText(/automatically record teams calls/i));
+    fireEvent.click(screen.getByLabelText(/automatically record teams and google meet calls/i));
     await flush();
 
     expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("true");
@@ -171,7 +176,7 @@ describe("MeetingAutoRecordToggle", () => {
     renderToggle();
     await flush();
 
-    const toggle = screen.getByLabelText(/automatically record teams calls/i);
+    const toggle = screen.getByLabelText(/automatically record teams and google meet calls/i);
     expect(toggle).not.toBeChecked();
 
     fire("meeting-detection-setting-changed", { enabled: true });
@@ -195,7 +200,7 @@ describe("MeetingAutoRecordToggle", () => {
     stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
     renderToggle();
     await flush();
-    fireEvent.click(screen.getByLabelText(/automatically record teams calls/i));
+    fireEvent.click(screen.getByLabelText(/automatically record teams and google meet calls/i));
     await flush();
 
     expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
@@ -222,6 +227,89 @@ describe("MeetingAutoRecordToggle", () => {
     expect(note()).toBeNull();
   });
 
+  it("the readout lists sessions with their kind", async () => {
+    invoke.mockImplementation(async (cmd: unknown) =>
+      cmd === "list_capture_sessions"
+        ? [
+            { name: "chrome.exe", pid: 7, active: true, kind: "gated" },
+            { name: "spotify.exe", pid: 8, active: false, kind: "ignored" },
+          ]
+        : { running: true, lastError: null }
+    );
+    renderToggle();
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
+    await flush();
+
+    expect(invoke).toHaveBeenCalledWith("list_capture_sessions", {
+      direct: MEETING_DETECT_PROCESSES,
+      gated: ["chrome.exe"],
+    });
+    // Scoped per row, so swapping the active/idle ternary fails.
+    const chromeRow = within(screen.getByText("chrome.exe").parentElement!);
+    expect(chromeRow.getByText("On the microphone")).toBeInTheDocument();
+    expect(chromeRow.queryByText("Idle")).toBeNull();
+    expect(
+      chromeRow.getByText("Watched after a calendar check (Google Meet)")
+    ).toBeInTheDocument();
+    const spotifyRow = within(screen.getByText("spotify.exe").parentElement!);
+    expect(spotifyRow.getByText("Idle")).toBeInTheDocument();
+    expect(spotifyRow.queryByText("On the microphone")).toBeNull();
+    expect(spotifyRow.getByText("Not watched")).toBeInTheDocument();
+  });
+
+  it("the readout renders one row per endpoint when a pid repeats", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    invoke.mockImplementation(async (cmd: unknown) =>
+      cmd === "list_capture_sessions"
+        ? [
+            { name: "chrome.exe", pid: 7, active: true, kind: "gated" },
+            { name: "chrome.exe", pid: 7, active: false, kind: "gated" },
+          ]
+        : { running: true, lastError: null }
+    );
+    renderToggle();
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
+    await flush();
+    expect(screen.getAllByText("chrome.exe")).toHaveLength(2);
+    expect(error).not.toHaveBeenCalled(); // React's duplicate-key warning
+    error.mockRestore();
+  });
+
+  it("the readout says so when no app is on the microphone", async () => {
+    invoke.mockImplementation(async (cmd: unknown) =>
+      cmd === "list_capture_sessions" ? [] : { running: true, lastError: null }
+    );
+    renderToggle();
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
+    await flush();
+    expect(
+      screen.getByText("No apps are using the microphone.")
+    ).toBeInTheDocument();
+  });
+
+  it("the readout shows its error copy on rejection", async () => {
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "list_capture_sessions") throw new Error("boom");
+      return { running: true, lastError: null };
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderToggle();
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
+    await flush();
+
+    expect(error).toHaveBeenCalled();
+    expect(screen.getByText("Couldn't list microphone apps.")).toBeInTheDocument();
+    // Release builds have no console, so the reason must be on screen.
+    expect(screen.getByText(/boom/)).toBeInTheDocument();
+    error.mockRestore();
+  });
+
   it("renders off when only the legacy detection key is set", async () => {
     // #31's toggle copy promised "Does not start or stop recording", so its
     // persisted `true` is NOT consent to being recorded. The old key must not be
@@ -235,7 +323,7 @@ describe("MeetingAutoRecordToggle", () => {
     await flush();
 
     expect(
-      screen.getByLabelText("Automatically record Teams calls")
+      screen.getByLabelText("Automatically record Teams and Google Meet calls")
     ).not.toBeChecked();
   });
 });

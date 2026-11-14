@@ -1,8 +1,13 @@
-//! Microsoft Teams call detection via WASAPI capture-session polling.
+//! Microsoft Teams and Google Meet call detection via WASAPI capture-session polling.
 //!
 //! All decision logic lives here as pure functions with no COM dependency, so it
 //! compiles and is unit-tested on every target including the Linux CI runner.
 //! `win32.rs` / `stub.rs` contribute only session enumeration.
+
+// Calendar-gated detection for Chrome (Google Meet): a second, independent
+// pure state machine, driven by the same poll loop.
+mod gate;
+use gate::{gated_step, GatedEvent, GatedInput, GatedState};
 
 #[cfg(target_os = "windows")]
 mod win32;
@@ -78,7 +83,7 @@ fn classify(sessions: &[SessionInfo], watch_list: &[String], own_pid: u32) -> Po
 }
 
 /// Two consecutive Active polls (~4s) enter a call.
-const START_DEBOUNCE: u32 = 2;
+pub(crate) const START_DEBOUNCE: u32 = 2;
 /// Three consecutive Inactive polls (~6s) end it. Survives a short reconnect.
 const END_DEBOUNCE: u32 = 3;
 /// 30 consecutive failed polls (~60s) is terminal. Deliberately far clear of
@@ -106,6 +111,8 @@ pub enum WatcherEvent {
     Ended(String),
     Degraded(String),
     Stopped(String),
+    CandidateStarted(u64),
+    CandidateEnded(u64),
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -199,7 +206,120 @@ fn step(mut state: MachineState, outcome: PollOutcome) -> (MachineState, Option<
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Direct,
+    Gated,
+}
+
+/// Merges the direct (Teams) and gated (Chrome) machines into one meeting
+/// stream: `Detected` when neither side was in a call, `Ended` when neither is.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Default)]
+struct Combined {
+    direct: bool,
+    gated: bool,
+    /// The process that opened the combined call; `Ended` carries it.
+    open: Option<String>,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Combined {
+    fn apply(&mut self, side: Side, entered: bool, process: &str) -> Option<WatcherEvent> {
+        let was_in = self.direct || self.gated;
+        match side {
+            Side::Direct => self.direct = entered,
+            Side::Gated => self.gated = entered,
+        }
+        match (was_in, self.direct || self.gated) {
+            (false, true) => {
+                self.open = Some(process.to_string());
+                Some(WatcherEvent::Detected(process.to_string()))
+            }
+            (true, false) => self.open.take().map(WatcherEvent::Ended),
+            _ => None,
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Default)]
+struct WatcherCore {
+    direct: MachineState,
+    gated: GatedState,
+    combined: Combined,
+}
+
+/// One poll through both machines. Order: candidate events, then combined
+/// meeting events (direct edges first, then gated), then health events.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn tick(
+    core: &mut WatcherCore,
+    direct: PollOutcome,
+    gated: PollOutcome,
+    now_ms: i64,
+    confirmed: Option<u64>,
+    next_episode: &mut dyn FnMut() -> u64,
+) -> Vec<WatcherEvent> {
+    let mut candidate = Vec::new();
+    let mut meeting = Vec::new();
+    let mut health = Vec::new();
+
+    let (next, event) = step(std::mem::take(&mut core.direct), direct);
+    core.direct = next;
+    match event {
+        Some(WatcherEvent::Detected(p)) => {
+            meeting.extend(core.combined.apply(Side::Direct, true, &p))
+        }
+        Some(WatcherEvent::Ended(p)) => {
+            meeting.extend(core.combined.apply(Side::Direct, false, &p))
+        }
+        Some(other) => health.push(other),
+        None => {}
+    }
+
+    let input = match gated {
+        PollOutcome::Classified(PollResult::Active(n)) => GatedInput::Active(n),
+        PollOutcome::Classified(PollResult::Inactive) => GatedInput::Inactive,
+        PollOutcome::Classified(PollResult::Unknown) | PollOutcome::Failed => GatedInput::Hold,
+    };
+    let (next, events) = gated_step(
+        std::mem::take(&mut core.gated),
+        input,
+        now_ms,
+        confirmed,
+        next_episode,
+    );
+    core.gated = next;
+    for event in events {
+        match event {
+            GatedEvent::CandidateStarted(e) => candidate.push(WatcherEvent::CandidateStarted(e)),
+            GatedEvent::CandidateEnded(e) => candidate.push(WatcherEvent::CandidateEnded(e)),
+            GatedEvent::EnteredCall(p) => {
+                meeting.extend(core.combined.apply(Side::Gated, true, &p))
+            }
+            GatedEvent::LeftCall(p) => meeting.extend(core.combined.apply(Side::Gated, false, &p)),
+        }
+    }
+
+    candidate.into_iter().chain(meeting).chain(health).collect()
+}
+
+/// What the poll thread re-emits after a webview reload, so a fresh frontend
+/// gate learns about a candidate that is already live.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn reannounce_event(core: &WatcherCore) -> Option<WatcherEvent> {
+    core.gated
+        .candidate_episode()
+        .map(WatcherEvent::CandidateStarted)
+}
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Process-wide so episode ids stay unique across watcher restarts.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+static NEXT_EPISODE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,7 +405,29 @@ pub struct MeetingWatcherState {
     /// because stop removes the generation before it waits.
     stopping: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
-    watch_list: Arc<Mutex<Vec<String>>>,
+    watch_list: Arc<Mutex<WatchLists>>,
+    /// The frontend's confirmed candidate episode, read by the poll thread.
+    confirmed: Arc<Mutex<Option<u64>>>,
+    /// Set by a start on a running watcher (a webview reload); the poll thread
+    /// swaps it and re-announces a live candidate.
+    reannounce: Arc<AtomicBool>,
+}
+
+/// One mutex holds both lists, so a poll never reads a torn pair.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchLists {
+    pub direct: Vec<String>,
+    pub gated: Vec<String>,
+}
+
+/// The three per-poll slots, bundled to keep `poll_loop` at 7 parameters.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone)]
+struct PollSlots {
+    lists: Arc<Mutex<WatchLists>>,
+    confirmed: Arc<Mutex<Option<u64>>>,
+    reannounce: Arc<AtomicBool>,
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -309,6 +451,11 @@ pub enum StopOutcome {
 #[derive(Serialize, Clone)]
 struct ProcessPayload {
     process: String,
+}
+
+#[derive(Serialize, Clone)]
+struct EpisodePayload {
+    episode: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -388,6 +535,33 @@ impl Drop for ExitGuard {
     }
 }
 
+/// Emits the detection-stream events; health events are handled by the caller.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn emit_detection(app: &AppHandle, event: &WatcherEvent) {
+    let (name, result) = match event {
+        WatcherEvent::Detected(p) => (
+            "meeting-detected",
+            app.emit("meeting-detected", ProcessPayload { process: p.clone() }),
+        ),
+        WatcherEvent::Ended(p) => (
+            "meeting-ended",
+            app.emit("meeting-ended", ProcessPayload { process: p.clone() }),
+        ),
+        WatcherEvent::CandidateStarted(e) => (
+            "meeting-candidate-started",
+            app.emit("meeting-candidate-started", EpisodePayload { episode: *e }),
+        ),
+        WatcherEvent::CandidateEnded(e) => (
+            "meeting-candidate-ended",
+            app.emit("meeting-candidate-ended", EpisodePayload { episode: *e }),
+        ),
+        WatcherEvent::Degraded(_) | WatcherEvent::Stopped(_) => return,
+    };
+    if let Err(e) = result {
+        tracing::warn!("Failed to emit {}: {}", name, e);
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn poll_loop(
     app: AppHandle,
@@ -395,7 +569,7 @@ fn poll_loop(
     running: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
     last_error: Arc<Mutex<Option<String>>>,
-    watch_list: Arc<Mutex<Vec<String>>>,
+    slots: PollSlots,
     done_tx: Sender<()>,
 ) {
     let mut guard = ExitGuard {
@@ -427,7 +601,7 @@ fn poll_loop(
     }
 
     let own_pid = std::process::id();
-    let mut machine = MachineState::default();
+    let mut core = WatcherCore::default();
     let mut error_episode = false;
 
     loop {
@@ -436,7 +610,14 @@ fn poll_loop(
             break;
         }
 
-        let watched = lock_recover(&watch_list).clone();
+        let lists = lock_recover(&slots.lists).clone();
+        let confirmed = *lock_recover(&slots.confirmed);
+
+        if slots.reannounce.swap(false, Ordering::SeqCst) {
+            if let Some(event) = reannounce_event(&core) {
+                emit_detection(&app, &event);
+            }
+        }
 
         // catch_unwind is scoped to a body that carries no COM state across it -
         // raw COM wrappers are not UnwindSafe, and the per-poll re-resolution
@@ -445,8 +626,11 @@ fn poll_loop(
             enumerate_capture_sessions()
         }));
 
-        let outcome = match polled {
-            Ok(Ok(sessions)) => PollOutcome::Classified(classify(&sessions, &watched, own_pid)),
+        let (outcome, gated_outcome) = match polled {
+            Ok(Ok(sessions)) => (
+                PollOutcome::Classified(classify(&sessions, &lists.direct, own_pid)),
+                PollOutcome::Classified(classify(&sessions, &lists.gated, own_pid)),
+            ),
             Ok(Err(message)) => {
                 tracing::warn!("Meeting detection poll failed: {}", message);
                 if !error_episode {
@@ -456,11 +640,11 @@ fn poll_loop(
                         tracing::warn!("Failed to emit meeting-watcher-error: {}", e);
                     }
                 }
-                PollOutcome::Failed
+                (PollOutcome::Failed, PollOutcome::Failed)
             }
             Err(_) => {
                 tracing::error!("Meeting detection poll panicked");
-                PollOutcome::Failed
+                (PollOutcome::Failed, PollOutcome::Failed)
             }
         };
 
@@ -481,36 +665,43 @@ fn poll_loop(
             }
         }
 
-        let (next, event) = step(machine, outcome);
-        machine = next;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let events = tick(
+            &mut core,
+            outcome,
+            gated_outcome,
+            now_ms,
+            confirmed,
+            &mut || NEXT_EPISODE.fetch_add(1, Ordering::SeqCst),
+        );
 
-        match event {
-            Some(WatcherEvent::Detected(process)) => {
-                if let Err(e) = app.emit("meeting-detected", ProcessPayload { process }) {
-                    tracing::warn!("Failed to emit meeting-detected: {}", e);
+        let mut stopped = false;
+        for event in events {
+            match event {
+                WatcherEvent::Degraded(message) => {
+                    // Opening an episode here is what lets the recovery block above
+                    // close it. Without this the degraded note survives for the rest
+                    // of the process lifetime after the condition self-heals, because
+                    // that block is gated on error_episode.
+                    error_episode = true;
+                    *lock_recover(&last_error) = Some(message.clone());
+                    if let Err(e) = app.emit("meeting-watcher-error", MessagePayload { message }) {
+                        tracing::warn!("Failed to emit meeting-watcher-error: {}", e);
+                    }
                 }
-            }
-            Some(WatcherEvent::Ended(process)) => {
-                if let Err(e) = app.emit("meeting-ended", ProcessPayload { process }) {
-                    tracing::warn!("Failed to emit meeting-ended: {}", e);
+                WatcherEvent::Stopped(reason) => {
+                    guard.reason = Some(reason);
+                    stopped = true;
+                    break;
                 }
+                other => emit_detection(&app, &other),
             }
-            Some(WatcherEvent::Degraded(message)) => {
-                // Opening an episode here is what lets the recovery block above
-                // close it. Without this the degraded note survives for the rest
-                // of the process lifetime after the condition self-heals, because
-                // that block is gated on error_episode.
-                error_episode = true;
-                *lock_recover(&last_error) = Some(message.clone());
-                if let Err(e) = app.emit("meeting-watcher-error", MessagePayload { message }) {
-                    tracing::warn!("Failed to emit meeting-watcher-error: {}", e);
-                }
-            }
-            Some(WatcherEvent::Stopped(reason)) => {
-                guard.reason = Some(reason);
-                break;
-            }
-            None => {}
+        }
+        if stopped {
+            break;
         }
 
         let mut slept = Duration::ZERO;
@@ -531,7 +722,11 @@ fn poll_loop(
 }
 
 #[tauri::command]
-pub fn start_meeting_watcher(app: AppHandle, processes: Vec<String>) -> Result<(), String> {
+pub fn start_meeting_watcher(
+    app: AppHandle,
+    direct: Vec<String>,
+    gated: Vec<String>,
+) -> Result<(), String> {
     if cfg!(not(target_os = "windows")) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
@@ -543,12 +738,17 @@ pub fn start_meeting_watcher(app: AppHandle, processes: Vec<String>) -> Result<(
         state.stopping.load(Ordering::SeqCst),
     ) {
         StartAction::UpdateWatchList => {
-            *lock_recover(&state.watch_list) = processes;
+            *lock_recover(&state.watch_list) = WatchLists { direct, gated };
+            // A start on a running watcher is what a webview reload does: the
+            // fresh frontend gate knows no live candidate, so have the poll
+            // thread re-announce one.
+            state.reannounce.store(true, Ordering::SeqCst);
             Ok(())
         }
         StartAction::Retryable(message) => Err(message.to_string()),
         StartAction::Spawn => {
-            *lock_recover(&state.watch_list) = processes;
+            *lock_recover(&state.watch_list) = WatchLists { direct, gated };
+            *lock_recover(&state.confirmed) = None;
             *lock_recover(&state.last_error) = None;
 
             let shutdown = Arc::new(AtomicBool::new(false));
@@ -573,18 +773,20 @@ pub fn start_meeting_watcher(app: AppHandle, processes: Vec<String>) -> Result<(
                 state.running.clone(),
                 state.stopping.clone(),
                 state.last_error.clone(),
-                state.watch_list.clone(),
+                PollSlots {
+                    lists: state.watch_list.clone(),
+                    confirmed: state.confirmed.clone(),
+                    reannounce: state.reannounce.clone(),
+                },
                 done_tx,
             );
 
             let spawned = thread::Builder::new()
                 .name("meeting-detect".to_string())
                 .spawn(move || {
-                    let (app, shutdown, running, stopping, last_error, watch_list, done_tx) =
+                    let (app, shutdown, running, stopping, last_error, slots, done_tx) =
                         thread_args;
-                    poll_loop(
-                        app, shutdown, running, stopping, last_error, watch_list, done_tx,
-                    );
+                    poll_loop(app, shutdown, running, stopping, last_error, slots, done_tx);
                 });
 
             match spawned {
@@ -609,6 +811,55 @@ pub fn start_meeting_watcher(app: AppHandle, processes: Vec<String>) -> Result<(
             }
         }
     }
+}
+
+/// Writes the lists only while the watcher runs; never spawns.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn apply_list_update(running: bool, slot: &Mutex<WatchLists>, lists: WatchLists) {
+    if running {
+        *lock_recover(slot) = lists;
+    }
+}
+
+#[tauri::command]
+pub fn update_meeting_watch_lists(
+    app: AppHandle,
+    direct: Vec<String>,
+    gated: Vec<String>,
+) -> Result<(), String> {
+    if cfg!(not(target_os = "windows")) {
+        return Err(UNSUPPORTED_PLATFORM.to_string());
+    }
+    let state = app.state::<MeetingWatcherState>();
+    apply_list_update(
+        state.running.load(Ordering::SeqCst),
+        &state.watch_list,
+        WatchLists { direct, gated },
+    );
+    Ok(())
+}
+
+/// Records the confirmed episode for the poll thread; emits nothing itself.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn apply_confirm(running: bool, slot: &Mutex<Option<u64>>, episode: u64) -> Result<(), String> {
+    if !running {
+        return Err("WATCHER_NOT_RUNNING".to_string());
+    }
+    *lock_recover(slot) = Some(episode);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn confirm_meeting_candidate(app: AppHandle, episode: u64) -> Result<(), String> {
+    if cfg!(not(target_os = "windows")) {
+        return Err(UNSUPPORTED_PLATFORM.to_string());
+    }
+    let state = app.state::<MeetingWatcherState>();
+    apply_confirm(
+        state.running.load(Ordering::SeqCst),
+        &state.confirmed,
+        episode,
+    )
 }
 
 /// async because it waits up to 3s: a non-async Tauri v2 command runs on the
@@ -700,6 +951,77 @@ pub fn get_meeting_watcher_status(app: AppHandle) -> Result<WatcherStatus, Strin
     })
 }
 
+/// One app holding the microphone, for the settings readout.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSession {
+    pub name: String,
+    pub pid: u32,
+    pub active: bool,
+    /// "direct", "gated" or "ignored".
+    pub kind: &'static str,
+}
+
+/// Same matching rule as `classify`: case-insensitive exact image name.
+fn describe_sessions(
+    sessions: &[SessionInfo],
+    lists: &WatchLists,
+    own_pid: u32,
+) -> Vec<MicSession> {
+    let listed = |list: &[String], name: &str| list.iter().any(|w| w.eq_ignore_ascii_case(name));
+    let mut rows: Vec<MicSession> = sessions
+        .iter()
+        .filter(|s| s.pid != own_pid)
+        .filter_map(|s| {
+            let name = s.image_name.as_ref()?;
+            let kind = if listed(&lists.direct, name) {
+                "direct"
+            } else if listed(&lists.gated, name) {
+                "gated"
+            } else {
+                "ignored"
+            };
+            Some(MicSession {
+                name: name.clone(),
+                pid: s.pid,
+                active: s.active,
+                kind,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    rows
+}
+
+/// Lists every app on the microphone and whether the watcher would watch it.
+/// Needs no watcher, so it works with auto-record off.
+#[tauri::command]
+pub async fn list_capture_sessions(
+    direct: Vec<String>,
+    gated: Vec<String>,
+) -> Result<Vec<MicSession>, String> {
+    if cfg!(not(target_os = "windows")) {
+        return Err(UNSUPPORTED_PLATFORM.to_string());
+    }
+    let lists = WatchLists { direct, gated };
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        let com_initialized = {
+            use ::windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+            unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok()
+        };
+        let sessions = enumerate_capture_sessions();
+        // Only pair CoUninitialize with a SUCCESSFUL init.
+        #[cfg(target_os = "windows")]
+        if com_initialized {
+            unsafe { ::windows::Win32::System::Com::CoUninitialize() };
+        }
+        Ok(describe_sessions(&sessions?, &lists, std::process::id()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,6 +1036,37 @@ mod tests {
             image_name: name.map(|n| n.to_string()),
             active,
         }
+    }
+
+    #[test]
+    fn describe_sessions_marks_each_list() {
+        let lists = WatchLists {
+            direct: vec!["ms-teams.exe".to_string()],
+            gated: vec!["chrome.exe".to_string()],
+        };
+        let rows = describe_sessions(
+            &[
+                session(1, Some("spotify.exe"), false),
+                session(2, Some("MS-TEAMS.EXE"), false),
+                session(3, Some("chrome.exe"), true),
+                session(4, None, true),
+                session(99, Some("chrome.exe"), true),
+            ],
+            &lists,
+            99,
+        );
+        let got: Vec<(&str, bool, &str)> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.active, r.kind))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("chrome.exe", true, "gated"),
+                ("MS-TEAMS.EXE", false, "direct"),
+                ("spotify.exe", false, "ignored"),
+            ]
+        );
     }
 
     // R12
@@ -1062,5 +1415,318 @@ mod tests {
         let running = AtomicBool::new(true);
         assert!(apply_spawn_outcome(&running, Ok(())).is_ok());
         assert!(running.load(Ordering::SeqCst));
+    }
+
+    fn teams() -> PollOutcome {
+        active()
+    }
+    fn chrome() -> PollOutcome {
+        PollOutcome::Classified(PollResult::Active("chrome.exe".to_string()))
+    }
+
+    type Poll = (PollOutcome, PollOutcome, Option<u64>);
+
+    fn run_core_state(seq: Vec<Poll>) -> (WatcherCore, Vec<WatcherEvent>) {
+        let mut core = WatcherCore::default();
+        let mut events = Vec::new();
+        let mut episode = 0u64;
+        let mut next_episode = || {
+            episode += 1;
+            episode
+        };
+        for (i, (direct, gated, confirmed)) in seq.into_iter().enumerate() {
+            events.extend(tick(
+                &mut core,
+                direct,
+                gated,
+                2_000 * i as i64,
+                confirmed,
+                &mut next_episode,
+            ));
+        }
+        (core, events)
+    }
+
+    fn run_core(seq: Vec<Poll>) -> Vec<WatcherEvent> {
+        run_core_state(seq).1
+    }
+
+    fn detected(p: &str) -> WatcherEvent {
+        WatcherEvent::Detected(p.to_string())
+    }
+    fn ended(p: &str) -> WatcherEvent {
+        WatcherEvent::Ended(p.to_string())
+    }
+
+    /// Two chrome polls (candidate 1) then a confirm poll: a confirmed Meet call.
+    fn confirmed_meet() -> Vec<Poll> {
+        vec![
+            (inactive(), chrome(), None),
+            (inactive(), chrome(), None),
+            (inactive(), chrome(), Some(1)),
+        ]
+    }
+
+    #[test]
+    fn classify_per_list_in_both_enumeration_orders() {
+        let chrome_s = session(300, Some("chrome.exe"), true);
+        let teams_s = session(301, Some("ms-teams.exe"), true);
+        for sessions in [
+            [chrome_s.clone(), teams_s.clone()],
+            [teams_s.clone(), chrome_s.clone()],
+        ] {
+            assert_eq!(
+                classify(&sessions, &watch(), 100),
+                PollResult::Active("ms-teams.exe".to_string())
+            );
+            assert_eq!(
+                classify(&sessions, &["chrome.exe".to_string()], 100),
+                PollResult::Active("chrome.exe".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_matching_mirrors_the_teams_rules() {
+        let list = ["chrome.exe".to_string()];
+        assert_eq!(
+            classify(&[session(300, Some("CHROME.EXE"), true)], &list, 100),
+            PollResult::Active("CHROME.EXE".to_string())
+        );
+        assert_eq!(
+            classify(&[session(100, Some("chrome.exe"), true)], &list, 100),
+            PollResult::Inactive,
+            "own pid is excluded"
+        );
+        assert_eq!(
+            classify(
+                &[session(300, None, true), session(301, None, true)],
+                &list,
+                100
+            ),
+            PollResult::Unknown
+        );
+    }
+
+    #[test]
+    fn teams_starts_while_chrome_is_a_candidate() {
+        // Chrome keeps holding the mic through the Teams polls (gated side live).
+        let (core, events) = run_core_state(vec![
+            (inactive(), chrome(), None),
+            (inactive(), chrome(), None),
+            (teams(), chrome(), None),
+            (teams(), chrome(), None),
+        ]);
+        assert_eq!(
+            events,
+            vec![WatcherEvent::CandidateStarted(1), detected("ms-teams.exe")],
+            "Teams is detected directly; Chrome is neither ended nor promoted"
+        );
+        assert_eq!(
+            core.gated.candidate_episode(),
+            Some(1),
+            "Chrome stays a candidate, still unconfirmed"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_gated_episode_emits_no_meeting_events() {
+        let mut seq = vec![(inactive(), chrome(), None), (inactive(), chrome(), None)];
+        seq.extend(vec![(inactive(), inactive(), None); 5]);
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                WatcherEvent::CandidateEnded(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn confirm_then_leave_emits_detected_then_ended() {
+        let mut seq = confirmed_meet();
+        seq.extend(vec![(inactive(), inactive(), None); 5]);
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                detected("chrome.exe"),
+                ended("chrome.exe")
+            ]
+        );
+    }
+
+    #[test]
+    fn teams_ending_inside_a_confirmed_meet_call_emits_no_ended() {
+        let mut seq = confirmed_meet();
+        seq.extend(vec![(teams(), chrome(), Some(1)); 2]);
+        seq.extend(vec![(inactive(), chrome(), Some(1)); 3]);
+        assert_eq!(
+            run_core(seq.clone()),
+            vec![WatcherEvent::CandidateStarted(1), detected("chrome.exe")],
+            "Teams starting and ending inside the Meet call emits nothing"
+        );
+        seq.extend(vec![(inactive(), inactive(), Some(1)); 5]);
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                detected("chrome.exe"),
+                ended("chrome.exe")
+            ]
+        );
+    }
+
+    #[test]
+    fn ended_carries_the_process_that_opened_the_call() {
+        // Teams opens, a Meet candidate is confirmed, Teams ends, then Meet ends.
+        let mut seq = vec![(teams(), inactive(), None); 2];
+        seq.extend(vec![(teams(), chrome(), None); 2]);
+        seq.push((teams(), chrome(), Some(1)));
+        seq.extend(vec![(inactive(), chrome(), Some(1)); 3]);
+        seq.extend(vec![(inactive(), inactive(), Some(1)); 5]);
+        let events = run_core(seq);
+        assert_eq!(
+            events,
+            vec![
+                detected("ms-teams.exe"),
+                WatcherEvent::CandidateStarted(1),
+                ended("ms-teams.exe")
+            ]
+        );
+    }
+
+    #[test]
+    fn teams_only_sequences_are_unchanged() {
+        let seqs = vec![
+            vec![active()],
+            vec![active(), active()],
+            vec![active(), active(), active(), active()],
+            vec![active(), active(), inactive(), inactive()],
+            vec![active(), active(), inactive(), inactive(), inactive()],
+            vec![
+                active(),
+                active(),
+                inactive(),
+                inactive(),
+                active(),
+                inactive(),
+                inactive(),
+            ],
+        ];
+        for seq in seqs {
+            let (_, expected) = run(seq.clone());
+            let got = run_core(seq.into_iter().map(|o| (o, inactive(), None)).collect());
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn one_bad_poll_raises_one_degraded() {
+        let events = run_core(vec![(unknown(), unknown(), None); 15]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WatcherEvent::Degraded(_)));
+
+        let events = run_core(vec![(failed(), failed(), None); 30]);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WatcherEvent::Stopped(_)));
+    }
+
+    #[test]
+    fn emptying_the_gated_list_ends_a_live_episode_after_the_debounce() {
+        let sessions = [session(300, Some("chrome.exe"), true)];
+        let emptied = classify(&sessions, &[], 100);
+        assert_eq!(emptied, PollResult::Inactive);
+
+        let mut seq = confirmed_meet();
+        let before = run_core(seq.clone());
+        assert_eq!(before.len(), 2);
+        for n in 1..=5 {
+            seq.push((
+                inactive(),
+                PollOutcome::Classified(emptied.clone()),
+                Some(1),
+            ));
+            let events = run_core(seq.clone());
+            if n < 5 {
+                assert_eq!(events, before, "poll {n} must not end the call");
+            } else {
+                assert_eq!(events.last(), Some(&ended("chrome.exe")));
+            }
+        }
+    }
+
+    #[test]
+    fn bad_polls_hold_a_confirmed_meet_call() {
+        let mut seq = confirmed_meet();
+        seq.extend(vec![(unknown(), unknown(), Some(1)); 10]);
+        seq.extend(vec![(failed(), failed(), Some(1)); 10]);
+        assert!(
+            !run_core(seq.clone())
+                .iter()
+                .any(|e| matches!(e, WatcherEvent::Ended(_))),
+            "bad polls must not end a confirmed call"
+        );
+        seq.push((inactive(), chrome(), Some(1)));
+        seq.extend(vec![(inactive(), inactive(), Some(1)); 5]);
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                detected("chrome.exe"),
+                ended("chrome.exe")
+            ]
+        );
+    }
+
+    #[test]
+    fn list_update_is_ignored_while_not_running() {
+        let initial = WatchLists {
+            direct: vec!["a.exe".to_string()],
+            gated: vec![],
+        };
+        let slot = Mutex::new(initial.clone());
+        let next = WatchLists {
+            direct: vec!["b.exe".to_string()],
+            gated: vec!["chrome.exe".to_string()],
+        };
+        apply_list_update(false, &slot, next.clone());
+        assert_eq!(*lock_recover(&slot), initial);
+        apply_list_update(true, &slot, next.clone());
+        assert_eq!(*lock_recover(&slot), next);
+    }
+
+    #[test]
+    fn reannounce_event_repeats_only_a_live_candidate() {
+        assert_eq!(reannounce_event(&WatcherCore::default()), None);
+
+        let candidate = vec![(inactive(), chrome(), None), (inactive(), chrome(), None)];
+        let (core, _) = run_core_state(candidate.clone());
+        assert_eq!(
+            reannounce_event(&core),
+            Some(WatcherEvent::CandidateStarted(1))
+        );
+
+        let mut confirmed = candidate.clone();
+        confirmed.push((inactive(), chrome(), Some(1)));
+        let (core, _) = run_core_state(confirmed);
+        assert_eq!(reannounce_event(&core), None);
+
+        let mut ended_seq = candidate;
+        ended_seq.extend(vec![(inactive(), inactive(), None); 5]);
+        let (core, _) = run_core_state(ended_seq);
+        assert_eq!(reannounce_event(&core), None);
+    }
+
+    #[test]
+    fn confirm_is_rejected_while_not_running() {
+        let slot = Mutex::new(None);
+        assert_eq!(
+            apply_confirm(false, &slot, 7),
+            Err("WATCHER_NOT_RUNNING".to_string())
+        );
+        assert_eq!(*lock_recover(&slot), None);
+        assert_eq!(apply_confirm(true, &slot, 7), Ok(()));
+        assert_eq!(*lock_recover(&slot), Some(7));
     }
 }

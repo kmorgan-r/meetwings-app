@@ -180,7 +180,8 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     {
         builder = builder.manage(shortcuts::WindowVisibility {
-            is_hidden: Mutex::new(false),
+            // Inverted flag: `true` means the bar is showing (see `reveal_overlay`).
+            is_hidden: Mutex::new(true),
         });
     }
     #[allow(unused_mut)]
@@ -207,6 +208,7 @@ pub fn run() {
             shortcuts::set_app_icon_visibility,
             shortcuts::set_always_on_top,
             shortcuts::exit_app,
+            shortcuts::reveal_overlay,
             activate::activate_license_api,
             activate::deactivate_license_api,
             activate::validate_license_api,
@@ -233,6 +235,9 @@ pub fn run() {
             meeting_detect::start_meeting_watcher,
             meeting_detect::stop_meeting_watcher,
             meeting_detect::get_meeting_watcher_status,
+            meeting_detect::update_meeting_watch_lists,
+            meeting_detect::confirm_meeting_candidate,
+            meeting_detect::list_capture_sessions,
             // The four commands below return GraphStatus or CurrentMeetings.
             // Both are scanned for credential-shaped keys by
             // graph::tests::no_exposed_command_return_type_serializes_a_credential

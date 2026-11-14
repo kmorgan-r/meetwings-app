@@ -14,7 +14,7 @@ vi.mock("@/lib/platform", () => ({
 // whether the settings page renders it.
 vi.mock("@/pages/settings/components/MeetingAutoRecordToggle", () => ({
   MeetingAutoRecordToggle: () => (
-    <div aria-label="Automatically record Teams calls" />
+    <div aria-label="Automatically record Teams and Google Meet calls" />
   ),
 }));
 
@@ -49,14 +49,14 @@ describe("settings page auto-record gate", () => {
   it("renders the toggle on Windows only", () => {
     const { unmount } = render(<Settings />);
     expect(
-      screen.queryByLabelText(/automatically record teams calls/i)
+      screen.queryByLabelText(/automatically record teams and google meet calls/i)
     ).not.toBeNull();
     unmount();
 
     onWindows = false;
     render(<Settings />);
     expect(
-      screen.queryByLabelText(/automatically record teams calls/i)
+      screen.queryByLabelText(/automatically record teams and google meet calls/i)
     ).toBeNull();
   });
 });
@@ -121,6 +121,7 @@ describe("app page mounts the detection hook", () => {
     vi.doMock("@/hooks", () => ({
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: {} }),
+      useMeetingCardHost: () => null,
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
@@ -619,6 +620,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
     vi.doMock("@/hooks", () => ({
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
+      useMeetingCardHost: () => null,
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,

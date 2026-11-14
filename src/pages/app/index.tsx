@@ -5,8 +5,9 @@ import {
   AudioVisualizer,
   StatusIndicator,
   MinimizedPill,
+  MeetingCard,
 } from "./components";
-import { useApp, useSetupStatus, useMeetingDetection } from "@/hooks";
+import { useApp, useSetupStatus, useMeetingDetection, useMeetingCardHost } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -21,7 +22,8 @@ import {
   setMinimized,
   subscribeToMinimized,
 } from "@/lib/overlay-minimize.store";
-import type { OverlayPillStyle } from "@/lib/storage";
+import { getMeetingCard, pillWindowSize } from "@/lib/meeting-cards.store";
+import { getCustomizableState, type OverlayPillStyle } from "@/lib/storage";
 
 const App = () => {
   const { isHidden, systemAudio } = useApp();
@@ -31,13 +33,14 @@ const App = () => {
     aiConfigured,
     sttConfigured,
   } = useSetupStatus();
-  // Teams call detection. Self-gating: inert outside the `main` window and off
+  // Teams and Google Meet call detection. Self-gating: inert outside the `main` window and off
   // Windows. Takes no arguments and never touches capture state.
   useMeetingDetection();
   const { customizable, setOverlayPillStyle } = useAppContext();
   const platform = getPlatform();
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
+  const card = useMeetingCardHost(pillStyle);
 
   const openDashboard = async () => {
     try {
@@ -60,7 +63,7 @@ const App = () => {
     // re-snapshot the window's own pill geometry as the "pre-minimize" rect —
     // corrupting the restore target.
     if (getMinimized()) return;
-    const dims = PILL_DIMENSIONS[pillStyle];
+    const dims = pillWindowSize(pillStyle, getMeetingCard());
     setMinimized(true);
     try {
       await invoke("minimize_overlay", {
@@ -84,10 +87,25 @@ const App = () => {
   // Reading the flag back on mount is what closes that gap; `set_window_height`
   // is gated in Rust too, so the observer cannot win the race while this
   // invoke is in flight.
+  //
+  // A reload also empties the card store while the window keeps its card-aware
+  // size, so a minimized rehydrate restyles to the size for the CURRENT card
+  // (none, after a reload). restyle: true never re-snapshots the restore rect.
+  // The style is read from storage at use time: AppProvider starts at the
+  // default style and loads the stored one in its own mount effect, which this
+  // IPC round trip is not guaranteed to outlast.
   useEffect(() => {
     invoke<boolean>("is_overlay_minimized")
       .then((isMinimized) => {
-        if (isMinimized) setMinimized(true);
+        if (!isMinimized) return;
+        setMinimized(true);
+        const style = getCustomizableState().overlayPill.style;
+        const dims = pillWindowSize(style, getMeetingCard());
+        return invoke("minimize_overlay", {
+          width: dims.width,
+          height: dims.height,
+          restyle: true,
+        });
       })
       .catch((error) => {
         console.error("Failed to read the minimized state:", error);
@@ -110,7 +128,7 @@ const App = () => {
         const style = event.payload.style;
         setOverlayPillStyle(style);
         if (getMinimized()) {
-          const dims = PILL_DIMENSIONS[style];
+          const dims = pillWindowSize(style, getMeetingCard());
           invoke("minimize_overlay", {
             width: dims.width,
             height: dims.height,
@@ -255,8 +273,25 @@ const App = () => {
               <Minimize2 className="h-4 w-4" />
             </Button>
           </Card>
+          {card && (
+            <div className="mt-2">
+              <MeetingCard card={card} />
+            </div>
+          )}
         </div>
-        {minimized && <MinimizedPill style={pillStyle} />}
+        {/* Compact card above the pill. The window grows upward from the
+            bottom-right anchor (useMeetingCardHost sizes it); the pill keeps
+            its exact box at the bottom-right. */}
+        {minimized && card ? (
+          <div className="w-full h-full flex flex-col items-end justify-end gap-2">
+            <MeetingCard card={card} compact />
+            <div className="shrink-0" style={PILL_DIMENSIONS[pillStyle]}>
+              <MinimizedPill style={pillStyle} />
+            </div>
+          </div>
+        ) : (
+          minimized && <MinimizedPill style={pillStyle} />
+        )}
         {/* Sibling of BOTH the Card wrapper and the pill, inside the isHidden
             one — exactly where it sat before the minimized wrapper existed.
             cursor.type defaults to "invisible", which sets --cursor-type:none

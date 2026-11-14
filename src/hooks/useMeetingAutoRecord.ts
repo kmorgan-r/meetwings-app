@@ -18,6 +18,11 @@ import {
   decideOnWatcherStopped,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
+import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
+import {
+  autoRecordingStarted,
+  autoRecordingStopped,
+} from "@/lib/meeting-cards.store";
 import {
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
@@ -176,6 +181,7 @@ export const useMeetingAutoRecord = ({
       // did not perform.
       void flushRef.current?.().catch(reportFlushFailure);
       startedModeRef.current = null;
+      autoRecordingStopped();
     } else if (!meetingAssistMode && !stopRequestedRef.current) {
       // Pill off mid-call: the guest half unmounts but the mic stays open and
       // starts auto-submitting to the AI. Do NOT close it inline - enqueue the
@@ -291,7 +297,7 @@ export const useMeetingAutoRecord = ({
     return chainRef.current;
   };
 
-  const handleDetected = async () => {
+  const handleDetected = async (process?: string) => {
     // The op that starts a capture owns cancelling it, because the unmount
     // cleanup cannot: provenance is written two IPC round trips after
     // startCapture(), while Rust sets is_capturing before the first of them
@@ -405,6 +411,12 @@ export const useMeetingAutoRecord = ({
       // Nothing is confirmed against Rust - see Decision 4. A failing guest half
       // reports itself via useMeetingAudio's onError.
       startedModeRef.current = "meeting";
+      // Published BEFORE the mic opens, so meetingCaptureStarted finds it.
+      autoRecordingStarted({
+        app: meetingLabel(process),
+        gated: isGatedProcess(process),
+        stop: () => setEnableVADRef.current(false),
+      });
       setEnableVADRef.current(true);
       return;
     }
@@ -433,6 +445,12 @@ export const useMeetingAutoRecord = ({
 
     if (started) {
       startedModeRef.current = "transcribing";
+      // Not a bare stopCapture(): see the unmount cleanup for why.
+      autoRecordingStarted({
+        app: meetingLabel(process),
+        gated: isGatedProcess(process),
+        stop: () => void enqueue(handleStop),
+      });
       return;
     }
 
@@ -478,7 +496,10 @@ export const useMeetingAutoRecord = ({
     return false;
   };
 
-  const handleStop = async () => {
+  // `opts` is optional AND read defensively: a bare enqueue(handleStop) goes
+  // through chain.then(op), which hands op the previous link's result.
+  const handleStop = async (opts?: { auto?: boolean }) => {
+    const auto = opts?.auto === true;
     const action = decideOnEnded({ startedMode: startedModeRef.current });
     if (action === "ignore") {
       // MUST clear here, not only in `finally`: this early return is before the
@@ -495,6 +516,7 @@ export const useMeetingAutoRecord = ({
     // branch and flush a SECOND time (measured: 2 flushes on every healthy
     // stop). The action is already captured, so nulling here is safe.
     startedModeRef.current = null;
+    autoRecordingStopped({ auto });
 
     try {
       if (action === "stop-meeting") {
@@ -556,6 +578,8 @@ export const useMeetingAutoRecord = ({
         // useCompletion today - up to MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL - 1
         // segments would vanish silently.
         void flushRef.current?.().catch(reportFlushFailure);
+        // Idempotent: a transcribing handleStop enqueued below publishes again.
+        autoRecordingStopped();
       }
       if (startedModeRef.current === "transcribing") {
         // enqueue, NOT a bare stopCapture(): a direct call bypasses chainRef
@@ -591,12 +615,13 @@ export const useMeetingAutoRecord = ({
     };
 
     Promise.all([
-      register("meeting-detected", () => {
-        enqueue(handleDetected);
-      }),
+      register("meeting-detected", (payload) =>
+        enqueue(() => handleDetected(payload?.process))
+      ),
 
       register("meeting-ended", () => {
-        enqueue(handleStop);
+        // The only automatic stop: it opens the quiet-restart window.
+        enqueue(() => handleStop({ auto: true }));
       }),
 
       register("capture-stopped", () => {
@@ -607,6 +632,7 @@ export const useMeetingAutoRecord = ({
         // decideOnEnded returning "ignore" and the mic never closing.
         if (startedModeRef.current === "transcribing") {
           startedModeRef.current = null;
+          autoRecordingStopped();
         }
       }),
 
