@@ -94,7 +94,7 @@ export const STORAGE_KEYS = {
 
 // Process image names that indicate a meeting call is in progress. Passed to the
 // Rust watcher, so adding an app here is a config change rather than a Rust one.
-export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe"];
+export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe", "Zoom.exe"];
 
 // Display names for the detection toasts, keyed by LOWERCASED process name.
 // Matching on the Rust side is case-insensitive and the observed basename keeps
@@ -103,6 +103,7 @@ export const MEETING_DETECT_LABELS: Record<string, string> = {
   "ms-teams.exe": "Teams",
   "teams.exe": "Teams",
   "chrome.exe": "Google Meet",
+  "zoom.exe": "Zoom",
 };
 
 export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
@@ -199,6 +200,26 @@ export const EMPTY_TRANSCRIPTION_REPORT_THRESHOLD = 5;
  */
 export const STOP_CONFIRM_ATTEMPTS = 5;
 export const STOP_CONFIRM_INTERVAL_MS = 300;
+
+// How long after a detected call ends the auto-recording keeps rolling before
+// it stops on its own. Two minutes, so the closing exchange of the call is kept
+// and an immediate re-detection of the same call (Teams rejoin, Zoom unmute
+// window) needs no second start. Same home as STOP_CONFIRM_ATTEMPTS above: a
+// module's own const reads compile to a local binding, so vi.mock on this
+// module is the only way to override it from a test.
+export const CALL_END_GRACE_MS = 2 * 60 * 1000;
+
+// The outer bound of a still-recording capture whose call stopped being
+// re-detected. Fifteen minutes: long enough never to cut a healthy call whose
+// detection missed a beat, short enough that a hung watcher cannot keep
+// recording a dead call indefinitely.
+export const SILENCE_STOP_MS = 15 * 60 * 1000;
+
+// Bound on reading the calendar inside the same-call check. The answer decides
+// whether a live capture keeps running, so a hung calendar request cannot be
+// allowed to stall the stop: past 5 seconds the read is abandoned and treated
+// as unreadable, which errs on the same-call side.
+export const SAME_CALL_READ_TIMEOUT_MS = 5_000;
 
 // Meeting Assist system prompt for contextual insights
 export const MEETING_ASSIST_SYSTEM_PROMPT = `You are a live meeting/interview assistant feeding the user answers in real time. The transcript uses speaker labels: "You" is the user; other labels are the other participants.

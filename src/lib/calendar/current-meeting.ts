@@ -62,6 +62,29 @@ export function insideEvent(
   return overlap >= 0.5 * spanLength;
 }
 
+/**
+ * The calendar slot covering a single moment: events that pass isMeetingEvent
+ * and satisfy `startMs <= at < endMs` with NO early-join and NO ended grace.
+ * Stricter than pickCurrentMeeting on purpose - the same-call rule compares the
+ * slots at the call's end and a later moment directly, so a window that
+ * tolerates early joins or overruns would make every pair of nearby moments
+ * resolve to the same entry.
+ *
+ * Among the covering events the one that STARTED LATEST wins, ties broken by
+ * id (the last one after ascending localeCompare). `null` when nothing covers
+ * the moment.
+ */
+export function slotEventAt(
+  events: CalendarEvent[],
+  at: number
+): CalendarEvent | null {
+  const slots = events
+    .filter(isMeetingEvent)
+    .filter((event) => event.startMs <= at && at < event.endMs)
+    .sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
+  return slots[slots.length - 1] ?? null;
+}
+
 function isCandidate(event: CalendarEvent, nowMs: number): boolean {
   if (!isMeetingEvent(event)) return false;
   if (event.startMs > nowMs + EARLY_JOIN_MS) return false;

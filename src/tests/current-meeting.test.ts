@@ -5,6 +5,7 @@ import {
   insideEvent,
   isMeetingEvent,
   pickCurrentMeeting,
+  slotEventAt,
 } from "@/lib/calendar/current-meeting";
 import type { CalendarEvent, CalendarParticipant } from "@/types";
 
@@ -261,5 +262,58 @@ describe("pickCurrentMeeting is unchanged by the split", () => {
     if (result.kind === "several") {
       expect(result.candidates.map((c) => c.id)).toEqual(["in-a", "in-b"]);
     }
+  });
+});
+
+// slotEventAt is the SAME-CALL slot lookup, deliberately stricter than
+// pickCurrentMeeting: no early-join and no ended grace, because the grace
+// window after a call ends must resolve to the exact calendar slot the call
+// belongs to, or two back-to-back meetings would read as one continuing call.
+describe("slotEventAt", () => {
+  it("includes the start and excludes the end", () => {
+    const ev = event(); // NOW-5min .. NOW+25min
+    expect(slotEventAt([ev], ev.startMs)?.id).toBe("e1");
+    expect(slotEventAt([ev], ev.endMs - MIN)?.id).toBe("e1");
+    expect(slotEventAt([ev], ev.endMs)).toBeNull();
+  });
+
+  it("ignores an event starting 4 minutes later (no early join)", () => {
+    const soon = event({ id: "soon", startMs: NOW + 4 * MIN, endMs: NOW + 34 * MIN });
+    expect(slotEventAt([soon], NOW)).toBeNull();
+  });
+
+  // The user is inside two overlapping meetings' spans only where they
+  // overlap; the one that started later is the one they are in.
+  it("prefers the later-starting of two overlapping events", () => {
+    const a = event({ id: "a" }); // NOW-5 .. NOW+25
+    const b = event({ id: "b", startMs: NOW, endMs: NOW + 30 * MIN });
+    expect(slotEventAt([a, b], NOW + 10 * MIN)?.id).toBe("b");
+    expect(slotEventAt([a, b], NOW - 1 * MIN)?.id).toBe("a");
+  });
+
+  // Pinned by sorting with ascending localeCompare and taking the last entry:
+  // "b" sorts after "a", so id "b" must win.
+  it("breaks a startMs tie by id, taking the last after ascending order", () => {
+    const a = event({ id: "a" });
+    const b = event({ id: "b", subject: "Other" });
+    expect(slotEventAt([a, b], NOW)?.id).toBe("b");
+  });
+
+  it("ignores cancelled, declined, all-day and solo events", () => {
+    expect(slotEventAt([event({ isCancelled: true })], NOW)).toBeNull();
+    expect(slotEventAt([event({ ownResponse: "declined" })], NOW)).toBeNull();
+    expect(slotEventAt([event({ isAllDay: true })], NOW)).toBeNull();
+    expect(
+      slotEventAt(
+        [{ ...event(), participants: [participant("me@corp.test", { isOrganizer: true })] }],
+        NOW
+      )
+    ).toBeNull();
+  });
+
+  it("returns null when nothing covers the moment", () => {
+    expect(slotEventAt([], NOW)).toBeNull();
+    const over = event({ startMs: NOW - 60 * MIN, endMs: NOW - 30 * MIN });
+    expect(slotEventAt([over], NOW)).toBeNull();
   });
 });

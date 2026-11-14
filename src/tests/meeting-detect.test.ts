@@ -102,9 +102,12 @@ describe("meetingLabel", () => {
     expect(meetingLabel("CHROME.EXE")).toBe("Google Meet");
     expect(meetingLabel("MS-Teams.exe")).toBe("Teams");
   });
+  it("labels Zoom.exe as Zoom", () => {
+    expect(meetingLabel("Zoom.exe")).toBe("Zoom");
+  });
   it("falls back", () => {
     expect(meetingLabel(undefined)).toBe("Meeting");
-    expect(meetingLabel("zoom.exe")).toBe("Meeting");
+    expect(meetingLabel("notepad.exe")).toBe("Meeting");
   });
 });
 
@@ -112,5 +115,16 @@ describe("isGatedProcess", () => {
   it("is case-insensitive membership", () => {
     expect(isGatedProcess("Chrome.exe")).toBe(true);
     expect(isGatedProcess("ms-teams.exe")).toBe(false);
+  });
+  it("never gates Zoom", () => {
+    expect(isGatedProcess("Zoom.exe")).toBe(false);
+  });
+});
+
+// Zoom joins Teams as a directly watched process: audio from the desktop
+// client alone proves a call, with no calendar gate.
+describe("Zoom detection entry", () => {
+  it("watches Zoom.exe directly", () => {
+    expect(MEETING_DETECT_PROCESSES).toContain("Zoom.exe");
   });
 });
