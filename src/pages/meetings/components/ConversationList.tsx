@@ -1,11 +1,11 @@
 import { memo, useMemo } from "react";
 import moment from "moment";
 import type { NotionBadge } from "@/hooks/useNotionQueue";
-import type { ChatConversation } from "@/types";
+import type { ConversationListItem } from "@/types";
 import { DateGroup } from "./DateGroup";
 
 export interface ConversationListProps {
-  conversations: ChatConversation[];
+  conversations: ConversationListItem[];
   search: string;
   badges: ReadonlyMap<string, { status: string; count: number }>;
   /** Conversation id -> who the meeting was with, for the badge label AND the
@@ -40,7 +40,7 @@ export interface ConversationListProps {
 
 interface DateBucket {
   dateKey: string;
-  conversations: ChatConversation[];
+  conversations: ConversationListItem[];
 }
 
 /**
@@ -51,20 +51,14 @@ interface DateBucket {
  * `STALE_TICK_MS` and re-renders the page that owns it; without this
  * component - and the `memo` below - that tick would re-run this grouping,
  * sorting and filtering on every cycle, over every conversation
- * `getAllConversations` returned with every message attached, to redraw a
- * clock only the queue strip needs. `React.memo`'s default shallow compare is
+ * `listConversations` returned, to redraw a clock only the queue strip
+ * needs. `React.memo`'s default shallow compare is
  * enough: `conversations`, `search` and `renamingId` are primitives or the
  * page's own state, `badges` and `whoNames` are the page's queue-derived maps
  * (rebuilt together, on `reload`, not on the tick - see the page's own
  * `badges`/`whoNames` doc comment), and `onOpen`, `onStartRename`,
  * `onCommitRename` and `onCancelRename` are page-level `useCallback`s with an
  * empty dependency array.
- *
- * Known cost this does NOT address: `getAllConversations` attaches every
- * message to every conversation, and this component still receives that full
- * object graph on every real reload - a row only ever reads
- * `doc.messages.length`. A `COUNT(*)`-shaped list read is the actual remedy
- * and is out of scope for this change.
  */
 function ConversationListInner({
   conversations,
@@ -82,7 +76,7 @@ function ConversationListInner({
 }: ConversationListProps) {
   const dateGroups = useMemo<DateBucket[]>(() => {
     const term = search.toLowerCase();
-    const byDate = new Map<string, ChatConversation[]>();
+    const byDate = new Map<string, ConversationListItem[]>();
     // Filters per ROW, then buckets what survives. Bucketing first and dropping
     // whole buckets - which this did, carried over verbatim from the old
     // `pages/chats/index.tsx` - kept every OTHER conversation from a day that

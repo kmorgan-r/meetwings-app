@@ -67,6 +67,11 @@ export interface ChatConversation {
   updatedAt: number;
 }
 
+/** A conversation as the history list shows it: how many messages, not the messages. */
+export interface ConversationListItem extends Omit<ChatConversation, "messages"> {
+  messageCount: number;
+}
+
 export interface CompletionState {
   input: string;
   response: string;

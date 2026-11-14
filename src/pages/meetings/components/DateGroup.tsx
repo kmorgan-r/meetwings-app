@@ -1,12 +1,12 @@
 import moment from "moment";
-import type { ChatConversation } from "@/types";
+import type { ConversationListItem } from "@/types";
 import type { NotionBadge } from "@/hooks/useNotionQueue";
 import { ConversationRow } from "./ConversationRow";
 
 export interface DateGroupProps {
   /** `YYYY-MM-DD`, the key the page grouped on. */
   dateKey: string;
-  conversations: ChatConversation[];
+  conversations: ConversationListItem[];
   badges: ReadonlyMap<string, { status: string; count: number }>;
   whoNames: ReadonlyMap<string, string>;
   onOpen: (id: string) => void;
@@ -58,7 +58,7 @@ export function DateGroup({
               key={doc.id}
               id={doc.id}
               title={doc.title}
-              messageCount={doc.messages.length}
+              messageCount={doc.messageCount}
               updatedAt={doc.updatedAt}
               badgeStatus={badge?.status ?? null}
               badgeCount={badge?.count ?? 0}

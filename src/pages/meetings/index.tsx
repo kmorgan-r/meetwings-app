@@ -98,7 +98,7 @@ export default function Meetings() {
    * Conversation id -> title, for the strip's rows.
    *
    * Read off the SAME `useHistory` state the list below renders, not a second
-   * query: `getAllConversations` is unbounded, so every conversation a queue
+   * query: `listConversations` is unbounded, so every conversation a queue
    * row can point at is already here, and a rename committed on either surface
    * repaints both through useHistory's own `conversation-title-updated`
    * listener. A queue-side read would drift from the list the moment one of
