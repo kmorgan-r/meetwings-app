@@ -41,6 +41,29 @@ const toast = vi.hoisted(() => ({
 }));
 vi.mock("sonner", () => ({ toast }));
 
+// Every createMeetGate() call yields a fresh spy gate, kept in order so the
+// StrictMode test can tell the discarded mount's gate from the live one.
+const gates = vi.hoisted(() => [] as Array<{
+  candidateStarted: ReturnType<typeof vi.fn>;
+  candidateEnded: ReturnType<typeof vi.fn>;
+  connectionChanged: ReturnType<typeof vi.fn>;
+  stop: ReturnType<typeof vi.fn>;
+}>);
+vi.mock("@/lib/meet-gate", () => ({
+  createMeetGate: () => {
+    const g = {
+      candidateStarted: vi.fn(),
+      candidateEnded: vi.fn(),
+      connectionChanged: vi.fn(),
+      stop: vi.fn(),
+    };
+    gates.push(g);
+    return g;
+  },
+  defaultMeetGateDeps: () => ({}),
+}));
+const lastGate = () => gates[gates.length - 1];
+
 let windowLabel = "main";
 let onWindows = true;
 let stored: Record<string, string> = {};
@@ -108,6 +131,7 @@ const registerImmediately = async (
 
 beforeEach(() => {
   listeners.clear();
+  gates.length = 0;
   vi.clearAllMocks();
   // clearAllMocks wipes call history but NOT implementations, so any test that
   // overrides listen/invoke would leak into the next one. Restore both here.
@@ -589,6 +613,105 @@ describe("useMeetingDetection", () => {
       await Promise.resolve();
     });
     await waitFor(() => expect(cmdCount("update_meeting_watch_lists")).toBe(1));
+  });
+
+  it("candidate listener is subscribed before the first start", async () => {
+    const order: string[] = [];
+    listen.mockImplementation(async (event: string, cb: never) => {
+      order.push(`listen:${event}`);
+      return registerImmediately(event, cb);
+    });
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(`invoke:${cmd}`);
+      return undefined;
+    });
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    const start = order.indexOf("invoke:start_meeting_watcher");
+    expect(start).toBeGreaterThan(-1);
+    for (const event of [
+      "meeting-candidate-started",
+      "meeting-candidate-ended",
+    ]) {
+      const at = order.indexOf(`listen:${event}`);
+      expect(at).toBeGreaterThan(-1);
+      expect(at).toBeLessThan(start);
+    }
+  });
+
+  it("candidate events reach the gate only while auto-record is on", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    fire("meeting-candidate-started", { episode: 3 });
+    fire("meeting-candidate-ended", { episode: 3 });
+    expect(lastGate().candidateStarted).toHaveBeenCalledWith(3);
+    expect(lastGate().candidateEnded).toHaveBeenCalledWith(3);
+
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await flush();
+    lastGate().candidateStarted.mockClear();
+    fire("meeting-candidate-started", { episode: 4 });
+    expect(lastGate().candidateStarted).not.toHaveBeenCalled();
+  });
+
+  it("a connection change pokes the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    fire(GOOGLE_CONNECTION_CHANGED_EVENT);
+    expect(lastGate().connectionChanged).toHaveBeenCalledTimes(1);
+    expect(registered(GOOGLE_CONNECTION_CHANGED_EVENT)).toBe(1);
+  });
+
+  it("turning auto-record off stops the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    expect(lastGate().stop).not.toHaveBeenCalled();
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await flush();
+    expect(lastGate().stop).toHaveBeenCalled();
+  });
+
+  it("meeting-watcher-stopped stops the gate", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    fire("meeting-watcher-stopped", { reason: "x" });
+    expect(lastGate().stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("Retry stops the gate before restarting the watcher", async () => {
+    const order: string[] = [];
+    renderHook(() => useMeetingDetection());
+    await flush();
+    invoke.mockImplementation(async (cmd: string) => {
+      order.push(cmd);
+      if (cmd === "stop_meeting_watcher") order.push("after-stop");
+      return undefined;
+    });
+    lastGate().stop.mockImplementation(() => order.push("gate.stop"));
+
+    fire("meeting-detection-retry-requested");
+    await flush();
+    await waitFor(() => expect(order).toContain("start_meeting_watcher"));
+    expect(order.indexOf("gate.stop")).toBeGreaterThan(
+      order.indexOf("stop_meeting_watcher")
+    );
+    expect(order.indexOf("gate.stop")).toBeLessThan(
+      order.indexOf("start_meeting_watcher")
+    );
+  });
+
+  it("StrictMode creates one live gate", async () => {
+    renderHook(() => useMeetingDetection(), { wrapper: StrictMode });
+    await flush();
+    expect(gates.length).toBe(2);
+    expect(gates[0].stop).toHaveBeenCalled();
+    expect(gates[1].stop).not.toHaveBeenCalled();
+
+    fire("meeting-candidate-started", { episode: 1 });
+    expect(gates[0].candidateStarted).not.toHaveBeenCalled();
+    expect(gates[1].candidateStarted).toHaveBeenCalledWith(1);
   });
 
   // F33 - the end payload carries the process, so a reload cannot orphan the label

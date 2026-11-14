@@ -8,6 +8,11 @@ import { isWindows } from "@/lib/platform";
 import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
 import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
+import {
+  createMeetGate,
+  defaultMeetGateDeps,
+  type MeetGate,
+} from "@/lib/meet-gate";
 
 const readSetting = () =>
   safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) === "true";
@@ -53,6 +58,10 @@ export const useMeetingDetection = () => {
   // serialization here makes them live bugs, and nothing in Rust - no compiler
   // check, no test - will catch it. Fix them there first.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
+
+  // The Meet calendar check loop. Created and stopped by effect 2. It never
+  // touches the watcher, so it needs no place in the command queue.
+  const gateRef = useRef<MeetGate | null>(null);
 
   // Resolves once the four detection listeners are actually registered. listen()
   // is async, so without this gate the first start_meeting_watcher reliably wins
@@ -108,6 +117,7 @@ export const useMeetingDetection = () => {
     Promise.all([
       register("meeting-detection-setting-changed", (payload) => {
         setEnabled(Boolean(payload?.enabled));
+        if (!payload?.enabled) gateRef.current?.stop();
       }),
 
       register("meeting-detection-retry-requested", () => {
@@ -125,6 +135,9 @@ export const useMeetingDetection = () => {
           // never clears or updates the note.
           try {
             await invoke("stop_meeting_watcher");
+            // A stopped watcher emits no candidate-ended, so the old episode
+            // would stay live and keep polling for a call the fresh one never saw.
+            gateRef.current?.stop();
             await startWatcher();
             await emit("meeting-detection-watcher-restarted", { ok: true });
           } catch (error) {
@@ -159,6 +172,8 @@ export const useMeetingDetection = () => {
     // the second mount's start runs, defeating the ordering it exists to enforce.
     armListenersGate();
     const gate = listenersReadyRef.current!;
+    const meetGate = createMeetGate(defaultMeetGateDeps());
+    gateRef.current = meetGate;
 
     const register = async (
       event: string,
@@ -180,7 +195,16 @@ export const useMeetingDetection = () => {
 
       // Updates the lists in place; never starts or stops. Rust ignores it when
       // no watcher is running.
+      register("meeting-candidate-started", (payload) => {
+        if (enabledRef.current) gateRef.current?.candidateStarted(payload.episode);
+      }),
+
+      register("meeting-candidate-ended", (payload) => {
+        gateRef.current?.candidateEnded(payload.episode);
+      }),
+
       register(GOOGLE_CONNECTION_CHANGED_EVENT, () => {
+        gateRef.current?.connectionChanged();
         enqueue(async () => {
           if (!enabledRef.current) return;
           await invoke("update_meeting_watch_lists", {
@@ -198,6 +222,7 @@ export const useMeetingDetection = () => {
         // The persisted setting deliberately stays on: it is what keeps the
         // settings note and its retry button reachable. The "never persist on with
         // no watcher" rule is scoped to a start that never succeeded.
+        gateRef.current?.stop();
         console.warn("Meeting detection stopped:", payload?.reason);
         toast.info("Meeting detection stopped");
       }),
@@ -213,6 +238,8 @@ export const useMeetingDetection = () => {
     return () => {
       cancelled = true;
       unlisteners.forEach((un) => un());
+      meetGate.stop();
+      if (gateRef.current === meetGate) gateRef.current = null;
     };
   }, [isOwner]);
 
