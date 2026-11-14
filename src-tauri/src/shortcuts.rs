@@ -252,6 +252,36 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Show the overlay for a warning without stealing focus from the call.
+///
+/// Windows: `is_hidden` is inverted (`useApp` sets `isHidden = !payload`, and
+/// `handle_toggle_window` never calls `hide()` there), so `true` is what makes the
+/// webview render. Elsewhere the window really is hidden, so `show()` it.
+#[tauri::command]
+pub fn reveal_overlay(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let state = app.state::<WindowVisibility>();
+        let mut is_hidden = state.is_hidden.lock().map_err(|e| e.to_string())?;
+        *is_hidden = true;
+        window
+            .emit("toggle-window-visibility", true)
+            .map_err(|e| e.to_string())?;
+        window.show().map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if !window.is_visible().map_err(|e| e.to_string())? {
+        window.show().map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 /// Handle audio shortcut
 fn handle_audio_shortcut<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {

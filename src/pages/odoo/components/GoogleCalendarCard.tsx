@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Input, Label } from "@/components";
+import { broadcastGoogleConnectionChanged as broadcast } from "@/lib/calendar/google-connect";
 import { GOOGLE_COPY, toGoogleCode } from "@/lib/calendar/google-errors";
 import {
   classifyGoogleConfig,
-  GOOGLE_CONNECTION_CHANGED_EVENT,
   loadGoogleConfigState,
   saveGoogleConfig,
 } from "@/lib/storage/google-config.storage";
@@ -16,15 +15,6 @@ const SETUP_URL = "https://github.com/kmorgan-r/meetwings-app/blob/main/docs/goo
 const INCOMPLETE = "Enter both the Client ID and the Client secret.";
 const SESSION_ONLY =
   "No system keychain found: you'll need to connect again after restarting Meetwings.";
-
-/** Best-effort: a failed broadcast never turns a successful connect into an error. */
-async function broadcast(): Promise<void> {
-  try {
-    await emit(GOOGLE_CONNECTION_CHANGED_EVENT);
-  } catch {
-    // best-effort
-  }
-}
 
 export function GoogleCalendarCard() {
   const [clientId, setClientId] = useState("");
@@ -74,10 +64,12 @@ export function GoogleCalendarCard() {
           clientSecret: form.config.clientSecret,
         })
       );
-      await broadcast();
     } catch (err) {
       setError(GOOGLE_COPY[toGoogleCode(err)]);
     } finally {
+      // saveGoogleConfig already ran, so even a cancelled first sign-in leaves a
+      // complete config the running watcher has not seen.
+      await broadcast();
       setBusy(false);
     }
   }

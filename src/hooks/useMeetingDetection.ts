@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
 import { isWindows } from "@/lib/platform";
 import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
-import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
+import { currentWatchLists } from "@/lib/meeting-detect";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import {
   createMeetGate,
@@ -185,13 +185,10 @@ export const useMeetingDetection = () => {
     };
 
     Promise.all([
-      register("meeting-detected", (payload) => {
-        toast.info(`${meetingLabel(payload?.process)} call detected`);
-      }),
-
-      register("meeting-ended", (payload) => {
-        toast.info(`${meetingLabel(payload?.process)} call ended`);
-      }),
+      // The cards report recording, not detection (meeting-cards.store), so these
+      // two stay subscribed but show nothing.
+      register("meeting-detected", () => {}),
+      register("meeting-ended", () => {}),
 
       // Updates the lists in place; never starts or stops. Rust ignores it when
       // no watcher is running.

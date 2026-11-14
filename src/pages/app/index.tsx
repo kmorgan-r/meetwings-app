@@ -5,8 +5,9 @@ import {
   AudioVisualizer,
   StatusIndicator,
   MinimizedPill,
+  MeetingCard,
 } from "./components";
-import { useApp, useSetupStatus, useMeetingDetection } from "@/hooks";
+import { useApp, useSetupStatus, useMeetingDetection, useMeetingCardHost } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -38,6 +39,7 @@ const App = () => {
   const platform = getPlatform();
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
+  const card = useMeetingCardHost(pillStyle);
 
   const openDashboard = async () => {
     try {
@@ -255,8 +257,23 @@ const App = () => {
               <Minimize2 className="h-4 w-4" />
             </Button>
           </Card>
+          {card && (
+            <div className="mt-2">
+              <MeetingCard card={card} />
+            </div>
+          )}
         </div>
-        {minimized && <MinimizedPill style={pillStyle} />}
+        {/* Compact card above the pill; window sizing is Task 10's. */}
+        {minimized && card ? (
+          <div className="flex h-full w-full flex-col justify-end gap-2">
+            <MeetingCard card={card} compact />
+            <div className="shrink-0" style={{ height: PILL_DIMENSIONS[pillStyle].height }}>
+              <MinimizedPill style={pillStyle} />
+            </div>
+          </div>
+        ) : (
+          minimized && <MinimizedPill style={pillStyle} />
+        )}
         {/* Sibling of BOTH the Card wrapper and the pill, inside the isHidden
             one — exactly where it sat before the minimized wrapper existed.
             cursor.type defaults to "invisible", which sets --cursor-type:none

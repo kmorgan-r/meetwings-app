@@ -146,17 +146,13 @@ beforeEach(() => {
 
 describe("useMeetingDetection", () => {
   // F1
-  it("toasts on detection and on call end", async () => {
+  it("meeting-detected and meeting-ended show no toast", async () => {
     renderHook(() => useMeetingDetection());
     await flush();
 
     fire("meeting-detected", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call detected");
-
     fire("meeting-ended", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(2);
-    expect(toast.info.mock.calls[1][0]).toContain("Teams call ended");
+    expect(toast.info).not.toHaveBeenCalled();
   });
 
   // F2
@@ -275,7 +271,7 @@ describe("useMeetingDetection", () => {
   // in effects 1, 2 and 3 exists solely for the mount -> cleanup -> mount cycle.
   // Effect 3's flag specifically keeps the in-flight start from the first mount
   // from double-firing after its cleanup enqueues a stop, so starts <= 1 holds.
-  it("keeps one watcher and one toast under StrictMode", async () => {
+  it("keeps one watcher and one listener per event under StrictMode", async () => {
     renderHook(() => useMeetingDetection(), { wrapper: StrictMode });
     await flush();
 
@@ -287,9 +283,6 @@ describe("useMeetingDetection", () => {
     for (const event of DETECTION_EVENTS) {
       expect(registered(event)).toBe(1);
     }
-
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
   });
 
   // F10 - the echo-suppression regression the spec names by hand. An
@@ -524,22 +517,6 @@ describe("useMeetingDetection", () => {
     );
   });
 
-  // F32 - label lookup is case-normalized with a fallback
-  it("normalizes the toast label and falls back for unknown processes", async () => {
-    renderHook(() => useMeetingDetection());
-    await flush();
-
-    fire("meeting-detected", { process: "MS-TEAMS.EXE" });
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call detected");
-
-    fire("meeting-ended", { process: "MS-TEAMS.EXE" });
-    toast.info.mockClear();
-
-    fire("meeting-detected", { process: "unknown.exe" });
-    expect(toast.info.mock.calls[0][0]).toContain("Meeting call detected");
-    expect(toast.info.mock.calls[0][0]).not.toContain("undefined");
-  });
-
   it("starts with Chrome gated once Google is set up", async () => {
     for (const state of ["complete", "unreadable"]) {
       listeners.clear();
@@ -733,16 +710,5 @@ describe("useMeetingDetection", () => {
     fire("meeting-candidate-started", { episode: 1 });
     expect(gates[0].candidateStarted).not.toHaveBeenCalled();
     expect(gates[1].candidateStarted).toHaveBeenCalledWith(1);
-  });
-
-  // F33 - the end payload carries the process, so a reload cannot orphan the label
-  it("labels the end toast from the payload", async () => {
-    renderHook(() => useMeetingDetection());
-    await flush();
-
-    // No preceding meeting-detected in this document, as after a window reload.
-    fire("meeting-ended", { process: "ms-teams.exe" });
-    expect(toast.info).toHaveBeenCalledTimes(1);
-    expect(toast.info.mock.calls[0][0]).toContain("Teams call ended");
   });
 });
