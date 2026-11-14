@@ -10,6 +10,7 @@ import {
   defaultMeetGateDeps,
   type MeetGateDeps,
 } from "@/lib/meet-gate";
+import type { CalendarEvent } from "@/types/calendar";
 import type { FetchGoogleMeetingsResult } from "@/lib/calendar/fetch-google-meetings";
 import {
   autoRecordingStarted,
@@ -19,20 +20,22 @@ import {
 const T0 = 1_000_000;
 const HOUR = 3_600_000;
 
-const meetEvent = {
+const meetEvent: CalendarEvent = {
+  id: "ev1",
+  subject: "Standup",
   hasMeetLink: true,
   isCancelled: false,
   isAllDay: false,
   startMs: T0 - 60_000,
   endMs: T0 + HOUR,
-  attendees: [],
+  participants: [],
   ownResponse: "accepted",
 };
-const MATCH = {
+const MATCH: FetchGoogleMeetingsResult = {
   kind: "ok",
   events: [meetEvent],
   ownAddress: null,
-} as unknown as FetchGoogleMeetingsResult;
+};
 const NO_MATCH: FetchGoogleMeetingsResult = {
   kind: "ok",
   events: [],
@@ -59,24 +62,29 @@ function deferred<T>(): Deferred<T> {
 }
 
 /** Every fetch is a held deferred, resolved by the test. */
-function setup(over: Partial<MeetGateDeps> = {}) {
-  const fetches: Array<Deferred<FetchGoogleMeetingsResult>> = [];
-  const deps = {
-    loadConfigState: vi.fn(async () => "complete" as const),
-    fetchMeetings: vi.fn(() => {
+function makeMocks(fetches: Array<Deferred<FetchGoogleMeetingsResult>>) {
+  return {
+    loadConfigState: vi.fn<MeetGateDeps["loadConfigState"]>(async () => "complete"),
+    fetchMeetings: vi.fn<MeetGateDeps["fetchMeetings"]>(() => {
       const d = deferred<FetchGoogleMeetingsResult>();
       fetches.push(d);
       return d.promise;
     }),
-    confirm: vi.fn(async () => undefined),
-    captureRunning: vi.fn(async () => false),
-    gatedRecordingRunning: vi.fn(() => false),
-    showAmber: vi.fn(),
-    dismissAmber: vi.fn(),
-    now: vi.fn(() => T0),
-    ...over,
-  } satisfies MeetGateDeps;
-  return { deps, fetches, gate: createMeetGate(deps) };
+    confirm: vi.fn<MeetGateDeps["confirm"]>(async () => undefined),
+    captureRunning: vi.fn<MeetGateDeps["captureRunning"]>(async () => false),
+    gatedRecordingRunning: vi.fn<MeetGateDeps["gatedRecordingRunning"]>(() => false),
+    showAmber: vi.fn<MeetGateDeps["showAmber"]>(),
+    dismissAmber: vi.fn<MeetGateDeps["dismissAmber"]>(),
+    now: vi.fn<MeetGateDeps["now"]>(() => T0),
+  };
+}
+
+/** Overrides keep their mock types, so tests can still call mockClear etc. */
+function setup(over: Partial<ReturnType<typeof makeMocks>> = {}) {
+  const fetches: Array<Deferred<FetchGoogleMeetingsResult>> = [];
+  const deps = { ...makeMocks(fetches), ...over };
+  const typed: MeetGateDeps = deps;
+  return { deps, fetches, gate: createMeetGate(typed) };
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
@@ -276,6 +284,34 @@ describe("createMeetGate", () => {
     expect(deps.fetchMeetings).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(deps.fetchMeetings).toHaveBeenCalledTimes(2);
+  });
+
+  it("a stale confirm rejection does not disturb the live episode's timer", async () => {
+    const confirmD = deferred<unknown>();
+    const confirm = vi
+      .fn<(episode: number) => Promise<unknown>>()
+      .mockReturnValueOnce(confirmD.promise)
+      .mockResolvedValue(undefined);
+    const { deps, fetches, gate } = setup({ confirm });
+    gate.candidateStarted(1);
+    await settle();
+    fetches[0].resolve(MATCH);
+    await settle();
+    gate.candidateEnded(1);
+    gate.candidateStarted(2);
+    await settle();
+    fetches[1].resolve(NO_MATCH);
+    await settle();
+    expect(deps.fetchMeetings).toHaveBeenCalledTimes(2);
+    confirmD.reject(new Error("WATCHER_NOT_RUNNING"));
+    await settle();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deps.fetchMeetings).toHaveBeenCalledTimes(3);
+    // The re-check must belong to episode 2: a stale episode-1 check would be
+    // discarded, so only episode 2's own check can confirm.
+    fetches[2].resolve(MATCH);
+    await settle();
+    expect(deps.confirm).toHaveBeenLastCalledWith(2);
   });
 
   it("the amber card shows once per episode", async () => {

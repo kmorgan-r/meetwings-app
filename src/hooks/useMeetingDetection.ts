@@ -279,6 +279,10 @@ export const useMeetingDetection = () => {
 
     return () => {
       cancelled = true;
+      // The watcher stop emits neither meeting-watcher-stopped nor
+      // candidate-ended, and enabledRef lags the setting-off path, so a candidate
+      // arriving in that gap would leave the gate polling with auto-record off.
+      gateRef.current?.stop();
       enqueue(async () => {
         // A stop that REJECTS is treated exactly like one that resolves
         // TIMED_OUT. Branching only on the resolved value would let a rejection

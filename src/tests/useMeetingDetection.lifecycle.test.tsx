@@ -616,28 +616,49 @@ describe("useMeetingDetection", () => {
   });
 
   it("candidate listener is subscribed before the first start", async () => {
-    const order: string[] = [];
-    listen.mockImplementation(async (event: string, cb: never) => {
-      order.push(`listen:${event}`);
-      return registerImmediately(event, cb);
-    });
-    invoke.mockImplementation(async (cmd: string) => {
-      order.push(`invoke:${cmd}`);
-      return undefined;
-    });
+    // Hold ONLY the candidate listens; every other listen registers at once.
+    const held: Array<() => void> = [];
+    listen.mockImplementation(
+      (event: string, cb: (e: { payload: unknown }) => void) => {
+        if (!event.startsWith("meeting-candidate-")) {
+          return registerImmediately(event, cb);
+        }
+        return new Promise((resolve) => {
+          held.push(() => {
+            if (!listeners.has(event)) listeners.set(event, new Set());
+            listeners.get(event)!.add(cb);
+            resolve(() => listeners.get(event)?.delete(cb));
+          });
+        });
+      }
+    );
+
     renderHook(() => useMeetingDetection());
     await flush();
+    await flush();
+    expect(held.length).toBe(2);
+    expect(cmdCount("start_meeting_watcher")).toBe(0);
 
-    const start = order.indexOf("invoke:start_meeting_watcher");
-    expect(start).toBeGreaterThan(-1);
-    for (const event of [
-      "meeting-candidate-started",
-      "meeting-candidate-ended",
-    ]) {
-      const at = order.indexOf(`listen:${event}`);
-      expect(at).toBeGreaterThan(-1);
-      expect(at).toBeLessThan(start);
-    }
+    await act(async () => {
+      held.forEach((release) => release());
+      await Promise.resolve();
+    });
+    await flush();
+    await waitFor(() => expect(cmdCount("start_meeting_watcher")).toBe(1));
+  });
+
+  it("a candidate just before toggle-off still gets the gate stopped", async () => {
+    renderHook(() => useMeetingDetection());
+    await flush();
+    const g = lastGate();
+    fire("meeting-candidate-started", { episode: 5 });
+    fire("meeting-detection-setting-changed", { enabled: false });
+    await waitFor(() => expect(cmdCount("stop_meeting_watcher")).toBe(1));
+    // One stop from the setting handler, one from the watcher teardown.
+    expect(g.stop.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(g.candidateStarted.mock.invocationCallOrder[0]).toBeLessThan(
+      g.stop.mock.invocationCallOrder[0]
+    );
   });
 
   it("candidate events reach the gate only while auto-record is on", async () => {
