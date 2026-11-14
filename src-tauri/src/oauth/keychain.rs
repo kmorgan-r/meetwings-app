@@ -26,6 +26,15 @@ fn chunk(service: &str, i: usize) -> Result<keyring::Entry, NoKeychain> {
     keyring::Entry::new(service, &format!("{ACCOUNT}.{i}")).map_err(|_| NoKeychain)
 }
 
+/// store, load and delete each span several entries, and callers load without
+/// their `persist_op` lock, so serialize them here: a load must never stitch
+/// chunks from two different stores.
+/// ponytail: one lock for every service; per-service if it ever contends.
+fn op_lock() -> std::sync::MutexGuard<'static, ()> {
+    static OP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    OP.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Windows caps a credential blob at 2560 bytes (CRED_MAX_CREDENTIAL_BLOB_SIZE)
 /// and keyring stores UTF-16, so 1280 units per entry. Microsoft refresh tokens
 /// routinely exceed it; keyring then fails with `TooLong` and the connect used
@@ -124,6 +133,7 @@ pub fn store(_service: &str, _token: &str) -> Result<(), NoKeychain> {
 /// reconnects. Alternate between two chunk sets if that ever matters.
 #[cfg(not(target_os = "linux"))]
 pub fn store(service: &str, token: &str) -> Result<(), NoKeychain> {
+    let _op = op_lock();
     // A token that looks like the marker goes chunked, or load would misread it.
     let direct = !token.starts_with(CHUNKED)
         && match entry(service)?.set_password(token) {
@@ -157,6 +167,7 @@ pub fn store(service: &str, token: &str) -> Result<(), NoKeychain> {
 /// `Ok(None)` means "no entry", which is NOT an error - it is the normal state
 /// before a first connect and after a disconnect.
 pub fn load(service: &str) -> Result<Option<String>, NoKeychain> {
+    let _op = op_lock();
     let Some(head) = read(entry(service)?)? else {
         return Ok(None);
     };
@@ -181,6 +192,7 @@ pub fn load(service: &str) -> Result<Option<String>, NoKeychain> {
 }
 
 pub fn delete(service: &str) -> Result<(), NoKeychain> {
+    let _op = op_lock();
     match entry(service)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => {}
         // A keychain-access failure, not a network one: calling it NETWORK
@@ -259,6 +271,18 @@ mod tests {
         // A token that looks like the marker is chunked, not misread.
         store(SVC, "meetwings-chunked:7").unwrap();
         assert_eq!(load(SVC), Ok(Some("meetwings-chunked:7".to_string())));
+
+        // A damaged marker, or one naming a missing chunk, is "not connected".
+        entry(SVC)
+            .unwrap()
+            .set_password("meetwings-chunked:x")
+            .unwrap();
+        assert_eq!(load(SVC), Ok(None));
+        entry(SVC)
+            .unwrap()
+            .set_password("meetwings-chunked:2")
+            .unwrap();
+        assert_eq!(load(SVC), Ok(None));
 
         store(SVC, &"z".repeat(3000)).unwrap();
         delete(SVC).unwrap();
