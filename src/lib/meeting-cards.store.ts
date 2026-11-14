@@ -234,11 +234,15 @@ export function cardHeight(c: MeetingCardState, compact: boolean): number {
   if (!c) return 0;
   switch (c.kind) {
     case "recording":
-      return c.event ? (compact ? 84 : 104) : compact ? 56 : 72;
+      // Compact is one line with or without an event. Full with an event adds
+      // divider, title, time row and a separate Stop row (spec 6.6).
+      return compact ? 48 : c.event ? 124 : 72;
     case "ended":
       return compact ? 48 : 64;
     case "amber":
-      return compact ? 80 : 104;
+      // The error wraps under the body: two more 16px lines. Compact swaps the
+      // headline for the error, so its height does not change.
+      return compact ? 80 : c.error ? 136 : 104;
   }
 }
 

@@ -63,7 +63,8 @@ function Chips({ event }: { event: CardEvent }) {
 
 const SHELL =
   "relative w-full overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg " +
-  "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-3 motion-safe:duration-300";
+  "transition-opacity duration-300 starting:opacity-0 " +
+  "motion-safe:animate-in motion-safe:slide-in-from-top-3";
 
 function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recording" }>; compact: boolean }) {
   const elapsed = useElapsed(card.startedAt);
@@ -91,7 +92,7 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
       className="h-6 px-2 text-xs"
       onClick={() => stopActiveRecording()}
     >
-      ■ Stop
+      <span aria-hidden="true">■</span> Stop
     </Button>
   );
   const when = event && (
@@ -108,6 +109,7 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
     <div
       data-testid="meeting-card"
       data-kind="recording"
+      role="status"
       data-paused={paused ? "true" : "false"}
       className={cn(SHELL, "border-destructive/40 bg-gradient-to-br from-destructive/10 to-card")}
       style={{ height: cardHeight(card, compact) }}
@@ -117,7 +119,7 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
       <div className="flex h-full flex-col px-3 pb-2 pt-2">
         <div className="flex items-center gap-2 text-sm">
           <span className="flex items-center gap-1.5 font-bold tracking-wide text-destructive">
-            <span className="motion-safe:animate-pulse">◉</span> REC
+            <span aria-hidden="true" className="motion-safe:animate-pulse">◉</span> REC
           </span>
           <span className="min-w-0 flex-1 truncate font-medium">
             {compact ? (event?.title ?? card.app) : `${card.app} · recording started`}
@@ -127,21 +129,16 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
           </span>
           {compact && stop}
         </div>
-        {event && (
+        {event && !compact && (
           <>
-            {!compact && <div className="my-1.5 h-px bg-border" />}
-            {!compact && (
-              <div className="truncate text-sm font-semibold" data-testid="meeting-card-title">
-                {event.title ?? card.app}
-              </div>
-            )}
-            <div className={cn("flex items-center justify-between gap-2", compact ? "mt-1" : "mt-0.5")}>
-              {when}
-              {!compact && stop}
+            <div className="my-1.5 h-px bg-border" />
+            <div className="truncate text-sm font-semibold" data-testid="meeting-card-title">
+              {event.title ?? card.app}
             </div>
+            <div className="mt-0.5">{when}</div>
           </>
         )}
-        {!event && !compact && <div className="mt-auto flex justify-end">{stop}</div>}
+        {!compact && <div className="mt-auto flex justify-end">{stop}</div>}
       </div>
       {/* Purely visual, and 6000ms must equal RECORDING_CARD_MS (a literal: Tailwind scans class strings). The store's timer removes the card, never this animation. */}
       <div
@@ -160,10 +157,11 @@ function EndedCard({ card, compact }: { card: Extract<Card, { kind: "ended" }>; 
     <div
       data-testid="meeting-card"
       data-kind="ended"
+      role="status"
       className={cn(SHELL, "flex items-center gap-3 border-emerald-500/40 bg-gradient-to-br from-emerald-500/10 to-card px-3")}
       style={{ height: cardHeight(card, compact) }}
     >
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-base font-bold text-emerald-600 dark:text-emerald-400">
+      <span aria-hidden="true" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/20 text-base font-bold text-emerald-600 dark:text-emerald-400">
         ✓
       </span>
       {compact ? (
@@ -242,18 +240,26 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
     >
       <div className="flex h-full flex-col px-3 py-2.5">
         <div className="flex items-center gap-2 text-sm font-semibold">
-          <span className="text-amber-600 dark:text-amber-400">⚠</span>
-          <span className="min-w-0 truncate">{AMBER_HEADLINE}</span>
+          <span aria-hidden="true" className="text-amber-600 dark:text-amber-400">
+            ⚠
+          </span>
+          {compact && card.error ? (
+            <span className="min-w-0 truncate text-destructive" title={card.error} data-testid="meeting-card-error">
+              {card.error}
+            </span>
+          ) : (
+            <span className="min-w-0 truncate">{AMBER_HEADLINE}</span>
+          )}
         </div>
         {!compact && (
           <p className="mt-0.5 pl-6 text-xs leading-4 text-muted-foreground">{AMBER_BODY[card.variant]}</p>
         )}
-        <div className="mt-auto flex items-center justify-between gap-2">
-          <span className="min-w-0 truncate text-xs text-destructive" data-testid="meeting-card-error">
+        {!compact && card.error && (
+          <p className="mt-1 pl-6 text-xs leading-4 text-destructive" data-testid="meeting-card-error">
             {card.error}
-          </span>
-          <span className="flex shrink-0 items-center gap-2">{buttons}</span>
-        </div>
+          </p>
+        )}
+        <div className="mt-auto flex items-center justify-end gap-2">{buttons}</div>
       </div>
     </div>
   );
@@ -262,11 +268,11 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
 export function MeetingCard({ card, compact = false }: { card: Card; compact?: boolean }) {
   switch (card.kind) {
     case "recording":
-      return <RecordingCard card={card} compact={compact} />;
+      return <RecordingCard key={`recording:${card.recordingId}`} card={card} compact={compact} />;
     case "ended":
-      return <EndedCard card={card} compact={compact} />;
+      return <EndedCard key="ended" card={card} compact={compact} />;
     case "amber":
-      return <AmberCard card={card} compact={compact} />;
+      return <AmberCard key={`amber:${card.episode}`} card={card} compact={compact} />;
   }
 }
 

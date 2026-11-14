@@ -19,15 +19,16 @@ import type { OverlayPillStyle } from "@/lib/storage";
  */
 export function useMeetingCardHost(_pillStyle: OverlayPillStyle): MeetingCardState {
   const card = useSyncExternalStore(subscribeToMeetingCard, getMeetingCard);
-  const kind = card?.kind;
+  // A new amber episode re-reveals; an error update on the same episode does not.
+  const amberEpisode = card?.kind === "amber" ? card.episode : null;
 
   useEffect(() => {
     // Red and ended cards never force the window open.
-    if (kind !== "amber") return;
+    if (amberEpisode === null) return;
     invoke("reveal_overlay").catch((error) => {
       console.error("Failed to reveal the overlay:", error);
     });
-  }, [kind]);
+  }, [amberEpisode]);
 
   return card;
 }

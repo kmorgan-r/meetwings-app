@@ -252,11 +252,18 @@ fn handle_toggle_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Only a bar that is not showing needs revealing. Re-emitting to a visible one
+/// would make `useApp` close an open popover.
+fn needs_reveal(visible: bool) -> bool {
+    !visible
+}
+
 /// Show the overlay for a warning without stealing focus from the call.
 ///
 /// Windows: `is_hidden` is inverted (`useApp` sets `isHidden = !payload`, and
-/// `handle_toggle_window` never calls `hide()` there), so `true` is what makes the
-/// webview render. Elsewhere the window really is hidden, so `show()` it.
+/// `handle_toggle_window` never calls `hide()` there), so `true` means the webview
+/// is already rendering. Elsewhere the window really is hidden, so `show()` it.
+/// Either way a visible bar is left alone.
 #[tauri::command]
 pub fn reveal_overlay(app: AppHandle) -> Result<(), String> {
     let window = app
@@ -267,6 +274,9 @@ pub fn reveal_overlay(app: AppHandle) -> Result<(), String> {
     {
         let state = app.state::<WindowVisibility>();
         let mut is_hidden = state.is_hidden.lock().map_err(|e| e.to_string())?;
+        if !needs_reveal(*is_hidden) {
+            return Ok(());
+        }
         *is_hidden = true;
         window
             .emit("toggle-window-visibility", true)
@@ -275,7 +285,7 @@ pub fn reveal_overlay(app: AppHandle) -> Result<(), String> {
     }
 
     #[cfg(not(target_os = "windows"))]
-    if !window.is_visible().map_err(|e| e.to_string())? {
+    if needs_reveal(window.is_visible().map_err(|e| e.to_string())?) {
         window.show().map_err(|e| e.to_string())?;
     }
 
@@ -693,4 +703,15 @@ fn handle_move_window<R: Runtime>(app: &AppHandle<R>, direction: &str) {
 #[tauri::command]
 pub fn exit_app(app_handle: tauri::AppHandle) {
     app_handle.exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_reveal;
+
+    #[test]
+    fn reveals_only_a_bar_that_is_not_showing() {
+        assert!(needs_reveal(false));
+        assert!(!needs_reveal(true));
+    }
 }

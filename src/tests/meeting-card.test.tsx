@@ -18,6 +18,7 @@ import {
   cardHeight,
   getMeetingCard,
   resetMeetingCardsForTests,
+  setAmberError,
   setCardEvent,
   showAmber,
   subscribeToMeetingCard,
@@ -137,13 +138,37 @@ describe("MeetingCard", () => {
     }
   });
 
-  it("the compact recording card is one line with the event title", () => {
+  it("the compact recording card is a single row with the event title", () => {
     render(<Harness compact />);
     run(() => setCardEvent(start(), event("Sync")));
     const root = screen.getByTestId("meeting-card");
     expect(root.textContent).toContain("REC");
     expect(root.textContent).toContain("Sync");
     expect(root.textContent).toContain("00:00");
+    // No second row: no title block, no chips, no time range, no separate divider.
+    expect(screen.queryByTestId("meeting-card-title")).toBeNull();
+    expect(screen.queryByTestId("meeting-card-chips")).toBeNull();
+    expect(root.textContent).not.toContain("10:00");
+    expect(root.querySelector(".h-px")).toBeNull();
+    expect(root.firstElementChild?.children).toHaveLength(1);
+    expect(root.style.height).toBe("48px");
+  });
+
+  it("the full recording card puts Stop on its own bottom row", () => {
+    render(<Harness />);
+    run(() => setCardEvent(start(), event("Weekly IC sync")));
+    const stop = screen.getByRole("button", { name: "Stop" });
+    const when = screen.getByTestId("meeting-card-chips");
+    expect(stop.parentElement).not.toBe(when.parentElement?.parentElement);
+    expect(stop.parentElement?.contains(when)).toBe(false);
+    expect(stop.parentElement?.className).toContain("justify-end");
+  });
+
+  it("decorative glyphs are hidden from assistive tech and red and ended cards are status regions", () => {
+    render(<Harness />);
+    run(() => void start());
+    expect(screen.getByTestId("meeting-card").getAttribute("role")).toBe("status");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
   });
 
   it("the ended card shows title and minutes, then leaves", () => {
@@ -196,29 +221,79 @@ describe("MeetingCard", () => {
     expect(getMeetingCard()).toBeNull();
   });
 
-  it("animation classes are motion-safe only", () => {
+  it("an amber error renders under the body, untruncated, and the card grows", () => {
+    render(<Harness />);
+    run(() => showAmber({ variant: "reconnect", episode: 1 }));
+    const before = getMeetingCard();
+    expect(screen.getByTestId("meeting-card").style.height).toBe(`${cardHeight(before, false)}px`);
+    run(() => setAmberError(GOOGLE_COPY.GOOGLE_AUTH_REJECTED));
+    const err = screen.getByTestId("meeting-card-error");
+    expect(err.textContent).toBe(GOOGLE_COPY.GOOGLE_AUTH_REJECTED);
+    expect(err.className).not.toContain("truncate");
+    const body = screen.getByText(/Google Calendar is disconnected/);
+    expect(body.compareDocumentPosition(err) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cardHeight(getMeetingCard(), false)).toBeGreaterThan(cardHeight(before, false));
+    expect(screen.getByTestId("meeting-card").style.height).toBe(`${cardHeight(getMeetingCard(), false)}px`);
+  });
+
+  it("compact amber with an error shows it in place of the headline, with a title", () => {
+    render(<Harness compact />);
+    run(() => showAmber({ variant: "reconnect", episode: 1 }));
+    run(() => setAmberError(GOOGLE_COPY.GOOGLE_NETWORK));
+    const err = screen.getByTestId("meeting-card-error");
+    expect(err.getAttribute("title")).toBe(GOOGLE_COPY.GOOGLE_NETWORK);
+    expect(screen.queryByText("If this is a Meet call, it isn't being recorded")).toBeNull();
+    expect(screen.getByRole("button", { name: "Reconnect Google" })).toBeTruthy();
+  });
+
+  it("a replacement card of the same kind does not inherit hover or busy state", () => {
+    render(<Harness />);
+    run(() => void start());
+    fireEvent.mouseEnter(screen.getByTestId("meeting-card"));
+    expect(screen.getByTestId("meeting-card").getAttribute("data-paused")).toBe("true");
+    run(() => {
+      autoRecordingStopped();
+      vi.setSystemTime(T0 + 10 * 60_000);
+      start();
+    });
+    expect(screen.getByTestId("meeting-card").getAttribute("data-paused")).toBe("false");
+  });
+
+  it("animation classes are motion-safe only, on every card form", () => {
     const seen: string[] = [];
+    const scenarios: Array<() => void> = [
+      () => setCardEvent(start(), event("X")),
+      () => void start(),
+      () => {
+        setCardEvent(start(), event("X", 2));
+        autoRecordingStopped();
+        vi.advanceTimersByTime(30_000);
+      },
+      () => showAmber({ variant: "reconnect", episode: 1 }),
+      () => {
+        showAmber({ variant: "settings", episode: 1 });
+        setAmberError("boom");
+      },
+      () => showAmber({ variant: "offline", episode: 1 }),
+    ];
     for (const compact of [false, true]) {
-      const { container, unmount } = render(<Harness compact={compact} />);
-      for (const make of [
-        () => setCardEvent(start(), event("X")),
-        () => showAmber({ variant: "offline", episode: 1 }),
-      ]) {
+      for (const make of scenarios) {
+        resetMeetingCardsForTests();
+        const { unmount } = render(<Harness compact={compact} />);
         run(make);
-        container.querySelectorAll("*").forEach((el) => {
+        expect(screen.getByTestId("meeting-card")).toBeTruthy();
+        document.body.querySelectorAll("*").forEach((el) => {
           seen.push(...(el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean));
         });
-        run(() => {
-          resetMeetingCardsForTests();
-        });
-        cleanup();
-        render(<Harness compact={compact} />);
+        unmount();
       }
-      unmount();
     }
     const motion = seen.filter((c) => /(^|:)(animate-|slide-)/.test(c));
     expect(motion.length).toBeGreaterThan(0);
     expect(motion.filter((c) => !c.startsWith("motion-safe:"))).toEqual([]);
+    // The reduced-motion fade: no animate-* class, so it survives motion-reduce.
+    expect(seen).toContain("transition-opacity");
+    expect(seen).toContain("starting:opacity-0");
   });
 });
 
@@ -235,5 +310,15 @@ describe("useMeetingCardHost", () => {
     run(() => showAmber({ variant: "reconnect", episode: 1 }));
     expect(result.current?.kind).toBe("amber");
     expect(h.invoke).toHaveBeenCalledWith("reveal_overlay");
+  });
+
+  it("a new amber episode re-reveals; an error update on the same episode does not", () => {
+    renderHook(() => useMeetingCardHost("icon-only"));
+    run(() => showAmber({ variant: "reconnect", episode: 1 }));
+    run(() => setAmberError("x"));
+    const reveals = () => h.invoke.mock.calls.filter((c) => c[0] === "reveal_overlay").length;
+    expect(reveals()).toBe(1);
+    run(() => showAmber({ variant: "reconnect", episode: 2 }));
+    expect(reveals()).toBe(2);
   });
 });
