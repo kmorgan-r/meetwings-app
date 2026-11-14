@@ -235,7 +235,8 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
       data-testid="meeting-card"
       data-kind="amber"
       role="alert"
-      className={cn(SHELL, "border-amber-500/50 bg-gradient-to-br from-amber-500/15 to-card")}
+      // z-[60]: the response popover is a z-50 portal and must not cover this card (R8).
+      className={cn(SHELL, "relative z-[60] border-amber-500/50 bg-gradient-to-br from-amber-500/15 to-card")}
       style={{ height: cardHeight(card, compact) }}
     >
       <div className="flex h-full flex-col px-3 py-2.5">
@@ -244,11 +245,11 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
             ⚠
           </span>
           {compact && card.error ? (
-            <span className="min-w-0 truncate text-destructive" title={card.error} data-testid="meeting-card-error">
+            <span className="min-w-0 line-clamp-2 text-xs text-destructive" title={card.error} data-testid="meeting-card-error">
               {card.error}
             </span>
           ) : (
-            <span className="min-w-0 truncate">{AMBER_HEADLINE}</span>
+            <span className={cn("min-w-0", compact ? "line-clamp-2 text-xs" : "truncate")}>{AMBER_HEADLINE}</span>
           )}
         </div>
         {!compact && (

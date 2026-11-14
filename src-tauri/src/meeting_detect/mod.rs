@@ -1,4 +1,4 @@
-//! Microsoft Teams call detection via WASAPI capture-session polling.
+//! Microsoft Teams and Google Meet call detection via WASAPI capture-session polling.
 //!
 //! All decision logic lives here as pure functions with no COM dependency, so it
 //! compiles and is unit-tested on every target including the Linux CI runner.
@@ -315,11 +315,11 @@ fn reannounce_event(core: &WatcherCore) -> Option<WatcherEvent> {
         .map(WatcherEvent::CandidateStarted)
 }
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 /// Process-wide so episode ids stay unique across watcher restarts.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 static NEXT_EPISODE: AtomicU64 = AtomicU64::new(1);
-
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1510,15 +1510,22 @@ mod tests {
 
     #[test]
     fn teams_starts_while_chrome_is_a_candidate() {
-        let events = run_core(vec![
+        // Chrome keeps holding the mic through the Teams polls (gated side live).
+        let (core, events) = run_core_state(vec![
             (inactive(), chrome(), None),
             (inactive(), chrome(), None),
-            (teams(), inactive(), None),
-            (teams(), inactive(), None),
+            (teams(), chrome(), None),
+            (teams(), chrome(), None),
         ]);
         assert_eq!(
             events,
-            vec![WatcherEvent::CandidateStarted(1), detected("ms-teams.exe")]
+            vec![WatcherEvent::CandidateStarted(1), detected("ms-teams.exe")],
+            "Teams is detected directly; Chrome is neither ended nor promoted"
+        );
+        assert_eq!(
+            core.gated.candidate_episode(),
+            Some(1),
+            "Chrome stays a candidate, still unconfirmed"
         );
     }
 

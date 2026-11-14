@@ -2017,6 +2017,31 @@ describe("useMeetingAutoRecord - meeting cards", () => {
     expect(getMeetingCard()?.kind).toBe("ended");
   });
 
+  it("only meeting-ended is an auto stop: it restarts quietly, the card's Stop does not", async () => {
+    const h = await startMeetingMode();
+    await fireActed("meeting-ended");
+    await drainStopConfirm();
+    expect(getMeetingCard()).toBeNull();
+
+    seedStatus([false, false]);
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(3));
+    expect(getActiveAutoRecording()).not.toBeNull();
+    expect(getMeetingCard()).toBeNull(); // auto stop + re-detect < 120s: quiet
+
+    await act(async () => {
+      stopActiveRecording();
+    });
+    await drainStopConfirm();
+    expect(getActiveAutoRecording()).toBeNull();
+
+    seedStatus([false, false]);
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(5));
+    expect(getMeetingCard()?.kind).toBe("recording"); // user stop: not quiet
+    await drainStopConfirm();
+  });
+
   it("the user closing the mic in meeting mode publishes the stop", async () => {
     const h = await startMeetingMode();
     expect(getActiveAutoRecording()).not.toBeNull();

@@ -96,8 +96,8 @@ const cmdCount = (cmd: string) =>
   invoke.mock.calls.filter(([c]) => c === cmd).length;
 
 const DETECTION_EVENTS = [
-  "meeting-detected",
-  "meeting-ended",
+  "meeting-candidate-started",
+  "meeting-candidate-ended",
   "meeting-watcher-error",
   "meeting-watcher-stopped",
 ];
@@ -145,14 +145,14 @@ beforeEach(() => {
 });
 
 describe("useMeetingDetection", () => {
-  // F1
-  it("meeting-detected and meeting-ended show no toast", async () => {
+  // F1 - the cards report recording, not detection: this hook does not listen
+  // to meeting-detected / meeting-ended at all.
+  it("does not subscribe to meeting-detected or meeting-ended", async () => {
     renderHook(() => useMeetingDetection());
     await flush();
 
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    fire("meeting-ended", { process: "ms-teams.exe" });
-    expect(toast.info).not.toHaveBeenCalled();
+    expect(registered("meeting-detected")).toBe(0);
+    expect(registered("meeting-ended")).toBe(0);
   });
 
   // F2
@@ -385,8 +385,6 @@ describe("useMeetingDetection", () => {
   it("never touches capture commands", async () => {
     renderHook(() => useMeetingDetection());
     await flush();
-    fire("meeting-detected", { process: "ms-teams.exe" });
-    fire("meeting-ended", { process: "ms-teams.exe" });
     fire("meeting-watcher-stopped", { reason: "x" });
     await flush();
 

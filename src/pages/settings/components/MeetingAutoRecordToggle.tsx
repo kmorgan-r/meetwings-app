@@ -22,7 +22,7 @@ type Readout =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "ok"; sessions: MicSession[] }
-  | { kind: "failed" };
+  | { kind: "failed"; reason: string };
 
 type Status =
   | { kind: "pending" }
@@ -155,7 +155,7 @@ export const MeetingAutoRecordToggle = ({
       setReadout({ kind: "ok", sessions });
     } catch (error) {
       console.error("Failed to list microphone apps:", error);
-      setReadout({ kind: "failed" });
+      setReadout({ kind: "failed", reason: String(error) });
     }
   };
 
@@ -228,6 +228,7 @@ export const MeetingAutoRecordToggle = ({
         {readout.kind === "failed" && (
           <p className="text-xs text-destructive">
             Couldn't list microphone apps.
+            <span className="text-muted-foreground"> — {readout.reason}</span>
           </p>
         )}
         {readout.kind === "ok" && readout.sessions.length === 0 && (
@@ -236,9 +237,9 @@ export const MeetingAutoRecordToggle = ({
           </p>
         )}
         {readout.kind === "ok" &&
-          readout.sessions.map((session) => (
+          readout.sessions.map((session, i) => (
             <div
-              key={session.pid}
+              key={`${session.pid}-${i}`}
               className="flex items-center justify-between gap-3 text-xs"
             >
               <span className="font-medium">{session.name}</span>

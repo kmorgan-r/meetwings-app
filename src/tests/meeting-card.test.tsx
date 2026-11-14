@@ -9,6 +9,9 @@ const h = vi.hoisted(() => ({
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 vi.mock("@/lib/calendar/google-connect", () => ({ reconnectGoogle: h.reconnect }));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({ label: "main" }),
+}));
 
 import { useMeetingCardHost } from "@/hooks/useMeetingCardHost";
 import { GOOGLE_COPY } from "@/lib/calendar/google-errors";
@@ -199,7 +202,7 @@ describe("MeetingCard", () => {
     render(<Harness />);
     run(() => setCardEvent(start(), event("Weekly IC sync", 2)));
     vi.setSystemTime(T0 + 42 * 60_000);
-    run(() => autoRecordingStopped(Date.now()));
+    run(() => autoRecordingStopped({ auto: true }, Date.now()));
     tick(30_000);
     expect(screen.getByText("Recording saved")).toBeTruthy();
     expect(screen.getByText(/Weekly IC sync/).textContent).toContain("42 min");
@@ -258,6 +261,27 @@ describe("MeetingCard", () => {
     expect(body.compareDocumentPosition(err) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(cardHeight(getMeetingCard(), false)).toBeGreaterThan(cardHeight(before, false));
     expect(screen.getByTestId("meeting-card").style.height).toBe(`${cardHeight(getMeetingCard(), false)}px`);
+  });
+
+  it("only the amber card sits above an open response popover (z-50 portal)", () => {
+    render(<Harness />);
+    run(() => showAmber({ variant: "reconnect", episode: 1 }));
+    const amber = screen.getByTestId("meeting-card").className.split(/\s+/);
+    expect(amber).toContain("relative");
+    expect(amber).toContain("z-[60]");
+    run(() => autoRecordingStarted({ app: "Google Meet", gated: false, stop: () => {} }));
+    expect(screen.getByTestId("meeting-card").className).not.toContain("z-[60]");
+  });
+
+  it("the compact amber headline wraps to two lines instead of truncating", () => {
+    render(<Harness compact />);
+    run(() => showAmber({ variant: "reconnect", episode: 1 }));
+    const headline = screen.getByText("If this is a Meet call, it isn't being recorded");
+    expect(headline.className).toContain("line-clamp-2");
+    expect(headline.className).toContain("text-xs");
+    expect(headline.className).not.toContain("truncate");
+    run(() => setAmberError(GOOGLE_COPY.GOOGLE_NETWORK));
+    expect(screen.getByTestId("meeting-card-error").className).toContain("line-clamp-2");
   });
 
   it("compact amber with an error shows it in place of the headline, with a title", () => {

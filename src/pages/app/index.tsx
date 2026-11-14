@@ -15,7 +15,7 @@ import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
 import { getPlatform } from "@/lib";
 import { AlertCircle, Minimize2 } from "lucide-react";
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import {
   getMinimized,
   PILL_DIMENSIONS,
@@ -41,6 +41,10 @@ const App = () => {
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
   const card = useMeetingCardHost(pillStyle);
+  const pillStyleRef = useRef(pillStyle);
+  useEffect(() => {
+    pillStyleRef.current = pillStyle;
+  }, [pillStyle]);
 
   const openDashboard = async () => {
     try {
@@ -87,10 +91,22 @@ const App = () => {
   // Reading the flag back on mount is what closes that gap; `set_window_height`
   // is gated in Rust too, so the observer cannot win the race while this
   // invoke is in flight.
+  //
+  // A reload also empties the card store while the window keeps its card-aware
+  // size, so a minimized rehydrate restyles to the size for the CURRENT card
+  // (none, after a reload). restyle: true never re-snapshots the restore rect.
+  // The style comes from a ref so this mount-only effect needs no extra dep.
   useEffect(() => {
     invoke<boolean>("is_overlay_minimized")
       .then((isMinimized) => {
-        if (isMinimized) setMinimized(true);
+        if (!isMinimized) return;
+        setMinimized(true);
+        const dims = pillWindowSize(pillStyleRef.current, getMeetingCard());
+        return invoke("minimize_overlay", {
+          width: dims.width,
+          height: dims.height,
+          restyle: true,
+        });
       })
       .catch((error) => {
         console.error("Failed to read the minimized state:", error);

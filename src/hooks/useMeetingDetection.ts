@@ -18,7 +18,9 @@ const readSetting = () =>
   safeLocalStorage.getItem(STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED) === "true";
 
 /**
- * Owns the Teams call detection watcher and its toasts.
+ * Owns the Teams and Google Meet call detection watcher and the Meet calendar
+ * gate. Recording and its cards belong to useMeetingAutoRecord and
+ * meeting-cards.store; this hook shows only the watcher-stopped toast.
  *
  * Single-owner: Tauri events broadcast to every window, so only the main window may
  * drive the watcher. Today only `main` renders the app page, but a capture-overlay
@@ -63,7 +65,7 @@ export const useMeetingDetection = () => {
   // touches the watcher, so it needs no place in the command queue.
   const gateRef = useRef<MeetGate | null>(null);
 
-  // Resolves once the four detection listeners are actually registered. listen()
+  // Resolves once the detection listeners are actually registered. listen()
   // is async, so without this gate the first start_meeting_watcher reliably wins
   // the race and an immediate-failure meeting-watcher-stopped fires into a void.
   // `useRef<T>()` with no argument does not type-check: @types/react 19 removed
@@ -158,7 +160,7 @@ export const useMeetingDetection = () => {
     };
   }, [isOwner]);
 
-  // Effect 2: the four detection events. Keyed on isOwner, NOT enabled - they
+  // Effect 2: the detection events. Keyed on isOwner, NOT enabled - they
   // must be in place before any start, and the retry path can start a watcher
   // without `enabled` changing. Subscribing with no watcher running is harmless.
   useEffect(() => {
@@ -185,11 +187,6 @@ export const useMeetingDetection = () => {
     };
 
     Promise.all([
-      // The cards report recording, not detection (meeting-cards.store), so these
-      // two stay subscribed but show nothing.
-      register("meeting-detected", () => {}),
-      register("meeting-ended", () => {}),
-
       // Updates the lists in place; never starts or stops. Rust ignores it when
       // no watcher is running.
       register("meeting-candidate-started", (payload) => {

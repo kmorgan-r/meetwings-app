@@ -147,12 +147,21 @@ export function autoRecordingStarted(
   return id;
 }
 
-export function autoRecordingStopped(now: number = Date.now()): void {
+/**
+ * `auto` is true only for the detection-driven stop (meeting-ended). Only that
+ * opens the quiet-restart window (spec 6.6, "previous auto stop"); a user stop
+ * must not, and clears any older auto stop of the app.
+ */
+export function autoRecordingStopped(
+  { auto = false }: { auto?: boolean } = {},
+  now: number = Date.now(),
+): void {
   if (!active) return;
   const { id, app, startedAt, event } = active;
   active = null;
   stopFn = null;
-  lastStops.set(app, { at: now, startedAt, event });
+  if (auto) lastStops.set(app, { at: now, startedAt, event });
+  else lastStops.delete(app);
   if (card?.kind === "recording" && card.recordingId === id) clearCard();
   const prior = endedTimers.get(app);
   if (prior) clearTimeout(prior);

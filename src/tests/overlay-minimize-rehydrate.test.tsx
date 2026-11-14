@@ -147,7 +147,7 @@ describe("minimized state rehydration on mount", () => {
     consoleError.mockRestore();
   });
 
-  it("does not re-minimize: rehydration never invokes minimize_overlay", async () => {
+  it("does not re-minimize: rehydration only ever restyles, never re-snapshots", async () => {
     mockAppPage();
     invokeMock.mockImplementation((cmd) =>
       cmd === "is_overlay_minimized"
@@ -159,6 +159,45 @@ describe("minimized state rehydration on mount", () => {
 
     await waitFor(() => {
       expect(screen.queryByTestId("minimized-pill-stub")).not.toBeNull();
+    });
+    const calls = invokeMock.mock.calls.filter(
+      ([cmd]) => cmd === "minimize_overlay"
+    );
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [, args] of calls) expect(args?.restyle).toBe(true);
+  });
+
+  it("a minimized rehydrate restyles the window to the plain pill size", async () => {
+    // The reload emptied the card store, but the window kept its card-aware size.
+    mockAppPage();
+    invokeMock.mockImplementation((cmd) =>
+      cmd === "is_overlay_minimized"
+        ? Promise.resolve(true)
+        : Promise.resolve(undefined)
+    );
+
+    await renderApp();
+
+    const { PILL_DIMENSIONS } = await import("@/lib/overlay-minimize.store");
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("minimize_overlay", {
+        ...PILL_DIMENSIONS["status-count"],
+        restyle: true,
+      });
+    });
+  });
+
+  it("an expanded rehydrate does not touch the window size", async () => {
+    mockAppPage();
+    invokeMock.mockImplementation((cmd) =>
+      cmd === "is_overlay_minimized"
+        ? Promise.resolve(false)
+        : Promise.resolve(undefined)
+    );
+
+    await renderApp();
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("is_overlay_minimized", undefined);
     });
     expect(
       invokeMock.mock.calls.filter(([cmd]) => cmd === "minimize_overlay")

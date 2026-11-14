@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const listeners = new Map<string, Set<(e: { payload: unknown }) => void>>();
@@ -12,7 +12,7 @@ const listen = vi.fn(async (event: string, cb: (e: { payload: unknown }) => void
   };
 });
 const emit = vi.fn(async () => {});
-const invoke = vi.fn(async () => undefined as unknown);
+const invoke = vi.fn(async (_cmd?: unknown, _args?: unknown) => undefined as unknown);
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: (...a: Parameters<typeof listen>) => listen(...a),
@@ -246,13 +246,36 @@ describe("MeetingAutoRecordToggle", () => {
       direct: MEETING_DETECT_PROCESSES,
       gated: ["chrome.exe"],
     });
-    expect(screen.getByText("chrome.exe")).toBeInTheDocument();
-    expect(screen.getByText("On the microphone")).toBeInTheDocument();
+    // Scoped per row, so swapping the active/idle ternary fails.
+    const chromeRow = within(screen.getByText("chrome.exe").parentElement!);
+    expect(chromeRow.getByText("On the microphone")).toBeInTheDocument();
+    expect(chromeRow.queryByText("Idle")).toBeNull();
     expect(
-      screen.getByText("Watched after a calendar check (Google Meet)")
+      chromeRow.getByText("Watched after a calendar check (Google Meet)")
     ).toBeInTheDocument();
-    expect(screen.getByText("Idle")).toBeInTheDocument();
-    expect(screen.getByText("Not watched")).toBeInTheDocument();
+    const spotifyRow = within(screen.getByText("spotify.exe").parentElement!);
+    expect(spotifyRow.getByText("Idle")).toBeInTheDocument();
+    expect(spotifyRow.queryByText("On the microphone")).toBeNull();
+    expect(spotifyRow.getByText("Not watched")).toBeInTheDocument();
+  });
+
+  it("the readout renders one row per endpoint when a pid repeats", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    invoke.mockImplementation(async (cmd: unknown) =>
+      cmd === "list_capture_sessions"
+        ? [
+            { name: "chrome.exe", pid: 7, active: true, kind: "gated" },
+            { name: "chrome.exe", pid: 7, active: false, kind: "gated" },
+          ]
+        : { running: true, lastError: null }
+    );
+    renderToggle();
+    await flush();
+    fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
+    await flush();
+    expect(screen.getAllByText("chrome.exe")).toHaveLength(2);
+    expect(error).not.toHaveBeenCalled(); // React's duplicate-key warning
+    error.mockRestore();
   });
 
   it("the readout says so when no app is on the microphone", async () => {
@@ -273,13 +296,18 @@ describe("MeetingAutoRecordToggle", () => {
       if (cmd === "list_capture_sessions") throw new Error("boom");
       return { running: true, lastError: null };
     });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     renderToggle();
     await flush();
 
     fireEvent.click(screen.getByRole("button", { name: "Check microphone apps" }));
     await flush();
 
+    expect(error).toHaveBeenCalled();
     expect(screen.getByText("Couldn't list microphone apps.")).toBeInTheDocument();
+    // Release builds have no console, so the reason must be on screen.
+    expect(screen.getByText(/boom/)).toBeInTheDocument();
+    error.mockRestore();
   });
 
   it("renders off when only the legacy detection key is set", async () => {

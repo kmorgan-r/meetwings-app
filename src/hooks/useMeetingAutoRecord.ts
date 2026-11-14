@@ -496,7 +496,10 @@ export const useMeetingAutoRecord = ({
     return false;
   };
 
-  const handleStop = async () => {
+  // `opts` is optional AND read defensively: a bare enqueue(handleStop) goes
+  // through chain.then(op), which hands op the previous link's result.
+  const handleStop = async (opts?: { auto?: boolean }) => {
+    const auto = opts?.auto === true;
     const action = decideOnEnded({ startedMode: startedModeRef.current });
     if (action === "ignore") {
       // MUST clear here, not only in `finally`: this early return is before the
@@ -513,7 +516,7 @@ export const useMeetingAutoRecord = ({
     // branch and flush a SECOND time (measured: 2 flushes on every healthy
     // stop). The action is already captured, so nulling here is safe.
     startedModeRef.current = null;
-    autoRecordingStopped();
+    autoRecordingStopped({ auto });
 
     try {
       if (action === "stop-meeting") {
@@ -617,7 +620,8 @@ export const useMeetingAutoRecord = ({
       ),
 
       register("meeting-ended", () => {
-        enqueue(handleStop);
+        // The only automatic stop: it opens the quiet-restart window.
+        enqueue(() => handleStop({ auto: true }));
       }),
 
       register("capture-stopped", () => {
