@@ -3,7 +3,7 @@ import { Button } from "@/components";
 /**
  * The undo affordance, in the 54px meeting bar.
  *
- * NOT a popover, and NOT in the expanded region: the window is 600px wide and
+ * NOT a popover, and NOT in the expanded region: the window is 500px wide and
  * non-resizable (tauri.conf.json:17-22), resizeWindow changes HEIGHT only
  * (useWindow.ts:22), and the expanded region is Input.tsx's PopoverContent -
  * portaled out of <Completion />'s subtree, and closed on the pill-off path

@@ -14,7 +14,7 @@
     "windows": [
       {
         "title": "Meetwings - Your Invisible AI Wingman",
-        "width": 600,
+        "width": 500,
         "height": 54,
         "decorations": false,
         "transparent": true,

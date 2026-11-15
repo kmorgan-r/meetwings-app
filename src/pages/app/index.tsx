@@ -54,7 +54,7 @@ const App = () => {
   // arriving during the IPC round-trip fires the MutationObserver's
   // resizeWindow(false), which must not race the pill geometry. The catch
   // rolls the flag back so a failed minimize cannot leave a pill rendered
-  // inside an un-minimized window. One paint of the pill in a still-600px
+  // inside an un-minimized window. One paint of the pill in a still-full-width
   // window beats one paint of the full bar in a pill-sized one.
   const handleMinimize = async () => {
     // Re-entrancy guard, matching the pattern everywhere else in this feature
@@ -82,7 +82,7 @@ const App = () => {
   // button, a WebView2 renderer restart — used to bring the app back with
   // `minimized` false while the WINDOW was still the bottom-right pill: the
   // full Card rendered into pill geometry, the MutationObserver stretched it
-  // to 600px from the corner anchor, and the drag handle and minimize button
+  // to the full bar width from the corner anchor, and the drag handle and minimize button
   // ended up off the right edge of the screen where nothing could reach them.
   // Reading the flag back on mount is what closes that gap; `set_window_height`
   // is gated in Rust too, so the observer cannot win the race while this
@@ -246,7 +246,7 @@ const App = () => {
                 {/* flex-1 min-w-0, not w-full: the toolbar takes what the
                     window controls leave, and the contact picker truncates.
                     At min-content (meeting badge + a conversation's input
-                    padding) the row is wider than the 600px window, and
+                    padding) the row is wider than the 500px window, and
                     overflow-hidden then clipped the LAST child: Minimize. */}
                 <div
                   className={`${
