@@ -78,6 +78,7 @@ const hooksBarrelStub = async (
         meetingAssistMode: true,
         isContactPickerOpen: false,
         setIsContactPickerOpen: vi.fn(),
+        setIsFilesPopoverOpen: vi.fn(),
         setTargetCount: setTargetCountSpy,
         setCalendarBlockPresent: vi.fn(),
         currentConversationId: null,

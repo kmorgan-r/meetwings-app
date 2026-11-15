@@ -135,6 +135,8 @@ export interface UseCompletionReturn {
 
   /** Ref for the input element */
   inputRef: RefObject<HTMLInputElement | null>;
+  /** Callback ref for the input: sets inputRef and registers it with the global shortcut (null on unmount) */
+  attachInput: (el: HTMLInputElement | null) => void;
   /** Function to capture a screenshot */
   captureScreenshot: () => Promise<void>;
   /** Whether a screenshot is currently loading */

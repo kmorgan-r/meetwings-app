@@ -300,7 +300,9 @@ describe("<Completion /> mounts the auto-record hook", () => {
       "enableVAD",
       "flushUnsavedMeetingTranscript",
       "meetingAssistMode",
+      "meetingTranscript",
       "setEnableVAD",
+      "startNewConversation",
       "systemAudio",
     ]);
     expect(options.enableVAD).toBe(false);
@@ -500,6 +502,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         flushUnsavedMeetingTranscript: vi.fn(),
         isContactPickerOpen: true,
         setIsContactPickerOpen,
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -564,6 +567,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI,

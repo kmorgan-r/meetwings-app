@@ -74,6 +74,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         flushUnsavedMeetingTranscript: vi.fn(),
         isContactPickerOpen: true,
         setIsContactPickerOpen: vi.fn(),
+        setIsFilesPopoverOpen: vi.fn(),
         setTargetCount: vi.fn(),
         setCalendarBlockPresent,
       }),
@@ -131,6 +132,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI: vi.fn(async () => false),

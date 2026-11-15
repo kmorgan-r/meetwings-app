@@ -23,6 +23,7 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
       flushUnsavedMeetingTranscript: vi.fn(),
       isContactPickerOpen: false,
       setIsContactPickerOpen: vi.fn(),
+      setIsFilesPopoverOpen: vi.fn(),
       setTargetCount: vi.fn(),
       setCalendarBlockPresent: vi.fn(),
     }),
@@ -62,6 +63,7 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
       selectedSttProvider: { provider: "", variables: {} },
     }),
   }));
+  vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
   vi.doMock("@/lib", () => ({
     getPlatform: () => "windows",
     shouldUseMeetwingsAPI: vi.fn(async () => false),

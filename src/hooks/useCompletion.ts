@@ -2433,18 +2433,28 @@ export const useCompletion = () => {
     };
   }, []);
 
+  // The input mounts only while the Ask box is expanded, so it registers
+  // itself as a callback ref (null on unmount: the shortcut never holds a
+  // detached node). Stable identity: a new function each render would make
+  // React re-run it with null then the element on every render.
+  const registerInputRef = globalShortcuts.registerInputRef;
+  const attachInput = useCallback(
+    (el: HTMLInputElement | null) => {
+      inputRef.current = el;
+      registerInputRef(el);
+    },
+    [registerInputRef]
+  );
+
   // register callbacks for global shortcuts
   useEffect(() => {
     globalShortcuts.registerAudioCallback(toggleRecording);
-    globalShortcuts.registerInputRef(inputRef.current);
     globalShortcuts.registerScreenshotCallback(captureScreenshot);
   }, [
     globalShortcuts.registerAudioCallback,
-    globalShortcuts.registerInputRef,
     globalShortcuts.registerScreenshotCallback,
     toggleRecording,
     captureScreenshot,
-    inputRef,
   ]);
 
   return {
@@ -2491,6 +2501,7 @@ export const useCompletion = () => {
     setCalendarBlockPresent,
     onRemoveAllFiles,
     inputRef,
+    attachInput,
     captureScreenshot,
     isScreenshotLoading,
     keepEngaged,

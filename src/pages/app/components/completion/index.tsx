@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   useCalendarProposal,
   useCalendarAutoSelect,
@@ -270,6 +271,42 @@ export const Completion = ({
     }
   };
 
+  // The Ask box is an icon until clicked or the focus shortcut fires. While
+  // expanded it takes the room of the picker, screenshot and files buttons.
+  const [askExpanded, setAskExpanded] = useState(false);
+  const { setIsContactPickerOpen, setIsFilesPopoverOpen } = completion;
+  const expandAsk = useCallback(() => {
+    // Their popovers are controlled flags; unmounting the triggers would
+    // strand them open (same reasoning as the holding effect above).
+    setIsContactPickerOpen(false);
+    setIsFilesPopoverOpen(false);
+    setAskExpanded(true);
+  }, [setIsContactPickerOpen, setIsFilesPopoverOpen]);
+  const collapseAsk = useCallback(() => setAskExpanded(false), []);
+  const expandAskRef = useRef(expandAsk);
+  useEffect(() => {
+    expandAskRef.current = expandAsk;
+  }, [expandAsk]);
+
+  // Cancelled flag: listen() is async, so under StrictMode the first mount's
+  // promise resolves after cleanup and would leak a second handler.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen("focus-text-input", () => expandAskRef.current())
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      })
+      .catch((error) => {
+        console.error("Failed to subscribe to focus-text-input:", error);
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   return (
     <>
       {meetingLog.holding || meetingLog.undoBlockedMessage ? (
@@ -279,7 +316,7 @@ export const Completion = ({
           onUndo={meetingLog.onUndo}
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
-      ) : hidePicker ? null : (
+      ) : hidePicker || askExpanded ? null : (
         <ContactPicker
           {...odoo.pickerProps}
           calendar={calendarProps}
@@ -292,12 +329,15 @@ export const Completion = ({
       <Input
         {...completion}
         isHidden={isHidden}
+        askExpanded={askExpanded}
+        onAskExpand={expandAsk}
+        onAskCollapse={collapseAsk}
         quickActions={quickActions}
         onQuickActionClick={handleQuickAction}
         cloudMode={useMeetwingsAPI}
       />
-      <Screenshot {...completion} />
-      <Files {...completion} />
+      {!askExpanded && <Screenshot {...completion} />}
+      {!askExpanded && <Files {...completion} />}
     </>
   );
 };
