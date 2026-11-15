@@ -44,26 +44,19 @@ function useElapsed(startedAt: number): string {
   return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`;
 }
 
-function Chips({ event }: { event: CardEvent }) {
+function People({ event }: { event: CardEvent }) {
+  const more = event.extraCount > 0 ? ` +${event.extraCount}` : "";
   return (
-    <span className="flex items-center gap-1" data-testid="meeting-card-chips">
-      {event.initials.map((i, n) => (
-        <span
-          key={n}
-          className="flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-foreground ring-1 ring-border"
-        >
-          {i}
-        </span>
-      ))}
-      {event.extraCount > 0 && (
-        <span className="text-[11px] text-muted-foreground">+{event.extraCount}</span>
-      )}
+    <span className="min-w-0 truncate font-medium text-foreground" data-testid="meeting-card-people">
+      {`with ${event.names.join(", ")}${more}`}
     </span>
   );
 }
 
+// select-none: a stray Ctrl+A or drag on the overlay otherwise paints selection
+// boxes over every line of the card and makes it unreadable.
 const SHELL =
-  "relative w-full overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg " +
+  "relative w-full select-none overflow-hidden rounded-xl border bg-card text-card-foreground shadow-lg " +
   "transition-opacity duration-300 starting:opacity-0 " +
   "motion-safe:animate-in motion-safe:fade-in motion-safe:slide-in-from-top-3";
 
@@ -97,12 +90,16 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
     </Button>
   );
   const when = event && (
-    <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
-      <span className="tabular-nums">
+    <span className="flex min-w-0 items-center gap-2 text-sm text-foreground/75">
+      <span className="shrink-0 tabular-nums">
         {hhmm(event.startMs)} – {hhmm(event.endMs)}
       </span>
-      <span aria-hidden>·</span>
-      <Chips event={event} />
+      {event.names.length > 0 && (
+        <>
+          <span aria-hidden>·</span>
+          <People event={event} />
+        </>
+      )}
     </span>
   );
 
@@ -130,6 +127,11 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
           </span>
           {compact && stop}
         </div>
+        {event && compact && event.names.length > 0 && (
+          <div className="mt-0.5 flex min-w-0 pl-5 text-sm">
+            <People event={event} />
+          </div>
+        )}
         {event && !compact && (
           <>
             <div className="my-1.5 h-px bg-border" />

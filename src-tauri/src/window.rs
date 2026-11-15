@@ -9,6 +9,10 @@ use tauri::{
 // The offset from the top of the screen to the window
 const TOP_OFFSET: i32 = 54;
 
+// The overlay's LOGICAL width. Must match `width` in tauri.conf.json. The
+// panels below the bar (answers, transcript, files) share it via w-screen.
+const BAR_WIDTH: f64 = 500.0;
+
 // Distance between the minimized pill and the work-area edges, in physical px.
 const PILL_MARGIN: i32 = 16;
 
@@ -33,7 +37,7 @@ impl Default for ContentProtectionState {
 
 /// The main overlay's pre-minimize geometry, in PHYSICAL pixels:
 /// (x, y, width, height). In-memory only — a restart starts un-minimized,
-/// and restore falls back to the 600x54 bar when this is None.
+/// and restore falls back to the BAR_WIDTH x 54 bar when this is None.
 ///
 /// `minimized` is the SOURCE OF TRUTH for whether the window is currently the
 /// corner pill. It cannot be derived from `saved`: restore deliberately keeps
@@ -197,8 +201,8 @@ fn keep_window_on_screen(window: &WebviewWindow) {
 }
 
 /// The rect `restore_overlay` falls back to when no snapshot exists (hot
-/// reload, restore-before-minimize, or after a restart): the 600x54 LOGICAL
-/// bar, top-center of the given work area, converted to physical pixels.
+/// reload, restore-before-minimize, or after a restart): the BAR_WIDTH x 54
+/// LOGICAL bar, top-center of the given work area, converted to physical pixels.
 /// Uses the work area (not monitor size) and the passed scale, matching the
 /// pill's own monitor-sensitivity — `position_window_top_center` is NOT used
 /// because its `primary_monitor()` would teleport a second-monitor user's
@@ -207,7 +211,7 @@ fn fallback_restore_rect(
     work_area: &PhysicalRect<i32, u32>,
     scale_factor: f64,
 ) -> (i32, i32, u32, u32) {
-    let width = (600.0 * scale_factor).round() as u32;
+    let width = (BAR_WIDTH * scale_factor).round() as u32;
     let height = (54.0 * scale_factor).round() as u32;
     let x = work_area.position.x + (work_area.size.width as i32 - width as i32) / 2;
     let y = work_area.position.y + (TOP_OFFSET as f64 * scale_factor).round() as i32;
@@ -257,7 +261,7 @@ pub fn set_window_height(
     }
 
     // Simply set the window size with fixed width and new height
-    let new_size = LogicalSize::new(600.0, height as f64);
+    let new_size = LogicalSize::new(BAR_WIDTH, height as f64);
     window
         .set_size(Size::Logical(new_size))
         .map_err(|e| format!("Failed to resize window: {}", e))?;
@@ -683,23 +687,23 @@ mod tests {
         assert_eq!(clamp_into_work_area(&area, 300, 300, 600, 600), (0, 0));
     }
 
-    // The restore fallback: 600x54 LOGICAL at top center, converted through the
+    // The restore fallback: 500x54 LOGICAL at top center, converted through the
     // scale factor to physical pixels.
     #[test]
     fn fallback_rect_scale_one() {
         let area = rect(0, 0, 1920, 1080);
         let (x, y, w, h) = fallback_restore_rect(&area, 1.0);
-        assert_eq!((x, y, w, h), ((1920 - 600) / 2, TOP_OFFSET, 600, 54));
+        assert_eq!((x, y, w, h), ((1920 - 500) / 2, TOP_OFFSET, 500, 54));
     }
 
     #[test]
     fn fallback_rect_fractional_scale() {
         let area = rect(0, 0, 2560, 1440);
-        // 1.5x: 600 logical = 900 physical, 54 logical = 81 physical.
+        // 1.5x: 500 logical = 750 physical, 54 logical = 81 physical.
         let (x, y, w, h) = fallback_restore_rect(&area, 1.5);
         assert_eq!(
             (x, y, w, h),
-            ((2560 - 900) / 2, (54.0 * 1.5) as i32, 900, 81)
+            ((2560 - 750) / 2, (54.0 * 1.5) as i32, 750, 81)
         );
     }
 

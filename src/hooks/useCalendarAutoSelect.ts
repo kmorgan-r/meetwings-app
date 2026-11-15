@@ -101,7 +101,7 @@ export function useCalendarAutoSelect(inputs: AutoSelectInputs): void {
         if (fetched.kind !== "ok") return;
         if (rec && !rec.gated) {
           const pick = pickCurrentMeeting(fetched.events, Date.now());
-          if (pick.kind === "one") setCardEvent(rec.id, pick.event);
+          if (pick.kind === "one") setCardEvent(rec.id, pick.event, fetched.ownAddress);
         }
         const plan = planAutoSelect({
           events: fetched.events,
