@@ -96,16 +96,23 @@ describe("MeetingCard", () => {
     run(() => setCardEvent(start(), event("Weekly IC sync")));
     expect(screen.getByText("Weekly IC sync")).toBeTruthy();
     expect(screen.getByText("10:00 – 10:30")).toBeTruthy();
-    const chips = screen.getByTestId("meeting-card-chips");
-    expect(chips.textContent).toBe("AKJSMR+2");
-    expect(chips.querySelectorAll("span.rounded-full")).toHaveLength(3);
+    expect(screen.getByTestId("meeting-card-people").textContent).toBe(
+      "with Ada Kay, Jo Smith, Max Reed +2",
+    );
+  });
+
+  it("the recording card leaves out the people line when nobody else is invited", () => {
+    render(<Harness />);
+    run(() => setCardEvent(start(), event("Focus", 1), "p0@x.com"));
+    expect(screen.getByText("Focus")).toBeTruthy();
+    expect(screen.queryByTestId("meeting-card-people")).toBeNull();
   });
 
   it("without an event only the top row shows", () => {
     render(<Harness />);
     run(() => void start());
     expect(screen.queryByTestId("meeting-card-title")).toBeNull();
-    expect(screen.queryByTestId("meeting-card-chips")).toBeNull();
+    expect(screen.queryByTestId("meeting-card-people")).toBeNull();
     expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
     expect(screen.getByTestId("meeting-card").style.height).toBe(`${cardHeight(getMeetingCard(), false)}px`);
   });
@@ -142,18 +149,30 @@ describe("MeetingCard", () => {
     }
   });
 
-  it("the compact recording card is a single row with the event title", () => {
+  it("the compact recording card is the title row plus a people line", () => {
     render(<Harness compact />);
     run(() => setCardEvent(start(), event("Sync")));
     const root = screen.getByTestId("meeting-card");
     expect(root.textContent).toContain("REC");
     expect(root.textContent).toContain("Sync");
     expect(root.textContent).toContain("00:00");
-    // No second row: no title block, no chips, no time range, no separate divider.
+    expect(screen.getByTestId("meeting-card-people").textContent).toBe(
+      "with Ada Kay, Jo Smith, Max Reed +2",
+    );
+    // No title block, no time range, no divider.
     expect(screen.queryByTestId("meeting-card-title")).toBeNull();
-    expect(screen.queryByTestId("meeting-card-chips")).toBeNull();
     expect(root.textContent).not.toContain("10:00");
     expect(root.querySelector(".h-px")).toBeNull();
+    expect(root.firstElementChild?.children).toHaveLength(2);
+    expect(root.style.height).toBe(`${cardHeight(getMeetingCard(), true)}px`);
+    expect(cardHeight(getMeetingCard(), true)).toBeGreaterThan(48);
+  });
+
+  it("the compact recording card stays one row when nobody else is invited", () => {
+    render(<Harness compact />);
+    run(() => setCardEvent(start(), event("Focus", 1), "p0@x.com"));
+    const root = screen.getByTestId("meeting-card");
+    expect(screen.queryByTestId("meeting-card-people")).toBeNull();
     expect(root.firstElementChild?.children).toHaveLength(1);
     expect(root.style.height).toBe("48px");
   });
@@ -162,7 +181,7 @@ describe("MeetingCard", () => {
     render(<Harness />);
     run(() => setCardEvent(start(), event("Weekly IC sync")));
     const stop = screen.getByRole("button", { name: "Stop" });
-    const when = screen.getByTestId("meeting-card-chips");
+    const when = screen.getByTestId("meeting-card-people");
     expect(stop.parentElement).not.toBe(when.parentElement?.parentElement);
     expect(stop.parentElement?.contains(when)).toBe(false);
     expect(stop.parentElement?.className).toContain("justify-end");

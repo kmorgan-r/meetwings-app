@@ -1,4 +1,4 @@
-import { participantsOf } from "@/lib/calendar/match-attendees";
+import { normalizeAddress, participantsOf } from "@/lib/calendar/match-attendees";
 import type { AmberKind } from "@/lib/meeting-detect";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
 import type { OverlayPillStyle } from "@/lib/storage";
@@ -16,7 +16,8 @@ export interface CardEvent {
   title: string | null;
   startMs: number;
   endMs: number;
-  initials: string[];
+  /** Up to three other guests: display name, else address. Never you. */
+  names: string[];
   extraCount: number;
 }
 
@@ -106,24 +107,17 @@ function clearCard(): void {
   setCard(null, null, Date.now());
 }
 
-function initialOf(name: string | null, address: string): string {
-  const words = (name ?? "").trim().split(/\s+/).filter(Boolean);
-  const letters =
-    words.length === 0
-      ? address.trim().charAt(0)
-      : words.length === 1
-        ? words[0].charAt(0)
-        : words[0].charAt(0) + words[words.length - 1].charAt(0);
-  return letters.toUpperCase();
-}
-
-function toCardEvent(ev: CalendarEvent): CardEvent {
-  const all = participantsOf(ev).map((p) => initialOf(p.name, p.address));
+function toCardEvent(ev: CalendarEvent, ownAddress: string | null): CardEvent {
+  const own = ownAddress === null ? null : normalizeAddress(ownAddress);
+  const all = participantsOf(ev)
+    .filter((p) => normalizeAddress(p.address) !== own)
+    .filter((p) => p.response?.toLowerCase() !== "declined")
+    .map((p) => p.name?.trim() || p.address);
   return {
     title: ev.subject,
     startMs: ev.startMs,
     endMs: ev.endMs,
-    initials: all.slice(0, 3),
+    names: all.slice(0, 3),
     extraCount: Math.max(0, all.length - 3),
   };
 }
@@ -188,9 +182,13 @@ export function stopActiveRecording(): void {
   stopFn?.();
 }
 
-export function setCardEvent(recordingId: number, ev: CalendarEvent): void {
+export function setCardEvent(
+  recordingId: number,
+  ev: CalendarEvent,
+  ownAddress: string | null = null,
+): void {
   if (!active || active.id !== recordingId) return;
-  const event = toCardEvent(ev);
+  const event = toCardEvent(ev, ownAddress);
   active = { ...active, event };
   // Same recording's card: swap the object but leave the timer untouched.
   if (card?.kind === "recording" && card.recordingId === recordingId) {
@@ -246,9 +244,11 @@ export function cardHeight(c: MeetingCardState, compact: boolean): number {
   if (!c) return 0;
   switch (c.kind) {
     case "recording":
-      // Compact is one line with or without an event. Full with an event adds
-      // divider, title, time row and a separate Stop row (spec 6.6).
-      return compact ? 48 : c.event ? 124 : 72;
+      // Compact is the title row, plus a people line when there are other
+      // guests. Full with an event adds divider, title, time row and a separate
+      // Stop row (spec 6.6).
+      if (compact) return c.event && c.event.names.length > 0 ? 64 : 48;
+      return c.event ? 124 : 72;
     case "ended":
       return compact ? 48 : 64;
     case "amber":

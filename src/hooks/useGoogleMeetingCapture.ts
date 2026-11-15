@@ -134,7 +134,9 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       const result = await g;
       if (seq !== readSeq.current || gen !== convGen.current) return;
       const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
-      if (rec?.gated && pick?.kind === "one") setCardEvent(rec.id, pick.event);
+      if (rec?.gated && result.kind === "ok" && pick?.kind === "one") {
+        setCardEvent(rec.id, pick.event, result.ownAddress);
+      }
       pending.current =
         result.kind === "ok" && pick?.kind === "one"
           ? { kind: "save", snapshot: buildSnapshot(pick.event, result.ownAddress) }

@@ -188,22 +188,34 @@ describe("meeting card store", () => {
     setCardEvent(
       id,
       event("Planning", [
+        person("Me Myself", "ME@x.com"),
         person("Ada Lovelace", "ada@x.com"),
         person("Grace Brewster Hopper", "grace@x.com"),
         person(null, "bob@x.com"),
+        { ...person("Gone", "gone@x.com"), response: "declined" },
         person("Dan", "dan@x.com"),
         person("Eve Adams", "eve@x.com"),
         person("Room 3", "room3@x.com", "resource"),
       ]),
+      "me@x.com",
     );
     const card = getMeetingCard();
     expect(card?.kind).toBe("recording");
     if (card?.kind === "recording") {
       expect(card.event?.title).toBe("Planning");
-      expect(card.event?.initials).toEqual(["AL", "GH", "B"]);
+      // You, the room and a declined guest are left out; a nameless guest shows its address.
+      expect(card.event?.names).toEqual(["Ada Lovelace", "Grace Brewster Hopper", "bob@x.com"]);
       expect(card.event?.extraCount).toBe(2);
     }
     expect(getActiveAutoRecording()?.event?.title).toBe("Planning");
+  });
+
+  it("setCardEvent with no other guest leaves names empty", () => {
+    const id = start();
+    setCardEvent(id, event("Focus", [person("Me", "me@x.com")]), "me@x.com");
+    const card = getMeetingCard();
+    expect(card?.kind === "recording" && card.event?.names).toEqual([]);
+    expect(card?.kind === "recording" && card.event?.extraCount).toBe(0);
   });
 
   it("amber shows, snoozes for an hour, and shows again after it", () => {
