@@ -19,7 +19,7 @@ const db = vi.hoisted(() => ({
 vi.mock("@/lib/database/meeting-log.action", () => db);
 
 const history = vi.hoisted(() => ({
-  getAllConversations: vi.fn(),
+  listConversations: vi.fn(),
   deleteConversation: vi.fn(),
   renameConversationManually: vi.fn(),
   getConversationById: vi.fn(),
@@ -107,14 +107,14 @@ import { buildBadgeMap } from "@/hooks/useNotionQueue";
 import { NOTION_COPY } from "@/lib/notion/errors";
 import { groupOf, resolveBadge } from "@/lib/odoo/meeting-log";
 import type { NotionItem } from "@/lib/database/notion-queue.action";
-import type { ChatConversation, DbNotionSend } from "@/types";
+import type { ConversationListItem, DbNotionSend } from "@/types";
 
 const AT = 1_700_000_000_000;
 const PAGE = "https://notion.example/page-1";
 const WINNER = "https://notion.example/winner";
 
-function conversation(over: Partial<ChatConversation> = {}): ChatConversation {
-  return { id: "c1", title: "Quarterly review", messages: [], createdAt: AT, updatedAt: AT, ...over };
+function conversation(over: Partial<ConversationListItem> = {}): ConversationListItem {
+  return { id: "c1", title: "Quarterly review", messageCount: 0, createdAt: AT, updatedAt: AT, ...over };
 }
 
 function send(over: Partial<DbNotionSend> = {}): NotionItem {
@@ -148,7 +148,7 @@ async function renderPage() {
       <Meetings />
     </MemoryRouter>,
   );
-  await waitFor(() => expect(history.getAllConversations).toHaveBeenCalled());
+  await waitFor(() => expect(history.listConversations).toHaveBeenCalled());
   await waitFor(() => expect(notionQueue.listNotionItems).toHaveBeenCalled());
   await act(async () => {
     await Promise.resolve();
@@ -174,7 +174,7 @@ beforeEach(() => {
   db.getQueueRow.mockResolvedValue(null);
   db.getQueueTranscript.mockResolvedValue("");
   db.readConversationTranscript.mockResolvedValue([]);
-  history.getAllConversations.mockResolvedValue([
+  history.listConversations.mockResolvedValue([
     conversation({ id: "c1", title: "Quarterly review" }),
     conversation({ id: "c2", title: "Supplier onboarding", updatedAt: AT - 86_400_000 }),
   ]);
@@ -395,7 +395,7 @@ describe("the Meetings page, Notion side", () => {
 
   describe("the row's Send to Notion button", () => {
     it("is offered on a conversation with no Notion state, and not on a system audio one", async () => {
-      history.getAllConversations.mockResolvedValue([
+      history.listConversations.mockResolvedValue([
         conversation({ id: "c1" }),
         conversation({ id: "sysaudio_conv_1", title: "System audio" }),
       ]);

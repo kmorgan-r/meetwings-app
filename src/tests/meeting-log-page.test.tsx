@@ -77,13 +77,13 @@ vi.mock("@/lib/database/odoo-contacts.action", () => contacts);
 const createContact = vi.hoisted(() => ({ createOrAdoptContact: vi.fn() }));
 vi.mock("@/lib/odoo/create-contact", () => createContact);
 
-// The merged page mounts `useHistory`, which calls getAllConversations through
+// The merged page mounts `useHistory`, which calls listConversations through
 // the `@/lib` barrel in a mount effect. Mocked at the LEAF for the reason the
 // meetwings.api mock below states; unmocked it reaches
 // @tauri-apps/plugin-sql under jsdom. This suite is about the queue, so the
 // list stays empty in every test here.
 const history = vi.hoisted(() => ({
-  getAllConversations: vi.fn(),
+  listConversations: vi.fn(),
   deleteConversation: vi.fn(),
 }));
 vi.mock("@/lib/database/chat-history.action", () => history);
@@ -360,7 +360,7 @@ beforeEach(() => {
   db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([contact()]);
   contacts.upsertContacts.mockResolvedValue(1);
-  history.getAllConversations.mockResolvedValue([]);
+  history.listConversations.mockResolvedValue([]);
   actions.retryMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.deleteMeetingLog.mockResolvedValue({ kind: "ok" });
   actions.assignMeetingLog.mockResolvedValue({ kind: "ok" });

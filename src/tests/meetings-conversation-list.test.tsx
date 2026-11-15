@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatConversation } from "@/types";
+import type { ConversationListItem } from "@/types";
 import { ConversationList } from "@/pages/meetings/components/ConversationList";
 
 // ConversationList's page never sets `renamingId` yet - nothing in the app
@@ -12,11 +12,11 @@ import { ConversationList } from "@/pages/meetings/components/ConversationList";
 const OLDER_DATE = 1_700_000_000_000;
 const NEWER_DATE = OLDER_DATE + 86_400_000;
 
-function conversation(over: Partial<ChatConversation> = {}): ChatConversation {
+function conversation(over: Partial<ConversationListItem> = {}): ConversationListItem {
   return {
     id: "c1",
     title: "Quarterly review",
-    messages: [],
+    messageCount: 0,
     createdAt: OLDER_DATE,
     updatedAt: OLDER_DATE,
     ...over,
@@ -24,6 +24,28 @@ function conversation(over: Partial<ChatConversation> = {}): ChatConversation {
 }
 
 describe("ConversationList", () => {
+  // The list gets a count from listConversations, not the messages themselves.
+  it("shows each row's message count", () => {
+    render(
+      <ConversationList
+        conversations={[conversation({ messageCount: 42 })]}
+        search=""
+        badges={new Map()}
+        whoNames={new Map()}
+        notionBadges={new Map()}
+        onSendToNotion={null}
+        onSendToOdoo={null}
+        onOpen={vi.fn()}
+        onStartRename={vi.fn()}
+        onCommitRename={vi.fn()}
+        onCancelRename={vi.fn()}
+        renamingId={null}
+      />
+    );
+
+    expect(screen.getByText("42 messages")).toBeInTheDocument();
+  });
+
   it("filters out a date group with no title match when nothing is being renamed", () => {
     const matching = conversation({ id: "c1", title: "Quarterly review", updatedAt: NEWER_DATE });
     const nonMatching = conversation({ id: "c2", title: "Supplier onboarding", updatedAt: OLDER_DATE });

@@ -39,7 +39,7 @@ vi.mock("@/hooks/useNotionQueue", async (importOriginal) => ({
 // star-exports it. Mocked at the LEAF rather than at `@/lib`, so the rest of
 // that barrel stays real - the queue page suite's rule, for its reason.
 const history = vi.hoisted(() => ({
-  getAllConversations: vi.fn(),
+  listConversations: vi.fn(),
   deleteConversation: vi.fn(),
   renameConversationManually: vi.fn(),
   getConversationById: vi.fn(),
@@ -154,7 +154,7 @@ vi.mock("@/layouts", () => ({
 
 import Meetings from "@/pages/meetings";
 import View from "@/pages/meetings/components/View";
-import type { ChatConversation, MeetingLogListRow } from "@/types";
+import type { ConversationListItem, MeetingLogListRow } from "@/types";
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 
 const INSTANCE = "http://h:8069|odoo";
@@ -186,11 +186,11 @@ function row(over: Partial<MeetingLogListRow> = {}): MeetingLogListRow {
   };
 }
 
-function conversation(over: Partial<ChatConversation> = {}): ChatConversation {
+function conversation(over: Partial<ConversationListItem> = {}): ConversationListItem {
   return {
     id: "c1",
     title: "Quarterly review",
-    messages: [],
+    messageCount: 0,
     createdAt: MEETING_AT,
     updatedAt: MEETING_AT,
     ...over,
@@ -209,7 +209,7 @@ async function renderPage() {
     </MemoryRouter>
   );
   await waitFor(() => expect(storage.loadOdooConfigState).toHaveBeenCalled());
-  await waitFor(() => expect(history.getAllConversations).toHaveBeenCalled());
+  await waitFor(() => expect(history.listConversations).toHaveBeenCalled());
   // Settles ProviderConfigReader's async shouldUseMeetwingsAPI leg too.
   await act(async () => {
     await Promise.resolve();
@@ -245,7 +245,7 @@ beforeEach(() => {
   db.getQueueRow.mockResolvedValue(null);
   db.listConversationBadgeRows.mockResolvedValue([]);
   contacts.listContacts.mockResolvedValue([]);
-  history.getAllConversations.mockResolvedValue(CONVERSATIONS);
+  history.listConversations.mockResolvedValue(CONVERSATIONS);
   history.renameConversationManually.mockResolvedValue(true);
 });
 
@@ -986,9 +986,14 @@ describe("renaming a conversation from the header", () => {
       hasActiveLicense: true,
       selectedSttProvider: { provider: "" },
     };
-    history.getConversationById.mockResolvedValue(
-      conversation({ id: "c1", title: "Quarterly review" })
-    );
+    // View's own read: the full conversation, which a list item is not.
+    history.getConversationById.mockResolvedValue({
+      id: "c1",
+      title: "Quarterly review",
+      messages: [],
+      createdAt: MEETING_AT,
+      updatedAt: MEETING_AT,
+    });
   });
 
   it("reveals the editor on the header pencil and commits on Enter", async () => {

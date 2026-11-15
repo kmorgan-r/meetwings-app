@@ -1,5 +1,5 @@
 import { getDatabase } from "./config";
-import { ChatConversation } from "@/types";
+import { ChatConversation, ConversationListItem } from "@/types";
 import { safeLocalStorage } from "@/lib";
 
 // Legacy localStorage key for migration purposes
@@ -245,20 +245,35 @@ async function attachMessages(
 }
 
 /**
- * Get all conversations with messages in a single optimized query
+ * Every conversation with its message COUNT, never its messages - the history
+ * list renders a count, and loading the bodies (attachments included) for
+ * every conversation ever saved kept them all in the dashboard's memory while
+ * its window sat hidden. A conversation's messages load when it is opened
+ * (getConversationById).
+ *
+ * Deliberately unbounded in conversations: the meetings page resolves queue
+ * row titles from this same list.
  */
-export async function getAllConversations(): Promise<ChatConversation[]> {
+export async function listConversations(): Promise<ConversationListItem[]> {
   const db = await getDatabase();
 
   try {
-    // Get all conversations
-    const conversations = await db.select<DbConversation[]>(
-      "SELECT * FROM conversations ORDER BY updated_at DESC"
+    const rows = await db.select<(DbConversation & { message_count: number })[]>(
+      `SELECT c.id, c.title, c.created_at, c.updated_at,
+              (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count
+       FROM conversations c
+       ORDER BY c.updated_at DESC`
     );
 
-    return attachMessages(conversations);
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      messageCount: row.message_count,
+    }));
   } catch (error) {
-    console.error("Failed to get all conversations:", error);
+    console.error("Failed to list conversations:", error);
     throw error;
   }
 }
