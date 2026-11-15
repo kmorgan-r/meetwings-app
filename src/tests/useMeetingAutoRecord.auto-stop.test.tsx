@@ -630,7 +630,11 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     await waitFor(() =>
       expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]])
     );
+    // The grace's stop, not silence's: with no arm, silence closes the mic
+    // inside waitFor's budget and the lower bound alone still holds.
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
     expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    expect(h.closeTimes[0]).toBeLessThan(endedAt + SILENCE);
     await drainStopConfirm();
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
   });
@@ -703,6 +707,25 @@ describe("useMeetingAutoRecord - call-end grace", () => {
 
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(getMeetingCard()).toBeNull();
+  });
+
+  it("a mic-closed meeting-ended leaves no grace to close the next auto-start", async () => {
+    // The half the case above cannot see: a grace armed with the mic closed is
+    // cancelled by the timer's own re-check. An auto-start inside it writes
+    // "meeting" provenance before its false->true commit, which takes the
+    // enableVAD exception - so a phantom grace would survive and close the new
+    // recording at endedAt + GRACE.
+    seedStatus([false]); // the detection's probe
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+
+    const endedAt = await endCall();
+    await sleep(GRACE / 3);
+    await fireActed("meeting-detected");
+    await sleep(Math.max(0, endedAt + 2 * GRACE - Date.now()));
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    expect(getMeetingCard()?.kind).toBe("recording");
   });
 
   it("a system line restarts the grace", async () => {
@@ -794,15 +817,29 @@ describe("useMeetingAutoRecord - call-end grace", () => {
   });
 
   it("unmount clears the grace", async () => {
-    const h = await openByHand();
-    await endCall();
-    await sleep(GRACE / 3);
+    // stopRecording's mountedRef guard hides a live timer from the mic, the
+    // card and the cap, so the timer itself is the evidence. Pass-through
+    // spies on the real timers; clearAllMocks does not restore them.
+    const setSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const h = await openByHand();
+      await endCall();
+      const idx = setSpy.mock.calls.findIndex(([, ms]) => ms === GRACE);
+      expect(idx).toBeGreaterThanOrEqual(0);
+      const handle = setSpy.mock.results[idx].value;
+      await sleep(GRACE / 3);
 
-    h.unmount();
-    await sleep(GRACE * 2);
+      h.unmount();
+      expect(clearSpy).toHaveBeenCalledWith(handle);
 
-    expect(h.setEnableVAD).not.toHaveBeenCalled();
-    expect(getMeetingCard()).toBeNull();
+      await sleep(GRACE * 2);
+      expect(h.setEnableVAD).not.toHaveBeenCalled();
+      expect(getMeetingCard()).toBeNull();
+    } finally {
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
   });
 
   it("a line arriving after the fire, before the queued stop, still cancels it", async () => {
