@@ -1036,6 +1036,8 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     );
 
     expect(h.startNewConversation).toHaveBeenCalledTimes(1);
+    // Same app, so a quiet (auto) stop would restart quietly with NO card.
+    expect(recordingId()).not.toBeNull();
     expect(recordingId()).not.toBe(idA);
   });
 
