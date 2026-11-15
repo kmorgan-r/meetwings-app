@@ -173,6 +173,14 @@ const flush = async () => {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * libuv counts timers in whole ms of its monotonic clock, so a timer can fire
+ * up to 1 ms of real time early (seen on Linux CI: 149 ms for a 150 ms grace).
+ * Every "restarted at or after input + timer" bound gives this much back; the
+ * restart-vs-no-restart gaps those cases test are tens of ms.
+ */
+const EARLY_FIRE_MS = 2;
+
+/**
  * Outlasts the post-stop confirmation loop, which is a REAL-timer background
  * process that outlives the assertions of the case that started it.
  *
@@ -453,8 +461,8 @@ afterEach(() => {
 // Timing rules (the lifecycle file's 20ms floor makes tighter gaps flake):
 // "stopped" is waitFor, never a fixed sleep; "not yet" is asserted within a third
 // of the timer; restart vs no restart compares the Date.now() the setEnableVAD
-// spy recorded with the time of the restarting input. Timers never fire early,
-// so a restarted timer stops at or after input + SILENCE.
+// spy recorded with the time of the restarting input. A restarted timer stops at
+// or after input + SILENCE, less EARLY_FIRE_MS (timers can fire 1 ms early).
 /** Act environment off while waiting, as RTL's waitFor does itself. */
 const settle = async (ms: number) => {
   const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
@@ -505,7 +513,7 @@ describe("useMeetingAutoRecord - silence stop", () => {
     await h.appendLine();
     await stopped(h);
 
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + SILENCE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + SILENCE - EARLY_FIRE_MS);
   });
 
   it("lines already there at start do not count", async () => {
@@ -518,7 +526,7 @@ describe("useMeetingAutoRecord - silence stop", () => {
     await stopped(h);
 
     // Not at once: old lines must not read as "already silent for 15 min".
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(openAt + SILENCE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(openAt + SILENCE - EARLY_FIRE_MS);
   });
 
   it("editing an entry in place is not an arrival", async () => {
@@ -632,7 +640,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     expect(h.setEnableVAD).not.toHaveBeenCalled();
 
     await stoppedByGrace(h);
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE - EARLY_FIRE_MS);
     expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
 
     // The cap is the call's end time, set before the mic write.
@@ -666,7 +674,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     expect(h.setEnableVAD).not.toHaveBeenCalledWith(false);
 
     await stoppedByGrace(h);
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE - EARLY_FIRE_MS);
   });
 
   it("meeting-ended queued behind the auto-start still arms the grace", async () => {
@@ -687,7 +695,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     // The grace's stop, not silence's: with no arm, silence closes the mic
     // inside waitFor's budget and the lower bound alone still holds.
     expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(endedAt + GRACE - EARLY_FIRE_MS);
     expect(h.closeTimes[0]).toBeLessThan(endedAt + SILENCE);
     await drainStopConfirm();
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
@@ -792,7 +800,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     await h.appendLine("system");
     await stoppedByGrace(h);
 
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE - EARLY_FIRE_MS);
   });
 
   it("a mic line does not restart the grace", async () => {
@@ -872,7 +880,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     await sleep(GRACE);
 
     expect(h.setEnableVAD.mock.calls).toEqual([[false]]);
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(secondAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(secondAt + GRACE - EARLY_FIRE_MS);
   });
 
   it("StrictMode runs one grace", async () => {
@@ -960,7 +968,7 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     await h.appendLine("system");
     await stoppedByGrace(h);
 
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
+    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE - EARLY_FIRE_MS);
   });
 });
 
