@@ -181,6 +181,14 @@ const App = () => {
             a shrink-to-fit parent — a content-sized bar instead of the
             full-window one. */}
         <div className={minimized ? "hidden" : "w-full"}>
+          {/* Above the bar, so a card never covers what sits under the
+              overlay. The window still grows downward (useWindow sizes it), so
+              the bar moves down by the card's height while one shows. */}
+          {card && (
+            <div className="mb-2">
+              <MeetingCard card={card} />
+            </div>
+          )}
           <Card className="w-full flex flex-row items-center gap-2 p-2">
             {/* Setup Required Message (suppressed until setup status settles) */}
             {!setupLoading && !setupComplete && (
@@ -273,11 +281,6 @@ const App = () => {
               <Minimize2 className="h-4 w-4" />
             </Button>
           </Card>
-          {card && (
-            <div className="mt-2">
-              <MeetingCard card={card} />
-            </div>
-          )}
         </div>
         {/* Compact card above the pill. The window grows upward from the
             bottom-right anchor (useMeetingCardHost sizes it); the pill keeps
