@@ -93,7 +93,7 @@ describe("the ask box transcript panel", () => {
 
 describe("the Ask box fold", () => {
   const box = () => screen.queryByPlaceholderText("Ask me anything...");
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const sleep = (ms: number) => act(() => new Promise<void>((r) => setTimeout(r, ms)));
   const blur = () => {
     act(() => (box() as HTMLInputElement).blur());
   };
@@ -120,10 +120,22 @@ describe("the Ask box fold", () => {
 
   it("empty and blurred collapses after the debounce, not before", async () => {
     const { props } = renderInput();
+    // Focused and empty: stays open well past a mount-started timer.
+    await sleep(ASK_COLLAPSE_DEBOUNCE_MS * 1.5);
+    expect(props.onAskCollapse).not.toHaveBeenCalled();
     blur();
     await sleep(ASK_COLLAPSE_DEBOUNCE_MS / 3);
     expect(props.onAskCollapse).not.toHaveBeenCalled();
     await waitFor(() => expect(props.onAskCollapse).toHaveBeenCalledTimes(1));
+  });
+
+  it("the fire-time re-check: a React blur while the input still has DOM focus does not collapse", async () => {
+    const { props } = renderInput();
+    // onBlur clears `focused`, but document.activeElement stays the input.
+    fireEvent.blur(box()!);
+    expect(document.activeElement).toBe(box());
+    await sleep(ASK_COLLAPSE_DEBOUNCE_MS * 1.5);
+    expect(props.onAskCollapse).not.toHaveBeenCalled();
   });
 
   it("typed text keeps it open", async () => {

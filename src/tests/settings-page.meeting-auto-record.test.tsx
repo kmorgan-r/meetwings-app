@@ -176,6 +176,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript,
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -249,6 +250,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       // Must be an async fn: the mount effect does
@@ -348,6 +350,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -405,6 +408,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI: vi.fn(async () => false),
