@@ -202,12 +202,13 @@ export const STOP_CONFIRM_ATTEMPTS = 5;
 export const STOP_CONFIRM_INTERVAL_MS = 300;
 
 // How long after a detected call ends the auto-recording keeps rolling before
-// it stops on its own. Two minutes, so the closing exchange of the call is kept
-// and an immediate re-detection of the same call (Teams rejoin, Zoom unmute
-// window) needs no second start. Same home as STOP_CONFIRM_ATTEMPTS above: a
-// module's own const reads compile to a local binding, so vi.mock on this
-// module is the only way to override it from a test.
-export const CALL_END_GRACE_MS = 2 * 60 * 1000;
+// it stops on its own. Five seconds (owner's call, 2026-11-15; was two minutes):
+// a hang-up should visibly stop the mic. The cost: a detection dropout longer
+// than this mid-call stops the recording, and the re-detect starts a new one,
+// so that call is split into two meeting-log rows. Same home as
+// STOP_CONFIRM_ATTEMPTS above: a module's own const reads compile to a local
+// binding, so vi.mock on this module is the only way to override it from a test.
+export const CALL_END_GRACE_MS = 5_000;
 
 // Stop a still-recording capture after fifteen minutes with no NEW transcript
 // entry — counted by arrival (when a line is appended, not its timestamp) —
