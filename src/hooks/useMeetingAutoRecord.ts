@@ -32,6 +32,7 @@ import {
   type RecordingStopCap,
 } from "@/lib/recording-stop-cap";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
+import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
 import type { CalendarEvent } from "@/types";
 import type { TranscriptEntry } from "@/types/completion";
 import {
@@ -765,17 +766,24 @@ export const useMeetingAutoRecord = ({
   // The calendar read behind the same-call decision. Bounded: the op that calls
   // it holds the chain, so a hung read must not freeze every later command.
   // Unreadable (not "ok", a throw, or a timeout) is null, which isSameCall
-  // counts as the same call.
-  const readCalendarEvents = async (): Promise<CalendarEvent[] | null> => {
+  // counts as the same call. A Meet call (a gated process) is detected only
+  // against a Google event, so its slots come from Google; every other app's
+  // from Outlook. Reading Outlook for Meet would merge every back-to-back Meet.
+  const readCalendarEvents = async (
+    process: string | undefined
+  ): Promise<CalendarEvent[] | null> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), SAME_CALL_READ_TIMEOUT_MS);
     });
     // The catch also covers a rejection arriving AFTER the timeout won, which
     // would otherwise surface as an unhandled rejection.
-    const read = fetchCurrentMeetings()
-      .then((r) => (r.kind === "ok" ? r.events : null))
-      .catch(() => null);
+    const read = (async () => {
+      const r = isGatedProcess(process)
+        ? await fetchCurrentGoogleMeetings()
+        : await fetchCurrentMeetings();
+      return r.kind === "ok" ? r.events : null;
+    })().catch(() => null);
     try {
       return await Promise.race([read, timeout]);
     } finally {
@@ -797,7 +805,7 @@ export const useMeetingAutoRecord = ({
         process &&
         g.endedProcess.toLowerCase() !== process.toLowerCase()
           ? null // already a new call; skip the read
-          : await readCalendarEvents();
+          : await readCalendarEvents(process ?? g.endedProcess);
       // Identity, not truthiness: a grace cancelled or re-armed during the read
       // must not be acted on with stale data.
       if (graceRef.current === g) {

@@ -411,8 +411,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // it - see meeting-log-watermark.storage.ts.
     // `let`: widened below once the recovery union is known, and read by
     // `skipUnwritten` at call time. Every exit before that keeps the
-    // snapshot-only end, as before.
-    let consumedTo = entries.length ? Math.max(...entries.map((e) => e.timestamp)) : 0;
+    // snapshot-only end, as before. A reduce, not a spread: a long meeting's
+    // line count can exceed the engine's argument limit (RangeError).
+    let consumedTo = entries.reduce((max, e) => Math.max(max, e.timestamp), 0);
     const skipUnwritten = () => {
       if (consumedTo > 0) setSkipWatermark(consumedTo);
     };

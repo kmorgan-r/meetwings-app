@@ -106,7 +106,9 @@ signal.
       already running at launch, `:100-101`) counts as the same call.
     - **Current calendar event** at a moment: the event whose slot `[start, end)` contains
       it, without the early-join allowance; if two do, the later-starting one; none if none.
-      Both none counts as the same; an unreadable calendar counts as the same.
+      Both none counts as the same; an unreadable calendar counts as the same. A Meet call
+      (`chrome.exe`, detected only against a Google event) reads Google Calendar; every
+      other app reads Outlook.
     - The same/new decision needs an async calendar read, so it runs as an op on the chain,
       not inside the listener.
     - **New call:** the grace stop runs at once, cutting call A's row (the edge trigger
@@ -399,7 +401,10 @@ Existing suites assert behaviour this removes, and must be updated, not deleted:
 - A re-detect during the grace is the same call only if it is the same app and the same
   calendar event; otherwise the first call's recording stops, a new conversation starts,
   and a new recording starts. Residual cases, accepted:
-  - Two back-to-back calls in the same app with no calendar events still merge into one row.
+  - Two back-to-back calls in the same app with no calendar events (or no calendar
+    connected) still merge into one row. Re-checked with the user on PR #99 (2026-11-15):
+    kept, because guessing "new call" without slot data would split live calls on
+    detection flaps.
   - A call that ends early, with the next call joined before the first call's slot ends,
     merges too (the calendar still says the first slot).
   - A detection dropout straddling a slot boundary splits one overrunning call into two

@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   // path is reachable from a test.
   failListenFor: new Set<string>(),
   fetchMeetings: vi.fn(),
+  fetchGoogle: vi.fn(),
 }));
 
 vi.mock("sonner", () => ({ toast: mocks.toast }));
@@ -41,6 +42,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
 vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
   fetchCurrentMeetings: mocks.fetchMeetings,
+}));
+vi.mock("@/lib/calendar/fetch-google-meetings", () => ({
+  fetchCurrentGoogleMeetings: mocks.fetchGoogle,
 }));
 
 // A listen registry keyed by event name that holds ALL callbacks, and whose
@@ -451,6 +455,8 @@ beforeEach(async () => {
   mocks.failListenFor.clear();
   mocks.fetchMeetings.mockReset();
   mocks.fetchMeetings.mockResolvedValue({ kind: "absent" });
+  mocks.fetchGoogle.mockReset();
+  mocks.fetchGoogle.mockResolvedValue({ kind: "absent" });
   seedStatus([]);
 });
 
@@ -1101,6 +1107,33 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     // Same app, so a quiet (auto) stop would restart quietly with NO card.
     expect(recordingId()).not.toBeNull();
     expect(recordingId()).not.toBe(idA);
+  });
+
+  it("a Meet call reads its slots from Google, not Outlook", async () => {
+    seedStatus([false, false, false]);
+    // Outlook stays absent (beforeEach): reading it would say "same call".
+    mocks.fetchGoogle.mockImplementation(async () => {
+      const boundary = Date.now();
+      return {
+        kind: "ok",
+        events: [
+          slot("g1", boundary - 60_000, boundary),
+          slot("g2", boundary, boundary + 60_000),
+        ],
+        ownAddress: null,
+      };
+    });
+    const { h } = await startAndEnd("chrome.exe");
+    await sleep(GRACE / 6); // endedAt is strictly before the read's boundary
+
+    await fireActed("meeting-detected", { process: "chrome.exe" });
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+    );
+
+    expect(h.startNewConversation).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchGoogle).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchMeetings).not.toHaveBeenCalled();
   });
 
   it("a failed conversation reset still records the new call", async () => {
