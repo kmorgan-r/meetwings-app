@@ -183,7 +183,14 @@ describe("the Ask box fold", () => {
 describe("<Completion /> and the Ask box fold", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  async function renderCompletion(opts: { holding?: boolean; strict?: boolean } = {}) {
+  async function renderCompletion(
+    opts: {
+      holding?: boolean;
+      strict?: boolean;
+      heldContactName?: string | null;
+      pickerContactName?: string | null;
+    } = {}
+  ) {
     vi.resetModules();
     const inputProps: { current: any } = { current: null };
     const completion = {
@@ -225,13 +232,18 @@ describe("<Completion /> and the Ask box fold", () => {
         targetsRef: { current: [] },
         addTarget: vi.fn(),
         onCreateContact: vi.fn(),
-        pickerProps: { contactName: null, cache: { kind: "never-synced" }, targets: [] },
+        pickerProps: {
+          contactName: opts.pickerContactName ?? null,
+          cache: { kind: "never-synced" },
+          targets: [],
+        },
       }),
       useCalendarProposal: () => ({ present: false }),
       useCalendarAutoSelect: vi.fn(),
       useGoogleMeetingCapture: vi.fn(),
       useMeetingLog: () => ({
         holding: !!opts.holding,
+        heldContactName: opts.heldContactName ?? null,
         onUndo: vi.fn(),
         undoBlockedMessage: null,
       }),
@@ -253,7 +265,9 @@ describe("<Completion /> and the Ask box fold", () => {
     }));
     for (const name of ["Audio", "Screenshot", "Files", "ContactPicker", "MeetingLogStrip"]) {
       vi.doMock(`@/pages/app/components/completion/${name}`, () => ({
-        [name]: () => <div data-testid={name} />,
+        [name]: (p: { contactName?: string | null }) => (
+          <div data-testid={name} data-contact={p.contactName ?? undefined} />
+        ),
       }));
     }
     vi.doMock("@/pages/app/components/completion/Input", () => ({
@@ -289,6 +303,16 @@ describe("<Completion /> and the Ask box fold", () => {
     const { expand } = await renderCompletion({ holding: true });
     await expand();
     expect(has("MeetingLogStrip")).toBe(true);
+  });
+
+  it("the Undo strip names the held row's contact, not the live picker's", async () => {
+    // A new-call reset can clear or re-pick the targets mid-hold.
+    await renderCompletion({
+      holding: true,
+      heldContactName: "Ada Lovelace",
+      pickerContactName: "Bob Builder",
+    });
+    expect(screen.getByTestId("MeetingLogStrip").dataset.contact).toBe("Ada Lovelace");
   });
 
   it("expanding closes the picker and files popovers first", async () => {

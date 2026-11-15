@@ -155,11 +155,23 @@ export interface UseMeetingLogOptions {
    * on it.
    */
   recording: boolean;
+  /**
+   * The picker's display name for the current target (`targetRef` holds only
+   * ids for a contact). Snapshotted beside the targets, for the Undo strip.
+   */
+  contactName?: string | null;
   providerConfig?: ProviderConfig;
 }
 
 export interface UseMeetingLogReturn {
   holding: boolean;
+  /**
+   * The held row's contact, as the picker named it when the row's targets
+   * were snapshotted. NOT the live picker: a new-call reset clears or
+   * re-picks the targets while the row is still undoable. Null for a
+   * rehydrated hold, which has no snapshot.
+   */
+  heldContactName: string | null;
   onUndo: () => void;
   undoBlockedMessage: string | null;
 }
@@ -193,6 +205,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const isOwner = useMemo(() => getCurrentWindow().label === "main", []);
 
   const [holding, setHolding] = useState(false);
+  const [heldContactName, setHeldContactName] = useState<string | null>(null);
   const [undoBlockedMessage, setUndoBlockedMessage] = useState<string | null>(null);
 
   /**
@@ -210,8 +223,10 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const conversationIdRef = useRef(currentConversationId);
   const providerConfigRef = useRef(options.providerConfig);
   const recordingRef = useRef(recording);
+  const contactNameRef = useRef(options.contactName ?? null);
   useLayoutEffect(() => {
     recordingRef.current = recording;
+    contactNameRef.current = options.contactName ?? null;
     transcriptRef.current = meetingTranscript;
     conversationIdRef.current = currentConversationId;
     providerConfigRef.current = options.providerConfig;
@@ -320,7 +335,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * the sweep runs once per process - in practice the next app start.
    */
   const startHold = useCallback(
-    (rowId: string, remainingMs = HOLD_MS) => {
+    (rowId: string, remainingMs = HOLD_MS, contactName: string | null = null) => {
       const displaced = heldRowIdRef.current;
       if (timerRef.current) {
         clearTimeout(timerRef.current);
@@ -330,6 +345,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
 
       heldRowIdRef.current = rowId;
       setHolding(true);
+      setHeldContactName(contactName);
       if (blockedTimerRef.current) {
         clearTimeout(blockedTimerRef.current);
         blockedTimerRef.current = null;
@@ -372,6 +388,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
     const targets = targetRef.current;
+    // The Undo strip's label, beside the targets it names: by the time the
+    // hold starts, a new-call reset may have cleared them.
+    const contactName = contactNameRef.current;
     // Same reason as `targets`: the pick and who set it are per-meeting and
     // must not change under an await (check 2 included).
     const notionPicked = notionPickedRef?.current ?? false;
@@ -581,7 +600,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // Task 10's startHold reads the previous value to decide whether a
       // displaced row needs pushing, and a pre-assignment here would make
       // `displaced === rowId` on every call, silently disabling that branch.
-      if (decision.odooStatus === "held" || decision.notionStatus === "held") startHold(rowId);
+      if (decision.odooStatus === "held" || decision.notionStatus === "held") {
+        startHold(rowId, HOLD_MS, contactName);
+      }
     } catch (err) {
       // SURFACED, not just logged. Reaching here means no row was written, so
       // to the user this is indistinguishable from "the meeting was silent" -
@@ -885,5 +906,5 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     })();
   }, [showUndoBlocked]);
 
-  return { holding, onUndo, undoBlockedMessage };
+  return { holding, heldContactName, onUndo, undoBlockedMessage };
 }

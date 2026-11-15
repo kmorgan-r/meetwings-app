@@ -164,6 +164,7 @@ function render(initial: Record<string, unknown> = {}) {
         recording: ("recording" in props
           ? props.recording
           : false) as boolean,
+        contactName: (props.contactName ?? null) as string | null,
         providerConfig: PROVIDER_CONFIG,
       });
     },
@@ -304,6 +305,32 @@ describe("the hold", () => {
     await waitFor(() => expect(result.current.holding).toBe(true));
     await vi.advanceTimersByTimeAsync(HOLD_MS);
     await waitFor(() => expect(result.current.holding).toBe(false));
+  });
+});
+
+describe("the strip's label", () => {
+  it("names the held row's contact, not whoever the picker shows by then", async () => {
+    action.getQueueRow.mockResolvedValue({ id: "row-1", status: "held" });
+    const meeting = [entry(1000), entry(31000), entry(61000)];
+    const { result, rerender } = render({ meetingTranscript: meeting, contactName: "Ada Lovelace" });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    // After mount, so the hold rehydrate's own config read does not take it.
+    let release: (v: unknown) => void = () => {};
+    config.loadOdooConfigState.mockImplementationOnce(() => new Promise((r) => (release = r)));
+
+    fireMeetingEnded(); // snapshots A, then awaits the config read
+    // The new-call reset clears the targets, then B's contact is picked.
+    rerender({ meetingTranscript: meeting, targets: [], contactName: null });
+    rerender({
+      meetingTranscript: meeting,
+      targets: [{ model: "res.partner", resId: 77, name: null }],
+      contactName: "Bob Builder",
+    });
+    release({ state: "complete", config: CONFIG });
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(action.insertQueueRow.mock.calls[0][0].targets).toEqual(DEFAULT_TARGETS);
+    expect(result.current.heldContactName).toBe("Ada Lovelace");
   });
 });
 

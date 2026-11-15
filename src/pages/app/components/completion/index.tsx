@@ -189,6 +189,8 @@ export const Completion = ({
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
     recording: completion.recording,
+    // Snapshotted with the targets, so the strip names the held row's contact.
+    contactName: odoo.pickerProps.contactName,
     providerConfig,
   });
 
@@ -312,7 +314,7 @@ export const Completion = ({
       {meetingLog.holding || meetingLog.undoBlockedMessage ? (
         <MeetingLogStrip
           holding={meetingLog.holding}
-          contactName={odoo.pickerProps.contactName}
+          contactName={meetingLog.heldContactName}
           onUndo={meetingLog.onUndo}
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
