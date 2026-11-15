@@ -367,6 +367,51 @@ describe("useCompletion meeting assist mode", () => {
     expect(result.current.error).toBeNull();
   });
 
+  describe("a quick action after the conversation rolled over", () => {
+    // meetingTranscript is session-wide, so the earlier meeting is still in it.
+    async function recordEarlierMeetingThenRollOver() {
+      enableProviderGate();
+      mockStreamedResponse("ok");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      act(() => {
+        result.current.addMeetingTranscript("Earlier meeting line", undefined, "system");
+      });
+      await act(async () => {
+        await result.current.startNewConversation();
+      });
+      expect(result.current.meetingTranscript).toHaveLength(1);
+      return result;
+    }
+
+    const sentUserMessages = () =>
+      vi.mocked(fetchAIResponse).mock.calls.map(([params]) => params.userMessage);
+
+    it("sends only the current conversation's lines", async () => {
+      const result = await recordEarlierMeetingThenRollOver();
+      act(() => {
+        result.current.addMeetingTranscript("Current meeting line", undefined, "system");
+      });
+
+      await act(async () => {
+        await result.current.submitWithMeetingContext("Summarize");
+      });
+
+      const prompt = sentUserMessages().find((m) => m.includes("## Your Request: Summarize"));
+      expect(prompt).toContain("Guest: Current meeting line");
+      expect(prompt).not.toContain("Earlier meeting line");
+    });
+
+    it("sends the bare action when the new conversation has no lines yet", async () => {
+      const result = await recordEarlierMeetingThenRollOver();
+
+      await act(async () => {
+        await result.current.submitWithMeetingContext("Summarize");
+      });
+
+      expect(sentUserMessages()).toEqual(["Summarize"]);
+    });
+  });
+
   it("reports transcript loss once the unsaved tail stops shrinking", async () => {
     const writeFailure = new Error("SQLITE_BUSY");
     vi.mocked(saveConversation).mockRejectedValue(writeFailure);

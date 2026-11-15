@@ -1,7 +1,13 @@
-import { UseCompletionReturn, SpeakerInfo, SpeakerId, SpeakerIdParser } from "@/types";
+import {
+  UseCompletionReturn,
+  SpeakerInfo,
+  SpeakerId,
+  SpeakerIdParser,
+  TranscriptEntry,
+} from "@/types";
 import { Button, ScrollArea, SpeakerTaggingPopover } from "@/components";
 import { TrashIcon, UsersIcon, Loader2 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { useApp } from "@/contexts";
 
 // Speaker color palette for visual distinction
@@ -54,6 +60,110 @@ function getSpeakerLabel(speaker: SpeakerInfo | undefined): string | null {
   // Use custom label if available, otherwise show "Speaker X"
   return speaker.speakerLabel || `Speaker ${speaker.speakerId}`;
 }
+
+interface TranscriptRowProps {
+  entry: TranscriptEntry;
+  index: number;
+  assignSpeaker?: UseCompletionReturn["assignSpeaker"];
+  sttTranslationEnabled: boolean;
+}
+
+// memo: the transcript is session-wide and only ever appended to, and every
+// edit (speaker, translation) replaces just the entry it touches, so an
+// unchanged row keeps its entry object and skips the re-render each new line
+// would otherwise cost it. Keep these props stable: no inline callbacks.
+const TranscriptRow = memo(function TranscriptRow({
+  entry,
+  index,
+  assignSpeaker,
+  sttTranslationEnabled,
+}: TranscriptRowProps) {
+  const speakerLabel = getSpeakerLabel(entry.speaker);
+  const speakerId = entry.speaker?.speakerId || "diarization_A";
+  const hasSpeaker = !!entry.speaker;
+
+  return (
+    <div
+      className={`p-3 rounded-lg bg-muted/50 text-sm border-l-2 ${
+        hasSpeaker
+          ? getSpeakerColor(speakerId).split(" ").find(c => c.startsWith("border-")) || "border-primary/30"
+          : "border-primary/30"
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-1">
+        {/* Speaker label - clickable for tagging when assignSpeaker is available */}
+        {hasSpeaker && speakerLabel && (
+          assignSpeaker ? (
+            <SpeakerTaggingPopover
+              speakerId={speakerId}
+              onAssign={assignSpeaker}
+            >
+              <button
+                className={`text-[10px] font-medium px-1.5 py-0.5 rounded border cursor-pointer hover:opacity-80 transition-opacity ${getSpeakerColor(
+                  speakerId
+                )}`}
+              >
+                {speakerLabel}
+              </button>
+            </SpeakerTaggingPopover>
+          ) : (
+            <span
+              className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${getSpeakerColor(
+                speakerId
+              )}`}
+            >
+              {speakerLabel}
+            </span>
+          )
+        )}
+
+        {/* Segment number (shown if no speaker) */}
+        {!hasSpeaker && (
+          <span className="text-[10px] text-muted-foreground font-medium">
+            #{index + 1}
+          </span>
+        )}
+
+        <span className="text-[10px] text-muted-foreground">
+          {new Date(entry.timestamp).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </span>
+
+        {/* Confidence indicator for low confidence matches */}
+        {entry.speaker?.needsConfirmation && (
+          <span className="text-[9px] text-amber-600 dark:text-amber-400">
+            (unconfirmed)
+          </span>
+        )}
+      </div>
+
+      {/* Original text */}
+      <p className="text-foreground">{entry.original}</p>
+
+      {/* Translation section */}
+      {sttTranslationEnabled && (
+        <div className="mt-2 pt-2 border-t border-muted">
+          {entry.translation ? (
+            <p className="text-foreground/80 italic" dir="auto">
+              {entry.translation}
+            </p>
+          ) : entry.translationError ? (
+            <p className="text-destructive/70 text-xs">
+              Translation unavailable
+            </p>
+          ) : (
+            <div className="flex items-center gap-1 text-muted-foreground text-xs">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span>Translating...</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
 
 interface MeetingTranscriptPanelProps {
   meetingTranscript: UseCompletionReturn["meetingTranscript"];
@@ -121,94 +231,15 @@ export const MeetingTranscriptPanel = ({
 
       <ScrollArea ref={scrollRef} className="flex-1 min-h-0">
         <div className="p-4 space-y-3">
-          {meetingTranscript.map((entry, index) => {
-            const speakerLabel = getSpeakerLabel(entry.speaker);
-            const speakerId = entry.speaker?.speakerId || "diarization_A";
-            const hasSpeaker = !!entry.speaker;
-
-            return (
-              <div
-                key={entry.timestamp}
-                className={`p-3 rounded-lg bg-muted/50 text-sm border-l-2 ${
-                  hasSpeaker
-                    ? getSpeakerColor(speakerId).split(" ").find(c => c.startsWith("border-")) || "border-primary/30"
-                    : "border-primary/30"
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  {/* Speaker label - clickable for tagging when assignSpeaker is available */}
-                  {hasSpeaker && speakerLabel && (
-                    assignSpeaker ? (
-                      <SpeakerTaggingPopover
-                        speakerId={speakerId}
-                        onAssign={assignSpeaker}
-                      >
-                        <button
-                          className={`text-[10px] font-medium px-1.5 py-0.5 rounded border cursor-pointer hover:opacity-80 transition-opacity ${getSpeakerColor(
-                            speakerId
-                          )}`}
-                        >
-                          {speakerLabel}
-                        </button>
-                      </SpeakerTaggingPopover>
-                    ) : (
-                      <span
-                        className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${getSpeakerColor(
-                          speakerId
-                        )}`}
-                      >
-                        {speakerLabel}
-                      </span>
-                    )
-                  )}
-
-                  {/* Segment number (shown if no speaker) */}
-                  {!hasSpeaker && (
-                    <span className="text-[10px] text-muted-foreground font-medium">
-                      #{index + 1}
-                    </span>
-                  )}
-
-                  <span className="text-[10px] text-muted-foreground">
-                    {new Date(entry.timestamp).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </span>
-
-                  {/* Confidence indicator for low confidence matches */}
-                  {entry.speaker?.needsConfirmation && (
-                    <span className="text-[9px] text-amber-600 dark:text-amber-400">
-                      (unconfirmed)
-                    </span>
-                  )}
-                </div>
-
-                {/* Original text */}
-                <p className="text-foreground">{entry.original}</p>
-
-                {/* Translation section */}
-                {sttTranslationEnabled && (
-                  <div className="mt-2 pt-2 border-t border-muted">
-                    {entry.translation ? (
-                      <p className="text-foreground/80 italic" dir="auto">
-                        {entry.translation}
-                      </p>
-                    ) : entry.translationError ? (
-                      <p className="text-destructive/70 text-xs">
-                        Translation unavailable
-                      </p>
-                    ) : (
-                      <div className="flex items-center gap-1 text-muted-foreground text-xs">
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                        <span>Translating...</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {meetingTranscript.map((entry, index) => (
+            <TranscriptRow
+              key={entry.timestamp}
+              entry={entry}
+              index={index}
+              assignSpeaker={assignSpeaker}
+              sttTranslationEnabled={sttTranslationEnabled}
+            />
+          ))}
         </div>
       </ScrollArea>
     </div>
