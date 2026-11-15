@@ -2,15 +2,26 @@ import { describe, expect, it } from "vitest";
 import {
   IDLE_FLUSH_MS,
   attachmentNameFor,
+  isScrap,
+  mergeScraps,
   segmentByGap,
   sessionKeyFor,
   sliceTranscript,
   toBase64Utf8,
 } from "@/lib/odoo/meeting-log";
-import type { TranscriptEntry } from "@/types";
+import type { TranscriptEntry, TranscriptSlice } from "@/types";
 
 function entry(timestamp: number, original = "hello"): TranscriptEntry {
   return { original, timestamp };
+}
+
+/** One slice spanning the given timestamps, at least one. */
+function sliceAt(...timestamps: number[]): TranscriptSlice {
+  return {
+    entries: timestamps.map((t, i) => entry(t, `line ${i + 1}`)),
+    startAt: Math.min(...timestamps),
+    endAt: Math.max(...timestamps),
+  };
 }
 
 describe("sliceTranscript", () => {
@@ -96,6 +107,100 @@ describe("segmentByGap", () => {
     const segments = segmentByGap([entry(3000), entry(1000), entry(2000)], IDLE_FLUSH_MS);
     expect(segments).toHaveLength(1);
     expect(segments[0].entries.map((e) => e.timestamp)).toEqual([1000, 2000, 3000]);
+  });
+});
+
+describe("isScrap", () => {
+  it("59_999 ms with 3 entries is a scrap", () => {
+    // One millisecond inside SCRAP_MIN_MS, with the entry count above its own
+    // threshold - so this case pins the DURATION rule at its boundary.
+    expect(isScrap(sliceAt(0, 30_000, 59_999))).toBe(true);
+  });
+
+  it("exactly 60_000 ms with exactly 3 entries is kept", () => {
+    // Both rules sit exactly ON their thresholds, which are strict `<`s -
+    // 60 seconds IS a meeting, and 3 entries ARE a meeting.
+    expect(isScrap(sliceAt(0, 30_000, 60_000))).toBe(false);
+  });
+
+  it("60_000 ms with 2 entries is a scrap", () => {
+    // The span clears its threshold, so this case pins the ENTRY rule at its
+    // own boundary - exactly 2, which is fewer than 3.
+    expect(isScrap(sliceAt(0, 60_000))).toBe(true);
+  });
+});
+
+describe("mergeScraps", () => {
+  it("a scrap merges into the nearer neighbour", () => {
+    const a = sliceAt(0, 30_000, 60_000, 90_000, 120_000); // 5 lines over 2 min
+    const b = sliceAt(126_000, 130_000); // 2 lines over 4 s - a scrap
+    const c = sliceAt(1_200_000, 1_300_000, 1_500_000); // 20..25 min, 3 lines
+    // B sits 6 s after A but 1_070 s before C - backward it is.
+    const merged = mergeScraps([a, b, c]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0].entries.map((e) => e.timestamp)).toEqual([
+      0, 30_000, 60_000, 90_000, 120_000, 126_000, 130_000,
+    ]);
+    expect(merged[0].startAt).toBe(0); // A's
+    expect(merged[0].endAt).toBe(130_000); // B's
+    expect(merged[1]).toEqual(c);
+  });
+
+  it("a scrap nearer the next segment merges forward", () => {
+    const a = sliceAt(0, 50_000, 100_000); // ends 100_000
+    const b = sliceAt(110_000, 112_000); // gap backward: 10 s
+    const c = sliceAt(118_000, 180_000, 240_000); // gap forward: 6 s - nearer
+    const merged = mergeScraps([a, b, c]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toEqual(a);
+    expect(merged[1].entries.map((e) => e.timestamp)).toEqual([
+      110_000, 112_000, 118_000, 180_000, 240_000,
+    ]);
+    expect(merged[1].startAt).toBe(110_000); // the scrap's span swallowed whole
+    expect(merged[1].endAt).toBe(240_000);
+  });
+
+  it("an equal gap goes to the previous segment", () => {
+    const a = sliceAt(0, 50_000, 100_000); // ends 100_000
+    const b = sliceAt(110_000, 112_000); // gap backward: 10 s
+    const c = sliceAt(122_000, 130_000, 200_000); // gap forward: 10 s - a tie
+    const merged = mergeScraps([a, b, c]);
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0].entries.map((e) => e.timestamp)).toEqual([
+      0, 50_000, 100_000, 110_000, 112_000,
+    ]);
+    expect(merged[1]).toEqual(c);
+  });
+
+  it("a lone scrap is dropped", () => {
+    expect(mergeScraps([sliceAt(0, 10_000)])).toEqual([]);
+  });
+
+  it("returns nothing for an empty run", () => {
+    expect(mergeScraps([])).toEqual([]);
+  });
+
+  it("two adjacent scraps alone merge, and are dropped if still a scrap", () => {
+    // 2 lines + 2 lines spanning 4 min: the union clears BOTH thresholds
+    // (4 entries, a 4-minute span), so it survives.
+    const kept = mergeScraps([sliceAt(0, 10_000), sliceAt(230_000, 240_000)]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].entries).toHaveLength(4);
+    expect(kept[0].startAt).toBe(0);
+    expect(kept[0].endAt).toBe(240_000);
+
+    // 1 + 1 line spanning 10 s: still one scrap after merging, and with no
+    // long neighbour left to absorb it, it goes.
+    expect(mergeScraps([sliceAt(0), sliceAt(10_000)])).toEqual([]);
+  });
+
+  it("non-scrap segments pass through unchanged", () => {
+    const a = sliceAt(0, 50_000, 100_000);
+    const b = sliceAt(200_000, 260_000, 300_000);
+    expect(mergeScraps([a, b])).toEqual([a, b]);
   });
 });
 

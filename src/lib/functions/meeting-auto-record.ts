@@ -6,7 +6,41 @@
  * CI runner even though the feature only runs on Windows.
  */
 
+import type { CalendarEvent } from "@/types";
+import { slotEventAt } from "@/lib/calendar/current-meeting";
+
 export type StartedMode = "meeting" | "transcribing" | null;
+
+/**
+ * Whether a call re-detected at `now` is the SAME call that ended at `endedAt`.
+ *
+ * The decision, in order:
+ * 1. When both process names are known and differ case-insensitively, the
+ *    capture moved to a different application - never the same call.
+ * 2. When the calendar is unreadable (`events` null), give the benefit of the
+ *    doubt: without slot information there is nothing to distinguish the two
+ *    moments, and wrongly stopping a live call is the worse error.
+ * 3. Otherwise compare the slots covering each moment with slotEventAt. No
+ *    event at either moment (or a shared none/none) counts as the same call,
+ *    because a call that started outside its calendar slot has no slot to
+ *    differ from.
+ */
+export function isSameCall(s: {
+  endedProcess?: string;
+  process?: string;
+  events: CalendarEvent[] | null;
+  endedAt: number;
+  now: number;
+}): boolean {
+  const ended = s.endedProcess?.toLowerCase();
+  const current = s.process?.toLowerCase();
+  if (ended && current && ended !== current) return false;
+  if (s.events === null) return true;
+  return (
+    (slotEventAt(s.events, s.endedAt)?.id ?? null) ===
+    (slotEventAt(s.events, s.now)?.id ?? null)
+  );
+}
 
 export type DetectedDecision =
   | "start" // transcribing mode

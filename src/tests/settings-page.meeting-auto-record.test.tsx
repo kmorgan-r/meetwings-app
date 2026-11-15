@@ -170,12 +170,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD,
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript,
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -249,6 +250,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       // Must be an async fn: the mount effect does
@@ -270,9 +272,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     // ContactPicker (index.tsx:67) is NOT stubbed here - F34b's app-page path
     // stubs Completion itself, but F34 mounts the real Completion, and
@@ -303,7 +302,9 @@ describe("<Completion /> mounts the auto-record hook", () => {
       "enableVAD",
       "flushUnsavedMeetingTranscript",
       "meetingAssistMode",
+      "meetingTranscript",
       "setEnableVAD",
+      "startNewConversation",
       "systemAudio",
     ]);
     expect(options.enableVAD).toBe(false);
@@ -343,12 +344,13 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD: vi.fn(),
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -406,6 +408,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI: vi.fn(async () => false),
@@ -421,9 +424,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     vi.doMock("@/components", () => ({
       Popover: ({ children }: any) => <>{children}</>,
@@ -442,7 +442,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       // Task 17: who set the Notion tick, so an auto tick gets check 2.
       notionSourceRef: { current: "hand" },
       meetingTranscript: [],
-      meetingAssistMode: expect.any(Boolean),
+      recording: expect.any(Boolean),
     });
     // The provider config must RESOLVE, not merely be spelled.
     // `toHaveProperty("providerConfig")` would pass on a key holding
@@ -498,14 +498,15 @@ describe("<Completion /> mounts the auto-record hook", () => {
         enableVAD: false,
         setEnableVAD: vi.fn(),
         meetingAssistMode: false,
+        recording: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
         isContactPickerOpen: true,
         setIsContactPickerOpen,
+        setIsFilesPopoverOpen: vi.fn(),
       }),
       useQuickActions: () => ({}),
       usePillRecordAction: vi.fn(),
@@ -570,6 +571,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI,
@@ -585,9 +587,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     vi.doMock("@/components", () => ({
       Popover: ({ children }: any) => <>{children}</>,

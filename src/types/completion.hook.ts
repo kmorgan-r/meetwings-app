@@ -90,6 +90,10 @@ export interface UseCompletionReturn {
   setKeepEngaged: Dispatch<SetStateAction<boolean>>;
   /** Hide the response panel without clearing anything (the X during a meeting) */
   setMeetingPanelHidden: Dispatch<SetStateAction<boolean>>;
+  /** The mic is on (meeting mode and VAD): the meeting-end signal. */
+  recording: boolean;
+  meetingTranscriptHidden: boolean;
+  setMeetingTranscriptHidden: Dispatch<SetStateAction<boolean>>;
 
   // Screenshot functionality
   /** Current screenshot configuration settings */
@@ -131,6 +135,8 @@ export interface UseCompletionReturn {
 
   /** Ref for the input element */
   inputRef: RefObject<HTMLInputElement | null>;
+  /** Callback ref for the input: sets inputRef and registers it with the global shortcut (null on unmount) */
+  attachInput: (el: HTMLInputElement | null) => void;
   /** Function to capture a screenshot */
   captureScreenshot: () => Promise<void>;
   /** Whether a screenshot is currently loading */
@@ -139,8 +145,6 @@ export interface UseCompletionReturn {
   // Meeting Assist Mode
   /** Whether Meeting Assist Mode is enabled (accumulates transcripts instead of auto-responding) */
   meetingAssistMode: boolean;
-  /** Function to toggle Meeting Assist Mode */
-  setMeetingAssistMode: Dispatch<SetStateAction<boolean>>;
   /** Accumulated meeting transcript segments with translations */
   meetingTranscript: TranscriptEntry[];
   /** Function to add a transcript segment to the meeting transcript with optional speaker info */

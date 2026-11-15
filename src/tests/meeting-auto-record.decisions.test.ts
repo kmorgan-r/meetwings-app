@@ -139,3 +139,107 @@ describe("decideOnWatcherStopped", () => {
     expect(decideOnWatcherStopped(stale)).toBe("ignore");
   });
 });
+
+import { isSameCall } from "@/lib/functions/meeting-auto-record";
+import type { CalendarEvent } from "@/types";
+
+const MIN = 60_000;
+const T = Date.UTC(2026, 11, 1, 15); // 2026-12-01T15:00:00Z
+
+function meetingEvent(over: Partial<CalendarEvent> = {}): CalendarEvent {
+  return {
+    id: "e1",
+    subject: "Call",
+    startMs: T,
+    endMs: T + 50 * MIN,
+    isCancelled: false,
+    isAllDay: false,
+    ownResponse: "accepted",
+    hasMeetLink: false,
+    participants: [
+      { address: "me@corp.test", name: null, type: "required", isOrganizer: true },
+      { address: "a@acme.example", name: null, type: "required", isOrganizer: false },
+    ],
+    ...over,
+  };
+}
+
+describe("isSameCall", () => {
+  const endedAt = T + 45 * MIN; // inside the one fixture event
+  const now = T + 48 * MIN; // still inside the same event
+
+  it("is true with the same process and the same slot", () => {
+    expect(isSameCall({ endedProcess: "ms-teams.exe", process: "ms-teams.exe", events: [meetingEvent()], endedAt, now })).toBe(true);
+  });
+
+  it("is false when both processes are known and differ", () => {
+    expect(
+      isSameCall({
+        endedProcess: "ms-teams.exe",
+        process: "Zoom.exe",
+        events: [meetingEvent()],
+        endedAt,
+        now,
+      })
+    ).toBe(false);
+  });
+
+  it("is true when only the case of the process differs", () => {
+    expect(isSameCall({ endedProcess: "Teams.exe", process: "teams.exe", events: [meetingEvent()], endedAt, now })).toBe(true);
+  });
+
+  it("ignores an unknown ended process", () => {
+    // With endedProcess unknown the process check can never fire; the slot
+    // pair decides. Both moments land in the same slot, so true.
+    expect(
+      isSameCall({ process: "some-other-call.exe", events: [meetingEvent()], endedAt, now })
+    ).toBe(true);
+  });
+
+  it("is true on an unreadable calendar with the same process", () => {
+    expect(
+      isSameCall({ endedProcess: "ms-teams.exe", process: "ms-teams.exe", events: null, endedAt, now })
+    ).toBe(true);
+  });
+
+  // Branch order: a known mismatch must reject even when the calendar cannot
+  // be read to confirm the slot pair.
+  it("is false on an unreadable calendar with differing processes", () => {
+    expect(
+      isSameCall({ endedProcess: "ms-teams.exe", process: "Zoom.exe", events: null, endedAt, now })
+    ).toBe(false);
+  });
+
+  it("is false when slot A covers the end and slot B covers now", () => {
+    const a = meetingEvent({ id: "a", startMs: T, endMs: T + 50 * MIN });
+    const b = meetingEvent({ id: "b", startMs: T + 55 * MIN, endMs: T + 70 * MIN });
+    const laterNow = T + 61 * MIN; // inside b only
+    expect(
+      isSameCall({ endedProcess: "ms-teams.exe", process: "ms-teams.exe", events: [a, b], endedAt, now: laterNow })
+    ).toBe(false);
+  });
+
+  it("is true when no event covers either moment", () => {
+    expect(
+      isSameCall({
+        endedProcess: "ms-teams.exe",
+        process: "ms-teams.exe",
+        events: [meetingEvent({ startMs: T + 90 * MIN, endMs: T + 120 * MIN })],
+        endedAt,
+        now,
+      })
+    ).toBe(true);
+  });
+
+  it("is false on a slot at the end but nothing now", () => {
+    expect(
+      isSameCall({
+        endedProcess: "ms-teams.exe",
+        process: "ms-teams.exe",
+        events: [meetingEvent({ id: "a", startMs: T, endMs: T + 50 * MIN })],
+        endedAt,
+        now: T + 61 * MIN,
+      })
+    ).toBe(false);
+  });
+});

@@ -7,9 +7,7 @@ import { getPillActions, setPillActions } from "@/lib/overlay-minimize.store";
 type Options = Parameters<typeof usePillRecordAction>[0];
 
 const opts = (over: Partial<Options> = {}): Options => ({
-  meetingAssistMode: false,
-  setMeetingAssistMode: vi.fn(),
-  enableVAD: false,
+  recording: false,
   setEnableVAD: vi.fn(),
   canRecord: true,
   ...over,
@@ -39,57 +37,26 @@ describe("usePillRecordAction", () => {
     expect(getPillActions().toggleRecording).toBeNull();
   });
 
-  it("start turns on BOTH the meeting pill and the mic", () => {
-    const setMeetingAssistMode = vi.fn();
+  it("start opens the mic", () => {
     const setEnableVAD = vi.fn();
-    renderHook(() =>
-      usePillRecordAction(opts({ setMeetingAssistMode, setEnableVAD }))
-    );
+    renderHook(() => usePillRecordAction(opts({ setEnableVAD })));
 
     getPillActions().toggleRecording?.();
 
-    expect(setMeetingAssistMode).toHaveBeenCalledWith(true);
+    expect(setEnableVAD).toHaveBeenCalledTimes(1);
     expect(setEnableVAD).toHaveBeenCalledWith(true);
   });
 
-  it("stop turns both off - the pill-off transition is what logs the meeting", () => {
-    const setMeetingAssistMode = vi.fn();
+  it("stop closes the mic only", () => {
     const setEnableVAD = vi.fn();
     renderHook(() =>
-      usePillRecordAction(
-        opts({
-          meetingAssistMode: true,
-          enableVAD: true,
-          setMeetingAssistMode,
-          setEnableVAD,
-        })
-      )
+      usePillRecordAction(opts({ recording: true, setEnableVAD }))
     );
 
     getPillActions().toggleRecording?.();
 
+    expect(setEnableVAD).toHaveBeenCalledTimes(1);
     expect(setEnableVAD).toHaveBeenCalledWith(false);
-    expect(setMeetingAssistMode).toHaveBeenCalledWith(false);
-  });
-
-  it("meeting mode on with the mic closed is NOT recording - the toggle starts", () => {
-    const setMeetingAssistMode = vi.fn();
-    const setEnableVAD = vi.fn();
-    renderHook(() =>
-      usePillRecordAction(
-        opts({
-          meetingAssistMode: true,
-          enableVAD: false,
-          setMeetingAssistMode,
-          setEnableVAD,
-        })
-      )
-    );
-
-    getPillActions().toggleRecording?.();
-
-    expect(setEnableVAD).toHaveBeenCalledWith(true);
-    expect(setMeetingAssistMode).toHaveBeenCalledWith(true);
   });
 
   it("keeps ONE registered reference across state flips, and still reads current state", () => {
@@ -100,7 +67,7 @@ describe("usePillRecordAction", () => {
     );
     const first = getPillActions().toggleRecording;
 
-    rerender(opts({ meetingAssistMode: true, enableVAD: true, setEnableVAD }));
+    rerender(opts({ recording: true, setEnableVAD }));
 
     // Same function: re-registering per render would wake the pill's
     // useSyncExternalStore on every streamed AI token.

@@ -201,9 +201,6 @@ describe("clearing the Odoo target from the meeting-transcript reset paths", () 
       })
     );
 
-    act(() => {
-      result.current.completion.setMeetingAssistMode(true);
-    });
 
     await act(async () => {
       result.current.completion.reset();

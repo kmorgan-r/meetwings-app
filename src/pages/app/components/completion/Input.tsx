@@ -1,4 +1,5 @@
-import { Loader2, XIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Loader2, MessageSquare, XIcon } from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -17,9 +18,17 @@ import { MeetingTranscriptPanel } from "./MeetingTranscriptPanel";
 import { ActiveModels } from "./ActiveModels";
 import { UseQuickActionsReturn } from "@/hooks/useQuickActions";
 import { useApp } from "@/contexts";
+import { cn } from "@/lib/utils";
+
+/** Empty and blurred this long before the Ask box folds. Longer than the
+ *  100 ms post-answer re-focus in useCompletion, so that re-focus wins. */
+export const ASK_COLLAPSE_DEBOUNCE_MS = 300;
 
 interface InputProps extends UseCompletionReturn {
   isHidden: boolean;
+  askExpanded: boolean;
+  onAskExpand: () => void;
+  onAskCollapse: () => void;
   quickActions?: UseQuickActionsReturn;
   onQuickActionClick?: (action: string) => void;
   /** Meetwings Cloud is answering, so its models are not the selected ones */
@@ -45,10 +54,18 @@ export const Input = ({
   cancel,
   scrollAreaRef,
   inputRef,
+  attachInput,
   isHidden,
+  askExpanded,
+  onAskExpand,
+  onAskCollapse,
+  isContactPickerOpen,
+  isFilesPopoverOpen,
   keepEngaged,
   setKeepEngaged,
   setMeetingPanelHidden,
+  meetingTranscriptHidden,
+  setMeetingTranscriptHidden,
   enableVAD,
   quickActions,
   onQuickActionClick,
@@ -60,6 +77,37 @@ export const Input = ({
   cloudMode = false,
 }: InputProps) => {
   const { sttTranslationEnabled } = useApp();
+  const [focused, setFocused] = useState(false);
+
+  // Fold back to the icon once the box is empty, unfocused and idle. The
+  // re-check at fire time lets a re-focus that landed meanwhile win.
+  useEffect(() => {
+    if (
+      !askExpanded ||
+      input ||
+      focused ||
+      isLoading ||
+      messageHistoryOpen ||
+      isContactPickerOpen ||
+      isFilesPopoverOpen
+    ) {
+      return;
+    }
+    const t = setTimeout(() => {
+      if (document.activeElement !== inputRef.current) onAskCollapse();
+    }, ASK_COLLAPSE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [
+    askExpanded,
+    input,
+    focused,
+    isLoading,
+    messageHistoryOpen,
+    isContactPickerOpen,
+    isFilesPopoverOpen,
+    inputRef,
+    onAskCollapse,
+  ]);
 
   // Get the last user message for display when conversation mode is OFF
   const lastUserMessage = conversationHistory
@@ -69,11 +117,14 @@ export const Input = ({
   // Show meeting transcript panel when:
   // - Meeting mode is ON
   // - Has transcripts
+  // - The stop did not hide them (hasContent and xHidesPanel below keep the
+  //   raw length: they guard reset(), which would drop the conversation)
   // - No AI response yet (once response comes, show normal view)
   // - Conversation mode is OFF (when ON, show conversation history instead)
   const showMeetingPanel =
     meetingAssistMode &&
     meetingTranscript.length > 0 &&
+    !meetingTranscriptHidden &&
     !response &&
     !keepEngaged &&
     !isLoading;
@@ -87,12 +138,15 @@ export const Input = ({
   const xHidesPanel = !isLoading && meetingAssistMode && meetingTranscript.length > 0;
 
   return (
-    <div className="relative flex-1">
+    <div className={cn("relative", askExpanded && "flex-1")}>
       <Popover
         open={isPopoverOpen}
         onOpenChange={(open) => {
           // Clicking the input brings back a panel the X hid.
-          if (open) setMeetingPanelHidden(false);
+          if (open) {
+            setMeetingPanelHidden(false);
+            setMeetingTranscriptHidden(false);
+          }
           // Only reset if popover is closing AND:
           // - Not loading
           // - Not in conversation mode
@@ -105,23 +159,45 @@ export const Input = ({
       >
         <PopoverTrigger asChild className="!border-none !bg-transparent">
           <div className="relative select-none">
-            <InputComponent
-              ref={inputRef}
-              placeholder="Ask me anything..."
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              onPaste={handlePaste}
-              disabled={isLoading || isHidden}
-              className={`${
-                currentConversationId && conversationHistory.length > 0
-                  ? "pr-14"
-                  : "pr-2"
-              }`}
-            />
+            {askExpanded ? (
+              <InputComponent
+                ref={attachInput}
+                autoFocus
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                placeholder="Ask me anything..."
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyPress={handleKeyPress}
+                onPaste={handlePaste}
+                disabled={isLoading || isHidden}
+                className={`${
+                  currentConversationId && conversationHistory.length > 0
+                    ? "pr-14"
+                    : "pr-2"
+                }`}
+              />
+            ) : (
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="Ask"
+                title="Ask"
+                className="cursor-pointer"
+                onClick={() => {
+                  // Same as clicking the box did: bring back a panel the X hid.
+                  setMeetingPanelHidden(false);
+                  setMeetingTranscriptHidden(false);
+                  onAskExpand();
+                }}
+              >
+                <MessageSquare />
+              </Button>
+            )}
 
             {/* Conversation thread indicator */}
-            {currentConversationId &&
+            {askExpanded &&
+              currentConversationId &&
               conversationHistory.length > 0 &&
               !isLoading && (
                 <div className="absolute select-none right-1 top-1/2 -translate-y-1/2 flex items-center gap-1">
@@ -154,6 +230,7 @@ export const Input = ({
           side="bottom"
           className="w-screen p-0 border shadow-lg overflow-hidden flex flex-col h-[calc(100vh-4rem)]"
           sideOffset={8}
+          onOpenAutoFocus={(e) => e.preventDefault()}
         >
           <div className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-muted/30">
             <div className="flex flex-row gap-2 items-center min-w-0">

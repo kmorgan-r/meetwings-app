@@ -394,9 +394,6 @@ const mockEverything = () => {
   vi.doMock("@/pages/app/components/completion/Audio", () => ({ Audio: () => null }));
   vi.doMock("@/pages/app/components/completion/Screenshot", () => ({ Screenshot: () => null }));
   vi.doMock("@/pages/app/components/completion/Files", () => ({ Files: () => null }));
-  vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-    MeetingAssistToggle: () => null,
-  }));
   vi.doMock("@/pages/app/components/completion/MessageHistory", () => ({
     MessageHistory: () => null,
   }));
@@ -470,7 +467,6 @@ async function closePicker() {
 /** Meeting assist on, mic (VAD) open, transcript lines present. */
 async function startMeetingByHand(lines = ["Hello everyone", "Let's begin"]) {
   act(() => {
-    probe.completion.setMeetingAssistMode(true);
     probe.completion.setEnableVAD(true);
   });
   for (const line of lines) {
@@ -655,7 +651,6 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
     await mountApp();
     await addTwoTargetsViaPicker();
     await closePicker();
-    act(() => probe.completion.setMeetingAssistMode(true));
 
     // The call starts: auto-record's start-meeting opens the mic.
     await act(async () => emitTauri("meeting-detected"));
@@ -667,10 +662,15 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
 
     const mark = targetLines().length;
     const flap = async () => {
+      // meeting-ended no longer closes the mic: it arms the call-end grace, and
+      // the re-detection (same call: no process, no readable calendar) cancels
+      // it. The recording and its targets carry straight through.
       await act(async () => emitTauri("meeting-ended"));
-      await waitFor(() => expect(probe.completion.enableVAD).toBe(false), { timeout: 3000 });
       await act(async () => emitTauri("meeting-detected"));
-      await waitFor(() => expect(probe.completion.enableVAD).toBe(true), { timeout: 3000 });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 100)); // the same-call read
+      });
+      expect(probe.completion.enableVAD).toBe(true);
     };
     await flap(); // before minimizing
     await minimizeThenRestore(flap); // while minimized
@@ -784,8 +784,12 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
       expect(screen.queryByTitle("Hide panel")).toBeNull();
 
       // Clicking the input does.
-      await user.click(screen.getByPlaceholderText("Ask me anything..."));
+      // The Ask box is an icon until clicked; the icon brings the panel back.
+      await user.click(screen.getByRole("button", { name: "Ask" }));
       await screen.findByTitle("Hide panel");
+      // The expanded box hides the picker; blur it and let the box fold back.
+      act(() => (document.activeElement as HTMLElement).blur());
+      await screen.findByTestId("contact-picker-trigger");
 
       expect(probe.completion.currentConversationId).toBe(convBefore);
       await expectTargetsSurvived(mark);
@@ -855,7 +859,8 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
     it("6f. hiding keeps a half-typed question and its attachment", async () => {
       await mountApp();
       await startMeetingByHand();
-      const box = screen.getByPlaceholderText("Ask me anything...");
+      await user.click(screen.getByRole("button", { name: "Ask" }));
+      const box = await screen.findByPlaceholderText("Ask me anything...");
       await user.type(box, "half a question");
       const file = { id: "f1", name: "shot.png", type: "image/png", base64: "", size: 1 };
       patchState({ attachedFiles: [file] });

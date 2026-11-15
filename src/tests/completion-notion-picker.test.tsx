@@ -18,12 +18,12 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
       meetingAssistMode: false,
       meetingTranscript: [],
       currentConversationId: null,
-      setMeetingAssistMode: vi.fn(),
       submit: vi.fn(),
       submitWithMeetingContext: vi.fn(),
       flushUnsavedMeetingTranscript: vi.fn(),
       isContactPickerOpen: false,
       setIsContactPickerOpen: vi.fn(),
+      setIsFilesPopoverOpen: vi.fn(),
       setTargetCount: vi.fn(),
       setCalendarBlockPresent: vi.fn(),
     }),
@@ -63,11 +63,12 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
       selectedSttProvider: { provider: "", variables: {} },
     }),
   }));
+  vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
   vi.doMock("@/lib", () => ({
     getPlatform: () => "windows",
     shouldUseMeetwingsAPI: vi.fn(async () => false),
   }));
-  for (const name of ["Audio", "Input", "Screenshot", "Files", "MeetingAssistToggle"]) {
+  for (const name of ["Audio", "Input", "Screenshot", "Files"]) {
     vi.doMock(`@/pages/app/components/completion/${name}`, () => ({ [name]: () => null }));
   }
   vi.doMock("@/pages/app/components/completion/ContactPicker", () => ({

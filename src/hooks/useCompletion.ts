@@ -1,10 +1,9 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, Dispatch, SetStateAction } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
 import { toast } from "sonner";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
 import {
   MAX_FILES,
-  STORAGE_KEYS,
   MEETING_ASSIST_SYSTEM_PROMPT,
   DEFAULT_SYSTEM_PROMPT,
   MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL,
@@ -164,18 +163,18 @@ export const useCompletion = () => {
   // (issue #72). New transcript lines keep it hidden; the input, a new
   // request, or a new conversation shows it again.
   const [meetingPanelHidden, setMeetingPanelHidden] = useState(false);
+  // Set when the mic closes (the meeting is over), cleared when it opens again
+  // or the user reopens the panel. Hides the transcript panel only: an answer
+  // being read stays up.
+  const [meetingTranscriptHidden, setMeetingTranscriptHidden] = useState(false);
   // The model behind the answer in the panel. Only the panel's own requests
   // set it, so a background call (titles, translation) can't overwrite it.
   const [respondedModel, setRespondedModel] = useState<RespondedModel | null>(
     null
   );
 
-  // Meeting Assist Mode state
-  const [meetingAssistMode, setMeetingAssistModeState] = useState(() => {
-    const stored = localStorage.getItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED);
-    return stored === "true";
-  });
-  const meetingAssistModeRef = useRef(meetingAssistMode);
+  // Meeting mode is always on: a call is recorded whenever the mic is open.
+  const meetingAssistMode = true;
   const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
 
   // Session-level speaker mapping (resets when meeting transcript is cleared)
@@ -197,11 +196,6 @@ export const useCompletion = () => {
   useEffect(() => {
     conversationHistoryRef.current = state.conversationHistory;
   }, [state.conversationHistory]);
-
-  // Persist Meeting Assist Mode setting
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MEETING_ASSIST_MODE_ENABLED, String(meetingAssistMode));
-  }, [meetingAssistMode]);
 
   const scrollAreaRef = useRef<HTMLDivElement>(null);
 
@@ -562,29 +556,6 @@ export const useCompletion = () => {
 
     return autoSaveMeetingTranscript();
   }, [autoSaveMeetingTranscript]);
-
-  // Wraps the raw state setter so turning meeting mode off flushes any
-  // unsaved transcript segments first. Transition state lives in a ref because
-  // invoking persistence from a React state updater is unsafe in StrictMode.
-  const setMeetingAssistMode = useCallback<Dispatch<SetStateAction<boolean>>>(
-    (value) => {
-      const previous = meetingAssistModeRef.current;
-      const next =
-        typeof value === "function"
-          ? (value as (p: boolean) => boolean)(previous)
-          : value;
-
-      meetingAssistModeRef.current = next;
-      setMeetingAssistModeState(next);
-
-      if (previous && !next) {
-        void flushUnsavedMeetingTranscript().catch((error) => {
-          console.error("Meeting-mode flush failed:", error);
-        });
-      }
-    },
-    [flushUnsavedMeetingTranscript]
-  );
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));
@@ -1590,6 +1561,24 @@ export const useCompletion = () => {
     })().catch((err) => console.error("Meeting capture rollover failed:", err));
   }, [meetingCaptureActive, startNewConversation]);
 
+  // Recording stop = the meeting is over. A layout effect that compares before
+  // it assigns, seeded from the first render (no edge on mount): a stop and a
+  // start inside one commit leave prev === current and so are no edge. Placed
+  // after the capture-edge effect so the transcript length mirror (a layout
+  // effect) has already run in this commit when the flush reads it.
+  const prevRecordingRef = useRef(meetingCaptureActive);
+  useLayoutEffect(() => {
+    const prev = prevRecordingRef.current;
+    prevRecordingRef.current = meetingCaptureActive;
+    if (prev === meetingCaptureActive) return;
+    setMeetingTranscriptHidden(!meetingCaptureActive);
+    if (prev) {
+      void flushUnsavedMeetingTranscript().catch((e) =>
+        console.error("Recording-stop flush failed:", e)
+      );
+    }
+  }, [meetingCaptureActive, flushUnsavedMeetingTranscript]);
+
   const saveCurrentConversation = useCallback(
     async (
       userMessage: string,
@@ -2056,7 +2045,10 @@ export const useCompletion = () => {
   );
 
   // Check if meeting transcript should trigger popover
-  const hasMeetingTranscript = meetingAssistMode && meetingTranscript.length > 0;
+  const hasMeetingTranscript =
+    meetingAssistMode &&
+    meetingTranscript.length > 0 &&
+    !meetingTranscriptHidden;
 
   // Popover opens when there's content to show
   const isPopoverOpen =
@@ -2441,18 +2433,28 @@ export const useCompletion = () => {
     };
   }, []);
 
+  // The input mounts only while the Ask box is expanded, so it registers
+  // itself as a callback ref (null on unmount: the shortcut never holds a
+  // detached node). Stable identity: a new function each render would make
+  // React re-run it with null then the element on every render.
+  const registerInputRef = globalShortcuts.registerInputRef;
+  const attachInput = useCallback(
+    (el: HTMLInputElement | null) => {
+      inputRef.current = el;
+      registerInputRef(el);
+    },
+    [registerInputRef]
+  );
+
   // register callbacks for global shortcuts
   useEffect(() => {
     globalShortcuts.registerAudioCallback(toggleRecording);
-    globalShortcuts.registerInputRef(inputRef.current);
     globalShortcuts.registerScreenshotCallback(captureScreenshot);
   }, [
     globalShortcuts.registerAudioCallback,
-    globalShortcuts.registerInputRef,
     globalShortcuts.registerScreenshotCallback,
     toggleRecording,
     captureScreenshot,
-    inputRef,
   ]);
 
   return {
@@ -2499,14 +2501,17 @@ export const useCompletion = () => {
     setCalendarBlockPresent,
     onRemoveAllFiles,
     inputRef,
+    attachInput,
     captureScreenshot,
     isScreenshotLoading,
     keepEngaged,
     setKeepEngaged,
     setMeetingPanelHidden,
+    recording: meetingCaptureActive,
+    meetingTranscriptHidden,
+    setMeetingTranscriptHidden,
     // Meeting Assist Mode
     meetingAssistMode,
-    setMeetingAssistMode,
     meetingTranscript,
     addMeetingTranscript,
     addMeetingTranscriptEntries,

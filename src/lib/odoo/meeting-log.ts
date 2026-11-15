@@ -41,6 +41,24 @@ export const UNDO_BLOCKED_MS = 6_000;
 export const IDLE_FLUSH_MS = 5 * 60 * 1000;
 
 /**
+ * Below EITHER of these a transcript cut is a scrap: too short or too few
+ * lines to be a meeting of its own.
+ *
+ * A scrap never deserves its own queue row - the tail of a meeting whose
+ * "meeting ended" never fired, or a stray fragment the idle timer cut loose -
+ * but it must not be LOST either, which is why the rule reads as two
+ * thresholds and not one: `mergeScraps` needs to be able to recognise the
+ * fragments it is allowed to fold into a neighbour. Both boundaries are
+ * strict `<`s, so exactly 60 000 ms with exactly 3 entries is a real
+ * meeting. Beside IDLE_FLUSH_MS deliberately: a live trigger skips a scrap
+ * instead of enqueuing it, and startup recovery instead merges it into its
+ * nearer neighbouring segment - the live trigger consuming this predicate is
+ * a later task (meeting-log.ts, recording-follows-the-call plan).
+ */
+export const SCRAP_MIN_MS = 60_000;
+export const SCRAP_MIN_ENTRIES = 3;
+
+/**
  * How stale a `sending` claim must be before the sweep reclaims it.
  *
  * Generously larger than the client's 30s timeout (client.ts:21) plus a
@@ -228,6 +246,66 @@ function sliceOf(entries: TranscriptEntry[]): TranscriptSlice {
     startAt: entries[0].timestamp,
     endAt: entries[entries.length - 1].timestamp,
   };
+}
+
+/** The Global Constraints predicate: too short or too few lines to be a row. */
+export function isScrap(slice: TranscriptSlice): boolean {
+  return slice.endAt - slice.startAt < SCRAP_MIN_MS || slice.entries.length < SCRAP_MIN_ENTRIES;
+}
+
+/**
+ * Folds every scrap into its nearer chronological neighbour, dropping
+ * fragments that survive with nothing to be folded into.
+ *
+ * The counterpart to the scrap rule for the pieces that DID end up alone in
+ * the cut: `segmentByGap` cannot know that a 30-second tail belongs to the
+ * meeting six minutes behind it, because a silence longer than IDLE_FLUSH_MS
+ * is exactly the silence it was built to cut on. A segment-level pass fixes
+ * that after the fact, and it does weaken the cut for scraps: there is no gap
+ * limit, so a scrap merges into its nearer neighbour however long the silence
+ * between them, and a short fragment CAN cross to a meeting on the other side
+ * of a long silence. Two segments that are not scraps are never merged. The
+ * skip rule would leave the tail lost entirely.
+ *
+ * Takes `segmentByGap`'s output - chronological, no overlaps - and repeats
+ * until stable:
+ *
+ * 1. While more than one segment remains, find the first scrap and merge it
+ *    into the neighbour with the SMALLER gap to it. Ties go backward, and
+ *    "backward" is not a tiebreak on a hunch: a tail fragment is almost
+ *    always the end of a meeting trailing off, so when a scrap sits
+ *    equidistant between two neighbours the meeting it trailed is behind it.
+ * 2. One segment left, or no scrap left: stop. A scrap that merged with
+ *    other scraps and is STILL a scrap after that has no long neighbour
+ *    anywhere in the input to grow into, so it is dropped - a two-line
+ *    fragment that never was part of a recoverable meeting must not become
+ *    a row of its own.
+ *
+ * Each merge is `sliceOf` over the timestamp-sorted concatenation, so the
+ * union's span is the true MIN/MAX rather than whichever neighbour's
+ * `startAt`/`endAt` the tie direction would name.
+ */
+export function mergeScraps(segments: TranscriptSlice[]): TranscriptSlice[] {
+  const slices = [...segments];
+  while (slices.length > 1) {
+    const i = slices.findIndex(isScrap);
+    if (i === -1) break;
+    const prev = slices[i - 1];
+    const next = slices[i + 1];
+    const gapBack = prev ? slices[i].startAt - prev.endAt : Infinity;
+    const gapNext = next ? next.startAt - slices[i].endAt : Infinity;
+    // Tie (gapNext === gapBack) or a missing next -> previous; a missing
+    // prev is the only case gapNext can win with equal gaps.
+    const target = gapNext < gapBack ? i + 1 : i - 1;
+    const merged = sliceOf(
+      [...slices[target].entries, ...slices[i].entries].sort(
+        (a, b) => a.timestamp - b.timestamp
+      )
+    );
+    slices.splice(Math.min(target, i), 2, merged);
+  }
+  if (slices.length === 1 && isScrap(slices[0])) return [];
+  return slices;
 }
 
 /**

@@ -69,12 +69,12 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         meetingAssistMode: false,
         meetingTranscript: [],
         currentConversationId: null,
-        setMeetingAssistMode: vi.fn(),
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),
         flushUnsavedMeetingTranscript: vi.fn(),
         isContactPickerOpen: true,
         setIsContactPickerOpen: vi.fn(),
+        setIsFilesPopoverOpen: vi.fn(),
         setTargetCount: vi.fn(),
         setCalendarBlockPresent,
       }),
@@ -132,6 +132,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         selectedSttProvider: { provider: "", variables: {} },
       }),
     }));
+    vi.doMock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
     vi.doMock("@/lib", () => ({
       getPlatform: () => "windows",
       shouldUseMeetwingsAPI: vi.fn(async () => false),
@@ -151,9 +152,6 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
     }));
     vi.doMock("@/pages/app/components/completion/Files", () => ({
       Files: () => null,
-    }));
-    vi.doMock("@/pages/app/components/completion/MeetingAssistToggle", () => ({
-      MeetingAssistToggle: () => null,
     }));
     // The one component under test is stubbed rather than mocked away like
     // the others above: capturing its props IS the assertion.

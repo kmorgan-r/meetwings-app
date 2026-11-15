@@ -8,6 +8,7 @@ import {
   holdCard,
   setAmberError,
   snoozeAmber,
+  STOP_NOTICE_TEXT,
   stopActiveRecording,
   type CardEvent,
   type MeetingCardState,
@@ -151,8 +152,6 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
 }
 
 function EndedCard({ card, compact }: { card: Extract<Card, { kind: "ended" }>; compact: boolean }) {
-  const mins = Math.max(1, Math.round(card.durationMs / 60_000));
-  const label = card.title ?? card.app;
   return (
     <div
       data-testid="meeting-card"
@@ -165,21 +164,10 @@ function EndedCard({ card, compact }: { card: Extract<Card, { kind: "ended" }>; 
         ✓
       </span>
       {compact ? (
-        <span className="min-w-0 truncate text-sm">
-          <span className="font-semibold">Recording saved</span>
-          <span className="text-muted-foreground">
-            {"  ·  "}
-            {label} · {mins} min
-          </span>
-        </span>
+        <span className="min-w-0 truncate text-sm">{STOP_NOTICE_TEXT[card.reason]}</span>
       ) : (
         <div className="min-w-0">
-          <div className="text-sm font-semibold">Recording saved</div>
-          <div className="truncate text-xs text-muted-foreground">
-            {label}
-            {"  ·  "}
-            {mins} min
-          </div>
+          <div className="text-sm font-semibold">{STOP_NOTICE_TEXT[card.reason]}</div>
         </div>
       )}
     </div>

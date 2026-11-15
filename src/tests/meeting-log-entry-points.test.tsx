@@ -237,20 +237,21 @@ function said(timestamp: number): TranscriptEntry {
   return { original: "hello", timestamp, audioSource: "microphone" };
 }
 
-function renderLog(opts: { targets?: SelectedTargets; picked?: boolean; pill?: boolean } = {}) {
+function renderLog(opts: { targets?: SelectedTargets; picked?: boolean; recording?: boolean } = {}) {
   return renderHook(
-    (props: { pill: boolean }) => {
+    (props: { recording: boolean }) => {
       const targetRef = useRef<SelectedTargets>(opts.targets ?? []);
       const notionPickedRef = useRef(opts.picked ?? false);
       return useMeetingLog({
         targetRef,
         notionPickedRef,
-        meetingTranscript: [said(1000)],
+        // A real meeting (3 lines over 60 s), not a scrap.
+        meetingTranscript: [said(1000), said(31000), said(61000)],
         currentConversationId: "conv-1",
-        meetingAssistMode: props.pill,
+        recording: props.recording,
       });
     },
-    { initialProps: { pill: opts.pill ?? true } }
+    { initialProps: { recording: opts.recording ?? false } }
   );
 }
 
@@ -294,10 +295,10 @@ describe("the hook: who sends where", () => {
     vi.clearAllMocks();
   });
 
-  it("Notion-only, no Odoo config: pill-off queues a held Notion row and shows the undo strip", async () => {
-    const { result, rerender } = renderLog({ pill: true });
+  it("Notion-only, no Odoo config: recording stop queues a held Notion row and shows the undo strip", async () => {
+    const { result, rerender } = renderLog({ recording: true });
     await waitFor(() => expect(hookListeners.has("meeting-ended")).toBe(true));
-    rerender({ pill: false });
+    rerender({ recording: false });
 
     await waitFor(() => expect(result.current.holding).toBe(true));
     expect(bodyOf(queue.insertQueueRow.mock.calls[0])).toMatchObject({
@@ -531,14 +532,14 @@ describe("the hook: who sends where", () => {
     await waitFor(() => expect(scheduler.ensureNotionScheduler).toHaveBeenCalled());
     scheduler.ensureNotionScheduler.mockClear();
 
-    // Same props: a plain re-render, no pill-off trigger.
-    rerender({ pill: true });
+    // Same props: a plain re-render, no recording-stop trigger.
+    rerender({ recording: false });
 
     expect(scheduler.ensureNotionScheduler).toHaveBeenCalledTimes(1);
     const deps = scheduler.ensureNotionScheduler.mock.calls[0][0] as {
       liveLastLineAt: (c: string) => number | null;
     };
-    expect(deps.liveLastLineAt("conv-1")).toBe(1000);
+    expect(deps.liveLastLineAt("conv-1")).toBe(61000);
     expect(deps.liveLastLineAt("other")).toBeNull();
   });
 

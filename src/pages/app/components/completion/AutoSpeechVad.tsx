@@ -5,7 +5,7 @@ import { LoaderCircleIcon, MicIcon, MicOffIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components";
 import { useApp } from "@/contexts";
-import { floatArrayToWav } from "@/lib/utils";
+import { cn, floatArrayToWav } from "@/lib/utils";
 import { shouldUseMeetwingsAPI } from "@/lib/functions/meetwings.api";
 import { useTranslation } from "@/hooks";
 import { isUsableTranscription } from "@/lib/functions/stt.function";
@@ -230,7 +230,7 @@ const AutoSpeechVADInternal = ({
             setEnableVAD(true);
           }
         }}
-        className="cursor-pointer"
+        className={cn("cursor-pointer", vad.listening && "bg-red-600 text-white hover:bg-red-600/90 animate-pulse")}
       >
         {isTranscribing ? (
           <LoaderCircleIcon className="h-4 w-4 animate-spin text-green-500" />

@@ -92,6 +92,7 @@ import { useMeetingLog, resetMeetingLogSweepGuard } from "@/hooks/useMeetingLog"
 import { fetchMeetingsBetween } from "@/lib/calendar/fetch-current-meetings";
 import { decideDestinations } from "@/lib/notion/destinations";
 import { resetTranscriptPruneGuard } from "@/lib/odoo/meeting-log-actions";
+import { setRecordingStopCap } from "@/lib/recording-stop-cap";
 
 const ODOO = { url: "http://h:8069", db: "odoo", login: "me@example.org", apiKey: "sk-secret" };
 const GRAPH_COMPLETE = {
@@ -112,7 +113,7 @@ function said(timestamp: number): TranscriptEntry {
   return { original: "hello", timestamp, audioSource: "microphone" };
 }
 
-/** Odoo complete, Notion ticked automatically, one contact, a 1000-4000 row. */
+/** Odoo complete, Notion ticked automatically, one contact, a 1000-61000 row. */
 function renderLog(
   opts: {
     targets?: SelectedTargets;
@@ -125,7 +126,7 @@ function renderLog(
   const targetRef = { current: opts.targets ?? ONE_TARGET };
   const notionPickedRef = { current: true };
   const notionSourceRef: { current: NotionPickSource } = { current: opts.source ?? "auto" };
-  const transcript = opts.transcript ?? [said(1000), said(4000)];
+  const transcript = opts.transcript ?? [said(1000), said(31000), said(61000)];
   const conversationId = opts.conversationId === undefined ? "conv-1" : opts.conversationId;
   const view = renderHook(() =>
     useMeetingLog({
@@ -134,8 +135,9 @@ function renderLog(
       notionSourceRef,
       meetingTranscript: transcript,
       currentConversationId: conversationId,
-      // Off: no pill-off edge and no idle flush, so only endMeeting() triggers.
-      meetingAssistMode: false,
+      // Mic closed from mount: no recording-stop edge, so only endMeeting()
+      // triggers (the idle flush needs IDLE_FLUSH_MS of silence).
+      recording: false,
     })
   );
   return { ...view, notionPickedRef, notionSourceRef };
@@ -177,6 +179,8 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     });
     queue.insertQueueRow.mockReset();
     queue.insertQueueRow.mockResolvedValue(true);
+    queue.getTranscriptWatermark.mockResolvedValue(0);
+    setRecordingStopCap(null);
     odooConfig.loadOdooConfigState.mockResolvedValue({ state: "complete", config: ODOO });
     odooConfig.requireOdooConfig.mockResolvedValue(ODOO);
     check.autoNotionAllowed.mockReset();
@@ -244,6 +248,18 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     expect(rows()[0]).toMatchObject({ status: "held", notionStatus: "held" });
   });
 
+  it("a scrap reads no Outlook and writes no row", async () => {
+    renderLog({ transcript: [said(1000), said(2000)] });
+    await listening();
+    endMeeting();
+
+    await settle();
+    expect(queue.insertQueueRow).not.toHaveBeenCalled();
+    expect(check.autoNotionAllowed).not.toHaveBeenCalled();
+    expect(snapshots.getCalendarSnapshot).not.toHaveBeenCalled();
+    expect(skipMark.value).toBe(2000);
+  });
+
   it("a toggle mid-check does not change the enqueued row", async () => {
     const gate = deferred<boolean>();
     check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
@@ -279,6 +295,120 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     await settle();
     expect(queue.insertQueueRow).toHaveBeenCalledTimes(2);
     expect(check.autoNotionAllowed).toHaveBeenCalledTimes(2);
+  });
+
+  it("a grace stop dropped mid-check hands its cap to the re-run, and only to it", async () => {
+    const gate = deferred<boolean>();
+    check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
+    const targetRef = { current: ONE_TARGET };
+    const notionPickedRef = { current: true };
+    const notionSourceRef: { current: NotionPickSource } = { current: "auto" };
+    const first = [said(1000), said(31000), said(61000)];
+    const T = 125_000;
+    const later = [
+      ...first,
+      { original: "call 1", timestamp: 70_000, audioSource: "system" as const },
+      { original: "call 2", timestamp: 100_000, audioSource: "system" as const },
+      { original: "call 3", timestamp: 131_000, audioSource: "system" as const },
+      said(150_000),
+      said(200_000),
+    ];
+    const { rerender } = renderHook(
+      (p: { transcript: TranscriptEntry[]; recording: boolean }) =>
+        useMeetingLog({
+          targetRef,
+          notionPickedRef,
+          notionSourceRef,
+          meetingTranscript: p.transcript,
+          currentConversationId: "conv-1",
+          recording: p.recording,
+        }),
+      { initialProps: { transcript: first, recording: true } }
+    );
+    await listening();
+    rerender({ transcript: first, recording: false }); // trigger 1: held in check 2
+    await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
+
+    rerender({ transcript: later, recording: true });
+    setRecordingStopCap(T);
+    rerender({ transcript: later, recording: false }); // dropped, schedules the re-run
+    await settle();
+
+    queue.getTranscriptWatermark.mockResolvedValue(61_000);
+    gate.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(2));
+    const row = rows()[1];
+    expect(String(row.transcript)).toContain("call 3");
+    expect(String(row.transcript)).not.toContain("hello");
+    expect(row.transcriptEndAt).toBe(200_000);
+
+    // The re-run used the stashed cap up: the next meeting's row is uncapped.
+    await settle();
+    const next = [
+      ...later,
+      { original: "next 1", timestamp: 260_000, audioSource: "microphone" as const },
+      { original: "next 2", timestamp: 290_000, audioSource: "microphone" as const },
+      { original: "next 3", timestamp: 330_000, audioSource: "microphone" as const },
+    ];
+    queue.getTranscriptWatermark.mockResolvedValue(200_000);
+    rerender({ transcript: next, recording: false });
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(3));
+    expect(String(rows()[2].transcript)).toContain("next 3");
+    expect(rows()[2]).toMatchObject({ transcriptStartAt: 260_000, transcriptEndAt: 330_000 });
+  });
+
+  it("a drop after check 2 keeps the cap a mid-check drop stashed for the re-run", async () => {
+    // Trigger 1 sits in check 2; trigger 2 (capped) is dropped there and
+    // stashes its cap; the check ends and trigger 1 sits in its insert;
+    // trigger 3 is dropped there. The re-run must still be capped.
+    const gate = deferred<boolean>();
+    check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
+    const insert = deferred<boolean>();
+    queue.insertQueueRow.mockImplementationOnce(() => insert.promise);
+    const targetRef = { current: ONE_TARGET };
+    const notionPickedRef = { current: true };
+    const notionSourceRef: { current: NotionPickSource } = { current: "auto" };
+    const first = [said(1000), said(31000), said(61000)];
+    const T = 125_000;
+    const later = [
+      ...first,
+      { original: "call 1", timestamp: 70_000, audioSource: "system" as const },
+      { original: "call 2", timestamp: 100_000, audioSource: "system" as const },
+      { original: "call 3", timestamp: 131_000, audioSource: "system" as const },
+      said(150_000),
+      said(200_000),
+    ];
+    const { rerender } = renderHook(
+      (p: { transcript: TranscriptEntry[]; recording: boolean }) =>
+        useMeetingLog({
+          targetRef,
+          notionPickedRef,
+          notionSourceRef,
+          meetingTranscript: p.transcript,
+          currentConversationId: "conv-1",
+          recording: p.recording,
+        }),
+      { initialProps: { transcript: first, recording: true } }
+    );
+    await listening();
+    rerender({ transcript: first, recording: false }); // trigger 1: held in check 2
+    await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
+
+    rerender({ transcript: later, recording: true });
+    setRecordingStopCap(T);
+    rerender({ transcript: later, recording: false }); // trigger 2: stashes the cap
+    gate.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(1)); // check over
+
+    endMeeting(); // trigger 3: dropped outside the check
+    queue.getTranscriptWatermark.mockResolvedValue(61_000);
+    insert.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(2));
+    const row = rows()[1];
+    expect(String(row.transcript)).toContain("call 3");
+    expect(String(row.transcript)).not.toContain("hello");
+    expect(row.transcriptEndAt).toBe(200_000);
   });
 
   it("a trigger dropped outside check 2 is not re-run", async () => {
@@ -327,14 +457,14 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     "check 2 is called with the row's span, the conversation's snapshot and the Outlook config state (%s)",
     async (_name, graphState, outlookAbsent) => {
       graph.loadGraphConfigState.mockResolvedValue(graphState);
-      renderLog({ transcript: [said(4000), said(1000), said(2500)] });
+      renderLog({ transcript: [said(61000), said(1000), said(31000)] });
       await listening();
       endMeeting();
 
       await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
       expect(snapshots.getCalendarSnapshot).toHaveBeenCalledWith("conv-1");
       expect(check.autoNotionAllowed).toHaveBeenCalledWith({
-        span: { start: 1000, end: 4000 },
+        span: { start: 1000, end: 61000 },
         snapshot: SNAPSHOT,
         outlookAbsent,
         // The span read, NOT fetchCurrentMeetings' now-relative one.

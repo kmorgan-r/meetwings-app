@@ -148,7 +148,8 @@ const DEFAULT_TARGETS: SelectedTargets = [{ model: "res.partner", resId: 42, nam
  * conversation id anywhere) could not be expressed at all.
  */
 function render(initial: Record<string, unknown> = {}) {
-  const props0 = { meetingTranscript: [entry(1000)], ...initial };
+  // A real meeting (3 lines over 60 s), not a scrap.
+  const props0 = { meetingTranscript: [entry(1000), entry(31000), entry(61000)], ...initial };
   return renderHook(
     (props: Record<string, unknown>) => {
       const targets = ("targets" in props ? props.targets : DEFAULT_TARGETS) as SelectedTargets;
@@ -160,9 +161,10 @@ function render(initial: Record<string, unknown> = {}) {
         currentConversationId: ("currentConversationId" in props
           ? props.currentConversationId
           : "conv-1") as string | null,
-        meetingAssistMode: ("meetingAssistMode" in props
-          ? props.meetingAssistMode
-          : true) as boolean,
+        recording: ("recording" in props
+          ? props.recording
+          : false) as boolean,
+        contactName: (props.contactName ?? null) as string | null,
         providerConfig: PROVIDER_CONFIG,
       });
     },
@@ -306,6 +308,32 @@ describe("the hold", () => {
   });
 });
 
+describe("the strip's label", () => {
+  it("names the held row's contact, not whoever the picker shows by then", async () => {
+    action.getQueueRow.mockResolvedValue({ id: "row-1", status: "held" });
+    const meeting = [entry(1000), entry(31000), entry(61000)];
+    const { result, rerender } = render({ meetingTranscript: meeting, contactName: "Ada Lovelace" });
+    await waitFor(() => expect(listeners.has("meeting-ended")).toBe(true));
+    // After mount, so the hold rehydrate's own config read does not take it.
+    let release: (v: unknown) => void = () => {};
+    config.loadOdooConfigState.mockImplementationOnce(() => new Promise((r) => (release = r)));
+
+    fireMeetingEnded(); // snapshots A, then awaits the config read
+    // The new-call reset clears the targets, then B's contact is picked.
+    rerender({ meetingTranscript: meeting, targets: [], contactName: null });
+    rerender({
+      meetingTranscript: meeting,
+      targets: [{ model: "res.partner", resId: 77, name: null }],
+      contactName: "Bob Builder",
+    });
+    release({ state: "complete", config: CONFIG });
+
+    await waitFor(() => expect(result.current.holding).toBe(true));
+    expect(action.insertQueueRow.mock.calls[0][0].targets).toEqual(DEFAULT_TARGETS);
+    expect(result.current.heldContactName).toBe("Ada Lovelace");
+  });
+});
+
 describe("undo", () => {
   it("cancels the row, pushes nothing and makes no AI call", async () => {
     // Same reason as above - without this the "pushes nothing" assertion holds
@@ -377,7 +405,9 @@ describe("two meetings inside one hold window", () => {
       "row-2" as `${string}-${string}-${string}-${string}-${string}`
     );
     action.getTranscriptWatermark.mockResolvedValue(1000);
-    rerender({ meetingTranscript: [entry(1000), entry(9000, "second meeting")] });
+    rerender({
+      meetingTranscript: [entry(1000), entry(9000, "second meeting"), entry(40000), entry(70000)],
+    });
     fireMeetingEnded();
     await waitFor(() => expect(push.pushQueuedRow).toHaveBeenCalledTimes(1));
     expect(push.pushQueuedRow.mock.calls[0][0]).toMatchObject({ id: "row-1" });

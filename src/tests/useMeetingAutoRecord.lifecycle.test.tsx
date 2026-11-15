@@ -35,6 +35,11 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
 vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+// A detection inside a grace reads the calendar to tell the same call from a
+// new one; no calendar connected here.
+vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
+  fetchCurrentMeetings: async () => ({ kind: "absent" }),
+}));
 
 // A listen registry keyed by event name that holds ALL callbacks, and whose
 // unlisten removes only its own - so a leak is observable.
@@ -60,6 +65,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/config/constants", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   STOP_CONFIRM_INTERVAL_MS: 5,
+  // meeting-ended with the mic open now waits this grace before it stops; the
+  // shipped two minutes would outlast every waitFor here. See waitGrace.
+  CALL_END_GRACE_MS: 30,
 }));
 
 let stored: Record<string, string> = {};
@@ -86,7 +94,6 @@ import {
   WATCHER_STOPPED_MESSAGE,
 } from "@/hooks/useMeetingAutoRecord";
 import {
-  ENDED_CARD_DELAY_MS,
   getActiveAutoRecording,
   getMeetingCard,
   resetMeetingCardsForTests,
@@ -96,9 +103,14 @@ import {
 // not the shipped ones: the drain has to outlast the loop as it actually
 // behaves in this file, and the attempt count has to match what it really does.
 import {
+  CALL_END_GRACE_MS,
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
 } from "@/config/constants";
+import type { TranscriptEntry } from "@/types/completion";
+
+// Module-level so the reference is stable across renders.
+const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 
 const registered = (event: string) => listeners.get(event)?.size ?? 0;
 
@@ -162,6 +174,33 @@ const drainStopConfirm = async () => {
       STOP_CONFIRM_ATTEMPTS * Math.max(STOP_CONFIRM_INTERVAL_MS, 20) * 2
     );
   });
+};
+
+/**
+ * Outlasts the call-end grace a meeting-ended with the mic open arms, then the
+ * confirm loop of the stop it fires. Used after every meeting-mode
+ * meeting-ended: a case expecting a stop sees it land, and a case expecting
+ * nothing proves nothing landed even after the grace. Same 20ms floor and
+ * headroom as drainStopConfirm.
+ *
+ * NOT act(() => sleep(...)). The grace fires inside that sleep, and under act
+ * its mic write does not commit until the act scope ends - so the confirm
+ * loop's re-acquisition guard reads the stale `true` mirror on its first check
+ * and stands down without polling (measured: F41-F44, F53 and F54 then see no
+ * poll at all). Waiting with the act environment OFF, as RTL's own waitFor
+ * does, lets the write commit on its own macrotask as in production, with no
+ * act warning.
+ */
+const waitGrace = async () => {
+  const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const prev = env.IS_REACT_ACT_ENVIRONMENT;
+  env.IS_REACT_ACT_ENVIRONMENT = false;
+  try {
+    await sleep(Math.max(CALL_END_GRACE_MS, 20) * 3);
+  } finally {
+    env.IS_REACT_ACT_ENVIRONMENT = prev;
+  }
+  await drainStopConfirm();
 };
 
 const makeAudio = (overrides: Record<string, any> = {}) => ({
@@ -242,6 +281,8 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     applyEnableVAD(value);
   });
 
+  const startNewConversation = vi.fn(async () => {});
+
   const Probe = () => {
     const [systemAudio, setSystemAudio] = useState(audio);
     const [enableVAD, setVADState] = useState(opts.enableVAD ?? false);
@@ -268,6 +309,8 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
       setEnableVAD: stableSetEnableVAD,
       meetingAssistMode,
       flushUnsavedMeetingTranscript: flushTranscript,
+      meetingTranscript: EMPTY_TRANSCRIPT,
+      startNewConversation,
     });
     return null;
   };
@@ -811,21 +854,18 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(mocks.toast.info).not.toHaveBeenCalled();
     expect(mocks.toast.error).not.toHaveBeenCalled();
 
-    // The other half of "declined": no provenance was recorded either, so the
-    // call ending cannot close a mic this hook never opened. This is a live
-    // assertion now that handleStop has its stop-meeting branch - a hook that
-    // claimed anyway writes the mic closed right here.
-    //
-    // The drain is what makes the status count discriminate: the first confirm
-    // poll is one sleep away, so asserting it immediately after fireActed would
-    // read 1 against a broken hook too.
+    // The call ending closes it anyway, after the grace: the call-end stop
+    // does not consult provenance, so a declined (hand-opened) mic is stopped
+    // like an auto-started one - once, through the mic, never the
+    // transcribing pipeline. Not at once: the grace comes first.
     await fireActed("meeting-ended");
-    await drainStopConfirm();
     expect(h.setEnableVAD).not.toHaveBeenCalled();
+    await waitGrace();
+    expect(h.setEnableVAD.mock.calls).toEqual([[false]]);
     expect(audio.stopCapture).not.toHaveBeenCalled();
-    expect(statusCalls()).toBe(1); // the detect probe only - no confirm loop
+    expect(statusCalls()).toBe(2); // the detect probe, then one confirm poll
     expect(mocks.toast.error).not.toHaveBeenCalled();
-    expect(h.observedVAD).toEqual([false, true]); // the user's write, only
+    expect(h.observedVAD).toEqual([false, true, false]);
   });
 
   it("F38: declines a mic opened DURING the capture-status round trip", async () => {
@@ -867,15 +907,15 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(h.observedVAD).toEqual([false, true]); // the user's write, only
     expect(statusCalls()).toBe(1);
 
-    // Live now, for the reason spelled out in F37. Note what the count pins
-    // here: this case's invoke NEVER resolves get_capture_status, so a confirm
-    // loop that did start would park on its first poll - visible only as the
-    // extra call, not as a toast.
+    // As in F37, the call ending closes the user's mic after the grace. This
+    // case's invoke NEVER resolves get_capture_status, so the stop's confirm
+    // loop parks on its first poll - visible only as the extra call.
     await fireActed("meeting-ended");
-    await drainStopConfirm();
     expect(h.setEnableVAD).not.toHaveBeenCalled();
+    await waitGrace();
+    expect(h.setEnableVAD.mock.calls).toEqual([[false]]);
     expect(audio.stopCapture).not.toHaveBeenCalled();
-    expect(statusCalls()).toBe(1);
+    expect(statusCalls()).toBe(2);
   });
 
   it("F39: two detections in one tick claim once and commit once", async () => {
@@ -906,23 +946,22 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     expect(h.observedVAD).toEqual([false, true]); // exactly one commit
     expect(audio.startCapture).not.toHaveBeenCalled();
 
-    // Two ended events, because handleStop clears provenance first: a single one
-    // cannot tell a correct stop from one that would fire twice. The first is a
-    // real stop - it releases provenance, flushes and closes the mic - and the
-    // second finds provenance null and must be silent. ONE claim in, ONE close
-    // out, however many events land on either end.
+    // Two ended events: a single one cannot tell a correct stop from one that
+    // would fire twice. The second lands inside the first's grace and re-arms
+    // it rather than stacking a second timer. ONE claim in, ONE close out,
+    // however many events land on either end.
     await fireActed("meeting-ended");
     await fireActed("meeting-ended");
-    await drainStopConfirm();
+    await waitGrace();
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
     expect(h.observedVAD).toEqual([false, true, false]);
     // The meeting path never drives the transcribing pipeline, in either
     // direction: closing the mic IS the stop.
     expect(audio.stopCapture).not.toHaveBeenCalled();
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 
-  it("F40: releases ownership and flushes when the mic goes closed", async () => {
+  it("F40: releases ownership when the mic goes closed", async () => {
     seedStatus([false]);
     const audio = makeAudio();
     const h = mount(audio, { meetingAssistMode: true });
@@ -937,9 +976,9 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
 
     await h.setMicOpen(false); // the user closes it mid-call
 
-    // Nothing else saves the tail: the periodic autosave is length-driven, and
-    // setMeetingAssistMode's flush only fires when the PILL moves.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // The tail is saved by useCompletion's recording-stop edge, not by this
+    // hook, so a release flushes nothing from here.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
     // Releasing is not a mic write - the mic is already closed.
     expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
     expect(h.observedVAD).toEqual([false, true, false]);
@@ -953,7 +992,7 @@ describe("useMeetingAutoRecord - meeting mode start", () => {
     // will do; a fresh audio object is the cheapest.
     await h.setAudio(makeAudio());
 
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 });
 
@@ -978,6 +1017,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     const h = await startMeeting();
 
     await fireActed("meeting-ended");
+    await waitGrace();
 
     // Settle on the POLL, not on setEnableVAD(false). At the instant of that
     // write the first sleep has not elapsed, so a healthy stop and a stop that
@@ -990,11 +1030,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     expect(h.observedVAD).toEqual([false, true, false]);
     expect(mocks.toast.error).not.toHaveBeenCalled();
 
-    // Exactly ONE flush. handleStop releases provenance before it writes the
-    // mic, so when that write commits - during the loop's first sleep - the
-    // ownership effect finds provenance already null and does not flush again.
-    // Release it after the write instead and this reads 2.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // No flush from this hook: useCompletion's recording-stop edge owns it.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 
   it("F42: a stop that never takes toasts the MEETING copy, once", async () => {
@@ -1003,6 +1040,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     await startMeeting();
 
     await fireActed("meeting-ended");
+    await waitGrace();
 
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
     expect(mocks.toast.error).toHaveBeenCalledWith(MEETING_STOP_FAILED_MESSAGE);
@@ -1024,6 +1062,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     await startMeeting();
 
     await fireActed("meeting-ended");
+    await waitGrace();
 
     await waitFor(() => expect(statusCalls()).toBe(3));
     await drainStopConfirm();
@@ -1045,6 +1084,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     });
 
     await fireActed("meeting-ended");
+    await waitGrace();
 
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledTimes(1));
     expect(mocks.toast.error).toHaveBeenCalledWith(MEETING_STOP_FAILED_MESSAGE);
@@ -1062,10 +1102,13 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // This event fires on ANY stop, including the mid-call useMeetingAudio
     // deps re-run that a device or STT-language change triggers - so it
     // arrives with the session very much alive. Clearing meeting provenance
-    // here would leave the mic open with decideOnEnded answering "ignore" for
-    // the rest of the call.
+    // here would end the recording mid-call (card, quiet restart). The mic
+    // count alone no longer shows it - the call-end grace closes the mic with
+    // or without provenance - so the live recording is asserted directly.
     await fireActed("capture-stopped");
+    expect(getActiveAutoRecording()).not.toBeNull();
     await fireActed("meeting-ended");
+    await waitGrace();
 
     await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(2));
     expect(h.setEnableVAD).toHaveBeenLastCalledWith(false);
@@ -1073,7 +1116,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     await drainStopConfirm(); // returns with a poll still scheduled
   });
 
-  it("F46: a mic the USER closed is not stopped again, and is flushed once", async () => {
+  it("F46: a mic the USER closed is not stopped again", async () => {
     seedStatus([false]); // the probe, and nothing after it
     const audio = makeAudio();
     const h = await startMeeting(audio);
@@ -1081,18 +1124,16 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     await h.setMicOpen(false); // the user, bypassing the spy - see F35
 
     await fireActed("meeting-ended");
-    await drainStopConfirm();
+    await waitGrace();
 
-    // The release branch already disowned the session, so the stop is disarmed.
+    // The mic is closed, so meeting-ended arms no grace and nothing stops.
     expect(h.setEnableVAD).toHaveBeenCalledTimes(1); // the claim, and no more
     expect(statusCalls()).toBe(1); // no confirm loop ran at all
     expect(audio.stopCapture).not.toHaveBeenCalled();
     expect(mocks.toast.error).not.toHaveBeenCalled();
 
-    // And the tail was saved on the way out. A release that skipped the flush
-    // is silent everywhere else on this path - the pill-off branch has its own
-    // flush assertions and would keep passing.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // The tail is flushed by useCompletion's recording-stop edge, not here.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 
   it("F47: a watcher death mid-MEETING points at the pill, not at a manual stop", async () => {
@@ -1134,7 +1175,7 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
     expect(h.observedVAD).toEqual([false, true, false]);
     expect(mocks.toast.error).not.toHaveBeenCalled();
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 
   it("F55: turning the Meeting pill off mid-call runs the ordinary stop", async () => {
@@ -1142,8 +1183,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // (Audio.tsx:124), so the pill going off unmounts the GUEST half while the
     // mic stays open - and AutoSpeechVad, which branches on the same pill, then
     // starts auto-submitting the user's own speech to the AI. It is the same
-    // physical operation as meeting-ended, so it routes through the same
-    // handleStop rather than closing the mic inline.
+    // physical operation as a call ending, so it routes through handleStop's
+    // confirmed stop rather than closing the mic inline.
     seedStatus([false, false]); // the detect probe, then the first confirm poll
     const audio = makeAudio();
     const h = await startMeeting(audio);
@@ -1163,22 +1204,18 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // Closing the mic IS the stop; the transcribing pipeline is never driven.
     expect(audio.stopCapture).not.toHaveBeenCalled();
 
-    // ONE flush here, from handleStop. PRODUCTION FLUSHES TWICE on this path
-    // and that is accepted: setMeetingAssistMode's wrapper
-    // (useCompletion.ts:481-485) flushes on the true->false transition, and
-    // handleStop's flush then sees unsavedCount <= 0. The harness OWNS
-    // meetingAssistMode and never runs that wrapper, so this count is 1 here -
-    // it is NOT evidence that the wrapper's flush is dead code.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // No flush from the hook: handleStop closes the mic and useCompletion's
+    // recording-stop edge flushes on that close.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
 
-    // And the session really is over. handleStop released provenance, so the
-    // meeting-ended that ends the same call a moment later must be inert - a
-    // build that closed the mic inline without disowning the session flushes,
-    // writes the mic and polls all over again right here.
+    // And the session really is over. handleStop released provenance and
+    // closed the mic, so the meeting-ended that ends the same call a moment
+    // later must be inert, even after the grace: no mic write, no flush, no
+    // second confirm loop.
     await fireActed("meeting-ended");
-    await drainStopConfirm();
+    await waitGrace();
     expect(h.setEnableVAD).toHaveBeenCalledTimes(2);
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    expect(h.flushTranscript).not.toHaveBeenCalled();
     expect(statusCalls()).toBe(2);
   });
 
@@ -1237,8 +1274,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     // optimisation, not a correctness guard - correctness comes from that
     // provenance clear - so a green run here is not evidence the ref is
     // load-bearing. What this case does pin is the end-to-end property: one
-    // flush, one mic write and one confirm loop out of many commits.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // mic write and one confirm loop out of many commits.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
     expect(statusCalls()).toBe(3); // detect probe, parked probe, one poll
     expect(mocks.toast.error).not.toHaveBeenCalled();
@@ -1285,8 +1322,8 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     });
 
     // The release branch already disowned the session, so the queued stop found
-    // provenance null and decided "ignore" - no second flush, no mic write.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // provenance null and decided "ignore" - no flush, no mic write.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
     expect(h.setEnableVAD).toHaveBeenCalledTimes(1);
     expect(statusCalls()).toBe(2);
 
@@ -1302,10 +1339,10 @@ describe("useMeetingAutoRecord - meeting mode stop", () => {
     await drainStopConfirm();
 
     // Against a flag cleared only in `finally` this reads [[true], [true]]:
-    // the branch never fires, the mic is never closed and nothing is flushed.
+    // the branch never fires and the mic is never closed.
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [true], [false]]);
     expect(h.observedVAD).toEqual([false, true, false, true, false]);
-    expect(h.flushTranscript).toHaveBeenCalledTimes(2);
+    expect(h.flushTranscript).not.toHaveBeenCalled();
     expect(statusCalls()).toBe(4);
     expect(mocks.toast.error).not.toHaveBeenCalled();
   });
@@ -1872,7 +1909,7 @@ describe("useMeetingAutoRecord - unmount", () => {
     expect(statusCalls()).toBe(1);
   });
 
-  it("F53: a StrictMode mount still confirms its stop, and flushes once", async () => {
+  it("F53: a StrictMode mount still confirms its stop", async () => {
     // The CREATE body of the unmount effect. StrictMode runs
     // create -> destroy -> create on mount WITHOUT recreating refs, so a
     // cleanup-only effect latches mountedRef false for the component's whole
@@ -1886,6 +1923,7 @@ describe("useMeetingAutoRecord - unmount", () => {
     await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledTimes(1));
 
     await fireActed("meeting-ended");
+    await waitGrace();
 
     // The POLL is the assertion: a latched mountedRef leaves this at 1 forever.
     await waitFor(() => expect(statusCalls()).toBe(2));
@@ -1893,9 +1931,9 @@ describe("useMeetingAutoRecord - unmount", () => {
     expect(statusCalls()).toBe(2);
     expect(h.setEnableVAD.mock.calls).toEqual([[true], [false]]);
     expect(mocks.toast.error).not.toHaveBeenCalled();
-    // Once for the whole mount. The discarded first mount's cleanup must not
-    // fire one of its own on the way past.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // None from the hook: the discarded first mount's cleanup must not fire
+    // one on the way past either.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 
   it("F54: an unmount mid-confirm stands the loop down instead of crying failure", async () => {
@@ -1930,6 +1968,7 @@ describe("useMeetingAutoRecord - unmount", () => {
     });
 
     await fireActed("meeting-ended");
+    await waitGrace(); // the grace stop runs and parks on poll 1
     await waitFor(() => expect(statusCalls()).toBe(2)); // parked on poll 1
 
     h.unmount(); // its own act - see the describe comment
@@ -1947,10 +1986,10 @@ describe("useMeetingAutoRecord - unmount", () => {
     // fire the meeting stop-failure toast for a teardown that merely landed
     // inside the confirmation window.
     expect(mocks.toast.error).not.toHaveBeenCalled();
-    // handleStop released provenance before the mic write, so the cleanup had
-    // nothing to flush and nothing to enqueue - the loop is the only thing
-    // this case is measuring.
-    expect(h.flushTranscript).toHaveBeenCalledTimes(1);
+    // The grace stop released provenance and closed the mic before the loop,
+    // so the cleanup had nothing to flush and nothing to enqueue - the loop is
+    // the only thing this case is measuring.
+    expect(h.flushTranscript).not.toHaveBeenCalled();
   });
 });
 
@@ -2011,17 +2050,25 @@ describe("useMeetingAutoRecord - meeting cards", () => {
     vi.useFakeTimers();
     await fireActed("meeting-ended");
     expect(getActiveAutoRecording()).toBeNull();
+    // The removed delayed ended card showed in [stop + 30_000, stop + 35_000).
+    // The stop here is the fake-timer base (the store stamps Date.now()), so
+    // 31 s in sits inside that window; 60 s is past it.
     await act(async () => {
-      vi.advanceTimersByTime(ENDED_CARD_DELAY_MS);
+      vi.advanceTimersByTime(31_000);
     });
-    expect(getMeetingCard()?.kind).toBe("ended");
+    expect(getMeetingCard()).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(29_000);
+    });
+    expect(getMeetingCard()).toBeNull();
   });
 
   it("only meeting-ended is an auto stop: it restarts quietly, the card's Stop does not", async () => {
     const h = await startMeetingMode();
     await fireActed("meeting-ended");
-    await drainStopConfirm();
-    expect(getMeetingCard()).toBeNull();
+    await waitGrace();
+    // The grace stop's notice; the quiet restart below clears it.
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
 
     seedStatus([false, false]);
     await fireActed("meeting-detected", { process: "chrome.exe" });

@@ -29,6 +29,7 @@ import {
   HOLD_MS,
   IDLE_FLUSH_MS,
   UNDO_BLOCKED_MS,
+  isScrap,
   renderTranscript,
   sessionKeyFor,
   sliceTranscript,
@@ -36,6 +37,7 @@ import {
 import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
 import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
+import { takeRecordingStopCap, type RecordingStopCap } from "@/lib/recording-stop-cap";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
@@ -147,12 +149,29 @@ export interface UseMeetingLogOptions {
   notionSourceRef?: RefObject<NotionPickSource>;
   meetingTranscript: TranscriptEntry[];
   currentConversationId: string | null;
-  meetingAssistMode: boolean;
+  /**
+   * The mic is on (useCompletion's `recording`). Closing it is the meeting-end
+   * signal: the edge, the idle timer's arming and the unmount trigger all key
+   * on it.
+   */
+  recording: boolean;
+  /**
+   * The picker's display name for the current target (`targetRef` holds only
+   * ids for a contact). Snapshotted beside the targets, for the Undo strip.
+   */
+  contactName?: string | null;
   providerConfig?: ProviderConfig;
 }
 
 export interface UseMeetingLogReturn {
   holding: boolean;
+  /**
+   * The held row's contact, as the picker named it when the row's targets
+   * were snapshotted. NOT the live picker: a new-call reset clears or
+   * re-picks the targets while the row is still undoable. Null for a
+   * rehydrated hold, which has no snapshot.
+   */
+  heldContactName: string | null;
   onUndo: () => void;
   undoBlockedMessage: string | null;
 }
@@ -166,7 +185,7 @@ export interface UseMeetingLogReturn {
  * meeting would push nothing.
  *
  * The owner gate is the `main` window label ALONE, with no isWindows(): the
- * pill-off trigger works where the Rust watcher never runs. Contrast
+ * recording-stop trigger works where the Rust watcher never runs. Contrast
  * useMeetingAutoRecord.ts:122, which gates on both because it drives the
  * Windows-only watcher.
  */
@@ -177,7 +196,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     notionSourceRef,
     meetingTranscript,
     currentConversationId,
-    meetingAssistMode,
+    recording,
   } = options;
 
   // Synchronous and stable. getCurrentWindow().label is read synchronously in
@@ -186,6 +205,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const isOwner = useMemo(() => getCurrentWindow().label === "main", []);
 
   const [holding, setHolding] = useState(false);
+  const [heldContactName, setHeldContactName] = useState<string | null>(null);
   const [undoBlockedMessage, setUndoBlockedMessage] = useState<string | null>(null);
 
   /**
@@ -202,7 +222,11 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const transcriptRef = useRef(meetingTranscript);
   const conversationIdRef = useRef(currentConversationId);
   const providerConfigRef = useRef(options.providerConfig);
+  const recordingRef = useRef(recording);
+  const contactNameRef = useRef(options.contactName ?? null);
   useLayoutEffect(() => {
+    recordingRef.current = recording;
+    contactNameRef.current = options.contactName ?? null;
     transcriptRef.current = meetingTranscript;
     conversationIdRef.current = currentConversationId;
     providerConfigRef.current = options.providerConfig;
@@ -248,6 +272,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    */
   const checkingRef = useRef(false);
   const pendingRef = useRef(false);
+  // The stop cap a dropped trigger hands to its re-run (see `trigger`).
+  const pendingCapRef = useRef<RecordingStopCap | null>(null);
   const heldRowIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -309,7 +335,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * the sweep runs once per process - in practice the next app start.
    */
   const startHold = useCallback(
-    (rowId: string, remainingMs = HOLD_MS) => {
+    (rowId: string, remainingMs = HOLD_MS, contactName: string | null = null) => {
       const displaced = heldRowIdRef.current;
       if (timerRef.current) {
         clearTimeout(timerRef.current);
@@ -319,6 +345,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
 
       heldRowIdRef.current = rowId;
       setHolding(true);
+      setHeldContactName(contactName);
       if (blockedTimerRef.current) {
         clearTimeout(blockedTimerRef.current);
         blockedTimerRef.current = null;
@@ -342,8 +369,18 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   const trigger = useCallback(async () => {
     // The owner gate stays FIRST: a non-owner must never set pendingRef.
     if (!isOwner) return;
+    // Every trigger still clears the shared cap, including one the latch
+    // drops, so a stale cap never reaches a later, unrelated row. While a
+    // re-run is scheduled, every drop hands the cap on through
+    // `pendingCapRef`, whichever branch dropped it: a later drop outside the
+    // check has taken the one an earlier drop stashed. A drop with no re-run
+    // scheduled discards it (that needs an earlier trigger stuck outside the
+    // Notion check across a whole recording plus the grace).
+    const cap = takeRecordingStopCap() ?? pendingCapRef.current;
+    pendingCapRef.current = null;
     if (inFlightRef.current) {
       if (checkingRef.current) pendingRef.current = true;
+      if (pendingRef.current && cap !== null) pendingCapRef.current = cap;
       return;
     }
     inFlightRef.current = true;
@@ -351,6 +388,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // the transcript or re-picking a contact mid-push splices two meetings.
     const entries = transcriptRef.current;
     const targets = targetRef.current;
+    // The Undo strip's label, beside the targets it names: by the time the
+    // hold starts, a new-call reset may have cleared them.
+    const contactName = contactNameRef.current;
     // Same reason as `targets`: the pick and who set it are per-meeting and
     // must not change under an await (check 2 included).
     const notionPicked = notionPickedRef?.current ?? false;
@@ -369,7 +409,11 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // transcript as a chatter note on whatever contact is selected for the
     // NEXT one. `skipUnwritten` closes that gap on every exit that reaches
     // it - see meeting-log-watermark.storage.ts.
-    const consumedTo = entries.length ? Math.max(...entries.map((e) => e.timestamp)) : 0;
+    // `let`: widened below once the recovery union is known, and read by
+    // `skipUnwritten` at call time. Every exit before that keeps the
+    // snapshot-only end, as before. A reduce, not a spread: a long meeting's
+    // line count can exceed the engine's argument limit (RangeError).
+    let consumedTo = entries.reduce((max, e) => Math.max(max, e.timestamp), 0);
     const skipUnwritten = () => {
       if (consumedTo > 0) setSkipWatermark(consumedTo);
     };
@@ -447,8 +491,36 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         }
       }
 
+      // The recovered entries were read too, so they are consumed whether or
+      // not they are written (a scrap, or the room talk a cap drops below).
+      for (const e of all) consumedTo = Math.max(consumedTo, e.timestamp);
+
       const slice = sliceTranscript(all, watermark);
       if (!slice) return; // a genuinely silent meeting is not a meeting
+
+      // A capped stop writes only what belongs to the call: up to its end,
+      // or (a widening cap) the newest system line if the call outran the
+      // signal. The new-call stop does not widen: its newest system lines are
+      // the next call's. The lines after the cap are consumed (consumedTo),
+      // never put in the customer's note.
+      let written: typeof slice | null = slice;
+      if (cap !== null) {
+        let end = cap.endedAt;
+        if (cap.widen) {
+          for (const e of slice.entries) {
+            if (e.audioSource === "system" && e.timestamp > end) end = e.timestamp;
+          }
+        }
+        written = sliceTranscript(
+          slice.entries.filter((e) => e.timestamp <= end),
+          watermark
+        );
+      }
+      // A scrap is too short to be a meeting: no row, no toast, no Outlook read.
+      if (!written || isScrap(written)) {
+        skipUnwritten();
+        return;
+      }
 
       // The window rule and check 2 (spec 8.3): an AUTO tick is held only for a
       // row inside the saved Google event with no Outlook meeting over it. Any
@@ -458,7 +530,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         checkingRef.current = true;
         try {
           allowed = await autoNotionAllowed({
-            span: { start: slice.startAt, end: slice.endAt },
+            span: { start: written.startAt, end: written.endAt },
             snapshot: recoveryId ? await getCalendarSnapshot(recoveryId) : null,
             outlookAbsent: (await loadGraphConfigState()).state === "absent",
             readOutlook: fetchMeetingsBetween,
@@ -496,20 +568,22 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
         // session keys, so ON CONFLICT(session_key) DO NOTHING never catches
         // the duplicate and two `held` rows get written for it. Keying both
         // on recoveryId makes them collide as intended. This cannot falsely
-        // collide two DIFFERENT meetings: slice.startAt is always strictly
+        // collide two DIFFERENT meetings: written.startAt is always strictly
         // above the watermark, and every already-stored row's
         // transcript_start_at <= transcript_end_at <= that same watermark.
-        sessionKey: sessionKeyFor(recoveryId, slice.startAt),
+        sessionKey: sessionKeyFor(recoveryId, written.startAt),
         // Stored as recoveryId too - the fallback path used to persist NULL
         // here even when it had just recovered the conversation via
         // getActiveConversationId(), losing the link slice 3 needs.
         conversationId: recoveryId,
         instance,
         targets: rowTargets,
-        transcript: renderTranscript(slice.entries),
-        transcriptStartAt: slice.startAt,
-        transcriptEndAt: slice.endAt,
-        meetingStartedAt: slice.startAt,
+        transcript: renderTranscript(written.entries),
+        transcriptStartAt: written.startAt,
+        // The consumed end, so a capped row's span covers the room talk too
+        // (equal to slice.endAt when uncapped).
+        transcriptEndAt: consumedTo,
+        meetingStartedAt: written.startAt,
         status: decision.odooStatus,
         notionStatus: decision.notionStatus,
         createdAt: Date.now(),
@@ -527,7 +601,9 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       // Task 10's startHold reads the previous value to decide whether a
       // displaced row needs pushing, and a pre-assignment here would make
       // `displaced === rowId` on every call, silently disabling that branch.
-      if (decision.odooStatus === "held" || decision.notionStatus === "held") startHold(rowId);
+      if (decision.odooStatus === "held" || decision.notionStatus === "held") {
+        startHold(rowId, HOLD_MS, contactName);
+      }
     } catch (err) {
       // SURFACED, not just logged. Reaching here means no row was written, so
       // to the user this is indistinguishable from "the meeting was silent" -
@@ -566,7 +642,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // listen() returns a PROMISE of the unlisten fn. Under StrictMode the first
     // mount's listen() resolves AFTER the first cleanup ran, so without the
     // flag the second handler leaks permanently. See useOdooTarget.ts:346-364.
-    void listen("meeting-ended", () => void triggerRef.current()).then((fn) => {
+    // Only with the mic closed: while recording, the call is still on (a
+    // remount leaves the mic closed, and the trigger's DB union still writes
+    // the row).
+    void listen("meeting-ended", () => {
+      if (!recordingRef.current) void triggerRef.current();
+    }).then((fn) => {
       if (cancelled) fn();
       else un = fn;
     });
@@ -577,7 +658,7 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   }, [isOwner]);
 
   /**
-   * The pill-off edge. COMPARE BEFORE ASSIGN, in ONE layout effect.
+   * The recording-stop edge. COMPARE BEFORE ASSIGN, in ONE layout effect.
    *
    * Every other ref mirror in this repo is a write-only useLayoutEffect, so
    * this is spelled out deliberately: mirroring here and comparing in a passive
@@ -586,12 +667,12 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * silently remove the only trigger that works where the Rust watcher does not
    * run, i.e. all logging on macOS and Linux.
    */
-  const prevPillRef = useRef(meetingAssistMode);
+  const prevRecordingRef = useRef(recording);
   useLayoutEffect(() => {
-    const prev = prevPillRef.current;
-    prevPillRef.current = meetingAssistMode;
-    if (prev && !meetingAssistMode) void triggerRef.current();
-  }, [meetingAssistMode]);
+    const prev = prevRecordingRef.current;
+    prevRecordingRef.current = recording;
+    if (prev && !recording) void triggerRef.current();
+  }, [recording]);
 
   /**
    * When the newest thing anyone said arrived. 0 means nothing yet.
@@ -625,15 +706,15 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    * cannot re-arm itself: one silence produces one trigger, not one every five
    * minutes for the rest of the session.
    *
-   * `newestEntryAt === 0` is the empty transcript. The pill is on by default
+   * `newestEntryAt === 0` is the empty transcript. The mic is closed by default
    * with no meeting under way, and arming there would fire a pointless trigger
    * every five minutes the app is open.
    */
   useEffect(() => {
-    if (!isOwner || !meetingAssistMode || newestEntryAt === 0) return;
+    if (!isOwner || recording || newestEntryAt === 0) return;
     const timer = setTimeout(() => void triggerRef.current(), IDLE_FLUSH_MS);
     return () => clearTimeout(timer);
-  }, [isOwner, meetingAssistMode, newestEntryAt]);
+  }, [isOwner, recording, newestEntryAt]);
 
   // App start - and ONCE PER PROCESS, not once per mount.
   //
@@ -761,6 +842,10 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
   // Closes over the stable ref OBJECTS, not their values, so teardown reads
   // whatever the latest startHold wrote.
   useEffect(() => () => {
+    // Unmount closes the mic, so with it open this is a recording stop: no
+    // edge or meeting-ended follows inside the grace. A held row's push runs
+    // detached, so it survives the teardown.
+    if (recordingRef.current) void triggerRef.current();
     if (timerRef.current) clearTimeout(timerRef.current);
     if (blockedTimerRef.current) clearTimeout(blockedTimerRef.current);
   }, []);
@@ -822,5 +907,5 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     })();
   }, [showUndoBlocked]);
 
-  return { holding, onUndo, undoBlockedMessage };
+  return { holding, heldContactName, onUndo, undoBlockedMessage };
 }

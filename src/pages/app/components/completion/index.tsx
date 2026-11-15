@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   useCalendarProposal,
   useCalendarAutoSelect,
@@ -20,7 +21,6 @@ import { Screenshot } from "./Screenshot";
 import { Files } from "./Files";
 import { Audio } from "./Audio";
 import { Input } from "./Input";
-import { MeetingAssistToggle } from "./MeetingAssistToggle";
 import { ContactPicker } from "./ContactPicker";
 import { MeetingLogStrip } from "./MeetingLogStrip";
 
@@ -42,6 +42,8 @@ export const Completion = ({
     setEnableVAD: completion.setEnableVAD,
     meetingAssistMode: completion.meetingAssistMode,
     flushUnsavedMeetingTranscript: completion.flushUnsavedMeetingTranscript,
+    meetingTranscript: completion.meetingTranscript,
+    startNewConversation: completion.startNewConversation,
   });
 
   // Mounted HERE, beside useMeetingAutoRecord, because slice 2's useMeetingLog
@@ -62,7 +64,9 @@ export const Completion = ({
   const toggleNotionPick = notionPick.toggle;
   const onToggleNotion = useCallback(() => toggleNotionPick(), [toggleNotionPick]);
   const odoo = useOdooTarget({
-    meetingAssistMode: completion.meetingAssistMode,
+    // Meeting mode is always on now, so the app-start sync's "skip while in a
+    // meeting" rule keys on an actual recording, not the constant.
+    meetingAssistMode: completion.recording,
     isPickerOpen: completion.isContactPickerOpen,
     setIsPickerOpen: completion.setIsContactPickerOpen,
     // Task 12: permanent wiring, not a bridge to remove later - useCompletion
@@ -184,7 +188,9 @@ export const Completion = ({
     notionSourceRef: notionPick.sourceRef,
     meetingTranscript: completion.meetingTranscript,
     currentConversationId: completion.currentConversationId,
-    meetingAssistMode: completion.meetingAssistMode,
+    recording: completion.recording,
+    // Snapshotted with the targets, so the strip names the held row's contact.
+    contactName: odoo.pickerProps.contactName,
     providerConfig,
   });
 
@@ -233,12 +239,11 @@ export const Completion = ({
       // that mirrors the transcribing pipeline's own capture (the headphones
       // button), a different subsystem, and its `error` would mask a healthy
       // meeting. Same pair useMeetingAudio is gated on (Audio.tsx:124).
-      recording: completion.meetingAssistMode && completion.enableVAD,
+      recording: completion.recording,
     });
   }, [
     completion.meetingTranscript,
-    completion.meetingAssistMode,
-    completion.enableVAD,
+    completion.recording,
     systemAudio.error,
     systemAudio.capturing,
   ]);
@@ -252,9 +257,7 @@ export const Completion = ({
   // boolean. Opening the mic without a provider that can transcribe turns the
   // pill red and collects nothing.
   usePillRecordAction({
-    meetingAssistMode: completion.meetingAssistMode,
-    setMeetingAssistMode: completion.setMeetingAssistMode,
-    enableVAD: completion.enableVAD,
+    recording: completion.recording,
     setEnableVAD: completion.setEnableVAD,
     canRecord: Boolean(meetwingsApiEnabled || selectedSttProvider.provider),
   });
@@ -270,21 +273,52 @@ export const Completion = ({
     }
   };
 
+  // The Ask box is an icon until clicked or the focus shortcut fires. While
+  // expanded it takes the room of the picker, screenshot and files buttons.
+  const [askExpanded, setAskExpanded] = useState(false);
+  const { setIsContactPickerOpen, setIsFilesPopoverOpen } = completion;
+  const expandAsk = useCallback(() => {
+    // Their popovers are controlled flags; unmounting the triggers would
+    // strand them open (same reasoning as the holding effect above).
+    setIsContactPickerOpen(false);
+    setIsFilesPopoverOpen(false);
+    setAskExpanded(true);
+  }, [setIsContactPickerOpen, setIsFilesPopoverOpen]);
+  const collapseAsk = useCallback(() => setAskExpanded(false), []);
+  const expandAskRef = useRef(expandAsk);
+  useEffect(() => {
+    expandAskRef.current = expandAsk;
+  }, [expandAsk]);
+
+  // Cancelled flag: listen() is async, so under StrictMode the first mount's
+  // promise resolves after cleanup and would leak a second handler.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen("focus-text-input", () => expandAskRef.current())
+      .then((un) => {
+        if (cancelled) un();
+        else unlisten = un;
+      })
+      .catch((error) => {
+        console.error("Failed to subscribe to focus-text-input:", error);
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   return (
     <>
-      <MeetingAssistToggle
-        meetingAssistMode={completion.meetingAssistMode}
-        setMeetingAssistMode={completion.setMeetingAssistMode}
-        meetingTranscript={completion.meetingTranscript}
-      />
       {meetingLog.holding || meetingLog.undoBlockedMessage ? (
         <MeetingLogStrip
           holding={meetingLog.holding}
-          contactName={odoo.pickerProps.contactName}
+          contactName={meetingLog.heldContactName}
           onUndo={meetingLog.onUndo}
           undoBlockedMessage={meetingLog.undoBlockedMessage}
         />
-      ) : hidePicker ? null : (
+      ) : hidePicker || askExpanded ? null : (
         <ContactPicker
           {...odoo.pickerProps}
           calendar={calendarProps}
@@ -297,12 +331,15 @@ export const Completion = ({
       <Input
         {...completion}
         isHidden={isHidden}
+        askExpanded={askExpanded}
+        onAskExpand={expandAsk}
+        onAskCollapse={collapseAsk}
         quickActions={quickActions}
         onQuickActionClick={handleQuickAction}
         cloudMode={useMeetwingsAPI}
       />
-      <Screenshot {...completion} />
-      <Files {...completion} />
+      {!askExpanded && <Screenshot {...completion} />}
+      {!askExpanded && <Files {...completion} />}
     </>
   );
 };

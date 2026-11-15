@@ -26,7 +26,11 @@ vi.mock("@/lib/storage/notion-config.storage", () => notion);
 // implementation that never consults it.
 const watermarkStorage = vi.hoisted(() => {
   const state = { skip: 0 };
-  return { state, getSkipWatermark: vi.fn(() => state.skip) };
+  return {
+    state,
+    getSkipWatermark: vi.fn(() => state.skip),
+    setSkipWatermark: vi.fn(),
+  };
 });
 vi.mock("@/lib/storage/meeting-log-watermark.storage", () => watermarkStorage);
 
@@ -69,9 +73,12 @@ describe("runMeetingRecovery", () => {
   it("enqueues an unassigned row for a meeting no trigger ever wrote", async () => {
     // THE bug this exists for: Auto-record off, pill left on, app closed. The
     // transcript is in `messages` and nothing in the queue points at it.
+    // Three lines spanning a full minute, so it clears both scrap thresholds
+    // and recovery still wants a row for it.
     action.readUnloggedMessages.mockResolvedValue([
-      said("conv-1", NOW - 60_000, "hello there"),
-      said("conv-1", NOW - 50_000, "goodbye"),
+      said("conv-1", NOW - 120_000, "hello there"),
+      said("conv-1", NOW - 90_000, "in between"),
+      said("conv-1", NOW - 60_000, "goodbye"),
     ]);
 
     expect(await runMeetingRecovery()).toBe(1);
@@ -80,12 +87,12 @@ describe("runMeetingRecovery", () => {
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
       conversationId: "conv-1",
       instance: INSTANCE,
-      sessionKey: `conv-1:${NOW - 60_000}`,
+      sessionKey: `conv-1:${NOW - 120_000}`,
       status: "unassigned",
       targets: [],
-      transcriptStartAt: NOW - 60_000,
-      transcriptEndAt: NOW - 50_000,
-      meetingStartedAt: NOW - 60_000,
+      transcriptStartAt: NOW - 120_000,
+      transcriptEndAt: NOW - 60_000,
+      meetingStartedAt: NOW - 120_000,
     });
     expect(action.insertQueueRow.mock.calls[0][0].transcript).toContain("hello there");
   });
@@ -94,7 +101,11 @@ describe("runMeetingRecovery", () => {
     // A recovered meeting has no contact anywhere - the pick that existed when
     // it was said is long gone. Guessing one posts a stranger's transcript into
     // a customer's chatter. `unassigned` puts the choice back on the user.
-    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 120_000),
+      said("conv-1", NOW - 90_000),
+      said("conv-1", NOW - 60_000),
+    ]);
     await runMeetingRecovery();
     const row = action.insertQueueRow.mock.calls[0][0];
     expect(row.targets).toEqual([]);
@@ -102,9 +113,16 @@ describe("runMeetingRecovery", () => {
   });
 
   it("splits one conversation's two meetings into two rows", async () => {
+    // Both "meetings" are three lines spanning a full minute, so neither is a
+    // scrap - the split must be doing the splitting, not the scrap rule
+    // swallowing one of them.
     action.readUnloggedMessages.mockResolvedValue([
-      said("conv-1", NOW - IDLE_FLUSH_MS - 20_000, "meeting one"),
-      said("conv-1", NOW - 10_000, "meeting two"),
+      said("conv-1", NOW - IDLE_FLUSH_MS - 200_000, "meeting one"),
+      said("conv-1", NOW - IDLE_FLUSH_MS - 170_000),
+      said("conv-1", NOW - IDLE_FLUSH_MS - 140_000),
+      said("conv-1", NOW - 130_000, "meeting two"),
+      said("conv-1", NOW - 100_000),
+      said("conv-1", NOW - 70_000),
     ]);
 
     expect(await runMeetingRecovery()).toBe(2);
@@ -117,8 +135,12 @@ describe("runMeetingRecovery", () => {
 
   it("keeps two conversations apart even when their entries interleave in time", async () => {
     action.readUnloggedMessages.mockResolvedValue([
-      said("conv-1", NOW - 60_000, "theirs"),
-      said("conv-2", NOW - 55_000, "someone else's"),
+      said("conv-1", NOW - 120_000, "theirs"),
+      said("conv-2", NOW - 100_000, "someone else's"),
+      said("conv-1", NOW - 90_000),
+      said("conv-2", NOW - 75_000),
+      said("conv-1", NOW - 60_000),
+      said("conv-2", NOW - 30_000),
     ]);
 
     expect(await runMeetingRecovery()).toBe(2);
@@ -177,8 +199,9 @@ describe("runMeetingRecovery", () => {
     // case is about, and would pass just as happily against the very code it is
     // meant to catch.
     const spoken = [
-      said("conv-1", NOW - 60_000, "before odoo existed"),
-      said("conv-1", NOW - 50_000, "still before"),
+      said("conv-1", NOW - 120_000, "before odoo existed"),
+      said("conv-1", NOW - 90_000, "still before"),
+      said("conv-1", NOW - 60_000),
     ];
     action.readUnloggedMessages.mockImplementation(async (floor: number) =>
       spoken.filter((e) => e.timestamp > floor)
@@ -218,14 +241,22 @@ describe("runMeetingRecovery", () => {
     // process, and finishing Odoo setup mid-session is EXACTLY when a user has
     // days of unlogged meetings waiting to be found.
     config.loadOdooConfigState.mockResolvedValueOnce({ state: "absent", config: null });
-    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 120_000),
+      said("conv-1", NOW - 90_000),
+      said("conv-1", NOW - 60_000),
+    ]);
 
     expect(await runMeetingRecovery()).toBe(0);
     expect(await runMeetingRecovery()).toBe(1);
   });
 
   it("runs once per process, not once per mount", async () => {
-    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 120_000),
+      said("conv-1", NOW - 90_000),
+      said("conv-1", NOW - 60_000),
+    ]);
     await runMeetingRecovery();
     await runMeetingRecovery();
     expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
@@ -234,17 +265,25 @@ describe("runMeetingRecovery", () => {
   it("counts only rows actually created, so a duplicate session key is not claimed", async () => {
     // insertQueueRow returns false on ON CONFLICT(session_key) DO NOTHING -
     // the row was already there, which is a normal outcome, not a recovery.
-    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 120_000),
+      said("conv-1", NOW - 90_000),
+      said("conv-1", NOW - 60_000),
+    ]);
     action.insertQueueRow.mockResolvedValue(false);
     expect(await runMeetingRecovery()).toBe(0);
   });
 
   it("keeps going when one segment's insert throws", async () => {
     // Abandoning the rest would lose meetings for a transient SQLITE_BUSY on
-    // the first of them.
+    // the first of them. Two non-scrap meetings - one per conversation.
     action.readUnloggedMessages.mockResolvedValue([
-      said("conv-1", NOW - 60_000, "first"),
-      said("conv-2", NOW - 50_000, "second"),
+      said("conv-1", NOW - 120_000, "first"),
+      said("conv-2", NOW - 115_000, "second"),
+      said("conv-1", NOW - 90_000),
+      said("conv-2", NOW - 85_000),
+      said("conv-1", NOW - 60_000),
+      said("conv-2", NOW - 55_000),
     ]);
     action.insertQueueRow.mockRejectedValueOnce(new Error("db busy"));
 
@@ -263,9 +302,15 @@ describe("runMeetingRecovery", () => {
     //
     // Two bounds, because that is what the SQL now takes and a mock that
     // ignored the ceiling could not fail for the reason this case is about.
+    // Both runs are non-scrap (three lines over a minute), so it is the
+    // ceiling and only the ceiling that keeps conv-live unqueued.
     const spoken = [
-      said("conv-old", RECOVERY_STARTED_AT - 60_000, "a prior run's meeting"),
+      said("conv-old", RECOVERY_STARTED_AT - 120_000, "a prior run's meeting"),
+      said("conv-old", RECOVERY_STARTED_AT - 90_000),
+      said("conv-old", RECOVERY_STARTED_AT - 60_000),
       said("conv-live", RECOVERY_STARTED_AT + 1_000, "being said right now"),
+      said("conv-live", RECOVERY_STARTED_AT + 31_000),
+      said("conv-live", RECOVERY_STARTED_AT + 61_000),
     ];
     action.readUnloggedMessages.mockImplementation(async (floor: number, ceiling: number) =>
       spoken.filter((e) => e.timestamp > floor && e.timestamp < ceiling)
@@ -286,11 +331,76 @@ describe("runMeetingRecovery", () => {
   });
 });
 
+describe("runMeetingRecovery and the scrap rule", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    resetMeetingRecoveryGuard();
+    watermarkStorage.state.skip = 0;
+    action.getTranscriptWatermark.mockResolvedValue(0);
+    action.readUnloggedMessages.mockResolvedValue([]);
+    action.insertQueueRow.mockResolvedValue(true);
+    config.loadOdooConfigState.mockResolvedValue({ state: "complete", config: CONFIG });
+    notion.isNotionConfigured.mockResolvedValue(false);
+    notion.isNotionAutoSendEnabled.mockReturnValue(true);
+    notion.getNotionSetupAt.mockReturnValue(null);
+  });
+
+  it("recovery merges a short tail into its call", async () => {
+    // A crash between a meeting and its trailing fragment: the body is a real
+    // 10-minute 20-line call, then a 2-line 30-second tail six minutes later
+    // (inside the segmenter's own cut, so it arrives as a separate scrap).
+    // Alone the tail is under BOTH thresholds - it must
+    // become neither its own row nor a dropped one when a call sits behind
+    // it to be folded into.
+    const START = NOW - 4 * 60 * 60_000;
+    const main = Array.from({ length: 20 }, (_, i) =>
+      said("conv-1", START + Math.round((i * 600_000) / 19))
+    );
+    const tail = [
+      said("conv-1", START + 960_000, "tail one"),
+      said("conv-1", START + 990_000, "tail two"),
+    ];
+    action.readUnloggedMessages.mockResolvedValue([...main, ...tail]);
+
+    expect(await runMeetingRecovery()).toBe(1);
+
+    expect(action.insertQueueRow).toHaveBeenCalledTimes(1);
+    const row = action.insertQueueRow.mock.calls[0][0];
+    expect(row.transcript).toContain("tail one");
+    expect(row.transcript).toContain("tail two");
+    expect(row.transcriptEndAt).toBe(START + 990_000); // the tail's last line
+    expect(row.transcriptStartAt).toBe(START); // the call's first line
+  });
+
+  it("recovery skips a lone scrap", async () => {
+    // Two lines with nothing to merge into: a row for that is a chatter note
+    // of a ten-second stutter. It is written nowhere and consumed nowhere -
+    // not even the skip watermark moves, because recovery's rows have no
+    // targets and the entries stay above every watermark for a later run.
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 60_000),
+      said("conv-1", NOW - 50_000),
+    ]);
+
+    expect(await runMeetingRecovery()).toBe(0);
+
+    expect(action.insertQueueRow).not.toHaveBeenCalled();
+    expect(watermarkStorage.setSkipWatermark).not.toHaveBeenCalled();
+  });
+});
+
 describe("runMeetingRecovery with Notion", () => {
   beforeEach(() => {
     notion.isNotionConfigured.mockResolvedValue(true);
     notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
-    action.readUnloggedMessages.mockResolvedValue([said("conv-1", NOW - 60_000)]);
+    // Three lines over a minute: not a scrap, so the assertions below read a
+    // real row and not a fragment the scrap rule would drop.
+    action.readUnloggedMessages.mockResolvedValue([
+      said("conv-1", NOW - 120_000),
+      said("conv-1", NOW - 90_000),
+      said("conv-1", NOW - 60_000),
+    ]);
   });
 
   /** A reader that honours the floor, like the real query. */
@@ -369,7 +479,11 @@ describe("runMeetingRecovery with Notion", () => {
   it("does not backfill a Notion-only meeting that predates the Notion setup", async () => {
     config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
     notion.getNotionSetupAt.mockReturnValue(NOW);
-    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+    storeHolds(
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000),
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000 + 30_000),
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000 + 60_000)
+    );
 
     expect(await runMeetingRecovery()).toBe(0);
     expect(action.insertQueueRow).not.toHaveBeenCalled();
@@ -378,7 +492,11 @@ describe("runMeetingRecovery with Notion", () => {
   it("rescues a crash-lost meeting that happened after the Notion setup", async () => {
     config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
     notion.getNotionSetupAt.mockReturnValue(NOW - 60 * 60_000);
-    storeHolds(said("conv-1", NOW - 30 * 60_000));
+    storeHolds(
+      said("conv-1", NOW - 30 * 60_000),
+      said("conv-1", NOW - 30 * 60_000 + 30_000),
+      said("conv-1", NOW - 30 * 60_000 + 60_000)
+    );
 
     expect(await runMeetingRecovery()).toBe(1);
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({
@@ -390,14 +508,22 @@ describe("runMeetingRecovery with Notion", () => {
   it("rescues nothing when no setup time is stored", async () => {
     config.loadOdooConfigState.mockResolvedValue({ state: "absent", config: null });
     notion.getNotionSetupAt.mockReturnValue(null);
-    storeHolds(said("conv-1", NOW - 30 * 60_000));
+    storeHolds(
+      said("conv-1", NOW - 30 * 60_000),
+      said("conv-1", NOW - 30 * 60_000 + 30_000),
+      said("conv-1", NOW - 30 * 60_000 + 60_000)
+    );
 
     expect(await runMeetingRecovery()).toBe(0);
   });
 
   it("keeps today's floor for an Odoo-complete row with no Notion lane", async () => {
     notion.getNotionSetupAt.mockReturnValue(NOW);
-    storeHolds(said("conv-1", NOW - 3 * 24 * 60 * 60_000));
+    storeHolds(
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000),
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000 + 30_000),
+      said("conv-1", NOW - 3 * 24 * 60 * 60_000 + 60_000)
+    );
 
     expect(await runMeetingRecovery()).toBe(1);
     expect(action.insertQueueRow.mock.calls[0][0]).toMatchObject({

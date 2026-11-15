@@ -16,14 +16,29 @@ import {
   decideOnDetected,
   decideOnEnded,
   decideOnWatcherStopped,
+  isSameCall,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
 import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
 import {
   autoRecordingStarted,
   autoRecordingStopped,
+  showStopNotice,
+  type StopNoticeReason,
 } from "@/lib/meeting-cards.store";
 import {
+  peekRecordingStopCap,
+  setRecordingStopCap,
+  type RecordingStopCap,
+} from "@/lib/recording-stop-cap";
+import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
+import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
+import type { CalendarEvent } from "@/types";
+import type { TranscriptEntry } from "@/types/completion";
+import {
+  CALL_END_GRACE_MS,
+  SAME_CALL_READ_TIMEOUT_MS,
+  SILENCE_STOP_MS,
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
   STORAGE_KEYS,
@@ -61,7 +76,7 @@ export const STOP_FAILED_MESSAGE =
 export const MEETING_STOP_FAILED_MESSAGE =
   "Recording may still be running — restart Meetwings if audio keeps being captured";
 export const MEETING_WATCHER_STOPPED_MESSAGE =
-  "Meeting detection stopped — still recording this call. Turn the Meeting pill off to end it.";
+  "Meeting detection stopped — still recording this call. Press the record button to end it.";
 export const WATCHER_STOPPED_MESSAGE =
   "Meeting detection stopped — still recording. Stop manually when the call ends.";
 
@@ -80,6 +95,28 @@ export type MeetingAutoRecordOptions = {
   setEnableVAD: Dispatch<SetStateAction<boolean>>;
   meetingAssistMode: boolean;
   flushUnsavedMeetingTranscript: () => Promise<void>;
+  /**
+   * Session-wide transcript. Read for its LENGTH (silence timer) and its count
+   * of system-audio lines (call-end grace restart); never for content.
+   */
+  meetingTranscript: TranscriptEntry[];
+  /**
+   * Clears the conversation (and its Odoo targets). Called when a detection
+   * during the grace turns out to be a NEW call. Its identity changes with every
+   * transcript line, so it is mirrored into a ref, never listed in effect deps.
+   */
+  startNewConversation: () => Promise<void>;
+};
+
+/**
+ * A running call-end grace. Mutated in place by a re-arm, never replaced, so a
+ * holder can compare it by identity across a restart.
+ */
+type Grace = {
+  endedAt: number;
+  endedProcess: string | undefined;
+  gen: number;
+  timer: ReturnType<typeof setTimeout> | null;
 };
 
 /**
@@ -122,11 +159,14 @@ export const useMeetingAutoRecord = ({
   setEnableVAD,
   meetingAssistMode,
   flushUnsavedMeetingTranscript,
+  meetingTranscript,
+  startNewConversation,
 }: MeetingAutoRecordOptions) => {
-  const isOwner = useMemo(
-    () => getCurrentWindow().label === "main" && isWindows(),
-    []
-  );
+  // Two gates. The silence timer and the shared stop op need only the main
+  // window (they act on this window's own mic, whatever the platform); the
+  // detection listeners and grace logic also need Windows.
+  const isMain = useMemo(() => getCurrentWindow().label === "main", []);
+  const isOwner = isMain && isWindows();
 
   // Every mutable value a listener reads comes from a ref. The listeners are
   // registered once per window lifetime, and startCapture/stopCapture are
@@ -161,32 +201,31 @@ export const useMeetingAutoRecord = ({
   const meetingAssistModeRef = useRef(meetingAssistMode);
   const setEnableVADRef = useRef(setEnableVAD);
   const flushRef = useRef(flushUnsavedMeetingTranscript);
+  const startNewConversationRef = useRef(startNewConversation);
   useLayoutEffect(() => {
     systemAudioRef.current = systemAudio;
     enableVADRef.current = enableVAD;
     meetingAssistModeRef.current = meetingAssistMode;
     setEnableVADRef.current = setEnableVAD;
     flushRef.current = flushUnsavedMeetingTranscript;
+    startNewConversationRef.current = startNewConversation;
 
     if (startedModeRef.current !== "meeting") return;
     if (!enableVAD) {
       // Someone closed the mic - the user, or us. Either way we no longer own
-      // it. Flush before releasing: this is the same physical operation as the
-      // pill-off path, and nothing else will save the tail - the periodic
-      // autosave is length-driven, and setMeetingAssistMode's flush only fires
-      // when the PILL moves, which here it did not.
+      // it. No flush here: the recording-stop edge in useCompletion owns the
+      // flush of the unsaved tail for every close of the mic.
       //
       // handleStop releases provenance BEFORE it writes the mic, so this branch
       // never double-fires against it; it is reached only for a close this hook
       // did not perform.
-      void flushRef.current?.().catch(reportFlushFailure);
       startedModeRef.current = null;
       autoRecordingStopped();
     } else if (!meetingAssistMode && !stopRequestedRef.current) {
       // Pill off mid-call: the guest half unmounts but the mic stays open and
       // starts auto-submitting to the AI. Do NOT close it inline - enqueue the
-      // ordinary stop, so this path gets the same flush and the same
-      // confirmation as meeting-ended.
+      // ordinary stop, so this path gets the same confirmation as
+      // meeting-ended.
       //
       // stopRequestedRef is a chain-length optimisation, not a correctness
       // guard: this effect has no dependency array and <Completion /> re-renders
@@ -194,14 +233,8 @@ export const useMeetingAutoRecord = ({
       // op runs enqueues another handleStop. Correctness comes from handleStop
       // nulling provenance, after which repeats decide "ignore".
       //
-      // THIS PATH FLUSHES TWICE IN PRODUCTION, and that is accepted rather than
-      // an oversight. setMeetingAssistMode's wrapper already flushes on the
-      // true->false transition (useCompletion.ts:481-485) and handleStop flushes
-      // again; the second sees unsavedCount <= 0 and resolves without writing.
-      // F55 measures ONE flush only because the harness owns meetingAssistMode
-      // and never runs that wrapper - so a green suite is NOT licence to delete
-      // either flush. The wrapper covers every other way the pill goes off; this
-      // one covers a stop that was never a pill move at all.
+      // The flush is not here: handleStop closes the mic, and the
+      // recording-stop edge in useCompletion flushes on that close.
       stopRequestedRef.current = true;
       enqueue(handleStop);
     }
@@ -351,7 +384,8 @@ export const useMeetingAutoRecord = ({
     // yields "start-meeting", we record provenance, and setEnableVAD(true) is a
     // no-op on an already-true value - leaving a state byte-identical to a
     // legitimate auto-start, with enableVAD never observed false, so ownership
-    // is never released and meeting-ended closes the USER's mic. A stale
+    // is never released and the hook treats the USER's mic as its own
+    // recording (card, quiet restart, pill-off stop). A stale
     // meetingMode read self-heals via the layout effect; a stale vadOpen read
     // cannot.
     const vadOpen = enableVADRef.current;
@@ -503,9 +537,10 @@ export const useMeetingAutoRecord = ({
     const action = decideOnEnded({ startedMode: startedModeRef.current });
     if (action === "ignore") {
       // MUST clear here, not only in `finally`: this early return is before the
-      // try, and an inert meeting-ended is the COMMON case (ignore-off,
-      // ignore-busy, ignore-active and ignore-mic-open all leave provenance
-      // null). Leaving it latched permanently disarms the pill-off branch.
+      // try, and an inert stop is a common case (a setting-off with nothing
+      // auto-started, or a queued pill-off stop whose provenance the mic-close
+      // release already nulled). Leaving it latched permanently disarms the
+      // pill-off branch.
       stopRequestedRef.current = false;
       return;
     }
@@ -513,8 +548,7 @@ export const useMeetingAutoRecord = ({
     // Release ownership BEFORE writing the mic. The write commits during the
     // confirm loop's first sleep, and the ownership layout effect has no dep
     // array - so with provenance still "meeting" it would take its release
-    // branch and flush a SECOND time (measured: 2 flushes on every healthy
-    // stop). The action is already captured, so nulling here is safe.
+    // branch and call autoRecordingStopped() a SECOND time. The action is already captured, so nulling here is safe.
     startedModeRef.current = null;
     autoRecordingStopped({ auto });
 
@@ -522,8 +556,8 @@ export const useMeetingAutoRecord = ({
       if (action === "stop-meeting") {
         // Closing the mic IS the stop: AutoSpeechVad, useMeetingAudio and the
         // diarization buffer are all gated on enableVAD. Nothing here touches
-        // the transcribing pipeline's startCapture/stopCapture.
-        void flushRef.current?.().catch(reportFlushFailure);
+        // the transcribing pipeline's startCapture/stopCapture. The unsaved
+        // tail is flushed by the recording-stop edge in useCompletion.
         setEnableVADRef.current(false);
 
         const ok = await confirmMeetingStopped();
@@ -562,6 +596,247 @@ export const useMeetingAutoRecord = ({
     }
   };
 
+  /**
+   * The one stop every AUTOMATIC stop goes through (silence, call-end grace,
+   * new call). Unlike handleStop it does not depend on provenance: it also
+   * closes a hand-opened mic. Always call it through `enqueue`.
+   *
+   * `widen: false` caps the row at `capEndedAt` exactly, with no system-line
+   * widening: the new-call stop, whose newest system lines are call B's.
+   */
+  const stopRecording = async (o: {
+    reason: StopNoticeReason;
+    auto: boolean;
+    capEndedAt: number | null;
+    widen?: boolean;
+  }): Promise<void> => {
+    if (!mountedRef.current || !enableVADRef.current) return;
+
+    // Before the write, so the ownership layout effect's release branch never
+    // runs and never calls autoRecordingStopped() without `auto`.
+    startedModeRef.current = null;
+    autoRecordingStopped({ auto: o.auto });
+    showStopNotice(o.reason);
+    if (o.widen === false) setRecordingStopCap(o.capEndedAt, false);
+    else setRecordingStopCap(o.capEndedAt);
+    setEnableVADRef.current(false);
+
+    const ok = await confirmMeetingStopped();
+    // The edge trigger read the cap synchronously at the stop commit; this
+    // clears one no edge consumed (a stop and start batched into one commit).
+    setRecordingStopCap(null);
+    if (!ok && !enableVADRef.current && !systemAudioRef.current.capturing) {
+      toast.error(MEETING_STOP_FAILED_MESSAGE);
+    }
+  };
+
+  // Silence: counted by transcript-line ARRIVAL (length), so an in-place edit of
+  // an entry does not reset it, and lines already present when the mic opens do
+  // not count. enqueue/stopRecording close over refs only (see the listener
+  // effect's argument below).
+  useEffect(() => {
+    if (!isMain || !enableVAD) return;
+    const t = setTimeout(
+      () =>
+        void enqueue(() =>
+          stopRecording({ reason: "silence", auto: true, capEndedAt: null })
+        ),
+      SILENCE_STOP_MS
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMain, enableVAD, meetingTranscript.length]);
+
+  // Call-end grace. meeting-ended no longer stops at once: detection flaps
+  // mid-call, so the stop waits CALL_END_GRACE_MS, and it closes the mic
+  // whoever opened it. Armed only from the meeting-ended listener, so it sits
+  // behind that listener's isOwner gate; every helper below is inert while
+  // graceRef is null.
+  //
+  // The generation counter is what lets a cancel or restart catch a stop the
+  // timer has ALREADY enqueued: the queued op re-checks it when it runs.
+  const graceRef = useRef<Grace | null>(null);
+  const graceGenRef = useRef(0);
+  // The process of the last meeting-detected. meeting-ended carries no payload,
+  // so this is "the call that ended".
+  const lastProcessRef = useRef<string | undefined>(undefined);
+
+  const cancelGrace = () => {
+    const g = graceRef.current;
+    if (g?.timer) clearTimeout(g.timer);
+    graceRef.current = null;
+    graceGenRef.current += 1;
+  };
+
+  // A mic closed during the grace (by hand, or by unmount) caps the row at
+  // the call's end, as the grace stop would, so the room talk since the
+  // hang-up stays out of the note. Only when no cap is held: stopRecording
+  // sets its own before it closes the mic (the new-call one must not widen).
+  // Returns the cap it set, for the identity check of the clear below.
+  const capAtGraceEnd = (): RecordingStopCap | null => {
+    const g = graceRef.current;
+    if (!g || peekRecordingStopCap() !== null) return null;
+    setRecordingStopCap(g.endedAt);
+    return peekRecordingStopCap();
+  };
+
+  const graceStop = async (gen: number) => {
+    const g = graceRef.current;
+    if (!g || g.gen !== gen) return; // cancelled or restarted since the fire
+    graceRef.current = null;
+    await stopRecording({
+      reason: "call-ended",
+      auto: true,
+      capEndedAt: g.endedAt,
+    });
+  };
+
+  // Re-arm MUTATES the running grace rather than replacing it (see Grace), and
+  // clears its timer first, so a second meeting-ended never stacks timers.
+  const armGrace = (endedAt: number, endedProcess: string | undefined) => {
+    graceGenRef.current += 1;
+    const g: Grace = graceRef.current ?? {
+      endedAt,
+      endedProcess,
+      gen: 0,
+      timer: null,
+    };
+    if (g.timer) clearTimeout(g.timer);
+    g.endedAt = endedAt;
+    g.endedProcess = endedProcess;
+    g.gen = graceGenRef.current;
+    graceRef.current = g;
+    g.timer = setTimeout(() => {
+      if (!enableVADRef.current) {
+        cancelGrace(); // the mic is already closed
+        return;
+      }
+      const gen = graceGenRef.current;
+      g.timer = null;
+      void enqueue(() => graceStop(gen));
+    }, CALL_END_GRACE_MS);
+  };
+
+  // Far-end audio restarts the grace: the other side only arrives as system
+  // audio, room talk only on the mic. Counted by ARRIVAL (the count rising), so
+  // a Clear only re-bases the count and never re-arms. Compare BEFORE assign,
+  // in a layout effect, seeded from the first render: no edge on mount.
+  const systemLineCount = useMemo(
+    () => meetingTranscript.filter((e) => e.audioSource === "system").length,
+    [meetingTranscript]
+  );
+  const prevSystemLineCountRef = useRef(systemLineCount);
+  useLayoutEffect(() => {
+    const prev = prevSystemLineCountRef.current;
+    prevSystemLineCountRef.current = systemLineCount;
+    const g = graceRef.current;
+    if (systemLineCount > prev && g) armGrace(g.endedAt, g.endedProcess);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [systemLineCount]);
+
+  // The user opening or closing the mic cancels the grace - with one
+  // exception: a false->true change under "meeting" provenance is this hook's
+  // own start committing, and a meeting-ended queued behind that start has
+  // already armed a grace that must survive it.
+  //
+  // A close sets the cap first. useMeetingLog's recording-stop edge, a layout
+  // effect of a LATER hook in <Completion />, takes it in this same commit:
+  // `recording` is derived from enableVAD during render, so it falls here too.
+  const prevEnableVADRef = useRef(enableVAD);
+  const closeCapRef = useRef<RecordingStopCap | null>(null);
+  useLayoutEffect(() => {
+    const prev = prevEnableVADRef.current;
+    prevEnableVADRef.current = enableVAD;
+    if (prev === enableVAD) return;
+    if (enableVAD && startedModeRef.current === "meeting") return;
+    if (prev) closeCapRef.current = capAtGraceEnd();
+    cancelGrace();
+  }, [enableVAD]);
+
+  // A close cap nothing took in its commit would cap a later, unrelated row.
+  // Passive effects run after every layout effect of the commit, so a trigger
+  // that ran has already taken it. Identity, so a cap stopRecording set since
+  // is never cleared. No cleanup: on unmount the cap is the unmount trigger's.
+  useEffect(() => {
+    const mine = closeCapRef.current;
+    closeCapRef.current = null;
+    if (mine && peekRecordingStopCap() === mine) setRecordingStopCap(null);
+  }, [enableVAD]);
+
+  // The calendar read behind the same-call decision. Bounded: the op that calls
+  // it holds the chain, so a hung read must not freeze every later command.
+  // Unreadable (not "ok", a throw, or a timeout) is null, which isSameCall
+  // counts as the same call. A Meet call (a gated process) is detected only
+  // against a Google event, so its slots come from Google; every other app's
+  // from Outlook. Reading Outlook for Meet would merge every back-to-back Meet.
+  const readCalendarEvents = async (
+    process: string | undefined
+  ): Promise<CalendarEvent[] | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), SAME_CALL_READ_TIMEOUT_MS);
+    });
+    // The catch also covers a rejection arriving AFTER the timeout won, which
+    // would otherwise surface as an unhandled rejection.
+    const read = (async () => {
+      const r = isGatedProcess(process)
+        ? await fetchCurrentGoogleMeetings()
+        : await fetchCurrentMeetings();
+      return r.kind === "ok" ? r.events : null;
+    })().catch(() => null);
+    try {
+      return await Promise.race([read, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // meeting-detected as ONE op: no queued meeting-ended can slip in between A's
+  // stop and B's start. Inside a grace, a detection is usually the SAME call
+  // coming back (detection flaps) - the grace is cancelled and recording
+  // continues. A NEW call (back-to-back meetings) stops A capped at its end and
+  // resets the conversation first, so B's transcript is never filed under A's
+  // Odoo contacts.
+  const onDetected = async (process?: string) => {
+    const g = graceRef.current;
+    if (g) {
+      const events =
+        g.endedProcess &&
+        process &&
+        g.endedProcess.toLowerCase() !== process.toLowerCase()
+          ? null // already a new call; skip the read
+          : await readCalendarEvents(process ?? g.endedProcess);
+      // Identity, not truthiness: a grace cancelled or re-armed during the read
+      // must not be acted on with stale data.
+      if (graceRef.current === g) {
+        const same = isSameCall({
+          endedProcess: g.endedProcess,
+          process,
+          events,
+          endedAt: g.endedAt,
+          now: Date.now(),
+        });
+        cancelGrace();
+        if (same) return; // recording continues; no card
+        // auto:false: no quiet window for B. widen:false: B's audio is
+        // already arriving as system lines, and must not stretch A's cap.
+        await stopRecording({
+          reason: "call-ended",
+          auto: false,
+          capEndedAt: g.endedAt,
+          widen: false,
+        });
+        try {
+          await startNewConversationRef.current(); // clears A's targets before B
+        } catch (e) {
+          // A's mic is already closed: still record B
+          console.error("New-call conversation reset failed:", e);
+        }
+      }
+    }
+    return handleDetected(process);
+  };
+
   useEffect(() => {
     // The CREATE body is MANDATORY, not decoration. StrictMode runs
     // create -> destroy -> create on mount WITHOUT recreating refs, so a
@@ -572,12 +847,20 @@ export const useMeetingAutoRecord = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      if (startedModeRef.current) {
+      // Unmount closes an open mic: capped like a hand close. Passive
+      // destroys run in hook order, so useMeetingLog's unmount trigger,
+      // mounted after this hook, takes it.
+      if (enableVADRef.current) capAtGraceEnd();
+      cancelGrace();
+      if (startedModeRef.current || enableVADRef.current) {
         // useCompletion dies with the tree, taking meetingTranscript and
         // conversationHistoryRef with it, and there is no unmount flush in
         // useCompletion today - up to MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL - 1
-        // segments would vanish silently.
+        // segments would vanish silently. A hand-opened mic (no provenance)
+        // records into the same transcript, so it flushes too.
         void flushRef.current?.().catch(reportFlushFailure);
+      }
+      if (startedModeRef.current) {
         // Idempotent: a transcribing handleStop enqueued below publishes again.
         autoRecordingStopped();
       }
@@ -615,21 +898,41 @@ export const useMeetingAutoRecord = ({
     };
 
     Promise.all([
-      register("meeting-detected", (payload) =>
-        enqueue(() => handleDetected(payload?.process))
-      ),
+      register("meeting-detected", (payload) => {
+        enqueue(() => onDetected(payload?.process));
+        lastProcessRef.current = payload?.process;
+      }),
 
       register("meeting-ended", () => {
-        // The only automatic stop: it opens the quiet-restart window.
-        enqueue(() => handleStop({ auto: true }));
+        // Captured now, at the event: the grace caps the row at the call's end.
+        const endedAt = Date.now();
+        const endedProcess = lastProcessRef.current;
+        // The checks run INSIDE the op. A queued start writes its provenance
+        // after awaits and resumes before the enableVAD mirror updates, so
+        // "meeting" provenance counts as an open mic here. A transcribing
+        // session stops at once, as before; an open mic waits the grace,
+        // unless auto-record was turned off since the event (no automatic
+        // call-end stop then, spec G2).
+        enqueue(async () => {
+          if (startedModeRef.current === "transcribing") {
+            return handleStop({ auto: true });
+          }
+          if (
+            enabledRef.current &&
+            (enableVADRef.current || startedModeRef.current === "meeting")
+          ) {
+            armGrace(endedAt, endedProcess);
+          }
+        });
       }),
 
       register("capture-stopped", () => {
         // Transcribing provenance ONLY. This fires on any stop - including the
         // one startCapture issues before every VAD start, and including a
         // mid-call useMeetingAudio deps re-run (device or STT-language change).
-        // Clearing meeting provenance here would leave the capture running with
-        // decideOnEnded returning "ignore" and the mic never closing.
+        // Clearing meeting provenance here would end the recording card and the
+        // quiet-restart window mid-call, and disarm the pill-off stop. (The
+        // call-end grace still closes the mic: it needs no provenance.)
         if (startedModeRef.current === "transcribing") {
           startedModeRef.current = null;
           autoRecordingStopped();
@@ -637,6 +940,8 @@ export const useMeetingAutoRecord = ({
       }),
 
       register("meeting-watcher-stopped", () => {
+        // No meeting-ended will follow, so no call-end is coming to wait for.
+        cancelGrace();
         // decideOnWatcherStopped returns "warn" | "ignore" and carries no mode,
         // so the copy choice has to happen here.
         if (
@@ -657,7 +962,10 @@ export const useMeetingAutoRecord = ({
         // effect: an op queued behind an in-flight one resumes on a microtask,
         // while a state mirror lands on a macrotask, so it would read stale.
         enabledRef.current = Boolean(payload?.enabled);
-        if (!enabledRef.current) enqueue(handleStop);
+        if (!enabledRef.current) {
+          cancelGrace(); // Auto-record off: no automatic call-end stop
+          enqueue(handleStop);
+        }
       }),
     ]).catch((error) => {
       // Refuse to start rather than start something we cannot stop.
