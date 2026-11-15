@@ -1,6 +1,9 @@
 import {
   StrictMode,
   useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -72,14 +75,18 @@ vi.mock("@/config/constants", async (importOriginal) => ({
   SAME_CALL_READ_TIMEOUT_MS: 100,
 }));
 
+// The REAL cap module with a pass-through spy on the setter: the I3 cases take
+// the cap the way useMeetingLog does, so the held value must be real.
 const stopCap = vi.hoisted(() => ({
   set: vi.fn(),
-  take: vi.fn(() => null),
+  real: null as null | typeof import("@/lib/recording-stop-cap"),
 }));
-vi.mock("@/lib/recording-stop-cap", () => ({
-  setRecordingStopCap: stopCap.set,
-  takeRecordingStopCap: stopCap.take,
-}));
+vi.mock("@/lib/recording-stop-cap", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/recording-stop-cap")>();
+  stopCap.real = real;
+  stopCap.set.mockImplementation(real.setRecordingStopCap);
+  return { ...real, setRecordingStopCap: stopCap.set };
+});
 
 let stored: Record<string, string> = {};
 vi.mock("@/lib", () => ({
@@ -121,6 +128,7 @@ import {
   // Task 9's same-call read bound; imported here so it arrives mocked too.
   SAME_CALL_READ_TIMEOUT_MS as READ_TIMEOUT,
 } from "@/config/constants";
+import { takeRecordingStopCap } from "@/lib/recording-stop-cap";
 import type { TranscriptEntry } from "@/types/completion";
 
 const registered = (event: string) => listeners.get(event)?.size ?? 0;
@@ -225,6 +233,8 @@ type MountOptions = {
   lines?: number;
   enableVAD?: boolean;
   meetingAssistMode?: boolean;
+  /** Take the cap the way useMeetingLog does, after this hook (see Probe). */
+  takeCap?: boolean;
 };
 
 /**
@@ -252,6 +262,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
   let currentAudio = audio;
   const renderedVAD: boolean[] = [];
   const flushTranscript = vi.fn(async () => {});
+  const takenCaps: ReturnType<typeof takeRecordingStopCap>[] = [];
 
   let applyAudio!: Dispatch<SetStateAction<AudioFixture>>;
   let applyEnableVAD!: Dispatch<SetStateAction<boolean>>;
@@ -312,6 +323,25 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
       meetingTranscript,
       startNewConversation,
     });
+
+    // useMeetingLog stand-in, AFTER the hook as in <Completion />: its
+    // recording-stop edge (a layout effect, compare before assign) and its
+    // unmount trigger (a passive cleanup) both take the cap synchronously.
+    const recording = meetingAssistMode && enableVAD;
+    const prevRecordingRef = useRef(recording);
+    const recordingRef = useRef(recording);
+    useLayoutEffect(() => {
+      const prev = prevRecordingRef.current;
+      prevRecordingRef.current = recording;
+      recordingRef.current = recording;
+      if (opts.takeCap && prev && !recording) takenCaps.push(takeRecordingStopCap());
+    }, [recording]);
+    useEffect(
+      () => () => {
+        if (opts.takeCap && recordingRef.current) takenCaps.push(takeRecordingStopCap());
+      },
+      []
+    );
     return null;
   };
 
@@ -341,6 +371,8 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     closeTimes,
     startNewConversation,
     flushTranscript,
+    /** What the useMeetingLog stand-in took, in order (`takeCap` only). */
+    takenCaps,
     unmount: () => view.unmount(),
     /** A new transcript line: the length changes. */
     appendLine: async (audioSource: "microphone" | "system" = "system") => {
@@ -399,6 +431,9 @@ beforeEach(async () => {
   // failed mid-loop never reached its own drain, and the next one must not
   // inherit its polls.
   await drainStopConfirm();
+  // Unspied, and before the clear: a cap a case left behind must not reach
+  // the next one, and the reset must not show up as a hook call.
+  stopCap.real!.takeRecordingStopCap();
   vi.clearAllMocks();
   resetMeetingCardsForTests();
   listeners.clear();
@@ -990,6 +1025,7 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     const idA = recordingId();
     await sleep(GRACE / 6);
 
+    const detectAt = Date.now();
     await fireActed("meeting-detected", { process: "Zoom.exe" });
     await waitFor(() =>
       expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
@@ -1001,10 +1037,12 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     expect(order(h.setEnableVAD, 1)).toBeLessThan(order(h.startNewConversation, 0));
     expect(order(h.startNewConversation, 0)).toBeLessThan(order(h.setEnableVAD, 2));
 
+    // A's end exactly, never widened: by now the newest system lines are B's.
     const caps = stopCap.set.mock.calls.filter(([v]) => v !== null);
     expect(caps).toHaveLength(1);
+    expect(caps[0][1]).toBe(false);
     expect(caps[0][0]).toBeGreaterThanOrEqual(endedAt);
-    expect(caps[0][0]).toBeLessThanOrEqual(Date.now());
+    expect(caps[0][0]).toBeLessThan(detectAt);
 
     const idB = recordingId();
     expect(idB).not.toBeNull();
@@ -1096,6 +1134,90 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
 
     expect(h.startNewConversation).not.toHaveBeenCalled();
     expect(mocks.fetchMeetings).not.toHaveBeenCalled();
+  });
+});
+
+describe("useMeetingAutoRecord - a mic closed during the grace is capped", () => {
+  // `takeCap` adds the useMeetingLog stand-in (see mount): what it took is
+  // what the written row is capped at, so a cap set too late reads as null.
+  const openByHand = async (opts: MountOptions = {}) => {
+    const h = mount(makeAudio(), { meetingAssistMode: true, takeCap: true, ...opts });
+    await flush();
+    await h.setMicOpen(true);
+    return h;
+  };
+
+  /** meeting-ended; the hook's endedAt falls inside the returned window. */
+  const endCall = async () => {
+    const from = Date.now();
+    await fireActed("meeting-ended");
+    return { from, to: Date.now() };
+  };
+
+  const expectCapAtEnd = (
+    cap: ReturnType<typeof takeRecordingStopCap> | undefined,
+    ended: { from: number; to: number },
+    widen: boolean
+  ) => {
+    expect(cap).toEqual({ endedAt: expect.any(Number), widen });
+    expect(cap!.endedAt).toBeGreaterThanOrEqual(ended.from);
+    expect(cap!.endedAt).toBeLessThanOrEqual(ended.to);
+  };
+
+  it("a hand close caps the row at the call's end", async () => {
+    const h = await openByHand();
+    const ended = await endCall();
+    await sleep(GRACE / 3); // the close is well after `ended.to`
+
+    await h.setMicOpen(false);
+
+    expect(h.takenCaps).toHaveLength(1);
+    expectCapAtEnd(h.takenCaps[0], ended, true);
+  });
+
+  it("the new-call stop's own close keeps its non-widening cap", async () => {
+    seedStatus([false, false, false]); // A's probe, the stop's poll, B's probe
+    const h = mount(makeAudio(), { meetingAssistMode: true, takeCap: true });
+    await flush();
+    await fireActed("meeting-detected", { process: "ms-teams.exe" });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledWith(true));
+    const ended = await endCall();
+    await sleep(GRACE / 6);
+
+    await fireActed("meeting-detected", { process: "Zoom.exe" });
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+    );
+
+    expect(h.takenCaps).toHaveLength(1);
+    expectCapAtEnd(h.takenCaps[0], ended, false);
+  });
+
+  it("a hand close nothing consumes leaves no cap behind", async () => {
+    const h = await openByHand({ takeCap: false });
+    const ended = await endCall();
+    await sleep(GRACE / 3);
+
+    await h.setMicOpen(false);
+
+    // Set in the close commit (so the null below is not vacuous)...
+    const set = stopCap.set.mock.calls.filter(([v]) => v !== null);
+    expect(set).toHaveLength(1);
+    expect(set[0][0]).toBeGreaterThanOrEqual(ended.from);
+    expect(set[0][0]).toBeLessThanOrEqual(ended.to);
+    // ...and cleared after it, so it cannot cap a later, unrelated row.
+    expect(stopCap.real!.takeRecordingStopCap()).toBeNull();
+  });
+
+  it("unmount during the grace leaves the cap for the unmount trigger", async () => {
+    const h = await openByHand();
+    const ended = await endCall();
+    await sleep(GRACE / 3);
+
+    h.unmount();
+
+    expect(h.takenCaps).toHaveLength(1);
+    expectCapAtEnd(h.takenCaps[0], ended, true);
   });
 });
 

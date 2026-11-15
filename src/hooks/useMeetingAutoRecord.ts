@@ -26,7 +26,11 @@ import {
   showStopNotice,
   type StopNoticeReason,
 } from "@/lib/meeting-cards.store";
-import { setRecordingStopCap } from "@/lib/recording-stop-cap";
+import {
+  peekRecordingStopCap,
+  setRecordingStopCap,
+  type RecordingStopCap,
+} from "@/lib/recording-stop-cap";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
 import type { CalendarEvent } from "@/types";
 import type { TranscriptEntry } from "@/types/completion";
@@ -592,14 +596,18 @@ export const useMeetingAutoRecord = ({
   };
 
   /**
-   * The one stop every AUTOMATIC stop goes through (silence, call-end grace).
-   * Unlike handleStop it does not depend on provenance: it also closes a
-   * hand-opened mic. Always call it through `enqueue`.
+   * The one stop every AUTOMATIC stop goes through (silence, call-end grace,
+   * new call). Unlike handleStop it does not depend on provenance: it also
+   * closes a hand-opened mic. Always call it through `enqueue`.
+   *
+   * `widen: false` caps the row at `capEndedAt` exactly, with no system-line
+   * widening: the new-call stop, whose newest system lines are call B's.
    */
   const stopRecording = async (o: {
     reason: StopNoticeReason;
     auto: boolean;
     capEndedAt: number | null;
+    widen?: boolean;
   }): Promise<void> => {
     if (!mountedRef.current || !enableVADRef.current) return;
 
@@ -608,7 +616,8 @@ export const useMeetingAutoRecord = ({
     startedModeRef.current = null;
     autoRecordingStopped({ auto: o.auto });
     showStopNotice(o.reason);
-    setRecordingStopCap(o.capEndedAt);
+    if (o.widen === false) setRecordingStopCap(o.capEndedAt, false);
+    else setRecordingStopCap(o.capEndedAt);
     setEnableVADRef.current(false);
 
     const ok = await confirmMeetingStopped();
@@ -656,6 +665,18 @@ export const useMeetingAutoRecord = ({
     if (g?.timer) clearTimeout(g.timer);
     graceRef.current = null;
     graceGenRef.current += 1;
+  };
+
+  // A mic closed during the grace (by hand, or by unmount) caps the row at
+  // the call's end, as the grace stop would, so the room talk since the
+  // hang-up stays out of the note. Only when no cap is held: stopRecording
+  // sets its own before it closes the mic (the new-call one must not widen).
+  // Returns the cap it set, for the identity check of the clear below.
+  const capAtGraceEnd = (): RecordingStopCap | null => {
+    const g = graceRef.current;
+    if (!g || peekRecordingStopCap() !== null) return null;
+    setRecordingStopCap(g.endedAt);
+    return peekRecordingStopCap();
   };
 
   const graceStop = async (gen: number) => {
@@ -716,14 +737,29 @@ export const useMeetingAutoRecord = ({
   // exception: a false->true change under "meeting" provenance is this hook's
   // own start committing, and a meeting-ended queued behind that start has
   // already armed a grace that must survive it.
+  //
+  // A close sets the cap first. useMeetingLog's recording-stop edge, a layout
+  // effect of a LATER hook in <Completion />, takes it in this same commit:
+  // `recording` is derived from enableVAD during render, so it falls here too.
   const prevEnableVADRef = useRef(enableVAD);
+  const closeCapRef = useRef<RecordingStopCap | null>(null);
   useLayoutEffect(() => {
     const prev = prevEnableVADRef.current;
     prevEnableVADRef.current = enableVAD;
     if (prev === enableVAD) return;
     if (enableVAD && startedModeRef.current === "meeting") return;
+    if (prev) closeCapRef.current = capAtGraceEnd();
     cancelGrace();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enableVAD]);
+
+  // A close cap nothing took in its commit would cap a later, unrelated row.
+  // Passive effects run after every layout effect of the commit, so a trigger
+  // that ran has already taken it. Identity, so a cap stopRecording set since
+  // is never cleared. No cleanup: on unmount the cap is the unmount trigger's.
+  useEffect(() => {
+    const mine = closeCapRef.current;
+    closeCapRef.current = null;
+    if (mine && peekRecordingStopCap() === mine) setRecordingStopCap(null);
   }, [enableVAD]);
 
   // The calendar read behind the same-call decision. Bounded: the op that calls
@@ -774,11 +810,13 @@ export const useMeetingAutoRecord = ({
         });
         cancelGrace();
         if (same) return; // recording continues; no card
-        // auto:false: no quiet window for B
+        // auto:false: no quiet window for B. widen:false: B's audio is
+        // already arriving as system lines, and must not stretch A's cap.
         await stopRecording({
           reason: "call-ended",
           auto: false,
           capEndedAt: g.endedAt,
+          widen: false,
         });
         try {
           await startNewConversationRef.current(); // clears A's targets before B
@@ -801,6 +839,10 @@ export const useMeetingAutoRecord = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // Unmount closes an open mic: capped like a hand close. Passive
+      // destroys run in hook order, so useMeetingLog's unmount trigger,
+      // mounted after this hook, takes it.
+      if (enableVADRef.current) capAtGraceEnd();
       cancelGrace();
       if (startedModeRef.current || enableVADRef.current) {
         // useCompletion dies with the tree, taking meetingTranscript and

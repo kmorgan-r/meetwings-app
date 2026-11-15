@@ -297,7 +297,7 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
     expect(check.autoNotionAllowed).toHaveBeenCalledTimes(2);
   });
 
-  it("a grace stop dropped mid-check hands its cap to the re-run", async () => {
+  it("a grace stop dropped mid-check hands its cap to the re-run, and only to it", async () => {
     const gate = deferred<boolean>();
     check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
     const targetRef = { current: ONE_TARGET };
@@ -336,6 +336,74 @@ describe("useMeetingLog: check 2 before an auto-ticked row is held", () => {
 
     queue.getTranscriptWatermark.mockResolvedValue(61_000);
     gate.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(2));
+    const row = rows()[1];
+    expect(String(row.transcript)).toContain("call 3");
+    expect(String(row.transcript)).not.toContain("hello");
+    expect(row.transcriptEndAt).toBe(200_000);
+
+    // The re-run used the stashed cap up: the next meeting's row is uncapped.
+    await settle();
+    const next = [
+      ...later,
+      { original: "next 1", timestamp: 260_000, audioSource: "microphone" as const },
+      { original: "next 2", timestamp: 290_000, audioSource: "microphone" as const },
+      { original: "next 3", timestamp: 330_000, audioSource: "microphone" as const },
+    ];
+    queue.getTranscriptWatermark.mockResolvedValue(200_000);
+    rerender({ transcript: next, recording: false });
+    endMeeting();
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(3));
+    expect(String(rows()[2].transcript)).toContain("next 3");
+    expect(rows()[2]).toMatchObject({ transcriptStartAt: 260_000, transcriptEndAt: 330_000 });
+  });
+
+  it("a drop after check 2 keeps the cap a mid-check drop stashed for the re-run", async () => {
+    // Trigger 1 sits in check 2; trigger 2 (capped) is dropped there and
+    // stashes its cap; the check ends and trigger 1 sits in its insert;
+    // trigger 3 is dropped there. The re-run must still be capped.
+    const gate = deferred<boolean>();
+    check.autoNotionAllowed.mockImplementationOnce(() => gate.promise);
+    const insert = deferred<boolean>();
+    queue.insertQueueRow.mockImplementationOnce(() => insert.promise);
+    const targetRef = { current: ONE_TARGET };
+    const notionPickedRef = { current: true };
+    const notionSourceRef: { current: NotionPickSource } = { current: "auto" };
+    const first = [said(1000), said(31000), said(61000)];
+    const T = 125_000;
+    const later = [
+      ...first,
+      { original: "call 1", timestamp: 70_000, audioSource: "system" as const },
+      { original: "call 2", timestamp: 100_000, audioSource: "system" as const },
+      { original: "call 3", timestamp: 131_000, audioSource: "system" as const },
+      said(150_000),
+      said(200_000),
+    ];
+    const { rerender } = renderHook(
+      (p: { transcript: TranscriptEntry[]; recording: boolean }) =>
+        useMeetingLog({
+          targetRef,
+          notionPickedRef,
+          notionSourceRef,
+          meetingTranscript: p.transcript,
+          currentConversationId: "conv-1",
+          recording: p.recording,
+        }),
+      { initialProps: { transcript: first, recording: true } }
+    );
+    await listening();
+    rerender({ transcript: first, recording: false }); // trigger 1: held in check 2
+    await waitFor(() => expect(check.autoNotionAllowed).toHaveBeenCalledTimes(1));
+
+    rerender({ transcript: later, recording: true });
+    setRecordingStopCap(T);
+    rerender({ transcript: later, recording: false }); // trigger 2: stashes the cap
+    gate.resolve(true);
+    await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(1)); // check over
+
+    endMeeting(); // trigger 3: dropped outside the check
+    queue.getTranscriptWatermark.mockResolvedValue(61_000);
+    insert.resolve(true);
     await waitFor(() => expect(queue.insertQueueRow).toHaveBeenCalledTimes(2));
     const row = rows()[1];
     expect(String(row.transcript)).toContain("call 3");

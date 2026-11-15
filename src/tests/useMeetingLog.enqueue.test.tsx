@@ -987,6 +987,26 @@ describe("a grace stop caps the row at the call's end", () => {
     expect(row.transcriptEndAt).toBe(160_000);
   });
 
+  it("a non-widening cap (the new-call stop) ignores system lines past the call's end", async () => {
+    // Call B's audio arrives as system lines after A's end. A widening cap
+    // would follow them and put B's opening in A's customer note.
+    const transcript = [
+      sys(10_000, "c1"), mic(30_000, "m1"), sys(95_000, "c2"),
+      mic(110_000, "room1"), sys(130_000, "call B opens"), mic(160_000, "room2"),
+    ];
+    const { rerender } = render({ recording: true, meetingTranscript: transcript });
+    setRecordingStopCap(T, false);
+    rerender({ meetingTranscript: transcript, recording: false });
+    await waitFor(() => expect(action.insertQueueRow).toHaveBeenCalledTimes(1));
+    const row = action.insertQueueRow.mock.calls[0][0];
+    expect(row.transcript).toContain("c2");
+    expect(row.transcript).not.toContain("room1");
+    expect(row.transcript).not.toContain("call B opens");
+    expect(row.transcript).not.toContain("room2");
+    // Still consumed: the lines past the cap never reach a later row.
+    expect(row.transcriptEndAt).toBe(160_000);
+  });
+
   it("a capped slice that is a scrap writes no row and consumes the room talk", async () => {
     stopWith([sys(10_000), sys(95_000), mic(150_000)]);
     await vi.advanceTimersByTimeAsync(50);

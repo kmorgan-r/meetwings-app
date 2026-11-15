@@ -37,7 +37,7 @@ import {
 import { runTranscriptPrune } from "@/lib/odoo/meeting-log-actions";
 import { runMeetingRecovery } from "@/lib/odoo/meeting-log-recovery";
 import { pushQueuedRow, runMeetingLogSweep } from "@/lib/odoo/meeting-log-push";
-import { takeRecordingStopCap } from "@/lib/recording-stop-cap";
+import { takeRecordingStopCap, type RecordingStopCap } from "@/lib/recording-stop-cap";
 import { getActiveConversationId } from "@/lib/storage/active-conversation.storage";
 import { loadGraphConfigState } from "@/lib/storage/graph-config.storage";
 import { getSkipWatermark, setSkipWatermark } from "@/lib/storage/meeting-log-watermark.storage";
@@ -257,8 +257,8 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
    */
   const checkingRef = useRef(false);
   const pendingRef = useRef(false);
-  // The grace-stop cap a dropped trigger hands to its re-run (see `trigger`).
-  const pendingCapRef = useRef<number | null>(null);
+  // The stop cap a dropped trigger hands to its re-run (see `trigger`).
+  const pendingCapRef = useRef<RecordingStopCap | null>(null);
   const heldRowIdRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const blockedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -354,17 +354,17 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
     // The owner gate stays FIRST: a non-owner must never set pendingRef.
     if (!isOwner) return;
     // Every trigger still clears the shared cap, including one the latch
-    // drops, so a stale cap never reaches a later, unrelated row. A drop that
-    // schedules a re-run hands its cap to that re-run through `pendingCapRef`;
-    // a drop without one discards it (that needs an earlier trigger stuck
-    // outside the Notion check across a whole recording plus the grace).
-    const capEndedAt = takeRecordingStopCap() ?? pendingCapRef.current;
+    // drops, so a stale cap never reaches a later, unrelated row. While a
+    // re-run is scheduled, every drop hands the cap on through
+    // `pendingCapRef`, whichever branch dropped it: a later drop outside the
+    // check has taken the one an earlier drop stashed. A drop with no re-run
+    // scheduled discards it (that needs an earlier trigger stuck outside the
+    // Notion check across a whole recording plus the grace).
+    const cap = takeRecordingStopCap() ?? pendingCapRef.current;
     pendingCapRef.current = null;
     if (inFlightRef.current) {
-      if (checkingRef.current) {
-        pendingRef.current = true;
-        if (capEndedAt !== null) pendingCapRef.current = capEndedAt;
-      }
+      if (checkingRef.current) pendingRef.current = true;
+      if (pendingRef.current && cap !== null) pendingCapRef.current = cap;
       return;
     }
     inFlightRef.current = true;
@@ -478,18 +478,21 @@ export function useMeetingLog(options: UseMeetingLogOptions): UseMeetingLogRetur
       const slice = sliceTranscript(all, watermark);
       if (!slice) return; // a genuinely silent meeting is not a meeting
 
-      // A call-end grace stop writes only what belongs to the call: up to its
-      // end, or the newest system line if the call outran the signal. The
-      // room talk after it is consumed (consumedTo), never put in the
-      // customer's note.
+      // A capped stop writes only what belongs to the call: up to its end,
+      // or (a widening cap) the newest system line if the call outran the
+      // signal. The new-call stop does not widen: its newest system lines are
+      // the next call's. The lines after the cap are consumed (consumedTo),
+      // never put in the customer's note.
       let written: typeof slice | null = slice;
-      if (capEndedAt !== null) {
-        let cap = capEndedAt;
-        for (const e of slice.entries) {
-          if (e.audioSource === "system" && e.timestamp > cap) cap = e.timestamp;
+      if (cap !== null) {
+        let end = cap.endedAt;
+        if (cap.widen) {
+          for (const e of slice.entries) {
+            if (e.audioSource === "system" && e.timestamp > end) end = e.timestamp;
+          }
         }
         written = sliceTranscript(
-          slice.entries.filter((e) => e.timestamp <= cap),
+          slice.entries.filter((e) => e.timestamp <= end),
           watermark
         );
       }
