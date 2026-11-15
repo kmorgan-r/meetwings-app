@@ -32,15 +32,17 @@ export const STT_LANGUAGES = [
 ] as const;
 
 /**
- * Default STT language setting for new users.
- * - "auto" enables automatic language detection by the STT provider
- * - Existing users who have a language saved in localStorage will continue using their saved setting
- * - This default only applies to new installations or users who haven't set a preference
+ * Default STT language setting for users who haven't picked one.
+ * - Existing users who have a language saved in localStorage keep their saved setting
+ *   ("auto" included) - we don't override user preferences on upgrade.
  *
- * Migration note: Changed from "en" to "auto" in v0.2.0. Existing users with "en" saved
- * will retain their setting - we don't override user preferences on upgrade.
+ * "en", not "auto": auto-detect on a clip with no speech in it (a call's end beep,
+ * room noise through the VAD gate) makes AssemblyAI fail the clip ("language_detection
+ * cannot be performed on files with no spoken audio") or invent a line in another
+ * language (Korean "고맙습니다." as a system-audio line), and an invented system line
+ * restarts the call-end grace. Was "auto" from v0.2.0 to 1.4.0.
  */
-export const DEFAULT_STT_LANGUAGE = "auto";
+export const DEFAULT_STT_LANGUAGE = "en";
 
 // STT Translation defaults
 export const DEFAULT_TRANSLATION_ENABLED = false;
