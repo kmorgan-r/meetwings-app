@@ -1119,7 +1119,11 @@ export const useCompletion = () => {
   // Submit a quick action with meeting transcript context
   const submitWithMeetingContext = useCallback(
     async (action: string) => {
-      if (meetingTranscript.length === 0) {
+      // This conversation's lines only, the same slice
+      // summarizeCurrentConversation uses. The buffer is session-wide, so the
+      // whole array would carry every earlier meeting into this prompt.
+      const transcript = meetingTranscript.slice(conversationTranscriptStartRef.current);
+      if (transcript.length === 0) {
         // No meeting context, just submit the action as a regular message
         setState((prev) => ({ ...prev, input: action }));
         await submit(action);
@@ -1127,7 +1131,7 @@ export const useCompletion = () => {
       }
 
       // Build the meeting context prompt with speaker attribution
-      const meetingContext = meetingTranscript
+      const meetingContext = transcript
         .map((entry) => {
           const speakerLabel = speakerLabelFor(entry);
           // No speaker info - return text as-is (backwards compatible)
@@ -1139,8 +1143,8 @@ export const useCompletion = () => {
       // model answers the LATEST question instead of an earlier one. Fall back
       // to the last line if we can't tell who spoke.
       const lastParticipant =
-        [...meetingTranscript].reverse().find((e) => speakerLabelFor(e) !== "You") ??
-        meetingTranscript[meetingTranscript.length - 1];
+        [...transcript].reverse().find((e) => speakerLabelFor(e) !== "You") ??
+        transcript[transcript.length - 1];
       const latestLine = lastParticipant
         ? `${speakerLabelFor(lastParticipant) ?? "Them"}: ${lastParticipant.original}`
         : "";
