@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   // Event names whose listen() should reject, so the partial-subscription-failure
   // path is reachable from a test.
   failListenFor: new Set<string>(),
+  fetchMeetings: vi.fn(),
 }));
 
 vi.mock("sonner", () => ({ toast: mocks.toast }));
@@ -35,6 +36,9 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
 vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
+  fetchCurrentMeetings: mocks.fetchMeetings,
+}));
 
 // A listen registry keyed by event name that holds ALL callbacks, and whose
 // unlisten removes only its own - so a leak is observable.
@@ -265,7 +269,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     applyEnableVAD(value);
   });
   // Task 9 consumes this; kept in the harness so the file is the shared base.
-  const startNewConversation = vi.fn();
+  const startNewConversation = vi.fn(async () => {});
   let applyTranscript!: Dispatch<SetStateAction<TranscriptEntry[]>>;
   const entry = (audioSource: "microphone" | "system", n: number) =>
     ({
@@ -306,6 +310,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
       meetingAssistMode,
       flushUnsavedMeetingTranscript: flushTranscript,
       meetingTranscript,
+      startNewConversation,
     });
     return null;
   };
@@ -401,6 +406,8 @@ beforeEach(async () => {
   mocks.windowLabel.value = "main";
   mocks.isWindows.mockReturnValue(true);
   mocks.failListenFor.clear();
+  mocks.fetchMeetings.mockReset();
+  mocks.fetchMeetings.mockResolvedValue({ kind: "absent" });
   seedStatus([]);
 });
 
@@ -413,6 +420,18 @@ afterEach(() => {
 // of the timer; restart vs no restart compares the Date.now() the setEnableVAD
 // spy recorded with the time of the restarting input. Timers never fire early,
 // so a restarted timer stops at or after input + SILENCE.
+/** Act environment off while waiting, as RTL's waitFor does itself. */
+const settle = async (ms: number) => {
+  const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const prev = env.IS_REACT_ACT_ENVIRONMENT;
+  env.IS_REACT_ACT_ENVIRONMENT = false;
+  try {
+    await sleep(ms);
+  } finally {
+    env.IS_REACT_ACT_ENVIRONMENT = prev;
+  }
+};
+
 const SECOND_THIRD = (SILENCE * 2) / 3;
 const stopped = (h: ReturnType<typeof mount>) =>
   waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledWith(false));
@@ -842,40 +861,24 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     }
   });
 
-  it("a line arriving after the fire, before the queued stop, still cancels it", async () => {
-    // Park the chain on a detection's probe, so the grace stop the timer
-    // enqueues sits behind it.
-    let releaseProbe!: (held: boolean) => void;
-    let probes = 0;
-    mocks.invoke.mockImplementation(async (cmd: string) => {
-      if (cmd !== "get_capture_status") return undefined;
-      probes += 1;
-      if (probes === 1) {
-        return new Promise<boolean>((resolve) => {
-          releaseProbe = resolve;
-        });
-      }
-      return false; // the re-armed stop's confirm poll
-    });
+  it("a line arriving after the fire, before the queued stop, cannot revive it", async () => {
+    // Park the chain on a re-detection's calendar read (a detection no longer
+    // reaches its probe inside a grace: it decides same-call/new-call first), so
+    // the grace stop the timer enqueues sits behind it. The read gives up at
+    // READ_TIMEOUT, counts as the same call and cancels the grace; the queued
+    // stop then finds its generation gone.
+    mocks.fetchMeetings.mockImplementation(() => new Promise(() => {}));
     const h = await openByHand();
     await endCall();
-    await fireActed("meeting-detected"); // parks on its probe
-    await waitFor(() => expect(statusCalls()).toBe(1));
+    await sleep(GRACE - READ_TIMEOUT / 2); // read ends after the timer fires
+    await fireActed("meeting-detected");
 
-    await sleep(GRACE * 1.5); // the timer has fired; its stop is queued
-    const lineAt = Date.now();
-    await h.appendLine("system");
-    await act(async () => {
-      releaseProbe(true); // ignore-active: the detection starts nothing
-      await flush();
-    });
+    await sleep(READ_TIMEOUT / 2 + 10); // the timer has fired; its stop is queued
+    await h.appendLine("system"); // re-arms the (still live) grace
+    await settle(READ_TIMEOUT + GRACE * 2);
 
     expect(h.setEnableVAD).not.toHaveBeenCalled();
     expect(h.observedVAD).toEqual([false, true]);
-
-    // The re-armed grace still stops it, a full grace after the line.
-    await stoppedByGrace(h);
-    expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
   });
 
   it("clearing the transcript during the grace neither stops nor re-arms", async () => {
@@ -907,6 +910,190 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     await stoppedByGrace(h);
 
     expect(h.closeTimes[0]).toBeGreaterThanOrEqual(lineAt + GRACE);
+  });
+});
+
+describe("useMeetingAutoRecord - same call or new call during the grace", () => {
+  const person = (address: string) => ({
+    address,
+    name: null,
+    type: "required" as const,
+    isOrganizer: false,
+  });
+  const slot = (id: string, startMs: number, endMs: number) => ({
+    id,
+    subject: id,
+    startMs,
+    endMs,
+    isCancelled: false,
+    isAllDay: false,
+    ownResponse: "accepted",
+    participants: [person("a@x.com"), person("b@x.com")],
+    hasMeetLink: false,
+  });
+
+  /** An auto-started meeting recording for `process`, then its meeting-ended. */
+  const startAndEnd = async (process = "ms-teams.exe") => {
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await fireActed("meeting-detected", { process });
+    await waitFor(() => expect(h.setEnableVAD).toHaveBeenCalledWith(true));
+    const endedAt = Date.now();
+    await fireActed("meeting-ended");
+    return { h, endedAt };
+  };
+
+  const recordingId = () => {
+    const card = getMeetingCard();
+    return card?.kind === "recording" ? card.recordingId : null;
+  };
+
+  it("same app and same slot: the grace is cancelled", async () => {
+    seedStatus([false]); // the start's probe only: nothing stops
+    const now = Date.now();
+    mocks.fetchMeetings.mockResolvedValue({
+      kind: "ok",
+      events: [slot("e1", now - 60_000, now + 60_000)],
+      ownAddress: null,
+    });
+    const { h } = await startAndEnd();
+    const id = recordingId();
+    expect(id).not.toBeNull();
+    await sleep(GRACE / 6);
+
+    await fireActed("meeting-detected", { process: "ms-teams.exe" });
+    await settle(GRACE * 2);
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    expect(recordingId()).toBe(id);
+    expect(h.startNewConversation).not.toHaveBeenCalled();
+  });
+
+  it("a hand-opened mic with no prior detection and an unreadable calendar counts as the same call", async () => {
+    mocks.fetchMeetings.mockResolvedValue({ kind: "error", code: "GRAPH_AUTH_REJECTED" });
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await h.setMicOpen(true);
+    await fireActed("meeting-ended");
+    await sleep(GRACE / 6);
+
+    await fireActed("meeting-detected", { process: "Zoom.exe" });
+    await settle(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.startNewConversation).not.toHaveBeenCalled();
+  });
+
+  it("another app is a new call", async () => {
+    seedStatus([false, false, false]); // A's probe, the stop's poll, B's probe
+    const { h, endedAt } = await startAndEnd("ms-teams.exe");
+    const idA = recordingId();
+    await sleep(GRACE / 6);
+
+    await fireActed("meeting-detected", { process: "Zoom.exe" });
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+    );
+
+    const order = (spy: { mock: { invocationCallOrder: number[] } }, i: number) =>
+      spy.mock.invocationCallOrder[i];
+    expect(h.startNewConversation).toHaveBeenCalledTimes(1);
+    expect(order(h.setEnableVAD, 1)).toBeLessThan(order(h.startNewConversation, 0));
+    expect(order(h.startNewConversation, 0)).toBeLessThan(order(h.setEnableVAD, 2));
+
+    const caps = stopCap.set.mock.calls.filter(([v]) => v !== null);
+    expect(caps).toHaveLength(1);
+    expect(caps[0][0]).toBeGreaterThanOrEqual(endedAt);
+    expect(caps[0][0]).toBeLessThanOrEqual(Date.now());
+
+    const idB = recordingId();
+    expect(idB).not.toBeNull();
+    expect(idB).not.toBe(idA);
+    await settle(GRACE * 2); // the cancelled grace never closes B
+    expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]]);
+  });
+
+  it("the same app in a different slot is a new call", async () => {
+    seedStatus([false, false, false]);
+    mocks.fetchMeetings.mockImplementation(async () => {
+      const boundary = Date.now();
+      return {
+        kind: "ok",
+        events: [
+          slot("e1", boundary - 60_000, boundary),
+          slot("e2", boundary, boundary + 60_000),
+        ],
+        ownAddress: null,
+      };
+    });
+    const { h } = await startAndEnd();
+    const idA = recordingId();
+    await sleep(GRACE / 6); // endedAt is strictly before the read's boundary
+
+    await fireActed("meeting-detected", { process: "ms-teams.exe" });
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+    );
+
+    expect(h.startNewConversation).toHaveBeenCalledTimes(1);
+    expect(recordingId()).not.toBe(idA);
+  });
+
+  it("a failed conversation reset still records the new call", async () => {
+    seedStatus([false, false, false]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { h } = await startAndEnd();
+      h.startNewConversation.mockRejectedValueOnce(new Error("reset boom"));
+      await sleep(GRACE / 6);
+
+      await fireActed("meeting-detected", { process: "Zoom.exe" });
+      await waitFor(() =>
+        expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+      );
+
+      expect(errSpy).toHaveBeenCalledWith(
+        "New-call conversation reset failed:",
+        expect.any(Error)
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("a hung calendar read counts as the same call and frees the chain", async () => {
+    mocks.fetchMeetings.mockImplementation(() => new Promise(() => {}));
+    seedStatus([false]); // the later grace stop's poll
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await h.setMicOpen(true);
+    await fireActed("meeting-ended");
+
+    await fireActed("meeting-detected", { process: "Zoom.exe" });
+    await waitFor(() => expect(mocks.fetchMeetings).toHaveBeenCalledTimes(1));
+    await settle(READ_TIMEOUT + GRACE * 2);
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.startNewConversation).not.toHaveBeenCalled();
+
+    // The chain is free: a later meeting-ended arms a grace that stops the mic.
+    await fireActed("meeting-ended");
+    await stopped(h);
+    expect(getMeetingCard()).toEqual({ kind: "ended", reason: "call-ended" });
+  });
+
+  it("a detection after the grace stop already ran starts fresh", async () => {
+    seedStatus([false, false, false]); // A's probe, the stop's poll, B's probe
+    const { h } = await startAndEnd();
+    await stopped(h);
+    await drainStopConfirm();
+
+    await fireActed("meeting-detected", { process: "Zoom.exe" });
+    await waitFor(() =>
+      expect(h.setEnableVAD.mock.calls).toEqual([[true], [false], [true]])
+    );
+
+    expect(h.startNewConversation).not.toHaveBeenCalled();
+    expect(mocks.fetchMeetings).not.toHaveBeenCalled();
   });
 });
 

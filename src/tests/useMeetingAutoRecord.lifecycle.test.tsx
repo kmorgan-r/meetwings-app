@@ -35,6 +35,11 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
 vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+// A detection inside a grace reads the calendar to tell the same call from a
+// new one; no calendar connected here.
+vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
+  fetchCurrentMeetings: async () => ({ kind: "absent" }),
+}));
 
 // A listen registry keyed by event name that holds ALL callbacks, and whose
 // unlisten removes only its own - so a leak is observable.
@@ -276,6 +281,8 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
     applyEnableVAD(value);
   });
 
+  const startNewConversation = vi.fn(async () => {});
+
   const Probe = () => {
     const [systemAudio, setSystemAudio] = useState(audio);
     const [enableVAD, setVADState] = useState(opts.enableVAD ?? false);
@@ -303,6 +310,7 @@ const mount = (audio: AudioFixture = makeAudio(), opts: MountOptions = {}) => {
       meetingAssistMode,
       flushUnsavedMeetingTranscript: flushTranscript,
       meetingTranscript: EMPTY_TRANSCRIPT,
+      startNewConversation,
     });
     return null;
   };

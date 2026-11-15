@@ -42,6 +42,7 @@ export const Completion = ({
     meetingAssistMode: completion.meetingAssistMode,
     flushUnsavedMeetingTranscript: completion.flushUnsavedMeetingTranscript,
     meetingTranscript: completion.meetingTranscript,
+    startNewConversation: completion.startNewConversation,
   });
 
   // Mounted HERE, beside useMeetingAutoRecord, because slice 2's useMeetingLog

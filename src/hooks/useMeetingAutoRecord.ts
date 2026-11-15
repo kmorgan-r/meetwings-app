@@ -16,6 +16,7 @@ import {
   decideOnDetected,
   decideOnEnded,
   decideOnWatcherStopped,
+  isSameCall,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
 import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
@@ -26,9 +27,12 @@ import {
   type StopNoticeReason,
 } from "@/lib/meeting-cards.store";
 import { setRecordingStopCap } from "@/lib/recording-stop-cap";
+import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
+import type { CalendarEvent } from "@/types";
 import type { TranscriptEntry } from "@/types/completion";
 import {
   CALL_END_GRACE_MS,
+  SAME_CALL_READ_TIMEOUT_MS,
   SILENCE_STOP_MS,
   STOP_CONFIRM_ATTEMPTS,
   STOP_CONFIRM_INTERVAL_MS,
@@ -91,6 +95,12 @@ export type MeetingAutoRecordOptions = {
    * of system-audio lines (call-end grace restart); never for content.
    */
   meetingTranscript: TranscriptEntry[];
+  /**
+   * Clears the conversation (and its Odoo targets). Called when a detection
+   * during the grace turns out to be a NEW call. Its identity changes with every
+   * transcript line, so it is mirrored into a ref, never listed in effect deps.
+   */
+  startNewConversation: () => Promise<void>;
 };
 
 /**
@@ -145,6 +155,7 @@ export const useMeetingAutoRecord = ({
   meetingAssistMode,
   flushUnsavedMeetingTranscript,
   meetingTranscript,
+  startNewConversation,
 }: MeetingAutoRecordOptions) => {
   // Two gates. The silence timer and the shared stop op need only the main
   // window (they act on this window's own mic, whatever the platform); the
@@ -185,12 +196,14 @@ export const useMeetingAutoRecord = ({
   const meetingAssistModeRef = useRef(meetingAssistMode);
   const setEnableVADRef = useRef(setEnableVAD);
   const flushRef = useRef(flushUnsavedMeetingTranscript);
+  const startNewConversationRef = useRef(startNewConversation);
   useLayoutEffect(() => {
     systemAudioRef.current = systemAudio;
     enableVADRef.current = enableVAD;
     meetingAssistModeRef.current = meetingAssistMode;
     setEnableVADRef.current = setEnableVAD;
     flushRef.current = flushUnsavedMeetingTranscript;
+    startNewConversationRef.current = startNewConversation;
 
     if (startedModeRef.current !== "meeting") return;
     if (!enableVAD) {
@@ -713,6 +726,71 @@ export const useMeetingAutoRecord = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enableVAD]);
 
+  // The calendar read behind the same-call decision. Bounded: the op that calls
+  // it holds the chain, so a hung read must not freeze every later command.
+  // Unreadable (not "ok", a throw, or a timeout) is null, which isSameCall
+  // counts as the same call.
+  const readCalendarEvents = async (): Promise<CalendarEvent[] | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), SAME_CALL_READ_TIMEOUT_MS);
+    });
+    // The catch also covers a rejection arriving AFTER the timeout won, which
+    // would otherwise surface as an unhandled rejection.
+    const read = fetchCurrentMeetings()
+      .then((r) => (r.kind === "ok" ? r.events : null))
+      .catch(() => null);
+    try {
+      return await Promise.race([read, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // meeting-detected as ONE op: no queued meeting-ended can slip in between A's
+  // stop and B's start. Inside a grace, a detection is usually the SAME call
+  // coming back (detection flaps) - the grace is cancelled and recording
+  // continues. A NEW call (back-to-back meetings) stops A capped at its end and
+  // resets the conversation first, so B's transcript is never filed under A's
+  // Odoo contacts.
+  const onDetected = async (process?: string) => {
+    const g = graceRef.current;
+    if (g) {
+      const events =
+        g.endedProcess &&
+        process &&
+        g.endedProcess.toLowerCase() !== process.toLowerCase()
+          ? null // already a new call; skip the read
+          : await readCalendarEvents();
+      // Identity, not truthiness: a grace cancelled or re-armed during the read
+      // must not be acted on with stale data.
+      if (graceRef.current === g) {
+        const same = isSameCall({
+          endedProcess: g.endedProcess,
+          process,
+          events,
+          endedAt: g.endedAt,
+          now: Date.now(),
+        });
+        cancelGrace();
+        if (same) return; // recording continues; no card
+        // auto:false: no quiet window for B
+        await stopRecording({
+          reason: "call-ended",
+          auto: false,
+          capEndedAt: g.endedAt,
+        });
+        try {
+          await startNewConversationRef.current(); // clears A's targets before B
+        } catch (e) {
+          // A's mic is already closed: still record B
+          console.error("New-call conversation reset failed:", e);
+        }
+      }
+    }
+    return handleDetected(process);
+  };
+
   useEffect(() => {
     // The CREATE body is MANDATORY, not decoration. StrictMode runs
     // create -> destroy -> create on mount WITHOUT recreating refs, so a
@@ -771,7 +849,7 @@ export const useMeetingAutoRecord = ({
 
     Promise.all([
       register("meeting-detected", (payload) => {
-        enqueue(() => handleDetected(payload?.process));
+        enqueue(() => onDetected(payload?.process));
         lastProcessRef.current = payload?.process;
       }),
 

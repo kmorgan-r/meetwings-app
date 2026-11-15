@@ -662,10 +662,15 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
 
     const mark = targetLines().length;
     const flap = async () => {
+      // meeting-ended no longer closes the mic: it arms the call-end grace, and
+      // the re-detection (same call: no process, no readable calendar) cancels
+      // it. The recording and its targets carry straight through.
       await act(async () => emitTauri("meeting-ended"));
-      await waitFor(() => expect(probe.completion.enableVAD).toBe(false), { timeout: 3000 });
       await act(async () => emitTauri("meeting-detected"));
-      await waitFor(() => expect(probe.completion.enableVAD).toBe(true), { timeout: 3000 });
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 100)); // the same-call read
+      });
+      expect(probe.completion.enableVAD).toBe(true);
     };
     await flap(); // before minimizing
     await minimizeThenRestore(flap); // while minimized
