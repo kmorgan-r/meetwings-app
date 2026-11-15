@@ -899,15 +899,20 @@ export const useMeetingAutoRecord = ({
         // Captured now, at the event: the grace caps the row at the call's end.
         const endedAt = Date.now();
         const endedProcess = lastProcessRef.current;
-        // Both checks run INSIDE the op. A queued start writes its provenance
+        // The checks run INSIDE the op. A queued start writes its provenance
         // after awaits and resumes before the enableVAD mirror updates, so
         // "meeting" provenance counts as an open mic here. A transcribing
-        // session stops at once, as before; an open mic waits the grace.
+        // session stops at once, as before; an open mic waits the grace,
+        // unless auto-record was turned off since the event (no automatic
+        // call-end stop then, spec G2).
         enqueue(async () => {
           if (startedModeRef.current === "transcribing") {
             return handleStop({ auto: true });
           }
-          if (enableVADRef.current || startedModeRef.current === "meeting") {
+          if (
+            enabledRef.current &&
+            (enableVADRef.current || startedModeRef.current === "meeting")
+          ) {
             armGrace(endedAt, endedProcess);
           }
         });

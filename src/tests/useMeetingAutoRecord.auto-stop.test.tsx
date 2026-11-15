@@ -833,6 +833,22 @@ describe("useMeetingAutoRecord - call-end grace", () => {
     expect(h.observedVAD).toEqual([false, true]);
   });
 
+  it("a meeting-ended queued before auto-record is turned off arms no grace", async () => {
+    const h = await openByHand();
+
+    // One synchronous block: the arm op runs on a microtask, after the
+    // setting change has already lowered the switch.
+    await act(async () => {
+      emit("meeting-ended");
+      emit("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+    });
+    await sleep(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.observedVAD).toEqual([false, true]);
+  });
+
   it("watcher stopped cancels the grace", async () => {
     const h = await openByHand();
     await endCall();
@@ -1099,6 +1115,42 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it("a grace cancelled during the calendar read is not acted on", async () => {
+    let resolveRead: (v: unknown) => void = () => {};
+    mocks.fetchMeetings.mockImplementation(() => new Promise((r) => (resolveRead = r)));
+    const h = mount(makeAudio(), { meetingAssistMode: true });
+    await flush();
+    await h.setMicOpen(true); // by hand: no ended process, so the read runs
+    const endedAt = Date.now();
+    await fireActed("meeting-ended");
+    await sleep(GRACE / 6); // endedAt is strictly before the slot boundary
+
+    const detectAt = Date.now();
+    await fireActed("meeting-detected", { process: "ms-teams.exe" });
+    expect(mocks.fetchMeetings).toHaveBeenCalledTimes(1);
+    // Auto-record off cancels the grace while the read is out...
+    await fireActed("meeting-detection-setting-changed", { enabled: false });
+    // ...and the read then says "new call".
+    const boundary = Date.now();
+    await act(async () => {
+      resolveRead({
+        kind: "ok",
+        events: [
+          slot("e1", endedAt - 60_000, boundary),
+          slot("e2", boundary, boundary + 60_000),
+        ],
+        ownAddress: null,
+      });
+      await flush();
+    });
+    // Inside the read's bound, or its timeout ("same call") decided instead.
+    expect(Date.now() - detectAt).toBeLessThan(READ_TIMEOUT);
+    await settle(GRACE * 2);
+
+    expect(h.setEnableVAD).not.toHaveBeenCalled();
+    expect(h.startNewConversation).not.toHaveBeenCalled();
   });
 
   it("a hung calendar read counts as the same call and frees the chain", async () => {

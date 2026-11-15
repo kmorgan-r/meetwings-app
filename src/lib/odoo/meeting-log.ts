@@ -261,9 +261,11 @@ export function isScrap(slice: TranscriptSlice): boolean {
  * the cut: `segmentByGap` cannot know that a 30-second tail belongs to the
  * meeting six minutes behind it, because a silence longer than IDLE_FLUSH_MS
  * is exactly the silence it was built to cut on. A segment-level pass fixes
- * that after the fact without weakening the cut - one customer's words still
- * never cross to a meeting on the other side of a LONG silence, and the skip
- * rule would leave the tail lost entirely.
+ * that after the fact, and it does weaken the cut for scraps: there is no gap
+ * limit, so a scrap merges into its nearer neighbour however long the silence
+ * between them, and a short fragment CAN cross to a meeting on the other side
+ * of a long silence. Two segments that are not scraps are never merged. The
+ * skip rule would leave the tail lost entirely.
  *
  * Takes `segmentByGap`'s output - chronological, no overlaps - and repeats
  * until stable:
