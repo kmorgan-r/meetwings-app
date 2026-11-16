@@ -177,6 +177,21 @@ describe("team-settings-applied consumers", () => {
     expect((screen.getByLabelText("Your name") as HTMLInputElement).value).toBe("");
   });
 
+  it("NotionSettingsCard keeps a name cleared after its own Save when the emit fires", async () => {
+    render(<NotionSettingsCard />);
+    await flush();
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText("Meetings database link"), URL_A);
+    await user.type(screen.getByLabelText("Your name"), "Bo");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+    await flush();
+    expect(JSON.parse(h.store.get(SECURE_NOTION_CONFIG_KEY)!).yourName).toBe("Bo");
+
+    await user.clear(screen.getByLabelText("Your name"));
+    await fire(NOTION_CONFIG_CHANGED_EVENT);
+    expect((screen.getByLabelText("Your name") as HTMLInputElement).value).toBe("");
+  });
+
   it("GoogleCalendarCard re-reads config and status on team-settings-applied", async () => {
     render(<GoogleCalendarCard />);
     await flush();
