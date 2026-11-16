@@ -15,7 +15,24 @@ import type { NotionSummary } from "./summarize";
 export interface RichTextItem {
   type: "text";
   text: { content: string };
-  annotations?: { bold: boolean };
+  annotations?: { bold: boolean; color?: "gray" };
+}
+
+/** The gray first paragraph that proves which send created a page. */
+export const SEND_REF_PREFIX = "Meetwings ref ";
+
+/** A send id (a UUID) as 12 lowercase hex characters. */
+export function sendRefOf(sendId: string): string {
+  return sendId.replace(/-/g, "").toLowerCase().slice(0, 12);
+}
+
+export function sendRefBlock(sendId: string): NotionBlockInput {
+  const item: RichTextItem = {
+    type: "text",
+    text: { content: SEND_REF_PREFIX + sendRefOf(sendId) },
+    annotations: { bold: false, color: "gray" },
+  };
+  return { object: "block", type: "paragraph", paragraph: { rich_text: [item] } };
 }
 
 /**

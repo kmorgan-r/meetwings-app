@@ -30,6 +30,17 @@ export interface Candidate {
   headings: string[];
   /** The page's "Calendar event" key, null when the column is absent or empty. */
   calendarKey: string | null;
+  /** The 12 hex of a leading "Meetwings ref" paragraph, null on an unmarked (legacy or hand-made) page. */
+  sendRef: string | null;
+}
+
+const SEND_REF_RE = /^Meetwings ref ([0-9a-f]{12})$/;
+
+/** The send ref, read from the first block only. */
+function sendRefOfChildren(children: NotionBlock[]): string | null {
+  const first = children[0];
+  if (first?.type !== "paragraph") return null;
+  return SEND_REF_RE.exec(blockPlainText(first))?.[1] ?? null;
 }
 
 /**
@@ -182,6 +193,7 @@ async function readCandidate(
     boldTitle: boldTitleOf(children),
     headings: headingsOf(children),
     calendarKey: calendarKeyOf(st, page),
+    sendRef: sendRefOfChildren(children),
   };
 }
 
