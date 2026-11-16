@@ -254,3 +254,6 @@ Style for spoken answers:
 For other requests (e.g. "Key points so far", "Suggest questions", "Action items"): be brief, practical, and actionable (2-4 short points). These may use lists.
 
 Always distinguish what the user ("You") said from what participants said.`;
+
+// Emitted after team settings were applied, so other windows reload caches and forms.
+export const TEAM_SETTINGS_APPLIED_EVENT = "team-settings-applied";
