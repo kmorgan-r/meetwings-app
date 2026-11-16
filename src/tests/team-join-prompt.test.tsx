@@ -56,6 +56,13 @@ describe("TeamJoinPrompt", () => {
     expect(h.send).toHaveBeenCalledWith({ type: "decline" });
   });
 
+  it("says it replaces AI, Notion and Google settings, not speech", () => {
+    h.state = base({ pending: pending() });
+    render(<TeamJoinPrompt />);
+    expect(screen.getByText(/This replaces your AI, Notion and Google settings/)).toBeInTheDocument();
+    expect(screen.queryByText(/speech/i)).toBeNull();
+  });
+
   it("names the gist owner", () => {
     h.state = base({ pending: pending() });
     render(<TeamJoinPrompt />);

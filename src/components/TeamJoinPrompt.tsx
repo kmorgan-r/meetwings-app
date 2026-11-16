@@ -40,7 +40,7 @@ export const TeamJoinPrompt = () => {
                     {`Shared by GitHub user ${pending.owner}`}
                   </strong>
                   <p>
-                    {`This replaces your AI, speech, Notion and Google settings with the ones in team file ${pending.gistShort}…. Only accept if you know this GitHub user and they sent you this link.`}
+                    {`This replaces your AI, Notion and Google settings with the ones in team file ${pending.gistShort}…. Only accept if you know this GitHub user and they sent you this link.`}
                   </p>
                   {pending.switching && <p>You'll leave your current team settings.</p>}
                 </>

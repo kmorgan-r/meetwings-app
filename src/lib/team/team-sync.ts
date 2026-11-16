@@ -7,7 +7,7 @@ import { NOTION_CONFIG_CHANGED_EVENT } from "@/lib/storage/notion-config.storage
 import { resetSecureProviderConfigsCache } from "@/lib/storage/secure-provider-configs";
 import { applyTeamFile, TEAM_LINK_SECURE_KEY, type ApplyResult } from "./team-apply";
 import { decryptTeamPayload } from "./team-crypto";
-import { parseTeamFile, type TeamErrorCode, type TeamFileV1, type TeamResult } from "./team-file";
+import { parseTeamFile, type TeamErrorCode, type TeamFile, type TeamResult } from "./team-file";
 import { fetchTeamBlob } from "./team-fetch";
 import { buildTeamLink, parseTeamLink, type TeamLink } from "./team-link";
 
@@ -40,7 +40,7 @@ export async function loadOwnerTeamLink(): Promise<TeamLink | null> {
 /** Fetches, decrypts and validates; applies nothing. */
 export async function fetchTeamFile(
   link: TeamLink
-): Promise<TeamResult<{ file: TeamFileV1; ownerLogin: string }>> {
+): Promise<TeamResult<{ file: TeamFile; ownerLogin: string }>> {
   const fetched = await fetchTeamBlob(link.gistId);
   if (!fetched.ok) return fetched;
   const plain = await decryptTeamPayload(fetched.value.blob, link.key);

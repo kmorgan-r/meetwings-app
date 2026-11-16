@@ -15,7 +15,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 import { STORAGE_KEYS } from "@/config";
 import { applyTeamFile, TEAM_LINK_SECURE_KEY } from "@/lib/team/team-apply";
-import type { TeamFileV1 } from "@/lib/team/team-file";
+import type { TeamFile } from "@/lib/team/team-file";
 import { buildTeamLink, type TeamLink } from "@/lib/team/team-link";
 import { SECURE_GOOGLE_CONFIG_KEY } from "@/lib/storage/google-config.storage";
 import { SECURE_NOTION_CONFIG_KEY } from "@/lib/storage/notion-config.storage";
@@ -31,11 +31,12 @@ const MEETINGS_URL = "https://www.notion.so/acme/Meetings-0123456789abcdef012345
 const OLD_MEETINGS_URL = "https://www.notion.so/acme/Old-fedcba9876543210fedcba9876543210";
 const LINK: TeamLink = { gistId: "0123456789abcdef0123", key: "k".repeat(43) };
 
-function teamFile(): TeamFileV1 {
+const ASSEMBLYAI_DEFAULT = { provider: "assemblyai-diarization", variables: {} };
+
+function teamFile(): TeamFile {
   return {
-    version: 1,
+    version: 2,
     ai: { provider: "openai", variables: { api_key: "sk-team", model: "gpt-team" } },
-    stt: { provider: "groq-whisper", variables: { api_key: "stt-team" } },
     notion: { token: "ntn_team", meetingsDbUrl: MEETINGS_URL },
     google: { clientId: "team-client.apps.googleusercontent.com", clientSecret: "g-secret" },
   };
@@ -134,11 +135,9 @@ describe("applyTeamFile", () => {
       provider: "openai",
       variables: { api_key: "sk-team", model: "gpt-team" },
     });
-    expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": { api_key: "stt-team" } });
-    expect(localJson(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toEqual({
-      provider: "groq-whisper",
-      variables: { api_key: "stt-team" },
-    });
+    // Speech is the colleague's own: AssemblyAI is suggested, no key is written.
+    expect(h.fake.secure.has(STT_CONFIGS_KEY)).toBe(false);
+    expect(localJson(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toEqual(ASSEMBLYAI_DEFAULT);
     expect(secureJson(SECURE_GOOGLE_CONFIG_KEY)).toEqual({
       clientId: "team-client.apps.googleusercontent.com",
       clientSecret: "g-secret",
@@ -153,6 +152,27 @@ describe("applyTeamFile", () => {
     // No custom provider in the file: the custom lists are not touched.
     expect(h.fake.local.has(STORAGE_KEYS.CUSTOM_AI_PROVIDERS)).toBe(false);
     expect(h.fake.local.has(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS)).toBe(false);
+  });
+
+  it("first join keeps a colleague's own speech provider and key", async () => {
+    const own = JSON.stringify({ provider: "deepgram", variables: { api_key: "dg-mine" } });
+    const blob = JSON.stringify({ deepgram: { api_key: "dg-mine" } });
+    h.fake.local.set(STORAGE_KEYS.SELECTED_STT_PROVIDER, own);
+    h.fake.secure.set(STT_CONFIGS_KEY, blob);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(result.ok).toBe(true);
+    expect(h.fake.local.get(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toBe(own);
+    expect(h.fake.secure.get(STT_CONFIGS_KEY)).toBe(blob);
+    expect(secureSetKeys()).not.toContain(STT_CONFIGS_KEY);
+  });
+
+  it("a later sync never suggests a speech provider", async () => {
+    const result = await applyTeamFile(teamFile(), { firstJoin: false });
+
+    expect(result.ok).toBe(true);
+    expect(h.fake.local.has(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toBe(false);
   });
 
   it("keeps a typed yourName and leaves uncovered settings untouched", async () => {
@@ -293,14 +313,11 @@ describe("applyTeamFile", () => {
     const custom = { id: "acme", curl: "curl https://acme {{API_KEY}}", responseContentPath: "choices[0].text" };
     const file = teamFile();
     file.ai = { provider: "acme", variables: { api_key: "k" }, custom };
-    file.stt = { ...file.stt, custom: { id: "groq-whisper", curl: "curl https://s", responseContentPath: "text" } };
 
     await applyTeamFile(file, { firstJoin: false });
 
     expect(localJson(STORAGE_KEYS.CUSTOM_AI_PROVIDERS)).toEqual([other, { ...custom, isCustom: true }]);
-    expect(localJson(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS)).toEqual([
-      { id: "groq-whisper", curl: "curl https://s", responseContentPath: "text", isCustom: true },
-    ]);
+    expect(h.fake.local.has(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS)).toBe(false);
   });
 
   it("first join: a write failing mid-apply restores storage byte-identically", async () => {
@@ -330,9 +347,8 @@ describe("applyTeamFile", () => {
 
     expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: false, googleClientChanged: false });
     // Every setting was written first, so this proves restoration, not inaction.
-    expect(secureSetKeys().slice(0, 5)).toEqual([
+    expect(secureSetKeys().slice(0, 4)).toEqual([
       AI_CONFIGS_KEY,
-      STT_CONFIGS_KEY,
       SECURE_GOOGLE_CONFIG_KEY,
       SECURE_NOTION_CONFIG_KEY,
       TEAM_LINK_SECURE_KEY,
@@ -345,7 +361,6 @@ describe("applyTeamFile", () => {
     const runs = [
       "token",
       `secure:${AI_CONFIGS_KEY}`,
-      `secure:${STT_CONFIGS_KEY}`,
       `secure:${SECURE_GOOGLE_CONFIG_KEY}`,
       `local:${STORAGE_KEYS.SELECTED_AI_PROVIDER}`,
       `local:${STORAGE_KEYS.SELECTED_STT_PROVIDER}`,
@@ -403,16 +418,19 @@ describe("applyTeamFile", () => {
 
   it("first join: an undo that fails reports landed", async () => {
     seedPriorState();
-    // The STT blob did not exist before, so its undo is a delete; make that fail.
+    // The suggested speech selection did not exist before, so its undo is a remove; make that fail.
     h.fake.failWhen(
       (op, key) =>
-        (op === "secureSet" && key === TEAM_LINK_SECURE_KEY) || (op === "secureDelete" && key === STT_CONFIGS_KEY)
+        (op === "secureSet" && key === TEAM_LINK_SECURE_KEY) ||
+        (op === "localRemove" && key === STORAGE_KEYS.SELECTED_STT_PROVIDER)
     );
 
     const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
 
     expect(result).toMatchObject({ ok: false, code: "TEAM_WRITE_FAILED", landed: true });
-    expect(h.fake.secureModule.secureDelete.mock.calls.map((c) => c[0])).toContain(STT_CONFIGS_KEY);
+    expect(vi.mocked(localStorage.removeItem).mock.calls.map((c) => c[0])).toContain(
+      STORAGE_KEYS.SELECTED_STT_PROVIDER
+    );
     // The other undos still ran.
     expect(h.fake.keychain.token).toBe("ntn_old");
   });
@@ -461,7 +479,7 @@ describe("applyTeamFile", () => {
     expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: true, googleClientChanged: false });
     expect(h.fake.keychain.token).toBe("ntn_team");
     expect(secureJson(AI_CONFIGS_KEY)).toMatchObject({ openai: { api_key: "sk-team" } });
-    expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": { api_key: "stt-team" } });
+    expect(h.fake.secure.has(STT_CONFIGS_KEY)).toBe(false);
     expect(h.fake.secure.get(SECURE_GOOGLE_CONFIG_KEY)).toBe(PRIOR_GOOGLE_RAW);
     expect(localJson(STORAGE_KEYS.SELECTED_AI_PROVIDER)).toEqual({ provider: "groq", variables: { api_key: "g" } });
     expect(h.fake.local.has(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toBe(false);
@@ -494,10 +512,8 @@ describe("applyTeamFile", () => {
     expect(h.fake.secure.get(SECURE_NOTION_CONFIG_KEY)).toBe(PRIOR_NOTION_RAW);
     expect(h.fake.keychain.token).toBe("ntn_team");
     expect(secureJson(AI_CONFIGS_KEY)).toMatchObject({ openai: { api_key: "sk-team" } });
-    expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": { api_key: "stt-team" } });
     expect(secureJson(SECURE_GOOGLE_CONFIG_KEY)).toMatchObject({ clientId: "team-client.apps.googleusercontent.com" });
     expect(localJson(STORAGE_KEYS.SELECTED_AI_PROVIDER)).toMatchObject({ provider: "openai" });
-    expect(localJson(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toMatchObject({ provider: "groq-whisper" });
   });
 
   it("later sync: a failed AI write still resets the provider cache", async () => {
@@ -567,13 +583,7 @@ describe("applyTeamFile", () => {
       STORAGE_KEYS.SELECTED_AI_PROVIDER,
       JSON.stringify({ provider: "openai", variables: { model: "local-m" } })
     );
-    // STT: the selection is another provider, so the blob is the base.
-    h.fake.local.set(
-      STORAGE_KEYS.SELECTED_STT_PROVIDER,
-      JSON.stringify({ provider: "deepgram", variables: { api_key: "dg" } })
-    );
     h.fake.secure.set(AI_CONFIGS_KEY, JSON.stringify({ openai: { model: "old" } }));
-    h.fake.secure.set(STT_CONFIGS_KEY, JSON.stringify({ "groq-whisper": { language: "en" }, deepgram: { api_key: "dg" } }));
     const file = teamFile();
     file.ai.variables = { api_key: "sk-team" };
 
@@ -582,9 +592,6 @@ describe("applyTeamFile", () => {
     const ai = { model: "local-m", api_key: "sk-team" };
     expect(localJson(STORAGE_KEYS.SELECTED_AI_PROVIDER)).toEqual({ provider: "openai", variables: ai });
     expect(secureJson(AI_CONFIGS_KEY)).toEqual({ openai: ai });
-    const stt = { language: "en", api_key: "stt-team" };
-    expect(localJson(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toEqual({ provider: "groq-whisper", variables: stt });
-    expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": stt, deepgram: { api_key: "dg" } });
   });
 
   it("replaces an unreadable notion blob with team fields and a blank yourName", async () => {

@@ -66,20 +66,18 @@ function seedCustom(curl = CUSTOM.curl) {
   return p;
 }
 
-// Tests write deliberately wrong values into these, so they are not TeamFileV1.
+// Tests write deliberately wrong values into these, so they are not TeamFile.
 interface Fixture {
   [key: string]: unknown;
   ai: Record<string, unknown> & { variables: Record<string, unknown> };
-  stt: Record<string, unknown> & { variables: Record<string, unknown> };
   notion: Record<string, unknown>;
   google: Record<string, unknown>;
 }
 
 function valid(): Fixture {
   return {
-    version: 1,
+    version: 2,
     ai: { provider: "openai", variables: { api_key: "k" } },
-    stt: { provider: "groq", variables: { api_key: "k" } },
     notion: { token: "t", meetingsDbUrl: NOTION_URL },
     google: { clientId: "c", clientSecret: "s" },
   };
@@ -109,15 +107,25 @@ describe("exportTeamSettings", () => {
     expect(v.notion.teamTimes).toEqual({ monday: "09:00" });
   });
 
-  it("export refuses a custom STT provider whose curl has the key inline", async () => {
+  it("export is version 2 and carries no speech settings", async () => {
     ownerSeed();
+    const v = okValue(await exportTeamSettings());
+    expect(v.version).toBe(2);
+    expect(v).not.toHaveProperty("stt");
+    expect(JSON.stringify(v)).not.toContain("gsk-owner");
+  });
+
+  it("export ignores the owner's speech settings: none, or a custom one with an inline key", async () => {
+    ownerSeed();
+    store.delete(STORAGE_KEYS.SELECTED_STT_PROVIDER);
+    expect((await exportTeamSettings()).ok).toBe(true);
     const p = { ...CUSTOM, id: "custom-stt", curl: "curl https://x.test -H 'k: gsk-owner'" };
     store.set(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS, JSON.stringify([p]));
     store.set(
       STORAGE_KEYS.SELECTED_STT_PROVIDER,
       JSON.stringify({ provider: "custom-stt", variables: { api_key: "gsk-owner" } })
     );
-    expect(code(await exportTeamSettings())).toBe("TEAM_KEY_INLINE");
+    expect((await exportTeamSettings()).ok).toBe(true);
   });
 
   it.each(["ai key", "notion token", "google config"])(
@@ -165,10 +173,19 @@ describe("parseTeamFile", () => {
     expect(code(parseTeamFile("null"))).toBe("TEAM_FILE_INVALID");
   });
 
-  it("parse: version 2 -> TEAM_FILE_TOO_NEW; version '1' -> TEAM_FILE_INVALID", () => {
-    expect(code(parse({ ...valid(), version: 2 }))).toBe("TEAM_FILE_TOO_NEW");
-    expect(code(parse({ ...valid(), version: "1" }))).toBe("TEAM_FILE_INVALID");
+  it("parse: version 3 -> TEAM_FILE_TOO_NEW; version 1 or '2' -> TEAM_FILE_INVALID", () => {
+    expect(code(parse({ ...valid(), version: 3 }))).toBe("TEAM_FILE_TOO_NEW");
+    expect(code(parse({ ...valid(), version: 1 }))).toBe("TEAM_FILE_INVALID");
+    expect(code(parse({ ...valid(), version: "2" }))).toBe("TEAM_FILE_INVALID");
     expect(code(parse({ ...valid(), version: 0 }))).toBe("TEAM_FILE_INVALID");
+  });
+
+  it("parse: a speech section in the file is dropped, key and all", () => {
+    const f = valid();
+    f.stt = { provider: "groq", variables: { api_key: "gsk-leak" } };
+    const r = parse(f);
+    expect(r.ok).toBe(true);
+    expect(JSON.stringify(r)).not.toContain("gsk-leak");
   });
 
   it("parse: whitespace-only notion token -> TEAM_FIELD_MISSING", () => {
@@ -215,16 +232,13 @@ describe("parseTeamFile", () => {
     expect(JSON.stringify(r)).not.toContain("Owner");
   });
 
-  it("parse: built-in id carrying custom -> TEAM_FILE_INVALID (AI and STT)", () => {
+  it("parse: built-in id carrying custom -> TEAM_FILE_INVALID", () => {
     const evil = { id: "x", curl: "curl https://evil.test" };
     // Also a well-formed custom: only the built-in-id rule can reject that one.
-    for (const c of [evil, { ...CUSTOM, id: "openai" }, { ...CUSTOM, id: "groq" }]) {
+    for (const c of [evil, { ...CUSTOM, id: "openai" }]) {
       const a = valid();
       a.ai = { provider: "openai", variables: { api_key: "k" }, custom: c };
       expect(code(parse(a))).toBe("TEAM_FILE_INVALID");
-      const s = valid();
-      s.stt = { provider: "groq", variables: { api_key: "k" }, custom: c };
-      expect(code(parse(s))).toBe("TEAM_FILE_INVALID");
     }
   });
 
@@ -250,6 +264,12 @@ describe("parseTeamFile", () => {
     const f = valid();
     f.ai.variables = { api_key: "k", model: null };
     expect(code(parse(f))).toBe("TEAM_FILE_INVALID");
+  });
+
+  it("the missing-field copy no longer names speech", () => {
+    expect(TEAM_COPY.TEAM_FIELD_MISSING).toBe(
+      "The team settings are missing a required key or link (AI, Notion or Google)."
+    );
   });
 
   it("has fixed copy for the fetch failure", () => {
