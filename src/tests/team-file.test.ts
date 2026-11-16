@@ -189,9 +189,8 @@ describe("parseTeamFile", () => {
   it("parse: unknown extra fields are ignored", () => {
     const f = valid();
     f.extra = 1;
-    f.ai.extra = 2;
     f.notion.yourName = "Owner";
-    f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: { ...CUSTOM, extra: 3 } };
+    f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: { ...CUSTOM, extra: 3 }, extra: 2 };
     const r: any = parse(f);
     expect(r.ok).toBe(true);
     expect(JSON.stringify(r)).not.toContain("extra");
