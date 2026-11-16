@@ -1,4 +1,5 @@
 const KEY_RE = /^[A-Za-z0-9_-]{43}$/;
+const SEG_RE = /^[A-Za-z0-9_-]+$/;
 const PREFIX = "mwt1";
 
 function b64url(bytes: Uint8Array): string {
@@ -14,6 +15,7 @@ function unb64url(s: string): Uint8Array {
 }
 
 function importKey(key: string, usage: KeyUsage) {
+  if (!KEY_RE.test(key)) throw new Error("invalid team key");
   return crypto.subtle.importKey(
     "raw",
     unb64url(key) as BufferSource,
@@ -47,8 +49,9 @@ export async function decryptTeamPayload(
   try {
     if (typeof blob !== "string" || typeof key !== "string") return null;
     if (!KEY_RE.test(key)) return null;
-    const parts = blob.split(".");
+    const parts = blob.trim().split(".");
     if (parts.length !== 3 || parts[0] !== PREFIX) return null;
+    if (!SEG_RE.test(parts[1]) || !SEG_RE.test(parts[2])) return null;
     const iv = unb64url(parts[1]);
     if (iv.length !== 12) return null;
     const pt = await crypto.subtle.decrypt(
@@ -56,7 +59,7 @@ export async function decryptTeamPayload(
       await importKey(key, "decrypt"),
       unb64url(parts[2]) as BufferSource,
     );
-    return new TextDecoder().decode(pt);
+    return new TextDecoder("utf-8", { fatal: true }).decode(pt);
   } catch {
     return null;
   }

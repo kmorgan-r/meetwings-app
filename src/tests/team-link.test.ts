@@ -29,6 +29,13 @@ describe("team-link", () => {
     ["short id", `meetwings://team/abc#${KEY}`],
     ["query", `meetwings://team/${ID}?x=1#${KEY}`],
     ["inner newline", `meetwings://team/${ID}\n#${KEY}`],
+    ["44-char key", `meetwings://team/${ID}#${KEY}A`],
+    ["trailing garbage", LINK + "AAAA"],
+    ["trailing space garbage", LINK + " x"],
+    ["leading garbage", "x" + LINK],
+    ["33-char id", `meetwings://team/${ID}a#${KEY}`],
+    ["double wrapped", `<<${LINK}>>`],
+    ["uppercase scheme", `MEETWINGS://team/${ID}#${KEY}`],
   ])("rejects %s", (_n, raw) => expect(parseTeamLink(raw)).toBeNull());
   it("build -> parse round trip", () =>
     expect(parseTeamLink(buildTeamLink({ gistId: ID, key: KEY }))).toEqual({
@@ -39,6 +46,8 @@ describe("team-link", () => {
     expect(parseGistRef(ID)).toBe(ID);
     expect(parseGistRef(`https://gist.github.com/someone/${ID}/`)).toBe(ID);
     expect(parseGistRef("https://example.com/x")).toBeNull();
+    expect(parseGistRef(`https://gist.github.com/u/${ID.toUpperCase()}`)).toBeNull();
+    expect(parseGistRef("https://gist.github.com/u/abc")).toBeNull();
   });
   it("shortGistId returns the first 6 chars", () =>
     expect(shortGistId("abcdef123456")).toBe("abcdef"));

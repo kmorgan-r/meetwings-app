@@ -39,6 +39,23 @@ describe("team-crypto", () => {
     expect(await decryptTeamPayload(blob.replace("mwt1.", "mwt2."), k)).toBeNull();
     expect(await decryptTeamPayload(blob.slice(5), k)).toBeNull();
   });
+  it("encrypt rejects wrong-size or padded keys", async () => {
+    const k = generateTeamKey();
+    await expect(encryptTeamPayload("x", "A".repeat(22))).rejects.toThrow();
+    await expect(encryptTeamPayload("x", "A".repeat(32))).rejects.toThrow();
+    await expect(encryptTeamPayload("x", k + "\n")).rejects.toThrow();
+  });
+  it("trailing newline on blob still decrypts; '+' in ct -> null", async () => {
+    const k = generateTeamKey();
+    const blob = await encryptTeamPayload("hi", k);
+    expect(await decryptTeamPayload(blob + "\n", k)).toBe("hi");
+    const [p, iv, ct] = blob.split(".");
+    expect(await decryptTeamPayload([p, iv, ct + "+"].join("."), k)).toBeNull();
+  });
+  it("extra segment -> null", async () => {
+    const k = generateTeamKey();
+    expect(await decryptTeamPayload("mwt1.a.b.c", k)).toBeNull();
+  });
   it("malformed input -> null without throwing", async () => {
     const k = generateTeamKey();
     const blob = await encryptTeamPayload("hi", k);
