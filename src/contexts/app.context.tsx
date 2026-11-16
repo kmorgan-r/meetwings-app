@@ -3,6 +3,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   SPEECH_TO_TEXT_PROVIDERS,
   STORAGE_KEYS,
+  TEAM_SETTINGS_APPLIED_EVENT,
   DEFAULT_STT_LANGUAGE,
   DEFAULT_TRANSLATION_ENABLED,
   DEFAULT_TRANSLATION_LANGUAGE,
@@ -14,6 +15,7 @@ import { pushShortcutsConfig } from "@/lib/functions/shortcuts.function";
 import {
   loadSecureAIConfigs,
   loadSecureSTTConfigs,
+  resetSecureProviderConfigsCache,
   updateAIConfigCache,
   updateSTTConfigCache,
   migrateProviderConfigsToSecureStorage,
@@ -518,6 +520,25 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+  // A team sync rewrote shared settings: re-read them, or the effect below
+  // would write this window's stale selection back over the team values.
+  useEffect(() => {
+    let cancelled = false;
+    const unlistenPromise = listen(TEAM_SETTINGS_APPLIED_EVENT, async () => {
+      if (cancelled) return;
+      resetSecureProviderConfigsCache();
+      await Promise.all([loadSecureAIConfigs(), loadSecureSTTConfigs()]);
+      if (!cancelled) loadData();
+    });
+    unlistenPromise.catch(() => {
+      // best-effort: a window without the event bridge just keeps its state
+    });
+    return () => {
+      cancelled = true;
+      unlistenPromise.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   // Sync selected AI to localStorage + keep the latest-selection ref current
