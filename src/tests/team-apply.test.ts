@@ -72,14 +72,44 @@ const PRIOR_NOTION_RAW = JSON.stringify(
   1
 );
 const PRIOR_GOOGLE_RAW = JSON.stringify({ clientSecret: "old-s", clientId: "old-client" }, null, 1);
+const PRIOR_AI_RAW = JSON.stringify({ openai: { api_key: "sk-old" }, groq: { api_key: "g" } }, null, 1);
+
+/** Every write in call order: secure/local writes by key, keychain writes as "token". */
+function writeLog(): string[] {
+  type Fn = { mock: { calls: any[][]; invocationCallOrder: number[] } };
+  const entries: [number, string][] = [];
+  const add = (fn: Fn, label: (call: any[]) => string | null) =>
+    fn.mock.calls.forEach((call, i) => {
+      const l = label(call);
+      if (l !== null) entries.push([fn.mock.invocationCallOrder[i], l]);
+    });
+  add(h.fake.secureModule.secureSet, (c) => `secure:${c[0]}`);
+  add(h.fake.secureModule.secureDelete, (c) => `secure:${c[0]}`);
+  add(vi.mocked(localStorage.setItem), (c) => `local:${c[0]}`);
+  add(vi.mocked(localStorage.removeItem), (c) => `local:${c[0]}`);
+  add(h.fake.invoke, (c) => (c[0] === "notion_token_set" || c[0] === "notion_token_clear" ? "token" : null));
+  return entries.sort((a, b) => a[0] - b[0]).map(([, l]) => l);
+}
+
+/**
+ * A real secureSet can reject after store.set (store.save failed), leaving the
+ * new value in the store's memory: write it, then reject once for `key`.
+ */
+function writeThenRejectOnce(key: string) {
+  let thrown = false;
+  h.fake.secureModule.secureSet.mockImplementation(async (k: string, v: string) => {
+    h.fake.secure.set(k, v);
+    if (k === key && !thrown) {
+      thrown = true;
+      throw new Error("fake save failure");
+    }
+  });
+}
 
 /** A non-empty prior install, so a rollback test proves restoration. */
 function seedPriorState() {
   h.fake.keychain.token = "ntn_old";
-  h.fake.secure.set(
-    AI_CONFIGS_KEY,
-    JSON.stringify({ openai: { api_key: "sk-old" }, groq: { api_key: "g" } }, null, 1)
-  );
+  h.fake.secure.set(AI_CONFIGS_KEY, PRIOR_AI_RAW);
   h.fake.secure.set(SECURE_NOTION_CONFIG_KEY, PRIOR_NOTION_RAW);
   h.fake.secure.set(SECURE_GOOGLE_CONFIG_KEY, PRIOR_GOOGLE_RAW);
   h.fake.local.set(
@@ -276,7 +306,8 @@ describe("applyTeamFile", () => {
   it("first join: a write failing mid-apply restores storage byte-identically", async () => {
     seedPriorState();
     const before = h.fake.snapshot();
-    h.fake.failWhen((op, key) => op === "secureSet" && key === AI_CONFIGS_KEY);
+    let aiFailures = 0;
+    h.fake.failWhen((op, key) => op === "secureSet" && key === AI_CONFIGS_KEY && aiFailures++ === 0);
 
     const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
 
@@ -285,8 +316,9 @@ describe("applyTeamFile", () => {
     const tokenSets = h.fake.invoke.mock.calls.filter((c) => c[0] === "notion_token_set").map((c) => c[1]);
     expect(tokenSets).toEqual([{ token: "ntn_team" }, { token: "ntn_old" }]);
     expect(h.fake.snapshot()).toBe(before);
-    // Later steps were never attempted.
-    expect(secureSetKeys()).toEqual([AI_CONFIGS_KEY]);
+    // The failed AI write is undone with the prior raw bytes; later steps never ran.
+    expect(secureSetKeys()).toEqual([AI_CONFIGS_KEY, AI_CONFIGS_KEY]);
+    expect(h.fake.secureModule.secureSet.mock.calls[1][1]).toBe(PRIOR_AI_RAW);
   });
 
   it("first join: a failing link write rolls back every setting and stores no link", async () => {
@@ -309,6 +341,52 @@ describe("applyTeamFile", () => {
     expect(h.fake.secure.has(TEAM_LINK_SECURE_KEY)).toBe(false);
     // The old Google client is back, so its sign-in stays.
     expect(disconnects()).toBe(0);
+    // Undo order: the failed link write first, then every completed step in reverse.
+    const runs = [
+      "token",
+      `secure:${AI_CONFIGS_KEY}`,
+      `secure:${STT_CONFIGS_KEY}`,
+      `secure:${SECURE_GOOGLE_CONFIG_KEY}`,
+      `local:${STORAGE_KEYS.SELECTED_AI_PROVIDER}`,
+      `local:${STORAGE_KEYS.SELECTED_STT_PROVIDER}`,
+      `secure:${SECURE_NOTION_CONFIG_KEY}`,
+      `secure:${TEAM_LINK_SECURE_KEY}`,
+    ];
+    expect(writeLog()).toEqual([...runs, ...[...runs].reverse()]);
+  });
+
+  it("first join: a link write that lands then rejects is undone too", async () => {
+    seedPriorState();
+    const before = h.fake.snapshot();
+    writeThenRejectOnce(TEAM_LINK_SECURE_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: false, googleClientChanged: false });
+    expect(h.fake.snapshot()).toBe(before);
+    expect(h.fake.secure.has(TEAM_LINK_SECURE_KEY)).toBe(false);
+  });
+
+  it("first join: an AI blob write that lands then rejects is undone too", async () => {
+    seedPriorState();
+    const before = h.fake.snapshot();
+    writeThenRejectOnce(AI_CONFIGS_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: false, googleClientChanged: false });
+    expect(h.fake.snapshot()).toBe(before);
+    expect(h.fake.secure.get(AI_CONFIGS_KEY)).toBe(PRIOR_AI_RAW);
+  });
+
+  it("first join with no prior token: a rollback clears the team token", async () => {
+    h.fake.failWhen((op, key) => op === "secureSet" && key === TEAM_LINK_SECURE_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(result).toMatchObject({ ok: false, landed: false });
+    expect(h.fake.invoke.mock.calls.map((c) => c[0])).toContain("notion_token_clear");
+    expect(h.fake.keychain.token).toBeNull();
   });
 
   it("first join: a failing localStorage write rolls back too", async () => {
@@ -325,16 +403,16 @@ describe("applyTeamFile", () => {
 
   it("first join: an undo that fails reports landed", async () => {
     seedPriorState();
-    h.fake.failWhen((op, key) => op === "secureSet" && key === TEAM_LINK_SECURE_KEY);
     // The STT blob did not exist before, so its undo is a delete; make that fail.
-    const fail = h.fake.secureModule.secureDelete;
-    fail.mockImplementationOnce(async () => {
-      throw new Error("fake undo failure");
-    });
+    h.fake.failWhen(
+      (op, key) =>
+        (op === "secureSet" && key === TEAM_LINK_SECURE_KEY) || (op === "secureDelete" && key === STT_CONFIGS_KEY)
+    );
 
     const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
 
     expect(result).toMatchObject({ ok: false, code: "TEAM_WRITE_FAILED", landed: true });
+    expect(h.fake.secureModule.secureDelete.mock.calls.map((c) => c[0])).toContain(STT_CONFIGS_KEY);
     // The other undos still ran.
     expect(h.fake.keychain.token).toBe("ntn_old");
   });
@@ -348,6 +426,29 @@ describe("applyTeamFile", () => {
 
     expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: false, googleClientChanged: false });
     expect(writeCounts()).toMatchObject({ secureSet: 0, secureDelete: 0, tokenSet: 0, tokenClear: 0 });
+    expect(h.fake.snapshot()).toBe(before);
+  });
+
+  it("a failing localStorage snapshot read writes nothing", async () => {
+    seedPriorState();
+    const before = h.fake.snapshot();
+    const read = vi.mocked(localStorage.getItem).getMockImplementation()!;
+    vi.mocked(localStorage.getItem).mockImplementation((key: string) => {
+      if (key === STORAGE_KEYS.SELECTED_AI_PROVIDER) throw new Error("fake read failure");
+      return read(key);
+    });
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: false, googleClientChanged: false });
+    expect(writeCounts()).toEqual({
+      secureSet: 0,
+      secureDelete: 0,
+      localSet: 0,
+      localRemove: 0,
+      tokenSet: 0,
+      tokenClear: 0,
+    });
     expect(h.fake.snapshot()).toBe(before);
   });
 
@@ -381,6 +482,60 @@ describe("applyTeamFile", () => {
       clientSecret: "g-secret",
     });
     expect(disconnects()).toBe(1);
+  });
+
+  it("later sync: a Notion blob write that lands then rejects is put back; earlier steps stay", async () => {
+    seedPriorState();
+    writeThenRejectOnce(SECURE_NOTION_CONFIG_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: false });
+
+    expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: true, googleClientChanged: true });
+    expect(h.fake.secure.get(SECURE_NOTION_CONFIG_KEY)).toBe(PRIOR_NOTION_RAW);
+    expect(h.fake.keychain.token).toBe("ntn_team");
+    expect(secureJson(AI_CONFIGS_KEY)).toMatchObject({ openai: { api_key: "sk-team" } });
+    expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": { api_key: "stt-team" } });
+    expect(secureJson(SECURE_GOOGLE_CONFIG_KEY)).toMatchObject({ clientId: "team-client.apps.googleusercontent.com" });
+    expect(localJson(STORAGE_KEYS.SELECTED_AI_PROVIDER)).toMatchObject({ provider: "openai" });
+    expect(localJson(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toMatchObject({ provider: "groq-whisper" });
+  });
+
+  it("later sync: a failed AI write still resets the provider cache", async () => {
+    expect(await loadSecureAIConfigs()).toEqual({}); // this window caches {}
+    h.fake.secure.set(AI_CONFIGS_KEY, JSON.stringify({ groq: { api_key: "g" } }));
+    h.fake.failWhen((op, key) => op === "secureSet" && key === AI_CONFIGS_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: false });
+
+    expect(result.ok).toBe(false);
+    expect(await loadSecureAIConfigs()).toEqual({ groq: { api_key: "g" } });
+  });
+
+  it("later sync: a first-step write whose undo also fails reports landed", async () => {
+    seedPriorState();
+    h.fake.keychain.token = "ntn_team"; // unchanged: the AI blob is the first step
+    h.fake.failWhen((op, key) => op === "secureSet" && key === AI_CONFIGS_KEY);
+
+    const result = await applyTeamFile(teamFile(), { firstJoin: false });
+
+    // Nothing completed, but the half-write could not be put back.
+    expect(result).toEqual({ ok: false, code: "TEAM_WRITE_FAILED", landed: true, googleClientChanged: false });
+    expect(secureSetKeys()).toEqual([AI_CONFIGS_KEY, AI_CONFIGS_KEY]);
+  });
+
+  it("first join: the provider cache is reset after the AI undo too", async () => {
+    seedPriorState();
+    // A reader in this window loads the cache mid-apply, while the team blob is stored.
+    const write = h.fake.secureModule.secureSet.getMockImplementation()!;
+    h.fake.secureModule.secureSet.mockImplementation(async (k: string, v: string) => {
+      if (k !== TEAM_LINK_SECURE_KEY) return write(k, v);
+      await loadSecureAIConfigs();
+      throw new Error("fake link failure");
+    });
+
+    await applyTeamFile(teamFile(), { firstJoin: true, link: LINK });
+
+    expect(await loadSecureAIConfigs()).toEqual(JSON.parse(PRIOR_AI_RAW));
   });
 
   it("later sync: a failure on the first step reports nothing landed", async () => {

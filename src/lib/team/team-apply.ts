@@ -38,6 +38,12 @@ export type ApplyResult =
 interface Step {
   run: () => Promise<void>;
   undo: () => Promise<void>;
+  /**
+   * A rejected run left nothing behind (one keychain call). Secure-store and
+   * localStorage writes are not: secureSet's store.set can land in memory before
+   * store.save rejects, and the next write would persist it.
+   */
+  atomic?: true;
 }
 
 const EMPTY_NOTION: NotionConfig = { meetingsDbUrl: "", knowledgeDbUrl: "", teamTimes: {}, yourName: "" };
@@ -129,6 +135,7 @@ export async function applyTeamFile(
   let notionRaw: string | null;
   let linkRaw: string | null;
   let oldGoogle: Awaited<ReturnType<typeof loadGoogleConfigState>>;
+  let local: Record<"customAi" | "customStt" | "selectedAi" | "selectedStt", string | null>;
   try {
     token = await loadNotionToken();
     aiRaw = await secureGet(AI_CONFIGS_KEY);
@@ -137,17 +144,19 @@ export async function applyTeamFile(
     notionRaw = await secureGet(SECURE_NOTION_CONFIG_KEY);
     linkRaw = await secureGet(TEAM_LINK_SECURE_KEY);
     oldGoogle = await loadGoogleConfigState();
+    // Raw localStorage, not safeLocalStorage: a swallowed read would look like
+    // "absent" and a rollback would then delete the key.
+    local = {
+      customAi: localStorage.getItem(STORAGE_KEYS.CUSTOM_AI_PROVIDERS),
+      customStt: localStorage.getItem(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS),
+      selectedAi: localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER),
+      selectedStt: localStorage.getItem(STORAGE_KEYS.SELECTED_STT_PROVIDER),
+    };
   } catch {
     return failed(false, false);
   }
   // Unreadable counts as nothing stored. Never loadNotionConfigState: it stamps NOTION_SETUP_AT.
   const notion = (await loadNotionConfig().catch(() => null)) ?? EMPTY_NOTION;
-  const local = {
-    customAi: safeLocalStorage.getItem(STORAGE_KEYS.CUSTOM_AI_PROVIDERS),
-    customStt: safeLocalStorage.getItem(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS),
-    selectedAi: safeLocalStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER),
-    selectedStt: safeLocalStorage.getItem(STORAGE_KEYS.SELECTED_STT_PROVIDER),
-  };
 
   // 2. Targets.
   const ai = providerTargets(file.ai, aiRaw, local.selectedAi);
@@ -177,6 +186,7 @@ export async function applyTeamFile(
     steps.push({
       run: () => saveNotionToken(file.notion.token),
       undo: () => (old === null ? clearNotionToken() : saveNotionToken(old)),
+      atomic: true,
     });
   }
   for (const [key, raw, target] of [
@@ -223,31 +233,33 @@ export async function applyTeamFile(
 
   // 4. Run in order; stop at the first rejection.
   const done: Step[] = [];
-  let stopped = false;
+  let failedStep: Step | undefined;
   for (const step of steps) {
     try {
       await step.run();
       done.push(step);
     } catch {
-      stopped = true;
+      failedStep = step;
       break;
     }
   }
   let landed = false;
   let googleInPlace = googleStep !== undefined && done.includes(googleStep);
-  if (stopped) {
-    if (opts.firstJoin) {
-      for (const step of [...done].reverse()) {
-        try {
-          await step.undo();
-          if (step === googleStep) googleInPlace = false;
-        } catch {
-          landed = true;
-        }
+  if (failedStep) {
+    // In both modes the failed write's own half-write goes first, so memory never
+    // holds an unpersisted value; a first join then undoes the rest in reverse.
+    const undos = failedStep.atomic ? [] : [failedStep];
+    if (opts.firstJoin) undos.push(...[...done].reverse());
+    let undoThrew = false;
+    for (const step of undos) {
+      try {
+        await step.undo();
+        if (step === googleStep) googleInPlace = false;
+      } catch {
+        undoThrew = true;
       }
-    } else {
-      landed = done.length > 0;
     }
+    landed = opts.firstJoin ? undoThrew : done.length > 0 || undoThrew;
   }
 
   // 5. A new Google client cannot use the old client's sign-in.
@@ -262,7 +274,7 @@ export async function applyTeamFile(
   }
 
   // 6. Result.
-  return stopped
+  return failedStep
     ? failed(landed, googleClientChanged)
     : { ok: true, value: { changed: steps.length > 0, googleClientChanged } };
 }
