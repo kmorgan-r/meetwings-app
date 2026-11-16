@@ -106,20 +106,20 @@ describe("syncTeam failures", () => {
     over(f);
     await serve(f);
   };
-  it.each<[string, () => Promise<void> | void]>([
-    ["HTTP 404", () => void vi.mocked(tauriFetch).mockResolvedValue(gistResponse("", 404))],
-    ["network error", () => void vi.mocked(tauriFetch).mockRejectedValue(new Error("offline"))],
-    ["wrong key", () => serve(teamFile(), generateTeamKey())],
-    ["not JSON inside", () => serve("not json at all")],
-    ["version 2", () => serve({ ...teamFile(), version: 2 })],
-    ["missing required field", withFile((f) => (f.notion.token = ""))],
-  ])("%s leaves storage byte-identical and stores no link", async (_n, setup) => {
+  it.each<[string, () => Promise<void> | void, string]>([
+    ["HTTP 404", () => void vi.mocked(tauriFetch).mockResolvedValue(gistResponse("", 404)), "TEAM_FETCH_FAILED"],
+    ["network error", () => void vi.mocked(tauriFetch).mockRejectedValue(new Error("offline")), "TEAM_FETCH_FAILED"],
+    ["wrong key", () => serve(teamFile(), generateTeamKey()), "TEAM_DECRYPT_FAILED"],
+    ["not JSON inside", () => serve("not json at all"), "TEAM_FILE_INVALID"],
+    ["version 2", () => serve({ ...teamFile(), version: 2 }), "TEAM_FILE_TOO_NEW"],
+    ["missing required field", withFile((f) => (f.notion.token = "")), "TEAM_FIELD_MISSING"],
+  ])("%s leaves storage byte-identical and stores no link", async (_n, setup, code) => {
     seedPrior();
     const before = h.fake.snapshot();
     await setup();
     const r = await syncTeam(LINK, { firstJoin: true });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r).toMatchObject({ landed: false, googleClientChanged: false });
+    if (!r.ok) expect(r).toMatchObject({ code, landed: false, googleClientChanged: false });
     expect(h.fake.snapshot()).toBe(before);
     expect(h.fake.secure.has(TEAM_LINK_SECURE_KEY)).toBe(false);
     expect(h.fake.local.has(STORAGE_KEYS.TEAM_LAST_SYNCED_AT)).toBe(false);
@@ -159,6 +159,15 @@ describe("syncTeam success", () => {
     if (!r.ok) expect(r.landed).toBe(true);
     expect(h.fake.local.has(STORAGE_KEYS.TEAM_LAST_SYNCED_AT)).toBe(false);
     expect(emitted()).toContain(TEAM_SETTINGS_APPLIED_EVENT);
+  });
+
+  it("first join: an apply failure that rolls back cleanly stamps nothing and emits nothing", async () => {
+    await serve(teamFile());
+    h.fake.failWhen((op, key) => op === "secureSet" && key === "secure_notion_config");
+    const r = await syncTeam(LINK, { firstJoin: true });
+    expect(r).toMatchObject({ ok: false, code: "TEAM_WRITE_FAILED", landed: false });
+    expect(h.fake.local.has(STORAGE_KEYS.TEAM_LAST_SYNCED_AT)).toBe(false);
+    expect(emitted()).toEqual([]);
   });
 });
 

@@ -115,6 +115,8 @@ describe("team sync redaction", () => {
     await force();
     const r = await syncTeam(LINK, { firstJoin: true });
     expect(r.ok).toBe(false);
+    // Proves the spies capture: an empty capture would make the check below vacuous.
+    expect(allConsoleArgs()).toContain("[team] sync failed:");
     const out = JSON.stringify(r) + allConsoleArgs();
     for (const s of SENTINELS) expect(out).not.toContain(s);
   });
