@@ -13,6 +13,7 @@ import {
   useMeetingDetection,
   useMeetingCardHost,
   useSilentUpdater,
+  useTeamSync,
 } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
@@ -45,6 +46,8 @@ const App = () => {
   // Silent background updates, gated on recording activity. Self-gating: inert
   // outside the `main` window and on Linux.
   useSilentUpdater();
+  // Team deep links and re-syncs. Self-gating: inert outside the `main` window.
+  useTeamSync();
   const { customizable, setOverlayPillStyle } = useAppContext();
   const platform = getPlatform();
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);

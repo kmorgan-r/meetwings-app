@@ -73,6 +73,7 @@ const mockHooks = (isHidden: boolean) => {
     }),
     useMeetingDetection: () => ({}),
     useSilentUpdater: () => {},
+    useTeamSync: () => {},
     useMeetingCardHost: () => null,
   }));
 };

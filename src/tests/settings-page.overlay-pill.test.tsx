@@ -211,6 +211,7 @@ describe("main window listens for overlay-pill-style-changed", () => {
       }),
       useMeetingDetection: () => ({}),
       useSilentUpdater: () => {},
+      useTeamSync: () => {},
       useMeetingCardHost: () => null,
     }));
     vi.doMock("react-error-boundary", () => ({

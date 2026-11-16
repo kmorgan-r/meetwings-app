@@ -362,6 +362,7 @@ const mockEverything = () => {
       }),
       useMeetingDetection: () => ({}),
       useSilentUpdater: () => {},
+      useTeamSync: () => {},
       useGlobalShortcuts: () => GLOBAL_SHORTCUTS,
       useCompletion: () => {
         const c = real.useCompletion!();

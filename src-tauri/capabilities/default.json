@@ -9,6 +9,7 @@
     "opener:default",
     "updater:default",
     "process:allow-restart",
+    "deep-link:default",
     "macos-permissions:default",
     "keychain:default",
     "keychain:allow-get-item",

@@ -61,6 +61,7 @@ const mockEverything = () => {
       }),
       useMeetingDetection: () => ({}),
       useSilentUpdater: () => {},
+      useTeamSync: () => {},
       useMeetingCardHost: real.useMeetingCardHost,
     };
   });

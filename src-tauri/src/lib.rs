@@ -138,6 +138,10 @@ pub fn run() {
                 });
             }
         }))
+        // A second launch's `meetwings://` URL reaches the running app's
+        // `onOpenUrl` through single-instance's `deep-link` feature. The URL
+        // carries a team key: never log it or argv.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:meetwings.db", db::migrations())
@@ -264,6 +268,15 @@ pub fn run() {
             window::setup_main_window(app).expect("Failed to setup main window");
             #[cfg(target_os = "macos")]
             init(app.app_handle());
+
+            // macOS registers the scheme from the bundle's Info.plist.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    tracing::warn!("deep link register failed: {e}");
+                }
+            }
 
             let app_handle = app.handle();
             if app_handle.get_webview_window("dashboard").is_none() {

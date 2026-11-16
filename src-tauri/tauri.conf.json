@@ -47,6 +47,9 @@
     "macOS": { "minimumSystemVersion": "10.13" }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["meetwings"] }
+    },
     "sql": {
       "preload": ["sqlite:meetwings.db"]
     },

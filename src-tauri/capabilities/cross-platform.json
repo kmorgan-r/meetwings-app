@@ -9,6 +9,7 @@
     "opener:default",
     "updater:default",
     "process:allow-restart",
+    "deep-link:default",
     "keychain:default",
     "keychain:allow-get-item",
     "keychain:allow-save-item",
