@@ -69,6 +69,7 @@ const hooksBarrelStub = async (
       sttConfigured: true,
     }),
     useMeetingDetection: () => ({}),
+    useSilentUpdater: () => {},
     useCompletion: () => {
       useEffect(() => {
         completionMountSpy();
