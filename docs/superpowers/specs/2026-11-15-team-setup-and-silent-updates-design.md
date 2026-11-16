@@ -164,9 +164,14 @@ one Google app, shared by everyone.
 - Download in the background, no UI.
 - **Install gate, pinned** (my call, from spec review). Install only when all
   hold at the moment of the call:
-  - no capture is running, read from the authoritative source at that
-    moment (Rust capture state or a module-level store), never a React prop
-    or state captured when a timer was scheduled;
+  - no capture is running, read fresh at that moment (a module-level store
+    or a Tauri query), never a React prop or state captured when a timer was
+    scheduled. "Capturing" means ANY of: a capture session is open
+    (`capturing` / `CAPTURING_CONVERSATION_ID`, `useSystemAudio.ts:815-817`
+    — true in continuous mode even while Rust is idle, `:601-610`), the
+    mic/VAD is open, or Rust reports capturing. Rust capture state alone is
+    not enough (`meeting-auto-record.ts:70-80`), and Macs have no meeting
+    detection to cover the gap;
   - no meeting is detected as active;
   - the last capture ended at least `MEETING_CONVERSATION_GAP_MS` (30 min)
     ago, or there was none since start. "Idle" means app recording activity,
@@ -203,13 +208,15 @@ one Google app, shared by everyone.
   this work; signing is expected to stop the per-version keychain prompts, but
   an `/Applications` admin prompt depends on file ownership and may remain.
   (My call.)
-- **Failures back off:** a failed or cancelled install (including a cancelled
-  macOS password prompt) is not retried for that version until the next app
-  start, and after 2 failures the error state shows a retry button. No
-  re-prompting every 4 hours. (My call, from spec review.)
+- **Failures** (my call, from spec review): a failed check or download is
+  retried on the next 4-hour tick. A failed or cancelled install (including
+  a cancelled macOS password prompt) is not retried automatically for that
+  version until the next app start, so nobody is re-prompted every 4 hours.
+  After any install failure the updater shows a retry button right away, so
+  an always-running app is never stuck on the old version with no way out.
 - After restart, a small "Updated to X.Y.Z" note. (My call.)
-- The existing click-to-install button is removed on Windows and Mac; the
-  error state keeps a retry.
+- The existing click-to-install button is removed on Windows and Mac; only
+  the failure retry above remains.
 
 Built first because it carries the team-setup release to colleagues with no
 clicks.
@@ -275,6 +282,14 @@ clicks.
   caches and AppContext's provider state, and mounted `NotionSettingsCard` /
   `GoogleCalendarCard` re-read storage, so no stale form or cache can write
   old values back. (My call, from spec review.)
+  The overlay is a 54 px bar that never takes focus and may be hidden or
+  shrunk to the pill (`tauri.conf.json`; `lib.rs:119-140` warns a direct
+  `show()` of `main` desyncs its toggle state), so nothing the colleague must
+  read or answer appears there. The confirm prompt and the join errors show
+  in the dashboard, which `main` opens (as a second launch already does) and
+  notifies by event. The Settings paste box and "Check team link" send their
+  request to `main` by event and show `main`'s reply. `main` stays the only
+  window that fetches and applies.
 - **What counts as a failure** — any of these applies nothing and keeps the
   last good settings (silent on start; fixed-text error on join and in the
   paste-link box):
@@ -286,6 +301,7 @@ clicks.
   | not valid JSON, or fails the schema | keep last good |
   | `version` higher than this app understands | keep last good |
   | a required field missing or empty | keep last good |
+  | a storage or keychain write fails mid-apply | stop the remaining writes; see Applying |
 
   Required: AI provider + key, speech provider + key, Notion token, Meetings
   link, Google Client ID + secret. Optional fields (Knowledge link, team
@@ -299,6 +315,12 @@ clicks.
   `NOTION_SETUP_AT` stamp). The Notion blob is read-modify-write: team fields
   replaced, `yourName` kept; an unreadable blob is replaced by the team fields
   with `yourName` blank.
+  A write that fails partway (e.g. a refused keychain prompt on an unsigned
+  Mac) stops the remaining writes. On a first join, the app undoes what it
+  already wrote and records no link and no "last synced", then shows the
+  join error. On a later fetch it keeps what landed and records no "last
+  synced"; the next fetch finishes the job, because only changed fields are
+  written.
 - **The file wins** (my call, owner did not object): anything the file
   covers is reset to the file's value on each successful fetch. Settings the
   file doesn't cover are untouched.
@@ -319,7 +341,11 @@ clicks.
   id (or the send's id) into the page, and a page counts as "this send's"
   only when that id matches. A teammate's page on the same call is then a
   normal same-meeting candidate: merged by the existing judge, never adopted
-  or trashed.
+  or trashed. Where the id lives is the builder's call, with one constraint:
+  the proof must work on a team database with no extra column (e.g. in the
+  page body next to the bold title the candidate read already uses), never
+  only in an optional property — today's optional columns are written only
+  when they exist (`page-blocks.ts:223-228`).
 - **"Recorded by" stays blank; who attended is what matters** (owner: "we
   should know who was in each meeting including the person who recorded, it's
   not as important who specifically recorded"). With a shared workspace
@@ -348,7 +374,8 @@ invokes, the updater plugin) proves the decision logic:
 - Team file: each row of the failure table leaves storage byte-identical; a
   valid file applies every covered field and leaves uncovered settings
   (audio, shortcuts, Odoo, a typed `yourName`) untouched; a no-op re-apply
-  writes nothing; Copy → apply round trip; wrong key, tampered blob and a link
+  writes nothing; a write failing mid-apply on first join leaves storage as
+  it was and records no link; Copy → apply round trip; wrong key, tampered blob and a link
   without a key fail cleanly; export refuses empty required fields and a key
   inline in a CURL template.
 - Link parser: valid link accepted; wrong scheme, non-gist host, http,
@@ -374,8 +401,9 @@ observable signal. (My call, from spec review.) Manual checklist, per OS:
    colleague reports, including any password prompt).
 2. Start a recording, publish a release: no install until the recording has
    been over for 30 minutes.
-3. Click a team link with Meetwings closed, and again with it running: the
-   confirm prompt appears both times.
+3. Click a team link with Meetwings closed and decline the prompt; click it
+   again with Meetwings running: the confirm prompt appears in the dashboard
+   both times.
 4. Join: settings fill in, Google consent opens once, and a recorded meeting
    reaches Notion with the colleague's name.
 5. Disconnect the network and restart: settings stay as they were.
