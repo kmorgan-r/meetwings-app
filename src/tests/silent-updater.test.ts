@@ -40,11 +40,13 @@ interface FakeUpdate {
   version: string;
   download: Mock;
   install: Mock;
+  close: Mock;
 }
 const fakeUpdate = (version: string): FakeUpdate => ({
   version,
   download: vi.fn().mockResolvedValue(undefined),
   install: vi.fn().mockResolvedValue(undefined),
+  close: vi.fn().mockResolvedValue(undefined),
 });
 const asUpdate = (u: FakeUpdate) => u as unknown as Update;
 
@@ -237,6 +239,7 @@ describe("silent updater scheduler", () => {
       version: "1.6.0",
     });
     expect(deps.relaunch).not.toHaveBeenCalled();
+    expect(u.close).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(UPDATE_TICK_MS);
 
@@ -247,6 +250,9 @@ describe("silent updater scheduler", () => {
       kind: "install-failed",
       version: "1.6.0",
     });
+    // The rejected install released the update; the failed-version discard
+    // at the retry tick releases it once more.
+    expect(u.close).toHaveBeenCalledTimes(2);
 
     retryInstall();
     await flush();
@@ -255,6 +261,7 @@ describe("silent updater scheduler", () => {
     expect(u.download).toHaveBeenCalledTimes(2);
     expect(u.install).toHaveBeenCalledTimes(2);
     expect(deps.relaunch).toHaveBeenCalledTimes(1);
+    expect(u.close).toHaveBeenCalledTimes(2);
   });
 
   it("a newer version after a failed install installs automatically", async () => {
@@ -303,6 +310,37 @@ describe("silent updater scheduler", () => {
 
     expect(u2.install).toHaveBeenCalledTimes(1);
     expect(u1.install).not.toHaveBeenCalled();
+    expect(deps.relaunch).toHaveBeenCalledTimes(1);
+    expect(u1.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("a re-check that fires while a tick holds busy reschedules itself", async () => {
+    const u = fakeUpdate("1.6.0");
+    deps.check.mockResolvedValueOnce(asUpdate(u));
+    deps.readGateInput.mockResolvedValue(busy());
+    start();
+    await flush();
+
+    expect(getSilentUpdaterStatus()).toEqual({ kind: "waiting", version: "1.6.0" });
+
+    // The next tick's check hangs, holding busy across the next re-check.
+    const pendingCheck = deferred<Update | null>();
+    deps.check.mockReturnValueOnce(pendingCheck.promise);
+    await vi.advanceTimersByTimeAsync(UPDATE_TICK_MS);
+    expect(u.install).not.toHaveBeenCalled();
+
+    deps.readGateInput.mockResolvedValue(idle());
+    // A re-check fires while the hung check holds busy: it must reschedule.
+    await vi.advanceTimersByTimeAsync(INSTALL_RECHECK_MS);
+    expect(u.install).not.toHaveBeenCalled();
+
+    pendingCheck.resolve(null);
+    await flush();
+    expect(u.install).not.toHaveBeenCalled();
+
+    // The rescheduled re-check runs once busy clears, and installs.
+    await vi.advanceTimersByTimeAsync(INSTALL_RECHECK_MS);
+    expect(u.install).toHaveBeenCalledTimes(1);
     expect(deps.relaunch).toHaveBeenCalledTimes(1);
   });
 

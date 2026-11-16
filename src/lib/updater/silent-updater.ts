@@ -65,6 +65,15 @@ let recheckTimer: ReturnType<typeof setTimeout> | null = null;
 const statusKey = (s: SilentUpdaterStatus) =>
   s.kind === "idle" ? s.kind : `${s.kind}:${s.version}`;
 
+/**
+ * A Rust-backed `Update` holds the whole installer in Rust memory until
+ * `close()` or a successful `install()`; anything dropped unreferenced must be
+ * released here.
+ */
+function release(update: Update): void {
+  void update.close().catch(() => {});
+}
+
 /** Replaces the status only on a real transition, and only then notifies. */
 function setStatus(next: SilentUpdaterStatus): void {
   if (statusKey(next) === statusKey(status)) return;
@@ -115,7 +124,10 @@ async function checkAndDownload(gen: number): Promise<void> {
   let update: Update | null;
   try {
     update = await deps.check();
-    if (gen !== generation) return;
+    if (gen !== generation) {
+      if (update) release(update);
+      return;
+    }
     safeLocalStorage.setItem(
       STORAGE_KEYS.UPDATER_LAST_CHECK_AT,
       String(deps.now())
@@ -125,18 +137,24 @@ async function checkAndDownload(gen: number): Promise<void> {
       update.version === failedVersion ||
       update.version === held?.update.version
     ) {
+      if (update) release(update);
       return;
     }
     // No hard cap on the download.
     await update.download();
-    if (gen !== generation) return;
+    if (gen !== generation) {
+      release(update);
+      return;
+    }
   } catch {
     if (gen !== generation) return;
     console.error("[updater] check/download failed");
     return;
   }
   // A newer release replaces one still waiting for the gate.
+  const prev = held;
   held = { update, installed: false };
+  if (prev) release(prev.update);
   await attemptInstall(gen);
 }
 
@@ -164,6 +182,7 @@ async function attemptInstall(gen: number): Promise<void> {
     // blocked; a newer release still installs on the next tick.
     if (gen !== generation) return;
     failedVersion = target.update.version;
+    release(target.update);
     held = null;
     setStatus({ kind: "install-failed", version: target.update.version });
     return;
@@ -211,6 +230,7 @@ function stopSilentUpdater(): void {
   tickTimer = null;
   clearRecheck();
   busy = false;
+  if (held) release(held.update);
   held = null;
   generation++;
 }
@@ -236,4 +256,5 @@ export function __resetSilentUpdaterForTests(): void {
   deps = DEFAULT_DEPS;
   status = IDLE;
   failedVersion = null;
+  subscribers.clear();
 }

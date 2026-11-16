@@ -30,7 +30,7 @@ export function useSilentUpdater(): void {
       // A watcher that stops mid-call emits no meeting-ended; without this the
       // flag would block updates until restart.
       register("meeting-watcher-stopped", () => setMeetingActive(false)),
-    ]);
+    ]).catch(() => {});
 
     const stop = startSilentUpdater();
     return () => {
