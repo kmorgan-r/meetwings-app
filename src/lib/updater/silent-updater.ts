@@ -34,6 +34,7 @@ export async function readGateInput(): Promise<GateInput> {
     capturing: snapshot.capturing || rust,
     meetingActive: snapshot.meetingActive,
     lastCaptureEndedAt: snapshot.lastCaptureEndedAt,
+    appBusy: snapshot.appBusy,
     now: Date.now(),
   };
 }

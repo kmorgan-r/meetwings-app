@@ -56,6 +56,10 @@ import {
 } from "@/lib/team/team-controller";
 import { useTeamSync } from "@/hooks/useTeamSync";
 import { installMemoryLocalStorage } from "./memory-local-storage";
+import {
+  __resetActivityForTests,
+  getActivitySnapshot,
+} from "@/lib/updater/recording-activity.store";
 
 const GIST_A = "0123456789abcdef0123456789abcdef";
 const GIST_B = "fedcba9876543210fedcba9876543210";
@@ -125,6 +129,7 @@ beforeEach(() => {
   storage = installMemoryLocalStorage();
   // happy-dom's real sessionStorage survives between tests.
   sessionStorage.clear();
+  __resetActivityForTests();
   h.label = "main";
   h.actionHandler = null;
   h.urlHandler = null;
@@ -450,6 +455,48 @@ describe("team controller: actions", () => {
     await act({ type: "confirm" });
     expect(h.syncTeam).toHaveBeenCalledTimes(2);
     expect(h.reconnectGoogle).toHaveBeenCalledTimes(1);
+  });
+
+  it("a confirm holds the install gate busy until syncTeam settles, even when it rejects or stop() lands", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await start();
+    await openUrl(LINK_A1);
+    const sync = deferred<typeof OK>();
+    let busyAtSync: boolean | null = null;
+    h.syncTeam.mockImplementation(() => {
+      busyAtSync = getActivitySnapshot().appBusy;
+      return sync.promise;
+    });
+
+    await act({ type: "confirm" });
+    expect(busyAtSync).toBe(true);
+    expect(getActivitySnapshot().appBusy).toBe(true);
+    sync.resolve(OK);
+    await flush();
+    expect(getActivitySnapshot().appBusy).toBe(false);
+
+    // A rejected join clears it too.
+    await openUrl(LINK_B1);
+    let rejectSync!: (e: Error) => void;
+    h.syncTeam.mockImplementation(() => new Promise((_, reject) => (rejectSync = reject)));
+    await act({ type: "confirm" });
+    expect(getActivitySnapshot().appBusy).toBe(true);
+    rejectSync(new Error("boom"));
+    await flush();
+    expect(getActivitySnapshot().appBusy).toBe(false);
+    expect(lastState().error).toBe("TEAM_WRITE_FAILED");
+
+    // A stop() mid-join: busy has no tail, so it must still clear once the write settles.
+    await openUrl(LINK_A2);
+    const late = deferred<typeof OK>();
+    h.syncTeam.mockReturnValue(late.promise);
+    await act({ type: "confirm" });
+    expect(getActivitySnapshot().appBusy).toBe(true);
+    stop!();
+    stop = null;
+    late.resolve(OK);
+    await flush();
+    expect(getActivitySnapshot().appBusy).toBe(false);
   });
 
   it("a double confirm joins once", async () => {

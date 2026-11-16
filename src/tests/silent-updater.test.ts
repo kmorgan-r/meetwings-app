@@ -20,6 +20,7 @@ import {
 } from "@/lib/updater/silent-updater";
 import {
   __resetActivityForTests,
+  setAppBusy,
   setCaptureActive,
   setMeetingActive,
 } from "@/lib/updater/recording-activity.store";
@@ -32,6 +33,7 @@ const idle = (): GateInput => ({
   capturing: false,
   meetingActive: false,
   lastCaptureEndedAt: null,
+  appBusy: false,
   now: NOW,
 });
 const busy = (): GateInput => ({ ...idle(), capturing: true });
@@ -544,9 +546,19 @@ describe("readGateInput", () => {
       capturing: true,
       meetingActive: true,
       lastCaptureEndedAt: NOW - 10,
+      appBusy: false,
       now: NOW,
     });
     expect(mocks.invoke).toHaveBeenCalledWith("get_capture_status");
+  });
+
+  it("readGateInput reports the app busy while a team join applies", async () => {
+    mocks.invoke.mockResolvedValue(false);
+    setAppBusy("team-join", true);
+    expect((await readGateInput()).appBusy).toBe(true);
+
+    setAppBusy("team-join", false);
+    expect((await readGateInput()).appBusy).toBe(false);
   });
 
   it.each([

@@ -4,6 +4,7 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { STORAGE_KEYS } from "@/config/constants";
 import { reconnectGoogle } from "@/lib/calendar/google-connect";
 import { safeLocalStorage } from "@/lib/storage/helper";
+import { setAppBusy } from "@/lib/updater/recording-activity.store";
 import type { GraphStatus } from "@/types";
 import type { ApplyResult } from "./team-apply";
 import type { TeamErrorCode } from "./team-file";
@@ -185,9 +186,14 @@ async function confirm(gen: number): Promise<void> {
   state.busy = true;
   emitState();
   let result: ApplyResult;
+  // A silent install landing mid-join (process exit on Windows) would leave a
+  // partial write with no link and no rollback.
+  setAppBusy("team-join", true);
   try {
     result = await syncTeam(link, { firstJoin: true });
   } finally {
+    // Unconditional: the flag has no tail, so a stale run must clear it too.
+    setAppBusy("team-join", false);
     if (gen === generation) {
       state.busy = false;
       // A link that arrived during the join keeps its prompt.

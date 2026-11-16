@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import {
   setCaptureActive,
   setMeetingActive,
+  setAppBusy,
   getActivitySnapshot,
   useReportCaptureActivity,
   __resetActivityForTests,
@@ -61,6 +62,16 @@ describe("recording-activity store", () => {
     // meeting-watcher-stopped also fires when nothing was detected.
     setMeetingActive(false, 50);
     expect(getActivitySnapshot().lastCaptureEndedAt).toBeNull();
+  });
+
+  it("an app-busy source blocks the gate while set and leaves no quiet tail", () => {
+    setAppBusy("team-join", true);
+    expect(getActivitySnapshot().appBusy).toBe(true);
+    expect(canInstallNow({ ...getActivitySnapshot(), now: 0 })).toBe(false);
+
+    setAppBusy("team-join", false);
+    expect(getActivitySnapshot()).toMatchObject({ appBusy: false, lastCaptureEndedAt: null });
+    expect(canInstallNow({ ...getActivitySnapshot(), now: 0 })).toBe(true);
   });
 
   it("useReportCaptureActivity stamps the end on true -> false and on unmount, not on unrelated re-renders", () => {
