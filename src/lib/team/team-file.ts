@@ -52,11 +52,11 @@ export const TEAM_COPY: Record<TeamErrorCode, string> = {
   TEAM_DECRYPT_FAILED:
     "This link's key doesn't match the team settings. Ask for the current link.",
   TEAM_FILE_INVALID:
-    "The team settings are damaged or incomplete. Ask the owner to copy the link again.",
+    "The team settings are damaged or incomplete. The owner needs to copy them again.",
   TEAM_FILE_TOO_NEW:
     "These team settings need a newer Meetwings. Update the app and try again.",
   TEAM_FIELD_MISSING:
-    "The team settings are missing a required key or link. Fill in the AI key, speech key, Notion and Google settings first.",
+    "The team settings are missing a required key or link (AI, speech, Notion or Google).",
   TEAM_WRITE_FAILED:
     "Couldn't save the team settings on this computer. Please try again.",
   TEAM_KEY_INLINE:
@@ -90,6 +90,11 @@ function str(v: unknown): string {
   return v;
 }
 
+function reqStr(v: unknown): string {
+  if (typeof v !== "string") throw new WrongType();
+  return v;
+}
+
 function obj(v: unknown): Record<string, unknown> {
   if (v === undefined) return {};
   if (!isObj(v)) throw new WrongType();
@@ -98,7 +103,10 @@ function obj(v: unknown): Record<string, unknown> {
 
 function variables(v: unknown): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [k, val] of Object.entries(obj(v))) out[k] = str(val ?? "");
+  for (const [k, val] of Object.entries(obj(v))) {
+    if (typeof val !== "string") throw new WrongType();
+    out[k] = val;
+  }
   return out;
 }
 
@@ -107,10 +115,11 @@ function pickCustom(v: unknown): TYPE_PROVIDER {
   const c = obj(v);
   const out: TYPE_PROVIDER = {
     id: str(c.id),
-    name: str(c.name),
     curl: str(c.curl),
-    responseContentPath: str(c.responseContentPath),
+    // Required: absent is wrong, not "" (blank is rejected in providerKnown).
+    responseContentPath: reqStr(c.responseContentPath),
   };
+  if (c.name !== undefined) out.name = reqStr(c.name);
   if (c.streaming !== undefined) {
     if (typeof c.streaming !== "boolean") throw new WrongType();
     out.streaming = c.streaming;
@@ -172,13 +181,15 @@ export function parseTeamFile(json: string): TeamResult<TeamFileV1> {
 }
 
 function providerKnown(s: TeamProviderSettings, builtIn: TYPE_PROVIDER[]): boolean {
-  if (builtIn.some((p) => p.id === s.provider)) return true;
+  // A built-in id carries no custom definition: nothing unchecked may ride along.
+  if (builtIn.some((p) => p.id === s.provider)) return s.custom === undefined;
   const c = s.custom;
   if (!c || c.id !== s.provider) return false;
   if (
-    typeof c.name !== "string" ||
+    (c.name !== undefined && typeof c.name !== "string") ||
     typeof c.curl !== "string" ||
     typeof c.responseContentPath !== "string" ||
+    c.responseContentPath.trim() === "" ||
     (c.streaming !== undefined && typeof c.streaming !== "boolean")
   ) {
     return false;
@@ -279,8 +290,8 @@ export async function exportTeamSettings(): Promise<TeamResult<TeamFileV1>> {
       }
     }
 
-    const code = validateTeamFile(file);
-    return code ? fail(code) : { ok: true, value: file };
+    // Exactly what a member's parser accepts (it validates last).
+    return parseTeamFile(JSON.stringify(file));
   } catch {
     return fail("TEAM_FILE_INVALID");
   }

@@ -87,6 +87,19 @@ describe("exportTeamSettings", () => {
     expect(back).toEqual(r);
     expect(JSON.stringify(r)).not.toContain("Owner");
     expect((r as any).value.notion.knowledgeDbUrl).toBeUndefined();
+    expect((r as any).value.ai.variables).toEqual({ api_key: "sk-owner", model: "gpt-x" });
+    expect((r as any).value.notion.teamTimes).toEqual({ monday: "09:00" });
+  });
+
+  it("export refuses a custom STT provider whose curl has the key inline", async () => {
+    ownerSeed();
+    const p = { ...CUSTOM, id: "custom-stt", curl: "curl https://x.test -H 'k: gsk-owner'" };
+    store.set(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS, JSON.stringify([p]));
+    store.set(
+      STORAGE_KEYS.SELECTED_STT_PROVIDER,
+      JSON.stringify({ provider: "custom-stt", variables: { api_key: "gsk-owner" } })
+    );
+    expect(code(await exportTeamSettings())).toBe("TEAM_KEY_INLINE");
   });
 
   it.each(["ai key", "notion token", "google config"])(
@@ -178,10 +191,48 @@ describe("parseTeamFile", () => {
     f.extra = 1;
     f.ai.extra = 2;
     f.notion.yourName = "Owner";
+    f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: { ...CUSTOM, extra: 3 } };
     const r: any = parse(f);
     expect(r.ok).toBe(true);
     expect(JSON.stringify(r)).not.toContain("extra");
     expect(JSON.stringify(r)).not.toContain("Owner");
+  });
+
+  it("parse: built-in id carrying custom -> TEAM_FILE_INVALID (AI and STT)", () => {
+    const evil = { id: "x", curl: "curl https://evil.test" };
+    // Also a well-formed custom: only the built-in-id rule can reject that one.
+    for (const c of [evil, { ...CUSTOM, id: "openai" }, { ...CUSTOM, id: "groq" }]) {
+      const a = valid();
+      a.ai = { provider: "openai", variables: { api_key: "k" }, custom: c };
+      expect(code(parse(a))).toBe("TEAM_FILE_INVALID");
+      const s = valid();
+      s.stt = { provider: "groq", variables: { api_key: "k" }, custom: c };
+      expect(code(parse(s))).toBe("TEAM_FILE_INVALID");
+    }
+  });
+
+  it("parse: custom responseContentPath absent or blank -> TEAM_FILE_INVALID", () => {
+    const { responseContentPath, ...noPath } = CUSTOM;
+    for (const c of [noPath, { ...CUSTOM, responseContentPath: "  " }]) {
+      const f = valid();
+      f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: c };
+      expect(code(parse(f))).toBe("TEAM_FILE_INVALID");
+    }
+  });
+
+  it("parse: custom name optional, but must be a string when present", () => {
+    const { name, ...noName } = CUSTOM;
+    const f = valid();
+    f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: noName };
+    expect(parse(f).ok).toBe(true);
+    f.ai.custom = { ...CUSTOM, name: 5 };
+    expect(code(parse(f))).toBe("TEAM_FILE_INVALID");
+  });
+
+  it("parse: null variable value -> TEAM_FILE_INVALID", () => {
+    const f = valid();
+    f.ai.variables = { api_key: "k", model: null };
+    expect(code(parse(f))).toBe("TEAM_FILE_INVALID");
   });
 
   it("has fixed copy for the fetch failure", () => {
