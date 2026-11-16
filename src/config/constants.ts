@@ -90,6 +90,9 @@ export const STORAGE_KEYS = {
   NOTION_PICK_SOURCE: "notion_pick_source",
   // When Notion first read as fully set up (ms epoch); floors crash recovery.
   NOTION_SETUP_AT: "notion_setup_at",
+
+  // When the silent updater last completed an update check (ms epoch).
+  UPDATER_LAST_CHECK_AT: "updater_last_check_at",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the
