@@ -4,9 +4,8 @@ import {
   MEETING_DETECT_LABELS,
   MEETING_DETECT_PROCESSES,
 } from "@/config/constants";
-import { EARLY_JOIN_MS, isDeclined } from "@/lib/calendar/current-meeting";
 import type { GoogleConfigState } from "@/lib/storage/google-config.storage";
-import type { CalendarEvent, GoogleErrorCode } from "@/types/calendar";
+import type { GoogleErrorCode } from "@/types/calendar";
 
 export interface WatchLists {
   direct: string[];
@@ -28,25 +27,6 @@ export function meetingLabel(process?: string): string {
 export function isGatedProcess(process?: string): boolean {
   return (
     !!process && MEETING_DETECT_GATED_PROCESSES.includes(process.toLowerCase())
-  );
-}
-
-/**
- * A current Meet call: Meet link, not cancelled/all-day/declined, and now within
- * [start - EARLY_JOIN_MS, end). Unlike isMeetingEvent, a solo event qualifies.
- */
-export function hasQualifyingMeetEvent(
-  events: CalendarEvent[],
-  nowMs: number
-): boolean {
-  return events.some(
-    (e) =>
-      e.hasMeetLink &&
-      !e.isCancelled &&
-      !e.isAllDay &&
-      !isDeclined(e) &&
-      e.startMs - EARLY_JOIN_MS <= nowMs &&
-      nowMs < e.endMs
   );
 }
 
