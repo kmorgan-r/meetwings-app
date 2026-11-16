@@ -693,7 +693,7 @@ git commit -m "feat(team): change-only apply with first-join rollback"
   - `__resetTeamSyncForTests(): void`, which resets the promise chain.
 
 `syncTeam`, pinned:
-- **Serialized and never rejects.** Calls queue through a module promise chain, `chain = chain.then(run, run)`, so two calls never overlap and one failure never poisons the next. The body is wrapped in try/catch. An unexpected throw maps to `TEAM_WRITE_FAILED` with `landed: true`, because the caller cannot know what landed.
+- **Serialized and never rejects.** Calls queue through a module promise chain, `chain = chain.then(run, run)`, so two calls never overlap and one failure never poisons the next. The body is wrapped in try/catch. An unexpected throw maps to `TEAM_WRITE_FAILED` with `landed: true`, because the caller cannot know what landed. The catch therefore also calls `resetSecureProviderConfigsCache()` and emits the events below, best effort.
 - **Fetch fails** → return the code. Nothing is written.
 - **Apply.** `applyTeamFile(file, firstJoin ? { firstJoin: true, link } : { firstJoin: false })`. The link write is the last apply step, so its failure rolls back the whole join.
 - **Apply fails** → return the failure and do not stamp last synced. If `landed`, emit the events below anyway, so other windows drop stale caches and forms.
@@ -721,7 +721,8 @@ it("later sync: an apply failure stamps no last synced and still emits the event
 // seed TEAM_LAST_SYNCED_AT absent; firstJoin false; failWhen notion blob write -> key still absent; emit TEAM_SETTINGS_APPLIED_EVENT called
 it("two concurrent syncs run one after the other", ...);   // second fetch starts only after the first resolves
 it("a sync whose body throws resolves TEAM_WRITE_FAILED and the next sync still runs", ...);
-// mock applyTeamFile to throw once -> first result {ok:false, code:"TEAM_WRITE_FAILED"}; second syncTeam resolves normally
+// mock applyTeamFile to throw once -> first result {ok:false, code:"TEAM_WRITE_FAILED", landed:true};
+// emit(TEAM_SETTINGS_APPLIED_EVENT) called; resetSecureProviderConfigsCache called; second syncTeam resolves normally
 it("leaveTeam deletes the link and last-synced and keeps settings", ...);
 it("Copy -> apply round trip reproduces the owner's settings", ...);
 // owner storage -> exportTeamSettings -> encryptTeamPayload -> gist mock returns blob -> wipe storage -> syncTeam -> AI/STT/notion/google equal owner's
@@ -840,7 +841,7 @@ git commit -m "feat(google): profile scope fills a blank Notion name; shared con
 **Interfaces:**
 - Produces:
   - `SEND_REF_PREFIX = "Meetwings ref "`
-  - `sendRefOf(sendId: string): string` returns `sendId.replace(/-/g, "").toLowerCase().slice(0, 12)`. Send ids are `crypto.randomUUID()` (`src/lib/notion/actions.ts:78`), so the result is always 12 hex characters.
+  - `sendRefOf(sendId: string): string` returns `sendId.replace(/-/g, "").toLowerCase().slice(0, 12)`. A send id is the id of its first joined queue row (`src/lib/notion/scheduler.ts:56-58`). Every `insertQueueRow` caller generates that id with `crypto.randomUUID()`: `useMeetingLog.ts:559`, `notion/actions.ts:78`, `odoo/meeting-log-actions.ts:607`, `odoo/meeting-log-recovery.ts:209`. So the result is always 12 hex characters.
   - `sendRefBlock(sendId: string): NotionBlockInput`: a `paragraph` with one rich-text item, content `SEND_REF_PREFIX + sendRefOf(sendId)`, annotation `color: "gray"`
   - `Candidate.sendRef: string | null`. Set from `children[0]` only: a `paragraph` whose plain text matches `/^Meetwings ref ([0-9a-f]{12})$/`. Otherwise `null`.
 
@@ -900,7 +901,7 @@ git commit -m "fix(notion): prove page ownership by per-send ref so shared token
 
 Pinned:
 - AppContext: `listen(TEAM_SETTINGS_APPLIED_EVENT, async () => { resetSecureProviderConfigsCache(); await Promise.all([loadSecureAIConfigs(), loadSecureSTTConfigs()]); loadData(); })`. Register it with the cancelled-flag pattern and `[]` deps (same reasoning as `pages/app/index.tsx:149-156`).
-- NotionSettingsCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. Never fully reload on `NOTION_CONFIG_CHANGED_EVENT`: the card emits that itself on every token save, and a reload would wipe unsaved link edits. On that event, re-read only `yourName`, and adopt it only when the form's `yourName` is blank. This is how a Google name fill (Task 10) reaches an open card without touching anything typed.
+- NotionSettingsCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. Never fully reload on `NOTION_CONFIG_CHANGED_EVENT`: the card emits that itself on every token save, and a reload would wipe unsaved link edits. On that event, re-read only `yourName`. Adopt it only when the form's `yourName` is blank *and* the name the card last loaded from storage was blank too. Keep that in a `loadedNameRef`, set by `reload()` and by a successful Save. This is how a Google name fill (Task 10) reaches an open card without touching anything typed. A user who clears the field on purpose, then saves the token or flips auto-send (both emit this event, `NotionSettingsCard.tsx:27-33`), keeps the field blank.
 - GoogleCalendarCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. On `GOOGLE_CONNECTION_CHANGED_EVENT`, refresh only `status` via `google_status`, never the Client ID and secret fields. The card broadcasts that event itself on connect and disconnect, and Tauri delivers it to the emitting window too, so a form reload there would wipe unsaved edits.
 
 - [ ] **Step 1: Write the failing tests**
@@ -914,6 +915,8 @@ it("NotionSettingsCard re-reads storage on team-settings-applied", ...)     // m
 it("NotionSettingsCard on notion-config-changed fills a blank name and keeps typed edits", ...)
 // type into the meetings link input; stored yourName "Ana"; fire handler -> link edit kept, name "Ana";
 // with a typed name "Bo" -> stays "Bo"
+it("NotionSettingsCard keeps a deliberately cleared name when its own emit fires", ...)
+// stored "Ana" loaded; clear the field; fire the notion-config-changed handler -> field stays blank
 it("GoogleCalendarCard re-reads config and status on team-settings-applied", ...)
 it("GoogleCalendarCard on google-connection-changed refreshes status only", ...)
 // type into Client ID; fire handler -> google_status re-queried, typed Client ID kept
@@ -984,7 +987,9 @@ Controller, pinned:
   - Otherwise → keep the parsed link in a module variable (never in state). Set `pending = { gistShort: shortGistId(id), switching: stored !== null }`, `invoke("open_dashboard")`, emit state.
   - A second link while pending replaces the pending link. Nothing is applied.
 - **Actions.**
-  - `confirm`: no pending → ignore. Else `busy`, `syncTeam(pending, { firstJoin: true })`, clear pending. On failure → `error = code`. On success → `joined = true`. Then set `busy = false` and emit state *before* any Google sign-in. `google_connect` blocks until the browser callback, and the prompt must not sit open and busy over settings that have already landed. Then, if `google_status` is not connected, `await reconnectGoogle()`: not ok → `googleNeedsConnect = true`, else `false`.
+  - `confirm`: no pending → ignore. Else `busy`, `syncTeam(pending, { firstJoin: true })`, clear pending.
+    - On failure → `error = code`, `busy = false`, emit state, stop. No Google step runs: a failed join opens no browser and leaves `googleNeedsConnect` false.
+    - On success → `joined = true`, `busy = false`, emit state *before* any Google sign-in. `google_connect` blocks until the browser callback, and the prompt must not sit open and busy over settings that have already landed. Then, only on this success branch, if `google_status` is not connected, `await reconnectGoogle()`: not ok → `googleNeedsConnect = true`, else `false`.
   - `decline`: clear pending.
   - `leave`: `leaveTeam()`, `joined = false`, `googleNeedsConnect = false`.
   - `check-owner-link`: `loadOwnerTeamLink()`. `null` → `check = { ok: false, code: "TEAM_LINK_INVALID" }`. Else `fetchTeamFile(link)` → `check = { ok: true }` or the code. Nothing is applied.
@@ -1016,7 +1021,8 @@ it("a listener that resolves after stop() is unlistened at once and never handle
 it("start emits state after google_status resolves", ...)        // stored link; last emit has joined true, googleNeedsConnect per google_status
 it("confirm emits a non-busy state before Google sign-in starts", ...)
 // reconnectGoogle pending -> an emitted state has pending null, busy false, joined true
-it("a confirm whose sync fails sets the error, clears pending and leaves joined false", ...)
+it("a confirm whose sync fails sets the error, clears pending, leaves joined false and starts no Google sign-in", ...)
+// expect(reconnectGoogle).not.toHaveBeenCalled(); googleNeedsConnect false
 it("a confirm followed by a failed Google sign-in sets googleNeedsConnect", ...)
 it("a throwing action clears busy and reports TEAM_WRITE_FAILED", ...)   // syncTeam rejects -> state busy false, error TEAM_WRITE_FAILED
 it("a rejected google_status counts as not connected", ...)
@@ -1061,7 +1067,7 @@ git commit -m "feat(team): meetwings:// deep link and main-window team controlle
 - Create: `src/pages/settings/components/TeamSettingsCard.tsx` (export from `./components` index)
 - Modify: `src/pages/settings/index.tsx` (render `<TeamSettingsCard />` right after `<Theme />`)
 - Modify: `src/pages/dev/index.tsx` (the `/api-setup` page: render `<TeamJoinBox />` above the "Required" section while `!state?.joined`). `DashboardLayout.tsx:17-21` redirects every other route to `/api-setup` until AI and speech are set up. A new colleague whose mail client does not make `meetwings://` clickable could otherwise never reach the paste box in Settings.
-- Test: `src/tests/team-join-prompt.test.tsx`, `src/tests/team-settings-card.test.tsx`, `src/tests/use-team-state.test.tsx`
+- Test: `src/tests/team-join-prompt.test.tsx`, `src/tests/team-settings-card.test.tsx`, `src/tests/use-team-state.test.tsx`, `src/tests/api-setup-team-join.test.tsx`
 
 **Interfaces:**
 - Consumes: `TEAM_STATE_EVENT`, `TEAM_ACTION_EVENT`, `TeamUiState`, `TeamAction` (Task 13). `parseTeamLink`, `parseGistRef`, `buildTeamLink` (Task 5). `generateTeamKey`, `encryptTeamPayload` (Task 5). `exportTeamSettings`, `TEAM_COPY` (Task 6). `TEAM_OWNER_KEY_SECURE_KEY`, `TEAM_OWNER_GIST_SECURE_KEY` (Task 9). `secureGet`/`secureSet`. `Dialog*`, `Button`, `Input` from `@/components`. `toast` from `sonner`.
@@ -1100,6 +1106,9 @@ it("toasts again when the same error arrives with a new errorSeq, and not on a r
 // use-team-state.test.tsx
 it("emits state-request only after the state listener resolves", ...)   // hold the listen promise; emit not called; resolve -> emit called
 it("a listener resolving after unmount is unlistened at once", ...)
+// api-setup-team-join.test.tsx (render DevSpace; mock useTeamState and the page's provider hooks)
+it.each([[null], [{ joined: false }]])("API Setup shows the team join box when state is %j", ...)
+it("API Setup hides the team join box when joined", ...)
 // team-settings-card.test.tsx
 it("requests state on mount", ...)                                   // emit(TEAM_ACTION_EVENT, {type:"state-request"})
 it("an invalid pasted link shows fixed copy and sends nothing", ...)
@@ -1113,25 +1122,25 @@ it("Reconnect Google appears only when googleNeedsConnect", ...)
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx`
+Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx src/tests/api-setup-team-join.test.tsx`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the hook, prompt, join box, card and the three mounts**
 
 - [ ] **Step 4: Run tests and type-check**
 
-Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx && npm run type-check`
+Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx src/tests/api-setup-team-join.test.tsx && npm run type-check`
 Expected: PASS.
 
 - [ ] **Step 5: Run every test file this plan touched**
 
-Run: `npx vitest run src/tests/install-gate.test.ts src/tests/recording-activity-store.test.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx src/tests/use-team-state.test.tsx src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/team-link.test.ts src/tests/team-crypto.test.ts src/tests/team-file.test.ts src/tests/team-fetch.test.ts src/tests/team-apply.test.ts src/tests/team-sync.test.ts src/tests/team-redact.test.ts src/tests/google-connect.test.ts src/tests/google-calendar-card.test.tsx src/tests/notion-page-blocks.test.ts src/tests/notion-same-meeting.test.ts src/tests/notion-send.test.ts src/tests/team-settings-applied-consumers.test.tsx src/tests/notion-settings-card.test.tsx src/tests/team-controller.test.ts src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/secure-provider-configs.test.ts`
+Run: `npx vitest run src/tests/install-gate.test.ts src/tests/recording-activity-store.test.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx src/tests/use-team-state.test.tsx src/tests/api-setup-team-join.test.tsx src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/team-link.test.ts src/tests/team-crypto.test.ts src/tests/team-file.test.ts src/tests/team-fetch.test.ts src/tests/team-apply.test.ts src/tests/team-sync.test.ts src/tests/team-redact.test.ts src/tests/google-connect.test.ts src/tests/google-calendar-card.test.tsx src/tests/notion-page-blocks.test.ts src/tests/notion-same-meeting.test.ts src/tests/notion-send.test.ts src/tests/team-settings-applied-consumers.test.tsx src/tests/notion-settings-card.test.tsx src/tests/team-controller.test.ts src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/secure-provider-configs.test.ts`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/hooks/useTeamState.ts src/hooks/index.ts src/components/TeamJoinPrompt.tsx src/components/TeamJoinBox.tsx src/components/index.ts src/layouts/DashboardLayout.tsx src/pages/settings src/pages/dev/index.tsx src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx
+git add src/hooks/useTeamState.ts src/hooks/index.ts src/components/TeamJoinPrompt.tsx src/components/TeamJoinBox.tsx src/components/index.ts src/layouts/DashboardLayout.tsx src/pages/settings src/pages/dev/index.tsx src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx src/tests/api-setup-team-join.test.tsx
 git commit -m "feat(team): dashboard join prompt and Team settings card"
 ```
 
