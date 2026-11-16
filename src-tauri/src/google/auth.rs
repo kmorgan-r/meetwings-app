@@ -271,7 +271,12 @@ mod tests {
 
     #[test]
     fn name_from_id_token_is_none_without_a_usable_name() {
-        for claims in [r#"{}"#, r#"{"name":""}"#, r#"{"name":"   "}"#, r#"{"name":42}"#] {
+        for claims in [
+            r#"{}"#,
+            r#"{"name":""}"#,
+            r#"{"name":"   "}"#,
+            r#"{"name":42}"#,
+        ] {
             assert_eq!(name_from_id_token(&fake_id_token(claims)), None, "{claims}");
         }
         assert_eq!(name_from_id_token("not-a-jwt"), None);

@@ -417,7 +417,10 @@ pub async fn google_connect(
     {
         return Err(AUTH_REJECTED.to_string());
     }
-    let name = tokens.id_token.as_deref().and_then(auth::name_from_id_token);
+    let name = tokens
+        .id_token
+        .as_deref()
+        .and_then(auth::name_from_id_token);
     // Without a refresh token the connection would die in an hour.
     if tokens.refresh_token.is_none() {
         return Err(BAD_RESPONSE.to_string());
