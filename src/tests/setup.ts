@@ -2,6 +2,9 @@ import { afterEach, vi } from 'vitest';
 import { cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 
+// Diagnostics only; kept out of every test's invoke mock and call counts.
+vi.mock('@/lib/detection-log', () => ({ detectionLog: vi.fn() }));
+
 // Cleanup after each test case (React Testing Library)
 afterEach(() => {
   cleanup();

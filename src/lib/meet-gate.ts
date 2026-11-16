@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { MEET_RECHECK_MS } from "@/config/constants";
+import { detectionLog } from "@/lib/detection-log";
 import {
   fetchCurrentGoogleMeetings,
   type FetchGoogleMeetingsResult,
@@ -63,8 +64,10 @@ export function createMeetGate(deps: MeetGateDeps): MeetGate {
     }, MEET_RECHECK_MS);
   };
 
-  const logConfirmFailure = (error: unknown) =>
+  const logConfirmFailure = (error: unknown) => {
     console.warn("confirm_meeting_candidate failed:", error);
+    detectionLog(`gate confirm failed: ${String(error)}`);
+  };
 
   const runCheck = async (e: number): Promise<void> => {
     if (inFlight === e) {
@@ -80,6 +83,7 @@ export function createMeetGate(deps: MeetGateDeps): MeetGate {
     } catch (error) {
       // fetchMeetings never rejects; this keeps the slot from sticking if a dep does.
       console.error("Meet calendar check failed:", error);
+      detectionLog(`gate e=${e} check threw`);
       if (inFlight === e) inFlight = null;
       if (live === e) schedule(e);
       return;
@@ -87,10 +91,20 @@ export function createMeetGate(deps: MeetGateDeps): MeetGate {
     // A newer episode's check may own the slot by now; clearing it would let
     // connectionChanged() start a second concurrent check.
     if (inFlight === e) inFlight = null;
+    const qualifying =
+      result.kind === "ok" && hasQualifyingMeetEvent(result.events, deps.now());
+    detectionLog(
+      `gate e=${e} live=${live === e} ${result.kind}` +
+        (result.kind === "ok"
+          ? ` events=${result.events.length} qualifying=${qualifying}`
+          : result.kind === "error"
+            ? ` ${result.code}`
+            : "")
+    );
     if (live !== e) return;
 
     if (result.kind === "ok") {
-      if (hasQualifyingMeetEvent(result.events, deps.now())) {
+      if (qualifying) {
         try {
           await deps.confirm(e);
           if (live !== e) return;

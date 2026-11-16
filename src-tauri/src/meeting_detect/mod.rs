@@ -9,6 +9,10 @@
 mod gate;
 use gate::{gated_step, GatedEvent, GatedInput, GatedState};
 
+// Persistent transition log: the only diagnostic a release build has.
+mod detect_log;
+use detect_log::{log_line, session_signature};
+
 #[cfg(target_os = "windows")]
 mod win32;
 #[cfg(target_os = "windows")]
@@ -497,6 +501,13 @@ struct ExitGuard {
 
 impl Drop for ExitGuard {
     fn drop(&mut self) {
+        log_line(
+            &self.app,
+            &format!(
+                "poll exit explicit={} reason={:?}",
+                self.explicit_stop, self.reason
+            ),
+        );
         self.running.store(false, Ordering::SeqCst);
         self.stopping.store(false, Ordering::SeqCst);
 
@@ -603,6 +614,11 @@ fn poll_loop(
     let own_pid = std::process::id();
     let mut core = WatcherCore::default();
     let mut error_episode = false;
+    let mut last_signature = String::new();
+    log_line(&app, &format!("poll start pid={own_pid}"));
+    // The signature logs on change only, so a starved poll thread would be
+    // invisible without this.
+    let mut last_poll = std::time::Instant::now();
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -610,11 +626,18 @@ fn poll_loop(
             break;
         }
 
+        let since = last_poll.elapsed();
+        last_poll = std::time::Instant::now();
+        if since > POLL_INTERVAL * 3 {
+            log_line(&app, &format!("poll stalled {}ms", since.as_millis()));
+        }
+
         let lists = lock_recover(&slots.lists).clone();
         let confirmed = *lock_recover(&slots.confirmed);
 
         if slots.reannounce.swap(false, Ordering::SeqCst) {
             if let Some(event) = reannounce_event(&core) {
+                log_line(&app, &format!("reannounce {event:?}"));
                 emit_detection(&app, &event);
             }
         }
@@ -625,6 +648,17 @@ fn poll_loop(
         let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             enumerate_capture_sessions()
         }));
+
+        // Logged on change only, so a steady call costs nothing.
+        let signature = match &polled {
+            Ok(Ok(sessions)) => session_signature(sessions, own_pid),
+            Ok(Err(message)) => format!("poll failed: {message}"),
+            Err(_) => "poll panicked".to_string(),
+        };
+        if signature != last_signature {
+            log_line(&app, &signature);
+            last_signature = signature;
+        }
 
         let (outcome, gated_outcome) = match polled {
             Ok(Ok(sessions)) => (
@@ -680,6 +714,7 @@ fn poll_loop(
 
         let mut stopped = false;
         for event in events {
+            log_line(&app, &format!("event {event:?}"));
             match event {
                 WatcherEvent::Degraded(message) => {
                     // Opening an episode here is what lets the recovery block above
@@ -733,10 +768,18 @@ pub fn start_meeting_watcher(
 
     let state = app.state::<MeetingWatcherState>();
 
-    match plan_start(
+    let action = plan_start(
         state.running.load(Ordering::SeqCst),
         state.stopping.load(Ordering::SeqCst),
-    ) {
+    );
+    log_line(
+        &app,
+        &format!(
+            "watcher start v{} {action:?} direct={direct:?} gated={gated:?}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    match action {
         StartAction::UpdateWatchList => {
             *lock_recover(&state.watch_list) = WatchLists { direct, gated };
             // A start on a running watcher is what a webview reload does: the
@@ -855,11 +898,21 @@ pub fn confirm_meeting_candidate(app: AppHandle, episode: u64) -> Result<(), Str
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
     let state = app.state::<MeetingWatcherState>();
-    apply_confirm(
+    let result = apply_confirm(
         state.running.load(Ordering::SeqCst),
         &state.confirmed,
         episode,
-    )
+    );
+    log_line(&app, &format!("confirm episode={episode} {result:?}"));
+    result
+}
+
+/// One frontend decision into detection.log. Bounded, so a runaway caller
+/// cannot fill the disk faster than rotation.
+#[tauri::command]
+pub fn log_detection(app: AppHandle, line: String) {
+    let line: String = line.chars().take(300).collect();
+    log_line(&app, &format!("ui {line}"));
 }
 
 /// async because it waits up to 3s: a non-async Tauri v2 command runs on the
@@ -873,6 +926,7 @@ pub async fn stop_meeting_watcher(app: AppHandle) -> Result<StopOutcome, String>
     }
 
     let state = app.state::<MeetingWatcherState>();
+    log_line(&app, "watcher stop requested");
 
     // Set BEFORE the generation leaves the slot, so a concurrent start can
     // observe that a stop is in flight.
