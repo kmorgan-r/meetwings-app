@@ -8,7 +8,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL,
   AUTOSAVE_FAILURE_REPORT_THRESHOLD,
-  MEETING_CONVERSATION_GAP_MS,
+  NEW_CONVERSATION_GAP_MS,
 } from "@/config";
 import { useApp } from "@/contexts";
 import {
@@ -1523,8 +1523,9 @@ export const useCompletion = () => {
   // A meeting capture that opens long after this conversation's last meeting
   // line is a new meeting. Left alone it appends to the old conversation, which
   // then spans both meetings under the first one's title, summary and download.
-  // Gap-based rather than tied to meeting-detected: detection flaps mid-call,
-  // and pausing the mic must not split a meeting either.
+  // Gap-based rather than tied to meeting-detected: detection flaps mid-call.
+  // The gap is short (NEW_CONVERSATION_GAP_MS), so a mic paused or dropped
+  // mid-call for longer than it does split the call.
   //
   // At the capture edge, not inside the add*Transcript functions: the autosave
   // reads the refs when it RUNS, so startNewConversation must flush the old
@@ -1547,7 +1548,7 @@ export const useCompletion = () => {
         const clock = meetingLines.length > 0 ? meetingLines : history;
         // Max, not the last element: the history is sorted newest-first in place.
         const lastLineAt = Math.max(...clock.map((m) => m.timestamp));
-        if (Date.now() - lastLineAt > MEETING_CONVERSATION_GAP_MS) {
+        if (Date.now() - lastLineAt > NEW_CONVERSATION_GAP_MS) {
           // Awaited: its newConversationStarted clears the Odoo targets, and
           // auto-select must land after that, not be wiped by it.
           await startNewConversation();
@@ -1557,7 +1558,7 @@ export const useCompletion = () => {
         }
       }
       // Only a conversation with no meeting in it yet. A capture restart
-      // mid-call, or a back-to-back meeting inside the gap, keeps its targets.
+      // inside the gap keeps its targets.
       // NOT meetingTranscript: that buffer is session-wide and never cleared
       // per conversation, so it would block every rollover. Every transcript
       // line reaches conversationHistoryRef with its audioSource on arrival.
