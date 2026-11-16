@@ -7,6 +7,9 @@ import {
   useReportCaptureActivity,
   __resetActivityForTests,
 } from "@/lib/updater/recording-activity.store";
+import { canInstallNow } from "@/lib/updater/install-gate";
+
+const MIN = 60_000;
 
 beforeEach(() => {
   __resetActivityForTests();
@@ -41,6 +44,23 @@ describe("recording-activity store", () => {
       meetingActive: true,
       capturing: false,
     });
+  });
+
+  it("a meeting that ended holds the install gate for the same 30-minute tail as a capture", () => {
+    // Detection flaps mid-call: an ended meeting may be re-detected minutes later.
+    const END = 1_000_000_000;
+    setMeetingActive(true, END - 60 * MIN);
+    setMeetingActive(false, END);
+    const gate = (now: number) => canInstallNow({ ...getActivitySnapshot(), now });
+
+    expect(gate(END + 10 * MIN)).toBe(false);
+    expect(gate(END + 31 * MIN)).toBe(true);
+  });
+
+  it("a meeting end with no meeting active starts no tail", () => {
+    // meeting-watcher-stopped also fires when nothing was detected.
+    setMeetingActive(false, 50);
+    expect(getActivitySnapshot().lastCaptureEndedAt).toBeNull();
   });
 
   it("useReportCaptureActivity stamps the end on true -> false and on unmount, not on unrelated re-renders", () => {

@@ -14,8 +14,9 @@ export interface GateInput {
 /**
  * Whether the silent auto-updater may install right now. Defers while any
  * capture runs or a meeting is detected, and for MEETING_CONVERSATION_GAP_MS
- * after the last capture ended, so a follow-up capture inside a conversation
- * is not interrupted by a restart.
+ * after the last capture or meeting ended, so a follow-up capture inside a
+ * conversation (or a meeting re-detected after a flap) is not interrupted by
+ * a restart.
  */
 export function canInstallNow(input: GateInput): boolean {
   if (input.capturing || input.meetingActive) return false;

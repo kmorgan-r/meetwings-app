@@ -4,8 +4,8 @@ import { useEffect } from "react";
 export type CaptureSource = "system-audio" | "mic";
 
 // Module-level store: which capture sources are currently active, whether a
-// meeting is detected, and when the last capture ended. Consumers the silent
-// updater reads via getActivitySnapshot()/canInstallNow().
+// meeting is detected, and when the last capture or meeting ended. Consumers
+// the silent updater reads via getActivitySnapshot()/canInstallNow().
 const activeSources = new Set<CaptureSource>();
 let meetingActive = false;
 let lastCaptureEndedAt: number | null = null;
@@ -31,8 +31,13 @@ export function setCaptureActive(
   }
 }
 
-/** Report whether a meeting is currently detected; independent of captures. */
-export function setMeetingActive(active: boolean): void {
+/**
+ * Report whether a meeting is currently detected. A meeting that ends stamps
+ * `lastCaptureEndedAt` like a capture does, so the gate's quiet tail covers a
+ * detection flap mid-call; an end with no meeting active stamps nothing.
+ */
+export function setMeetingActive(active: boolean, now: number = Date.now()): void {
+  if (meetingActive && !active) lastCaptureEndedAt = now;
   meetingActive = active;
 }
 
