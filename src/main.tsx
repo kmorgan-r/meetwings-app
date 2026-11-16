@@ -13,7 +13,14 @@ const windowLabel = currentWindow.label;
 
 // Outside the React root: nothing above App catches a render error, and an
 // updater a broken release can kill would strand every colleague (no rollback).
-if (windowLabel === "main") startMainWindowUpdater();
+// The try keeps a future synchronous throw from also skipping createRoot below.
+if (windowLabel === "main") {
+  try {
+    startMainWindowUpdater();
+  } catch {
+    // Nothing to report to: release builds have no console.
+  }
+}
 
 // Render different components based on window label
 if (windowLabel.startsWith("capture-overlay-")) {
