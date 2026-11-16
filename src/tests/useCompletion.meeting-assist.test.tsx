@@ -3,7 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { useCompletion } from "@/hooks/useCompletion";
-import { MEETING_CONVERSATION_GAP_MS, STORAGE_KEYS } from "@/config/constants";
+import { NEW_CONVERSATION_GAP_MS, STORAGE_KEYS } from "@/config/constants";
 import {
   appendMessagesToConversation,
   fetchAIResponse,
@@ -798,7 +798,7 @@ describe("useCompletion meeting assist mode", () => {
       // The incident: a meeting on Fri 12:41, the app left open, and Monday's
       // call appended to Friday's conversation - inheriting its title,
       // summary and transcript download.
-      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS + 60_000);
+      const result = await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS + 60_000);
       expect(result.current.currentConversationId).toBe("chat-b");
       expect(result.current.conversationHistory.map((m) => m.content)).toEqual(["Next line"]);
     });
@@ -806,7 +806,21 @@ describe("useCompletion meeting assist mode", () => {
     it("keeps the conversation when the capture reopens within the gap", async () => {
       // Meeting detection flaps (meeting-ended, then meeting-detected again
       // minutes later) and users pause the mic: both are the same meeting.
-      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS - 60_000);
+      const result = await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS / 2);
+      expect(result.current.currentConversationId).toBe("chat-a");
+      expect(result.current.conversationHistory).toHaveLength(2);
+    });
+
+    it("starts a new conversation for a call that opens two minutes after the last line", async () => {
+      // 2026-11-16: an 8:00 call ended 8:40, the next call opened 9:03, and it
+      // joined the first call's conversation - and its Odoo contact.
+      const result = await recordOneMeetingThenReopenAfter(2 * 60_000);
+      expect(result.current.currentConversationId).toBe("chat-b");
+      expect(result.current.conversationHistory.map((m) => m.content)).toEqual(["Next line"]);
+    });
+
+    it("keeps the conversation when the capture reopens 30 seconds after the last line", async () => {
+      const result = await recordOneMeetingThenReopenAfter(30_000);
       expect(result.current.currentConversationId).toBe("chat-a");
       expect(result.current.conversationHistory).toHaveLength(2);
     });
@@ -830,13 +844,15 @@ describe("useCompletion meeting assist mode", () => {
         result.current.setEnableVAD(false);
       });
 
-      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS - 5 * 60_000);
+      // Asked inside the gap, so the reopen below is under the gap from the
+      // question but over it from the meeting line.
+      vi.setSystemTime(meetingEndedAt + NEW_CONVERSATION_GAP_MS - 10_000);
       await act(async () => {
         await result.current.submit("What did we agree on?");
       });
       expect(result.current.currentConversationId).toBe("chat-a");
 
-      vi.setSystemTime(meetingEndedAt + MEETING_CONVERSATION_GAP_MS + 60_000);
+      vi.setSystemTime(meetingEndedAt + NEW_CONVERSATION_GAP_MS + 10_000);
       await act(async () => {
         result.current.setEnableVAD(true);
       });
@@ -859,7 +875,7 @@ describe("useCompletion meeting assist mode", () => {
       });
       expect(result.current.currentConversationId).toBe("chat-a");
 
-      vi.setSystemTime(Date.now() + MEETING_CONVERSATION_GAP_MS + 60_000);
+      vi.setSystemTime(Date.now() + NEW_CONVERSATION_GAP_MS + 60_000);
       await act(async () => {
         result.current.setEnableVAD(true);
       });
@@ -872,7 +888,7 @@ describe("useCompletion meeting assist mode", () => {
 
     it("announces the next meeting only after the rollover has started its conversation", async () => {
       const events = recordCaptureEvents();
-      const result = await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS + 60_000);
+      const result = await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS + 60_000);
 
       await waitFor(() =>
         expect(events.seen).toEqual([
@@ -889,7 +905,7 @@ describe("useCompletion meeting assist mode", () => {
 
     it("does not announce a capture that resumes the same meeting", async () => {
       const events = recordCaptureEvents();
-      await recordOneMeetingThenReopenAfter(MEETING_CONVERSATION_GAP_MS - 60_000);
+      await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS / 2);
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });

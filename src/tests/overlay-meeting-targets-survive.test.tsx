@@ -41,7 +41,7 @@ vi.setConfig({ testTimeout: 60_000 });
 const INSTANCE = "http://h:8069|odoo";
 const MIGRATIONS = path.resolve(__dirname, "../../src-tauri/src/db/migrations");
 const WASM = path.resolve(__dirname, "../../node_modules/sql.js/dist/sql-wasm.wasm");
-const GAP_PLUS = 31 * 60 * 1000; // > MEETING_CONVERSATION_GAP_MS (30 min)
+const GAP_PLUS = 31 * 60 * 1000; // > NEW_CONVERSATION_GAP_MS (1 min)
 
 // ---------------------------------------------------------------------------
 // Real SQLite (sql.js) behind the real action module

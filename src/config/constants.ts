@@ -171,11 +171,19 @@ export const MEETING_ASSIST_QUICK_ACTIONS = [
 // if the user ends/clears the transcript without ever asking the AI a question.
 export const MEETING_TRANSCRIPT_AUTOSAVE_INTERVAL = 4;
 
-// A meeting capture that opens this long after the current conversation's last
-// line starts a new conversation. Measured on real data: silences inside one
-// meeting reached 13 min, and detection flapping reopens the capture 5-15 min
-// apart within the same call, while separate meetings were 36+ min apart.
+// The silence that separates two meetings for the Notion and Odoo lanes and the
+// updater: rows closer than this join one Notion page, a send waits this long
+// after the last line, and a silent install waits this long after a capture.
+// Measured on real data: silences inside one meeting reached 13 min, and
+// detection flapping reopens the capture 5-15 min apart within the same call.
 export const MEETING_CONVERSATION_GAP_MS = 30 * 60 * 1000;
+
+// A meeting capture that opens this long after the current conversation's last
+// meeting line starts a new conversation. Owner's call, 2026-11-16: back-to-back
+// calls 23 min apart merged under the 30-min gap. Accepted cost: a mic that
+// closes mid-call (a pause, or a detection dropout longer than the call-end
+// grace) and reopens after this long splits the call into two conversations.
+export const NEW_CONVERSATION_GAP_MS = 60 * 1000;
 
 // Number of consecutive meeting-transcript autosave failures before the user
 // is shown a "transcript could not be saved" report. A failed save advances

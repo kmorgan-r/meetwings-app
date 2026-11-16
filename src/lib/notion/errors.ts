@@ -53,9 +53,9 @@ export const NOTION_COPY: Record<
   NOTION_UNAUTHORIZED:
     "Notion rejected your token. Paste a new one in Settings > Integrations > Notion.",
   NOTION_NO_ACCESS:
-    "Notion refused access. Open the database in Notion and check you have edit access.",
+    "Notion refused access. In Notion, open the database's ••• menu > Connections and add your integration.",
   NOTION_NOT_FOUND:
-    "Notion can't find the database. Check the link in Settings > Integrations > Notion.",
+    "Notion can't find the database. Check the link in Settings > Integrations > Notion, and that your integration is added under the database's ••• menu > Connections.",
   NOTION_INVALID:
     "Notion refused the page. Press Check in Settings > Integrations > Notion.",
   NOTION_RATE_LIMITED: "Notion is busy. Trying again shortly.",

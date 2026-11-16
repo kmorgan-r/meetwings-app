@@ -174,13 +174,13 @@ describe("checkNotionSetup", () => {
     expect(result).toEqual({ ok: false, message: "Team Knowledge is missing the Topic column." });
   });
 
-  it("Check: 404 on the meetings database → the 'Can't see the Weekly Team Meetings database' sentence", async () => {
+  it("Check: 404 on the meetings database → the 'Can't open the Weekly Team Meetings database' sentence", async () => {
     wire({ meetingsError: new NotionError("NOTION_NOT_FOUND") });
     const result = await checkNotionSetup("t", cfg());
     expect(result).toEqual({
       ok: false,
       message:
-        "Can't see the Weekly Team Meetings database: open it in Notion and check you have edit access.",
+        "Can't open the Weekly Team Meetings database. Check the link, then in Notion open the database's ••• menu > Connections and add your integration.",
     });
   });
 
@@ -190,7 +190,7 @@ describe("checkNotionSetup", () => {
     expect(result).toEqual({
       ok: false,
       message:
-        "Can't see the Team Knowledge database: open it in Notion and check you have edit access.",
+        "Can't open the Team Knowledge database. Check the link, then in Notion open the database's ••• menu > Connections and add your integration.",
     });
   });
 
