@@ -12,6 +12,7 @@ import { getResponseSettings, updateLanguage } from "@/lib/storage/response-sett
 import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { pushShortcutsConfig } from "@/lib/functions/shortcuts.function";
+import { initializeAutostart } from "@/lib/autostart";
 import {
   loadSecureAIConfigs,
   loadSecureSTTConfigs,
@@ -442,31 +443,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }, [customizable]);
 
   useEffect(() => {
-    const initializeAutostart = async () => {
-      try {
-        const autostartInitialized = safeLocalStorage.getItem(
-          STORAGE_KEYS.AUTOSTART_INITIALIZED
-        );
-
-        // Only apply autostart on the very first launch
-        if (!autostartInitialized) {
-          const autostartEnabled = customizable?.autostart?.isEnabled ?? true;
-
-          if (autostartEnabled) {
-            await enable();
-          } else {
-            await disable();
-          }
-
-          // Mark as initialized so this never runs again
-          safeLocalStorage.setItem(STORAGE_KEYS.AUTOSTART_INITIALIZED, "true");
-        }
-      } catch (error) {
-        console.debug("Autostart initialization skipped:", error);
-      }
-    };
-
-    initializeAutostart();
+    void initializeAutostart(customizable?.autostart?.isEnabled ?? true);
   }, []);
 
   // Listen for app icon hide/show events when window is toggled
