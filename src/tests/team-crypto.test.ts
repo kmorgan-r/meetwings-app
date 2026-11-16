@@ -45,16 +45,23 @@ describe("team-crypto", () => {
     await expect(encryptTeamPayload("x", "A".repeat(32))).rejects.toThrow();
     await expect(encryptTeamPayload("x", k + "\n")).rejects.toThrow();
   });
-  it("trailing newline on blob still decrypts; '+' in ct -> null", async () => {
+  it("trailing newline on blob still decrypts; non-base64url segment chars -> null", async () => {
     const k = generateTeamKey();
     const blob = await encryptTeamPayload("hi", k);
     expect(await decryptTeamPayload(blob + "\n", k)).toBe("hi");
-    const [p, iv, ct] = blob.split(".");
-    expect(await decryptTeamPayload([p, iv, ct + "+"].join("."), k)).toBeNull();
+    // "hii" gives a 26-char ct segment, so "==" padding makes it valid for
+    // atob: only the segment alphabet check can reject it.
+    const padded = await encryptTeamPayload("hii", k);
+    const [p, iv, ct] = padded.split(".");
+    expect(await decryptTeamPayload([p, iv, ct + "=="].join("."), k)).toBeNull();
+    // atob strips inner whitespace; the alphabet check must not.
+    const spaced = iv.slice(0, 8) + "    " + iv.slice(8);
+    expect(await decryptTeamPayload([p, spaced, ct].join("."), k)).toBeNull();
   });
   it("extra segment -> null", async () => {
     const k = generateTeamKey();
-    expect(await decryptTeamPayload("mwt1.a.b.c", k)).toBeNull();
+    const blob = await encryptTeamPayload("hi", k);
+    expect(await decryptTeamPayload(blob + ".x", k)).toBeNull();
   });
   it("malformed input -> null without throwing", async () => {
     const k = generateTeamKey();
