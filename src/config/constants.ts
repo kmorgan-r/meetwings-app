@@ -93,6 +93,9 @@ export const STORAGE_KEYS = {
 
   // When the silent updater last completed an update check (ms epoch).
   UPDATER_LAST_CHECK_AT: "updater_last_check_at",
+  // Set just before a silent install: Windows' installer relaunches with the
+  // same argv, so the next start must not handle the launch link again.
+  RELAUNCH_AFTER_UPDATE: "mw_relaunch_after_update",
 
   // Version recorded at last launch; a change means an update was installed.
   APP_LAST_VERSION: "app_last_version",

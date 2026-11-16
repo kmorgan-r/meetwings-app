@@ -55,6 +55,7 @@ import {
   type TeamUiState,
 } from "@/lib/team/team-controller";
 import { useTeamSync } from "@/hooks/useTeamSync";
+import { installMemoryLocalStorage } from "./memory-local-storage";
 
 const GIST_A = "0123456789abcdef0123456789abcdef";
 const GIST_B = "fedcba9876543210fedcba9876543210";
@@ -103,6 +104,7 @@ const invokedCount = (cmd: string) =>
   h.invoke.mock.calls.filter(([c]) => c === cmd).length;
 
 let stop: (() => void) | null = null;
+let storage: Map<string, string>;
 const start = async () => {
   stop = startTeamController();
   await flush();
@@ -120,6 +122,9 @@ beforeEach(() => {
   vi.useFakeTimers();
   __resetTeamControllerForTests();
   stop = null;
+  storage = installMemoryLocalStorage();
+  // happy-dom's real sessionStorage survives between tests.
+  sessionStorage.clear();
   h.label = "main";
   h.actionHandler = null;
   h.urlHandler = null;
@@ -351,6 +356,74 @@ describe("team controller: incoming links", () => {
     await openUrl();
     expect(lastState().error).toBeNull();
     expect(invokedCount("open_dashboard")).toBe(0);
+  });
+});
+
+describe("team controller: launch link replay", () => {
+  const RELAUNCH = "mw_relaunch_after_update";
+  const SEEN = "mw_launch_link_seen";
+
+  it("a launch link after an update relaunch is not handled, and the flag is cleared", async () => {
+    storage.set(RELAUNCH, "1");
+    h.getCurrent.mockResolvedValue([LINK_A1]);
+    await start();
+
+    expect(h.fetchTeamFile).not.toHaveBeenCalled();
+    expect(lastState().pending).toBeNull();
+    expect(invokedCount("open_dashboard")).toBe(0);
+    expect(storage.has(RELAUNCH)).toBe(false);
+
+    // A fresh click while running is always handled.
+    await openUrl(LINK_A1);
+    expect(lastState().pending).toEqual(prompt("012345", false));
+  });
+
+  it("a launch link already seen this session (webview reload) is not handled; a fresh click still is", async () => {
+    sessionStorage.setItem(SEEN, "1");
+    h.getCurrent.mockResolvedValue([LINK_A1]);
+    await start();
+
+    expect(h.fetchTeamFile).not.toHaveBeenCalled();
+    expect(lastState().pending).toBeNull();
+
+    await openUrl(LINK_B1);
+    expect(lastState().pending).toEqual(prompt("fedcba", false));
+  });
+
+  it("a handled launch link is not handled again after a reload", async () => {
+    h.getCurrent.mockResolvedValue([LINK_A1]);
+    await start();
+    expect(lastState().pending).toEqual(prompt("012345", false));
+    expect(sessionStorage.getItem(SEEN)).toBe("1");
+
+    // The reload: module state is gone, sessionStorage and getCurrent() stay.
+    stop!();
+    __resetTeamControllerForTests();
+    h.emit.mockClear();
+    await start();
+
+    expect(h.fetchTeamFile).toHaveBeenCalledTimes(1);
+    expect(lastState().pending).toBeNull();
+  });
+
+  it("StrictMode start/stop/start still handles the launch link", async () => {
+    h.getCurrent.mockResolvedValue([LINK_A1]);
+    startTeamController()();
+    await start();
+
+    expect(h.fetchTeamFile).toHaveBeenCalledTimes(1);
+    expect(lastState().pending).toEqual(prompt("012345", false));
+  });
+
+  it("StrictMode start/stop/start after an update relaunch still skips it", async () => {
+    storage.set(RELAUNCH, "1");
+    h.getCurrent.mockResolvedValue([LINK_A1]);
+    startTeamController()();
+    await start();
+
+    expect(h.fetchTeamFile).not.toHaveBeenCalled();
+    expect(lastState().pending).toBeNull();
+    expect(storage.has(RELAUNCH)).toBe(false);
   });
 });
 

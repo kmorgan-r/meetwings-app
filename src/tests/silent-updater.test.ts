@@ -264,6 +264,43 @@ describe("silent updater scheduler", () => {
     expect(u.close).toHaveBeenCalledTimes(2);
   });
 
+  it("sets the relaunch flag immediately before install, not while the gate is closed", async () => {
+    // Windows' installer relaunches with the same argv, replaying a launch link.
+    const u = fakeUpdate("1.6.0");
+    let flagAtInstall: string | undefined;
+    u.install.mockImplementation(async () => {
+      flagAtInstall = storage.get("mw_relaunch_after_update");
+    });
+    deps.check.mockResolvedValue(asUpdate(u));
+    deps.readGateInput.mockResolvedValue(busy());
+    start();
+    await flush();
+    expect(getSilentUpdaterStatus()).toEqual({ kind: "waiting", version: "1.6.0" });
+    expect(storage.has("mw_relaunch_after_update")).toBe(false);
+
+    deps.readGateInput.mockResolvedValue(idle());
+    await vi.advanceTimersByTimeAsync(INSTALL_RECHECK_MS);
+
+    expect(u.install).toHaveBeenCalledTimes(1);
+    expect(flagAtInstall).toBe("1");
+  });
+
+  it("clears the relaunch flag when install throws", async () => {
+    const u = fakeUpdate("1.6.0");
+    let flagAtInstall: string | undefined;
+    u.install.mockImplementation(async () => {
+      flagAtInstall = storage.get("mw_relaunch_after_update");
+      throw new Error("installer failed");
+    });
+    deps.check.mockResolvedValue(asUpdate(u));
+    start();
+    await flush();
+
+    expect(flagAtInstall).toBe("1");
+    expect(getSilentUpdaterStatus()).toEqual({ kind: "install-failed", version: "1.6.0" });
+    expect(storage.has("mw_relaunch_after_update")).toBe(false);
+  });
+
   it("a newer version after a failed install installs automatically", async () => {
     const u1 = fakeUpdate("1.6.0");
     u1.install.mockRejectedValue(new Error("failed"));

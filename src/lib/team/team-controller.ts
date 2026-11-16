@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { STORAGE_KEYS } from "@/config/constants";
 import { reconnectGoogle } from "@/lib/calendar/google-connect";
+import { safeLocalStorage } from "@/lib/storage/helper";
 import type { GraphStatus } from "@/types";
 import type { ApplyResult } from "./team-apply";
 import type { TeamErrorCode } from "./team-file";
@@ -18,6 +20,8 @@ export const TEAM_STATE_EVENT = "team-state";
 export const TEAM_ACTION_EVENT = "team-action";
 export const TEAM_REFRESH_MS = 4 * 60 * 60 * 1000;
 export const TEAM_START_RETRY_MS = 60_000;
+// sessionStorage: survives a webview reload, not an app restart.
+const LAUNCH_LINK_SEEN = "mw_launch_link_seen";
 
 export interface TeamUiState {
   joined: boolean;
@@ -294,8 +298,20 @@ export function startTeamController(): () => void {
     })
   );
   void step(gen, async () => {
+    // getCurrent() replays the launch link after an update relaunch (Windows
+    // re-passes argv) and after a webview reload; only a fresh launch handles it.
+    const relaunched = safeLocalStorage.getItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE) === "1";
+    safeLocalStorage.removeItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE);
+    if (relaunched || sessionStorage.getItem(LAUNCH_LINK_SEEN) === "1") {
+      sessionStorage.setItem(LAUNCH_LINK_SEEN, "1");
+      return;
+    }
     const urls = await getCurrent();
-    if (gen !== generation || !urls?.[0]) return;
+    // Marked only by a live run: StrictMode's discarded first run must not
+    // make the second one skip the link.
+    if (gen !== generation) return;
+    sessionStorage.setItem(LAUNCH_LINK_SEEN, "1");
+    if (!urls?.[0]) return;
     await handleIncomingLink(gen, urls[0]);
   });
   void step(gen, () => startup(gen));

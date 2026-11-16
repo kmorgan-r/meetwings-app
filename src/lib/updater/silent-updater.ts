@@ -175,9 +175,11 @@ async function attemptInstall(gen: number): Promise<void> {
     scheduleRecheck(attemptInstall);
     return;
   }
+  safeLocalStorage.setItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE, "1");
   try {
     await target.update.install();
   } catch {
+    safeLocalStorage.removeItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE);
     // Includes a cancelled macOS password prompt. Only this version stays
     // blocked; a newer release still installs on the next tick.
     if (gen !== generation) return;
