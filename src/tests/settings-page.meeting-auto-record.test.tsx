@@ -31,6 +31,7 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
     AlwaysOnTopToggle: Stub,
     AppIconToggle: Stub,
     AppStatusLine: Stub,
+    TeamSettingsCard: Stub,
     AutostartToggle: Stub,
     ContentProtectionToggle: Stub,
     // The real selector calls useApp, which throws outside an AppProvider -
