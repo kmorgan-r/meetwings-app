@@ -17,8 +17,8 @@
 import { secureSet, secureGet, secureDelete } from "@/lib/secure-storage";
 
 // Storage keys for provider configs
-const AI_CONFIGS_KEY = "secure_ai_provider_configs";
-const STT_CONFIGS_KEY = "secure_stt_provider_configs";
+export const AI_CONFIGS_KEY = "secure_ai_provider_configs";
+export const STT_CONFIGS_KEY = "secure_stt_provider_configs";
 
 // Cache for loaded configs to avoid async reads on every access
 let aiConfigsCache: Record<string, Record<string, string>> | null = null;

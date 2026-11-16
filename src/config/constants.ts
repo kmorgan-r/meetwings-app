@@ -90,6 +90,19 @@ export const STORAGE_KEYS = {
   NOTION_PICK_SOURCE: "notion_pick_source",
   // When Notion first read as fully set up (ms epoch); floors crash recovery.
   NOTION_SETUP_AT: "notion_setup_at",
+
+  // When the silent updater last completed an update check (ms epoch).
+  UPDATER_LAST_CHECK_AT: "updater_last_check_at",
+  // Set just before a silent install: Windows' installer relaunches with the
+  // same argv, so the next start must not handle the launch link again.
+  RELAUNCH_AFTER_UPDATE: "mw_relaunch_after_update",
+
+  // Version recorded at last launch; a change means an update was installed.
+  APP_LAST_VERSION: "app_last_version",
+  // "Updated to X" note, shown while X runs: JSON {version, at} for the Settings readout.
+  APP_UPDATED_TO: "app_updated_to",
+  // When team settings were last fetched from the cloud (ms epoch).
+  TEAM_LAST_SYNCED_AT: "team_last_synced_at",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the
@@ -244,3 +257,6 @@ Style for spoken answers:
 For other requests (e.g. "Key points so far", "Suggest questions", "Action items"): be brief, practical, and actionable (2-4 short points). These may use lists.
 
 Always distinguish what the user ("You") said from what participants said.`;
+
+// Emitted after team settings were applied, so other windows reload caches and forms.
+export const TEAM_SETTINGS_APPLIED_EVENT = "team-settings-applied";

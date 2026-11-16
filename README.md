@@ -35,7 +35,7 @@ Meetwings is a lightweight desktop application built to be your invisible AI com
 
 [![GitHub Release](https://img.shields.io/github/v/release/kmorgan-r/meetwings-app?style=for-the-badge&logo=github&label=Latest%20Version)](https://meetwings.com/releases) &nbsp; [![GitHub Downloads](https://img.shields.io/github/downloads/kmorgan-r/meetwings-app/total?style=for-the-badge&logo=github&label=Total%20Downloads)](https://meetwings.com/downloads)
 
-**Available formats:** `.dmg` (macOS) • `.msi` (Windows) • `.exe` (Windows) • `.deb` (Linux) • `.rpm` (Linux) • `.AppImage` (Linux)
+**Available formats:** `.dmg` (macOS) • `.exe` (Windows) • `.deb` (Linux) • `.rpm` (Linux) • `.AppImage` (Linux)
 
 </div>
 
@@ -449,7 +449,7 @@ npm run tauri build
 This creates platform-specific installers in `src-tauri/target/release/bundle/`:
 
 - **macOS**: `.dmg`
-- **Windows**: `.msi`, `.exe`
+- **Windows**: `.exe`
 - **Linux**: `.deb`, `.rpm`, `.AppImage`
 
 ---

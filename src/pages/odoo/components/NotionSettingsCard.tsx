@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState } from "react";
+import { emit, listen } from "@tauri-apps/api/event";
+import { TEAM_SETTINGS_APPLIED_EVENT } from "@/config";
 import { Button, Input, Label, Switch } from "@/components";
 import { checkNotionSetup, type CheckResult } from "@/lib/notion/check";
 import { NOTION_COPY, notionErrorText } from "@/lib/notion/errors";
@@ -58,28 +59,60 @@ export function NotionSettingsCard() {
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState<CheckResult | null>(null);
 
+  const mountedRef = useRef(true);
+  // The name last loaded from (or saved to) storage: a blank here means a blank
+  // field is "never filled", not "cleared on purpose".
+  const loadedNameRef = useRef("");
+
+  async function reload() {
+    const available = await isNotionKeychainAvailable();
+    let loaded: NotionConfig | null = null;
+    let bad = false;
+    try {
+      loaded = await loadNotionConfig();
+    } catch {
+      bad = true;
+    }
+    const stored = await readTokenStored();
+    if (stored === null) bad = true;
+    if (!mountedRef.current) return;
+    setKeychainAvailable(available);
+    if (loaded) setForm(loaded);
+    loadedNameRef.current = loaded?.yourName ?? "";
+    setUnreadable(bad);
+    setTokenStored(stored === true);
+  }
+
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
-    void (async () => {
-      const available = await isNotionKeychainAvailable();
-      let loaded: NotionConfig | null = null;
-      let bad = false;
-      try {
-        loaded = await loadNotionConfig();
-      } catch {
-        bad = true;
-      }
-      const stored = await readTokenStored();
-      if (stored === null) bad = true;
-      if (cancelled) return;
-      setKeychainAvailable(available);
-      if (loaded) setForm(loaded);
-      setUnreadable(bad);
-      setTokenStored(stored === true);
-    })();
+    void reload();
+    const unlisteners = [
+      listen(TEAM_SETTINGS_APPLIED_EVENT, () => void reload()),
+      // Only the name: this card emits the event itself on every token save,
+      // so a full reload would wipe unsaved link edits.
+      listen(NOTION_CONFIG_CHANGED_EVENT, async () => {
+        let name: string;
+        try {
+          name = (await loadNotionConfig())?.yourName ?? "";
+        } catch {
+          return;
+        }
+        if (cancelled || name.trim() === "" || loadedNameRef.current.trim() !== "") return;
+        setForm((f) => {
+          if (f.yourName.trim() !== "") return f;
+          loadedNameRef.current = name;
+          return { ...f, yourName: name };
+        });
+      }),
+    ];
+    for (const p of unlisteners) p.catch(() => {});
     return () => {
       cancelled = true;
+      mountedRef.current = false;
+      for (const p of unlisteners) p.then((fn) => fn()).catch(() => {});
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** Re-read after every save or clear: this read stamps the setup time. */
@@ -127,6 +160,7 @@ export function NotionSettingsCard() {
       setMessage({ ok: false, text: "Couldn't save the Notion settings." });
       return;
     }
+    loadedNameRef.current = form.yourName;
     setUnreadable(false);
     setMessage({ ok: true, text: "Saved" });
     await refreshStored();

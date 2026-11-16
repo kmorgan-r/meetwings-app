@@ -215,6 +215,7 @@ describe("readCandidates", () => {
       end: END,
       boldTitle: "Weekly sync",
       headings: ["Launch", "Wrap-up"],
+      sendRef: null,
     });
     expect(listChildrenCalls).toEqual(["fake-page-1"]);
   });
@@ -358,6 +359,42 @@ describe("readCandidates", () => {
     expect(other[0].calendarKey).toBeNull();
   });
 
+  describe("sendRef", () => {
+    const refOf = async (body: NotionBlock[]) => {
+      const { client } = fakeNotion({
+        pages: { "ds-a": [page("fake-page-r", { start: ISO_START, end: ISO_END })] },
+        bodies: { "fake-page-r": body },
+      });
+      return (await readCandidates(client, [subTable("ds-a")], START, END))[0].sendRef;
+    };
+
+    it("reads sendRef from the first block", async () => {
+      expect(await refOf([paragraph("Meetwings ref abcdef123456"), ...NOTES_BODY])).toBe("abcdef123456");
+    });
+
+    it("sendRef is null without a marker, or with a malformed one", async () => {
+      expect(await refOf(NOTES_BODY)).toBeNull();
+      expect(await refOf([paragraph("Meetwings ref ABCDEF123456"), ...NOTES_BODY])).toBeNull();
+      expect(await refOf([paragraph("Meetwings ref abcdef12345"), ...NOTES_BODY])).toBeNull();
+      expect(await refOf([paragraph("Meetwings ref abcdef123456 extra"), ...NOTES_BODY])).toBeNull();
+      expect(await refOf([heading2("Meetwings ref abcdef123456"), ...NOTES_BODY])).toBeNull();
+    });
+
+    it("a marker that is not first is ignored", async () => {
+      expect(await refOf([...NOTES_BODY, paragraph("Meetwings ref abcdef123456")])).toBeNull();
+      expect(await refOf([heading2("Agenda"), paragraph("Meetwings ref abcdef123456")])).toBeNull();
+    });
+
+    it("a leading ref paragraph does not change the bold title or headings", async () => {
+      const { client } = fakeNotion({
+        pages: { "ds-a": [page("fake-page-r", { start: ISO_START, end: ISO_END })] },
+        bodies: { "fake-page-r": [paragraph("Meetwings ref abcdef123456"), ...NOTES_BODY] },
+      });
+      const [c] = await readCandidates(client, [subTable("ds-a")], START, END);
+      expect(c).toMatchObject({ boldTitle: "Weekly sync", headings: ["Launch", "Wrap-up"] });
+    });
+  });
+
   it("a first paragraph after the Meeting Notes heading that is not all bold → boldTitle \"\"", async () => {
     const { client } = fakeNotion({
       pages: { "ds-a": [page("fake-page-5", { start: ISO_START, end: ISO_END })] },
@@ -403,6 +440,7 @@ describe("sameMeeting", () => {
       end: END,
       boldTitle: "Weekly sync",
       headings: ["Launch", "Wrap-up"],
+      sendRef: null,
     };
   }
 
@@ -608,6 +646,7 @@ describe("isOwnPage", () => {
       end: END,
       boldTitle: "T",
       headings: [],
+      sendRef: null,
       ...extra,
     };
   }

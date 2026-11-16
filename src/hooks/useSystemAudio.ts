@@ -24,6 +24,7 @@ import {
 } from "@/lib";
 import { Message } from "@/types/completion";
 import { setCapturingConversationId } from "@/lib/storage/active-conversation.storage";
+import { useReportCaptureActivity } from "@/lib/updater/recording-activity.store";
 
 // VAD Configuration interface matching Rust
 export interface VadConfig {
@@ -815,6 +816,11 @@ export function useSystemAudio() {
   useEffect(() => {
     setCapturingConversationId(capturing ? conversation.id : null);
   }, [capturing, conversation.id]);
+
+  // Feeds the silent-updater install gate. Its own hook call, deliberately not
+  // folded into the effect above: that effect's cleanup fires on a
+  // conversation switch mid-capture and would stamp a false capture end.
+  useReportCaptureActivity("system-audio", capturing);
 
   // Debounced save to prevent race conditions and improve performance
   useEffect(() => {

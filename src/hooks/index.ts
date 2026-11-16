@@ -31,3 +31,5 @@ export * from "./useCalendarProposal";
 export * from "./useCalendarAutoSelect";
 export * from "./useGoogleMeetingCapture";
 export * from "./usePillRecordAction";
+export * from "./useTeamSync";
+export * from "./useTeamState";

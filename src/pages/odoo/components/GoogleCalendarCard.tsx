@@ -1,13 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { TEAM_SETTINGS_APPLIED_EVENT } from "@/config";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Input, Label } from "@/components";
-import { broadcastGoogleConnectionChanged as broadcast } from "@/lib/calendar/google-connect";
+import {
+  broadcastGoogleConnectionChanged as broadcast,
+  connectGoogle,
+} from "@/lib/calendar/google-connect";
 import { GOOGLE_COPY, toGoogleCode } from "@/lib/calendar/google-errors";
 import {
   classifyGoogleConfig,
+  GOOGLE_CONNECTION_CHANGED_EVENT,
   loadGoogleConfigState,
-  saveGoogleConfig,
 } from "@/lib/storage/google-config.storage";
 import type { GraphStatus } from "@/types";
 
@@ -24,29 +29,50 @@ export function GoogleCalendarCard() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const mountedRef = useRef(true);
+
+  async function reload() {
+    const state = await loadGoogleConfigState();
+    if (!mountedRef.current) return;
+    if (state.state !== "absent") {
+      if (state.state === "complete") {
+        setClientId(state.config.clientId);
+        setClientSecret(state.config.clientSecret);
+      }
+      // Silent only for never-configured users, like the Graph page: the
+      // keychain alone says connected, even when the stored config is corrupt.
+      try {
+        const s = await invoke<GraphStatus>("google_status");
+        if (mountedRef.current) setStatus(s);
+      } catch (err) {
+        if (mountedRef.current) setError(GOOGLE_COPY[toGoogleCode(err)]);
+      }
+    }
+  }
+
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const state = await loadGoogleConfigState();
-      if (cancelled) return;
-      if (state.state !== "absent") {
-        if (state.state === "complete") {
-          setClientId(state.config.clientId);
-          setClientSecret(state.config.clientSecret);
-        }
-        // Silent only for never-configured users, like the Graph page: the
-        // keychain alone says connected, even when the stored config is corrupt.
+    mountedRef.current = true;
+    void reload();
+    const unlisteners = [
+      listen(TEAM_SETTINGS_APPLIED_EVENT, () => void reload()),
+      // Status only: this card broadcasts the event itself, and a form reload
+      // would wipe unsaved Client ID / secret edits. A failed background
+      // refresh keeps the shown status and raises no banner.
+      listen(GOOGLE_CONNECTION_CHANGED_EVENT, async () => {
         try {
           const s = await invoke<GraphStatus>("google_status");
-          if (!cancelled) setStatus(s);
-        } catch (err) {
-          if (!cancelled) setError(GOOGLE_COPY[toGoogleCode(err)]);
+          if (mountedRef.current) setStatus(s);
+        } catch {
+          // keep the current status
         }
-      }
-    })();
+      }),
+    ];
+    for (const p of unlisteners) p.catch(() => {});
     return () => {
-      cancelled = true;
+      mountedRef.current = false;
+      for (const p of unlisteners) p.then((fn) => fn()).catch(() => {});
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleConnect() {
@@ -57,21 +83,11 @@ export function GoogleCalendarCard() {
       return;
     }
     setBusy(true);
-    try {
-      await saveGoogleConfig(form.config);
-      setStatus(await invoke<GraphStatus>("google_connect", {
-          clientId: form.config.clientId,
-          clientSecret: form.config.clientSecret,
-        })
-      );
-    } catch (err) {
-      setError(GOOGLE_COPY[toGoogleCode(err)]);
-    } finally {
-      // saveGoogleConfig already ran, so even a cancelled first sign-in leaves a
-      // complete config the running watcher has not seen.
-      await broadcast();
-      setBusy(false);
-    }
+    // connectGoogle saves, connects, fills the Notion name and broadcasts.
+    const r = await connectGoogle(form.config);
+    if (r.ok) setStatus(r.status);
+    else setError(GOOGLE_COPY[r.code]);
+    setBusy(false);
   }
 
   async function handleDisconnect() {

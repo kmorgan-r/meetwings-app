@@ -32,7 +32,7 @@ import {
   type SummaryErrorCode,
 } from "./errors";
 import { addPractices, readKnowledge } from "./knowledge";
-import { batchBlocks, buildPageBlocks, pageProperties, transcriptBlocks } from "./page-blocks";
+import { batchBlocks, buildPageBlocks, pageProperties, sendRefBlock, sendRefOf, transcriptBlocks } from "./page-blocks";
 import { armNotionRedactor } from "./redact";
 import { buildMapping, describeSubTable, routeMeeting, type Mapping, type SubTable } from "./routing";
 import { findKeyMatch, pickWinner, type Candidate, readCandidates, sameMeeting } from "./same-meeting";
@@ -217,18 +217,24 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     const { subTables, mapping } = await loadMapping();
     if (mapping === null) throw new NotionError("NOTION_INVALID");
 
-    // Proven to be THIS send's page: a creator match alone is not proof (with a personal
-    // token the owner is the person, so their hand-made pages match too). Needs our creator,
-    // the exact range this send wrote (60 s covers minute rounding) and our bold title.
-    // ponytail: the same token on two devices recording one meeting with identical AI titles
-    // and spans within 60 s would still trash each other's pages; no cheaper proof exists.
-    const isThisSendsPage = (c: Candidate): boolean =>
-      s.create_started_at !== null &&
+    // The page body, ref first: create and append share it so the resume compare is block-for-block.
+    const blocks = [sendRefBlock(sendId), ...buildPageBlocks(summary, attendees)];
+
+    // A creator match alone is not proof (with a personal token the owner is the person, so
+    // their hand-made pages match too; with a shared team token every colleague matches).
+    // Needs our creator, the exact range this send wrote (60 s covers minute rounding) and
+    // our bold title. Only for pages made before the ref existed.
+    const legacyRule = (c: Candidate): boolean =>
       c.createdById !== null &&
       (c.createdById === me.id || (me.ownerUserId !== null && c.createdById === me.ownerUserId)) &&
       Math.abs(c.start - s.span_start_at) <= 60_000 &&
       Math.abs(c.end - s.span_end_at) <= 60_000 &&
       c.boldTitle === summary.title;
+    // Proven to be THIS send's page: a marked page by its ref, an unmarked legacy page by the old rule.
+    // ponytail: a send interrupted across an app update resumes against legacy blocks and fails as
+    // NOTION_PAGE_CHANGED; the 30-minute install gate makes this rare.
+    const isThisSendsPage = (c: Candidate): boolean =>
+      s.create_started_at !== null && (c.sendRef !== null ? c.sendRef === sendRefOf(sendId) : legacyRule(c));
 
     // 4. Find or create the page.
     if (!s.page_id) {
@@ -260,7 +266,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
           parent: { type: "data_source_id", data_source_id: r.subTable.dataSourceId },
           // The key is recorded even when this send cannot match by it (it ends too late).
           properties: pageProperties(r, s.span_start_at, s.span_end_at, me.ownerUserId, snap?.key ?? null),
-          children: batchBlocks(buildPageBlocks(summary, attendees))[0] ?? [],
+          children: batchBlocks(blocks)[0] ?? [],
         });
         if (!page.id || !page.url) throw new NotionError("NOTION_INTERNAL");
         await patch({ page_id: page.id, page_url: page.url, page_created_time: page.created_time ?? "" });
@@ -272,7 +278,7 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
     if (!s.body_done) {
       await stamp();
       // The same attendees as the create: the resume check compares block by block.
-      const all = await appendResumable(deps.client, pageId, buildPageBlocks(summary, attendees), stamp);
+      const all = await appendResumable(deps.client, pageId, blocks, stamp);
       const toggle = [...all].reverse().find((b) => b.type === "toggle");
       if (!toggle?.id) throw new NotionError("NOTION_PAGE_CHANGED");
       await patch({ body_done: 1, toggle_block_id: toggle.id });

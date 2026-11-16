@@ -5,6 +5,9 @@ import {
   batchBlocks,
   buildPageBlocks,
   pageProperties,
+  sendRefBlock,
+  sendRefOf,
+  SEND_REF_PREFIX,
   splitRichText,
   transcriptBlocks,
 } from "@/lib/notion/page-blocks";
@@ -298,6 +301,29 @@ describe("buildPageBlocks with attendees", () => {
     };
     expect(payload.rich_text).toHaveLength(1);
     expect(payload.rich_text[0].annotations?.bold ?? false).toBe(false);
+  });
+});
+
+describe("send ref", () => {
+  it("sendRefOf strips dashes and keeps 12 lowercase hex", () => {
+    expect(sendRefOf("ABCDEF12-3456-7890-abcd-ef1234567890")).toBe("abcdef123456");
+  });
+
+  it("sendRefBlock is a gray paragraph with the prefix", () => {
+    expect(SEND_REF_PREFIX).toBe("Meetwings ref ");
+    expect(sendRefBlock("abcdef12-3456-7890-abcd-ef1234567890")).toEqual({
+      object: "block",
+      type: "paragraph",
+      paragraph: {
+        rich_text: [
+          {
+            type: "text",
+            text: { content: "Meetwings ref abcdef123456" },
+            annotations: { bold: false, color: "gray" },
+          },
+        ],
+      },
+    });
   });
 });
 

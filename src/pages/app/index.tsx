@@ -7,7 +7,13 @@ import {
   MinimizedPill,
   MeetingCard,
 } from "./components";
-import { useApp, useSetupStatus, useMeetingDetection, useMeetingCardHost } from "@/hooks";
+import {
+  useApp,
+  useSetupStatus,
+  useMeetingDetection,
+  useMeetingCardHost,
+  useTeamSync,
+} from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -36,6 +42,8 @@ const App = () => {
   // Teams and Google Meet call detection. Self-gating: inert outside the `main` window and off
   // Windows. Takes no arguments and never touches capture state.
   useMeetingDetection();
+  // Team deep links and re-syncs. Self-gating: inert outside the `main` window.
+  useTeamSync();
   const { customizable, setOverlayPillStyle } = useAppContext();
   const platform = getPlatform();
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);

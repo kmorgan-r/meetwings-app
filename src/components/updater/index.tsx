@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import {
   Download,
   RefreshCw,
@@ -18,6 +18,12 @@ import {
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useWindowResize } from "@/hooks";
+import { isLinux } from "@/lib/platform";
+import {
+  getSilentUpdaterStatus,
+  retryInstall,
+  subscribeSilentUpdater,
+} from "@/lib/updater/silent-updater";
 
 type UpdateState =
   | "checking"
@@ -35,7 +41,33 @@ interface DownloadProgress {
   percentage: number;
 }
 
-export const Updater = () => {
+// Windows and macOS update silently (startMainWindowUpdater); Linux keeps the
+// click-to-install flow.
+export const Updater = () =>
+  isLinux() ? <LinuxUpdater /> : <UpdateRetryButton />;
+
+/** Shown only after a silent install or relaunch failed. Never calls check(). */
+const UpdateRetryButton = () => {
+  const status = useSyncExternalStore(
+    subscribeSilentUpdater,
+    getSilentUpdaterStatus
+  );
+  if (status.kind !== "install-failed") return null;
+  const label = `Update to ${status.version} failed - retry`;
+  return (
+    <Button
+      size="icon"
+      className="cursor-pointer"
+      title={label}
+      aria-label={label}
+      onClick={retryInstall}
+    >
+      <RefreshCw className="h-4 w-4" />
+    </Button>
+  );
+};
+
+const LinuxUpdater = () => {
   const [updateState, setUpdateState] = useState<UpdateState>("uptodate");
   const [update, setUpdate] = useState<Update | null>(null);
   const [progress, setProgress] = useState<DownloadProgress>({

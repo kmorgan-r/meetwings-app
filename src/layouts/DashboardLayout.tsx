@@ -1,4 +1,4 @@
-import { Sidebar } from "@/components";
+import { Sidebar, TeamJoinPrompt } from "@/components";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "./ErrorLayout";
@@ -30,6 +30,7 @@ export const DashboardLayout = () => {
         console.log("Reset");
       }}
     >
+      <TeamJoinPrompt />
       <div className="relative flex h-screen w-screen overflow-hidden bg-background">
         {/* Draggable region */}
         <div

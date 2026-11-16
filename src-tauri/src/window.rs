@@ -448,7 +448,10 @@ pub fn is_overlay_minimized(app: AppHandle) -> bool {
 pub async fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     // Check if dashboard window already exists
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
-        // Window exists, just focus and show it
+        // Window exists: restore it if minimized (a team link's prompt must
+        // not open in a minimized dashboard), then focus and show it. The
+        // error is ignored so a failed restore still focuses and shows.
+        let _ = dashboard_window.unminimize();
         dashboard_window
             .set_focus()
             .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;

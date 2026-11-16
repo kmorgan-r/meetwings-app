@@ -210,6 +210,7 @@ describe("main window listens for overlay-pill-style-changed", () => {
         sttConfigured: true,
       }),
       useMeetingDetection: () => ({}),
+      useTeamSync: () => {},
       useMeetingCardHost: () => null,
     }));
     vi.doMock("react-error-boundary", () => ({

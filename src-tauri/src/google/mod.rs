@@ -346,12 +346,21 @@ pub async fn google_current_meetings(
     })
 }
 
+/// NO TOKEN FIELD, EVER - covered by the credential-scan test in `graph`.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleConnectResult {
+    pub connected: bool,
+    pub session_only: bool,
+    pub name: Option<String>,
+}
+
 #[tauri::command]
 pub async fn google_connect(
     app: AppHandle,
     client_id: String,
     client_secret: String,
-) -> Result<GraphStatus, String> {
+) -> Result<GoogleConnectResult, String> {
     let state = app.state::<GoogleState>();
     if client_id.trim().is_empty() || client_secret.trim().is_empty() {
         return Err(AUTH_REJECTED.to_string());
@@ -408,6 +417,10 @@ pub async fn google_connect(
     {
         return Err(AUTH_REJECTED.to_string());
     }
+    let name = tokens
+        .id_token
+        .as_deref()
+        .and_then(auth::name_from_id_token);
     // Without a refresh token the connection would die in an hour.
     if tokens.refresh_token.is_none() {
         return Err(BAD_RESPONSE.to_string());
@@ -427,7 +440,12 @@ pub async fn google_connect(
     if *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) {
         let _ = keychain::delete(GOOGLE_SERVICE);
     }
-    state.status()
+    let status = state.status()?;
+    Ok(GoogleConnectResult {
+        connected: status.connected,
+        session_only: status.session_only,
+        name,
+    })
 }
 
 #[tauri::command]

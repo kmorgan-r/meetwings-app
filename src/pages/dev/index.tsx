@@ -8,12 +8,14 @@ import {
 } from "./components";
 import { SummaryProviderCard } from "./components/ai-configs/SummaryProviderCard";
 import Contribute from "@/components/Contribute";
-import { useSettings, useSetupStatus } from "@/hooks";
+import { TeamJoinBox } from "@/components/TeamJoinBox";
+import { useSettings, useSetupStatus, useTeamState } from "@/hooks";
 import { PageLayout } from "@/layouts";
 
 const DevSpace = () => {
   const settings = useSettings();
   const { isComplete } = useSetupStatus();
+  const [teamState] = useTeamState();
 
   return (
     <PageLayout
@@ -22,6 +24,13 @@ const DevSpace = () => {
     >
       {/* Setup Progress */}
       <SetupProgressHeader />
+
+      {/* Colleagues whose mail client doesn't open meetwings:// links paste here */}
+      {!teamState?.joined && (
+        <div className="mb-6">
+          <TeamJoinBox />
+        </div>
+      )}
 
       {/* Required Section */}
       <div className="space-y-6">

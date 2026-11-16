@@ -67,8 +67,8 @@ jobs:
             args: ""
             bundles: "src-tauri/target/release/bundle/deb/*.deb:Meetwings-linux-x64.deb src-tauri/target/release/bundle/appimage/*.AppImage:Meetwings-linux-x64.AppImage src-tauri/target/release/bundle/rpm/*.rpm:Meetwings-linux-x64.rpm"
           - platform: "windows-latest"
-            args: ""
-            bundles: "src-tauri/target/release/bundle/nsis/*-setup.exe:Meetwings-windows-x64-setup.exe src-tauri/target/release/bundle/msi/*.msi:Meetwings-windows-x64.msi"
+            args: "--bundles nsis"
+            bundles: "src-tauri/target/release/bundle/nsis/*-setup.exe:Meetwings-windows-x64-setup.exe"
 
     runs-on: ${{ matrix.platform }}
     steps:

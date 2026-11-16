@@ -3,6 +3,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   SPEECH_TO_TEXT_PROVIDERS,
   STORAGE_KEYS,
+  TEAM_SETTINGS_APPLIED_EVENT,
   DEFAULT_STT_LANGUAGE,
   DEFAULT_TRANSLATION_ENABLED,
   DEFAULT_TRANSLATION_LANGUAGE,
@@ -11,9 +12,11 @@ import { getResponseSettings, updateLanguage } from "@/lib/storage/response-sett
 import { DEFAULT_LANGUAGE } from "@/lib/response-settings.constants";
 import { getPlatform, safeLocalStorage, trackAppStart } from "@/lib";
 import { pushShortcutsConfig } from "@/lib/functions/shortcuts.function";
+import { initializeAutostart } from "@/lib/autostart";
 import {
   loadSecureAIConfigs,
   loadSecureSTTConfigs,
+  resetSecureProviderConfigsCache,
   updateAIConfigCache,
   updateSTTConfigCache,
   migrateProviderConfigsToSecureStorage,
@@ -440,31 +443,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }, [customizable]);
 
   useEffect(() => {
-    const initializeAutostart = async () => {
-      try {
-        const autostartInitialized = safeLocalStorage.getItem(
-          STORAGE_KEYS.AUTOSTART_INITIALIZED
-        );
-
-        // Only apply autostart on the very first launch
-        if (!autostartInitialized) {
-          const autostartEnabled = customizable?.autostart?.isEnabled ?? true;
-
-          if (autostartEnabled) {
-            await enable();
-          } else {
-            await disable();
-          }
-
-          // Mark as initialized so this never runs again
-          safeLocalStorage.setItem(STORAGE_KEYS.AUTOSTART_INITIALIZED, "true");
-        }
-      } catch (error) {
-        console.debug("Autostart initialization skipped:", error);
-      }
-    };
-
-    initializeAutostart();
+    void initializeAutostart(customizable?.autostart?.isEnabled ?? true);
   }, []);
 
   // Listen for app icon hide/show events when window is toggled
@@ -518,6 +497,25 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
     window.addEventListener("storage", handleStorageChange);
     return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
+  // A team sync rewrote shared settings: re-read them, or the effect below
+  // would write this window's stale selection back over the team values.
+  useEffect(() => {
+    let cancelled = false;
+    const unlistenPromise = listen(TEAM_SETTINGS_APPLIED_EVENT, async () => {
+      if (cancelled) return;
+      resetSecureProviderConfigsCache();
+      await Promise.all([loadSecureAIConfigs(), loadSecureSTTConfigs()]);
+      if (!cancelled) loadData();
+    });
+    unlistenPromise.catch(() => {
+      // best-effort: a window without the event bridge just keeps its state
+    });
+    return () => {
+      cancelled = true;
+      unlistenPromise.then((fn) => fn()).catch(() => {});
+    };
   }, []);
 
   // Sync selected AI to localStorage + keep the latest-selection ref current

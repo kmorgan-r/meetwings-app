@@ -49,7 +49,7 @@ import type { NotionAi } from "@/lib/notion/ai";
 import type { NotionBlock, NotionBlockInput, NotionClient, NotionPage, NotionProperty } from "@/lib/notion/client";
 import { NotionError, SummaryError } from "@/lib/notion/errors";
 import { PRACTICES_PROMPT } from "@/lib/notion/knowledge";
-import { buildPageBlocks, transcriptBlocks } from "@/lib/notion/page-blocks";
+import { buildPageBlocks, sendRefBlock, transcriptBlocks } from "@/lib/notion/page-blocks";
 import { isNotionRedactorArmed, redactNotion, resetNotionRedactor } from "@/lib/notion/redact";
 import { SAME_MEETING_PROMPT } from "@/lib/notion/same-meeting";
 import { RECHECK_DELAY_MS, buildSendDeps, runNotionSend, type NotionSendDeps } from "@/lib/notion/send";
@@ -623,7 +623,7 @@ describe("find or create", () => {
     await seedSend("s1", Array.from({ length: 250 }, (_, i) => `Sam: line ${i}`));
     db.run("UPDATE notion_sends SET summary_json = ? WHERE id = 's1'", [JSON.stringify(big)]);
     expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
-    expect(world.kids.get("pg-1")).toHaveLength(buildPageBlocks(big).length);
+    expect(world.kids.get("pg-1")).toHaveLength(1 + buildPageBlocks(big).length);
     const toggle = world.kids.get("pg-1")?.find((b) => b.type === "toggle");
     expect(world.kids.get(toggle?.id as string)).toHaveLength(transcriptBlocks(Array.from({ length: 250 }, (_, i) => `Sam: line ${i}`), "x").length);
     expect(world.calls.appendChildren).toBeGreaterThanOrEqual(4);
@@ -641,6 +641,97 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
     expect(mine.trashed).toBe(false);
     expect((await sendOf()).page_id).toBe("pg-1");
     expect(asks(world, "same").length).toBeGreaterThan(0);
+  });
+
+  describe("per-send page ref", () => {
+    const UID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const OTHER_UID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const summary = { title: "Weekly sync", actionItems: ["Send notes"], sections: [{ heading: "Roadmap", bullets: ["Ship it"] }], practices: [] };
+    const withBody = (id: string, kids: NotionBlockInput[]) => {
+      world.kids.set(id, kids.map((b, i) => ({ ...b, id: `${id}-b${i}` }) as NotionBlock));
+      world.kids.set(`${id}-b${kids.length - 1}`, []);
+    };
+
+    it("the create writes the ref block first", async () => {
+      await seedSend(UID);
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
+      expect(world.kids.get("pg-1")?.[0]).toMatchObject(sendRefBlock(UID));
+    });
+
+    it("two installs on one token never adopt or trash each other's page, and the judge still merges", async () => {
+      await seedSend(UID);
+      db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
+      // Satisfies the whole legacy rule (creator, span, bold title) but carries ANOTHER send's ref.
+      const theirs = addRival(world, { id: "other-install", created_by: { id: "bot-1" } }, "Weekly sync");
+      world.kids.set("other-install", [sendRefBlock(OTHER_UID) as unknown as NotionBlock, ...titleKids("Weekly sync")]);
+      world.sameAnswer = true;
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("already");
+      const row = await sendOf(UID);
+      expect(row.page_id).toBeNull();
+      expect(row.lost_to_url).toBe("https://notion.invalid/rival");
+      expect(theirs.trashed).toBe(false);
+      expect(world.calls.trashPage).toBeUndefined();
+      expect(asks(world, "same").length).toBeGreaterThan(0);
+    });
+
+    it("recheck: a legacy-complete rival with another send's ref is a rival, not an orphan: not trashed, the judge is asked", async () => {
+      await seedSend(UID);
+      const theirs = addRival(
+        world,
+        { id: "other-hidden", created_by: { id: "bot-1" }, hidden: true, created_time: "2026-11-09T14:00:00.000Z", url: "https://notion.invalid/other-hidden" },
+        "Weekly sync",
+      );
+      world.kids.set("other-hidden", [sendRefBlock(OTHER_UID) as unknown as NotionBlock, ...titleKids("Weekly sync")]);
+      world.onSleep = () => {
+        theirs.hidden = false;
+      };
+      world.sameAnswer = true;
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("already");
+      expect(theirs.trashed).toBe(false);
+      expect(asks(world, "same").length).toBeGreaterThan(0);
+      // The earlier page wins; ours is the one trashed.
+      expect((await sendOf(UID)).lost_to_url).toBe("https://notion.invalid/other-hidden");
+      expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    });
+
+    it("recheck: a hidden orphan carrying this send's ref is trashed, whatever its title", async () => {
+      await seedSend(UID);
+      const orphan = addRival(world, { id: "orphan-ref", created_by: { id: "bot-1" }, hidden: true }, "Another topic");
+      world.kids.set("orphan-ref", [sendRefBlock(UID) as unknown as NotionBlock, ...titleKids("Another topic")]);
+      world.onSleep = () => {
+        orphan.hidden = false;
+      };
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
+      expect(orphan.trashed).toBe(true);
+      expect(world.pages.get("pg-1")?.trashed).toBe(false);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it("a page carrying this send's ref is adopted even when the legacy rule would reject it", async () => {
+      await seedSend(UID);
+      db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
+      // A creator that is neither me.id nor me.ownerUserId: legacyRule rejects it,
+      // and the resume compare ignores the creator, so only the ref can adopt it.
+      addRival(world, { id: "mine-ref", created_by: { id: "person-2" } });
+      withBody("mine-ref", [sendRefBlock(UID), ...buildPageBlocks(summary)]);
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
+      expect((await sendOf(UID)).page_id).toBe("mine-ref");
+      expect(world.calls.createPage).toBeUndefined();
+    });
+
+    it("an unmarked legacy page of this send is still adopted", async () => {
+      await seedSend(UID);
+      db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
+      addRival(world, { id: "legacy-own", created_by: { id: "bot-1" } }, "Weekly sync");
+      withBody("legacy-own", buildPageBlocks(summary));
+      const outcome = await runNotionSend(UID, makeDeps(world));
+      // The documented ceiling: legacy blocks have no ref, so the resume compare fails.
+      expect(outcome).not.toBe("sent");
+      expect(await sendOf(UID)).toMatchObject({ error_code: "NOTION_PAGE_CHANGED" });
+      expect((await sendOf(UID)).page_id).toBe("legacy-own");
+      expect(world.calls.createPage).toBeUndefined();
+      expect(world.pages.get("legacy-own")?.trashed).toBe(false);
+    });
   });
 
   it("the same hand-made page, called the same meeting and created earlier, beats this send: already, ours trashed, theirs kept", async () => {
@@ -665,7 +756,7 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
     const decoy = addRival(world, { id: "decoy-own", created_by: { id: "bot-1" } }, "Another topic");
     addRival(world, { id: "mine-own", created_by: { id: "bot-1" } }, "Weekly sync");
     // The page our earlier attempt wrote: the whole body, so the body step finds nothing missing.
-    const body = buildPageBlocks({ title: "Weekly sync", actionItems: ["Send notes"], sections: [{ heading: "Roadmap", bullets: ["Ship it"] }], practices: [] });
+    const body = [sendRefBlock("s1"), ...buildPageBlocks({ title: "Weekly sync", actionItems: ["Send notes"], sections: [{ heading: "Roadmap", bullets: ["Ship it"] }], practices: [] })];
     world.kids.set("mine-own", body.map((b, i) => ({ ...b, id: `mine-b${i}` }) as NotionBlock));
     world.kids.set(`mine-b${body.length - 1}`, []);
     expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
@@ -992,7 +1083,7 @@ describe("one page per meeting: the calendar key", () => {
         .map((i) => i.text?.content ?? "").join("");
     const blocksOf = (w: World, id: string) => (w.kids.get(id) ?? []).map((b) => ({ type: b.type, text: textOf(b) }));
     const expectedBlocks = (s: NotionSummary, a: AttendeeGroups | null) =>
-      buildPageBlocks(s, a).map((b) => ({ type: b.type, text: textOf(b) }));
+      [sendRefBlock("s1"), ...buildPageBlocks(s, a)].map((b) => ({ type: b.type, text: textOf(b) }));
     /** A summary whose page body is more than one 100-block batch, so the body step appends. */
     const BIG = summaryJson({
       sections: Array.from({ length: 12 }, (_, i) => ({ heading: `H${i}`, bullets: Array.from({ length: 8 }, (_, j) => `b${i}-${j}`) })),
@@ -1024,7 +1115,7 @@ describe("one page per meeting: the calendar key", () => {
       db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = 's1'");
       // The page our earlier attempt wrote: our creator, our range, our title, the key and the whole body.
       addKeyed({ id: "mine-own", created_by: { id: "bot-1" } }, EV_KEY, [EV_START, EV_END], "Weekly sync");
-      const body = buildPageBlocks(WEEKLY, ATTENDEES);
+      const body = [sendRefBlock("s1"), ...buildPageBlocks(WEEKLY, ATTENDEES)];
       world.kids.set("mine-own", body.map((b, i) => ({ ...b, id: `mine-b${i}` }) as NotionBlock));
       world.kids.set(`mine-b${body.length - 1}`, []);
       expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
@@ -1160,7 +1251,8 @@ describe("one page per meeting: the calendar key", () => {
       async (col) => {
         const pageOf = (w: World) => {
           const p = mainPages(w)[0];
-          return { properties: p.properties, blocks: blocksOf(w, p.id) };
+          // Past the leading ref paragraph: it differs on purpose, the two sends have different ids.
+          return { properties: p.properties, blocks: blocksOf(w, p.id).slice(1) };
         };
         world.calendarCol = col;
         await seedSend("s0", LINES, [EV_START, EV_END], null);
@@ -1174,6 +1266,8 @@ describe("one page per meeting: the calendar key", () => {
         expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
 
         expect(mainPages(world)).toHaveLength(1);
+        expect(blocksOf(plain, mainPages(plain)[0].id)[0].text).toBe("Meetwings ref s0");
+        expect(blocksOf(world, mainPages(world)[0].id)[0].text).toBe("Meetwings ref s1");
         expect(pageOf(world)).toEqual(pageOf(plain));
         expect(keyQueries()).toHaveLength(0);
         expect(Object.keys(mainPages(world)[0].properties)).not.toContain("Calendar event");

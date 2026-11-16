@@ -120,9 +120,8 @@ pub fn run() {
             // The dashboard, not the overlay: `main` is the 54px skipTaskbar
             // overlay whose visibility the toggle shortcut tracks in its own
             // state (shortcuts.rs `is_hidden`), which a direct show() here
-            // would desync. An existing dashboard is restored directly -
-            // `open_dashboard` only calls set_focus then show, and on Windows
-            // neither restores a MINIMIZED window.
+            // would desync. An existing dashboard is restored directly, in
+            // this sync callback, rather than through async `open_dashboard`.
             if let Some(dashboard) = app.get_webview_window("dashboard") {
                 let _ = dashboard.unminimize();
                 let _ = dashboard.show();
@@ -138,6 +137,10 @@ pub fn run() {
                 });
             }
         }))
+        // A second launch's `meetwings://` URL reaches the running app's
+        // `onOpenUrl` through single-instance's `deep-link` feature. The URL
+        // carries a team key: never log it or argv.
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations("sqlite:meetwings.db", db::migrations())
@@ -155,6 +158,7 @@ pub fn run() {
         .manage(google::GoogleState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_keychain::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -263,6 +267,15 @@ pub fn run() {
             window::setup_main_window(app).expect("Failed to setup main window");
             #[cfg(target_os = "macos")]
             init(app.app_handle());
+
+            // macOS registers the scheme from the bundle's Info.plist.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    tracing::warn!("deep link register failed: {e}");
+                }
+            }
 
             let app_handle = app.handle();
             if app_handle.get_webview_window("dashboard").is_none() {

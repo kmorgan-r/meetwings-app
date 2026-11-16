@@ -42,6 +42,7 @@ import { speakerLabelFor } from "@/lib/functions/speaker-label.function";
 import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 // Leaf path for the same reason: the usage listener must get the real helper.
 import { isSameModel } from "@/lib/functions/active-model.function";
+import { useReportCaptureActivity } from "@/lib/updater/recording-activity.store";
 import type {
   UsageData,
   TranscriptEntry,
@@ -130,6 +131,9 @@ export const useCompletion = () => {
   });
   const [micOpen, setMicOpen] = useState(false);
   const [enableVAD, setEnableVAD] = useState(false);
+  // Feeds the silent-updater install gate: the mic or VAD listening counts as
+  // an active capture while either is on.
+  useReportCaptureActivity("mic", micOpen || enableVAD);
   const [messageHistoryOpen, setMessageHistoryOpen] = useState(false);
   const [isFilesPopoverOpen, setIsFilesPopoverOpen] = useState(false);
   // Mirrors isFilesPopoverOpen: threaded to useOdooTarget (see

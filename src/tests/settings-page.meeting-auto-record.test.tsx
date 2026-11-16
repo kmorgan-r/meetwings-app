@@ -30,6 +30,8 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
     AITitlesToggle: Stub,
     AlwaysOnTopToggle: Stub,
     AppIconToggle: Stub,
+    AppStatusLine: Stub,
+    TeamSettingsCard: Stub,
     AutostartToggle: Stub,
     ContentProtectionToggle: Stub,
     // The real selector calls useApp, which throws outside an AppProvider -
@@ -129,6 +131,7 @@ describe("app page mounts the detection hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection,
+      useTeamSync: () => {},
     }));
     mockAppRenderDeps();
 
@@ -627,6 +630,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection: vi.fn(),
+      useTeamSync: () => {},
       useMeetingAutoRecord,
     }));
     mockAppRenderDeps();

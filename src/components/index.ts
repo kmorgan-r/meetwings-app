@@ -17,3 +17,5 @@ export * from "./WingIcon";
 export * from "./ModelSelector";
 export * from "./ProviderVerification";
 export * from "./StatusIcon";
+export * from "./TeamJoinPrompt";
+export * from "./TeamJoinBox";

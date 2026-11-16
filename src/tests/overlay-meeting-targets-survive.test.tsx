@@ -361,6 +361,7 @@ const mockEverything = () => {
         sttConfigured: true,
       }),
       useMeetingDetection: () => ({}),
+      useTeamSync: () => {},
       useGlobalShortcuts: () => GLOBAL_SHORTCUTS,
       useCompletion: () => {
         const c = real.useCompletion!();
