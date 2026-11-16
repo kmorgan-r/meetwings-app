@@ -3,8 +3,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { STORAGE_KEYS } from "@/config/constants";
 import { safeLocalStorage } from "@/lib/storage/helper";
-import { canInstallNow, type GateInput } from "./install-gate";
-import { getActivitySnapshot } from "./recording-activity.store";
+import { canInstallNow, type GateInput } from "@/lib/updater/install-gate";
+import { getActivitySnapshot } from "@/lib/updater/recording-activity.store";
 
 export const UPDATE_TICK_MS = 4 * 60 * 60 * 1000;
 export const INSTALL_RECHECK_MS = 5 * 60 * 1000;
