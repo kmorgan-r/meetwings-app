@@ -22,6 +22,9 @@
 - Imports use `@/`. Files are kebab-case. Tests go in `src/tests/*.test.ts(x)`.
 - Verification commands: `npx vitest run <files>`, `npm run type-check` (the script is `type-check`, not `check:types`), `cargo test --manifest-path src-tauri/Cargo.toml <filter>`. tsconfig does not type-check `src/tests/`, so run test files, don't only type-check.
 - Fixed error copy only, via `TEAM_COPY` (Task 6) and the existing `GOOGLE_COPY`.
+- Tests and localStorage: `src/tests/setup.ts:38-46` replaces `localStorage` with inert `vi.fn()` stubs. Any test that seeds or reads localStorage calls `installMemoryLocalStorage()` (created in Task 3). That backs the stubs with a Map, following the precedent in `src/tests/customizable.storage.test.ts:11-21`.
+- Timer tests: use `vi.useFakeTimers()` and `await vi.advanceTimersByTimeAsync(ms)`, never the sync `advanceTimersByTime`, so the async chains (check → download → gate → install) flush.
+- Module state: every module with module-level state exports a `__reset…ForTests()` helper, and tests call it in `beforeEach`.
 
 ## Review Focus
 
@@ -52,6 +55,7 @@
   - `setCaptureActive(source: CaptureSource, active: boolean, now?: number): void`. `now` defaults to `Date.now()`.
   - `setMeetingActive(active: boolean): void`
   - `getActivitySnapshot(): { capturing: boolean; meetingActive: boolean; lastCaptureEndedAt: number | null }`
+  - `useReportCaptureActivity(source: CaptureSource, active: boolean): void`. A hook running `useEffect(() => { setCaptureActive(source, active); return () => setCaptureActive(source, false); }, [source, active])`. Its deps are only `source` and `active`, so a re-render that changes anything else (a conversation switch) never stamps a false end.
   - `__resetActivityForTests(): void`
 
 - [ ] **Step 1: Write the failing tests**
@@ -83,6 +87,11 @@ it("meeting state is independent of capture", () => {
   setMeetingActive(true);
   expect(getActivitySnapshot()).toMatchObject({ meetingActive: true, capturing: false });
 });
+it("useReportCaptureActivity stamps the end on true -> false and on unmount, not on unrelated re-renders", () => {
+  // renderHook(({ active, other }) => { useReportCaptureActivity("system-audio", active); return other; }, { initialProps: { active: true, other: 1 } })
+  // rerender({ active: true, other: 2 }) -> lastCaptureEndedAt still null; rerender({ active: false, other: 2 }) -> stamped;
+  // a second hook instance active -> unmount -> capturing false
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -96,11 +105,9 @@ The gate is `!capturing && !meetingActive && (lastCaptureEndedAt === null || now
 
 - [ ] **Step 4: Wire the two hooks**
 
-In `useSystemAudio.ts`, add a separate effect keyed on `[capturing]` only:
-`useEffect(() => { setCaptureActive("system-audio", capturing); return () => setCaptureActive("system-audio", false); }, [capturing]);`
-Do not add it to the existing `[capturing, conversation.id]` effect. Its cleanup would fire on a conversation switch mid-capture and stamp a false end.
+In `useSystemAudio.ts`, call `useReportCaptureActivity("system-audio", capturing)` as its own hook call. Do not fold it into the existing `[capturing, conversation.id]` effect. That effect's cleanup would fire on a conversation switch mid-capture and stamp a false end.
 
-In `useCompletion.ts`, add `const micBusy = micOpen || enableVAD;` and the same effect shape keyed on `[micBusy]` with source `"mic"`.
+In `useCompletion.ts`, call `useReportCaptureActivity("mic", micOpen || enableVAD)`.
 
 - [ ] **Step 5: Run tests and type-check**
 
@@ -164,12 +171,15 @@ Owner action, outside the code: remove the MSI download link from meetwings.com.
 - Modify: `src/pages/app/index.tsx:38` (call the hook in the App body, next to `useMeetingDetection()`, outside the ErrorBoundary)
 - Modify: `src/components/updater/index.tsx`
 - Modify: `src/config/constants.ts` (`STORAGE_KEYS.UPDATER_LAST_CHECK_AT: "updater_last_check_at"`)
-- Test: `src/tests/silent-updater.test.ts`, `src/tests/updater-retry-button.test.tsx`
+- Create: `src/tests/memory-local-storage.ts` (test helper, shared by Tasks 3, 4, 6, 8 and 9)
+- Test: `src/tests/silent-updater.test.ts`, `src/tests/updater-retry-button.test.tsx`, `src/tests/use-silent-updater.test.tsx`
 
 **Interfaces:**
 - Consumes: `canInstallNow`, `GateInput`, `getActivitySnapshot`, `setMeetingActive` (Task 1). `relaunch` (Task 2).
 - Produces:
-  - `UPDATE_TICK_MS = 4 * 60 * 60 * 1000`, `INSTALL_RECHECK_MS = 5 * 60 * 1000`
+  - `installMemoryLocalStorage(): Map<string, string>` in `src/tests/memory-local-storage.ts`. It points the global stubs' `getItem`/`setItem`/`removeItem`/`clear` at a fresh Map via `mockImplementation` and returns the Map, so tests can seed, assert and enumerate.
+  - `UPDATE_TICK_MS = 4 * 60 * 60 * 1000`, `INSTALL_RECHECK_MS = 5 * 60 * 1000`, `CHECK_TIMEOUT_MS = 60 * 1000`
+  - `__resetSilentUpdaterForTests(): void`
   - `type SilentUpdaterStatus = { kind: "idle" } | { kind: "waiting"; version: string } | { kind: "relaunch-pending"; version: string } | { kind: "install-failed"; version: string }`
   - `interface SilentUpdaterDeps { check: () => Promise<Update | null>; relaunch: () => Promise<void>; readGateInput: () => Promise<GateInput>; now: () => number }`
   - `startSilentUpdater(deps?: Partial<SilentUpdaterDeps>): () => void` (returns stop)
@@ -180,19 +190,22 @@ Owner action, outside the code: remove the MSI download link from meetwings.com.
 
 Behaviour, pinned:
 - `start`: run `tick()` now, then `setInterval(tick, UPDATE_TICK_MS)`.
-- `tick`: skip if a check/download is in flight or an update is already downloaded or installed (the re-check timer owns those). Otherwise call `check()`. On success, write `STORAGE_KEYS.UPDATER_LAST_CHECK_AT = String(now())`. On `null`, stop there. If `update.version === failedVersion`, do nothing. Else `await update.download()`, keep the `Update` in a module variable, then `attemptInstall()`.
-- `attemptInstall`: read `readGateInput()`. Closed: status `waiting`, `setTimeout(attemptInstall, INSTALL_RECHECK_MS)`. Open: `await update.install()`. If install rejects (including a cancelled macOS password prompt): `failedVersion = version`, status `install-failed`, stop. After install, read the gate again. Closed: status `relaunch-pending`, retry the relaunch on the re-check timer. Open: `await relaunch()`. If that rejects: status `install-failed`.
+- One `busy` flag covers a check, a download, an install and a relaunch. A re-check timer that fires while `busy` is set reschedules itself.
+- `tick`: skip if `busy`, or if an installed update awaits relaunch (the re-check timer owns that). Otherwise call `check()`. The default dep is `() => check({ timeout: CHECK_TIMEOUT_MS })`, so a stalled request rejects instead of holding `busy` forever. On success, write `STORAGE_KEYS.UPDATER_LAST_CHECK_AT = String(now())`. On `null`, stop there. If `update.version` equals `failedVersion` or the held update's version, do nothing. Otherwise `await update.download()` (no hard cap on the download), replace the held `Update`, and call `attemptInstall()`. So a newer release replaces one still waiting for the gate.
+- `attemptInstall`: clear any pending re-check timer, then read `readGateInput()`. Closed: status `waiting`, `setTimeout(attemptInstall, INSTALL_RECHECK_MS)`. Open: `await update.install()`. If install rejects (including a cancelled macOS password prompt): `failedVersion = version`, drop the held update, status `install-failed`. The next tick then checks again, and only that one version stays blocked (Review Focus 5). After install, mark the update installed and run `attemptRelaunch`.
+- `attemptRelaunch`: read the gate. Closed: status `relaunch-pending`, retry on the re-check timer. Open: `await relaunch()`. If that rejects: status `install-failed`, update still marked installed.
 - A check or download rejection logs `console.error("[updater] check/download failed")` and waits for the next tick.
 - `failedVersion` lives in memory only, so it is cleared by the next app start.
-- `retryInstall()`: clear `failedVersion` and the held update, set status `idle`, run `tick()`.
-- `stop()`: clear the interval and timeouts, and bump a generation counter. Every continuation after an `await` checks the generation and returns if it is stale. StrictMode mounts twice.
+- `retryInstall()`: if the held update is already installed, run `attemptRelaunch()` only, which means no second install and no second Mac password prompt. Otherwise clear `failedVersion`, set status `idle`, and run `tick()`.
+- Status is a module variable. It is replaced only on a real transition, and only then are subscribers notified. `getSilentUpdaterStatus()` returns that variable itself, never a fresh object, because `useSyncExternalStore` loops on a new snapshot reference (precedent: `src/lib/overlay-minimize.store.ts:77-83`).
+- `stop()`: clear the interval and timeouts, reset `busy` and the held update, and bump a generation counter. Every continuation after an `await` checks the generation and returns at once if it is stale. That covers `finally` blocks too, so a stale continuation never touches module state, including the next generation's `busy`. StrictMode mounts twice. The first mount's download cannot be cancelled and is discarded.
 - `readGateInput()`: `capturing = snapshot.capturing || rust`, where `rust = await invoke<boolean>("get_capture_status")`. A rejected invoke counts as `true` (fail closed). Use `snapshot.meetingActive`, `snapshot.lastCaptureEndedAt`, and `now = Date.now()`.
-- `useSilentUpdater`: an effect that returns early unless `getCurrentWindow().label === "main"` and `!isLinux()`. It registers `listen("meeting-detected", () => setMeetingActive(true))` and `listen("meeting-ended", () => setMeetingActive(false))` with the cancelled-flag pattern from `useMeetingAutoRecord.ts:891-898`, calls `startSilentUpdater()`, and its cleanup stops the updater and unlistens.
+- `useSilentUpdater`: an effect that returns early unless `getCurrentWindow().label === "main"` and `!isLinux()`. It registers three listeners with the cancelled-flag pattern from `useMeetingAutoRecord.ts:891-898`: `listen("meeting-detected", () => setMeetingActive(true))`, `listen("meeting-ended", () => setMeetingActive(false))`, and `listen("meeting-watcher-stopped", () => setMeetingActive(false))`. The last one is there because a watcher that stops mid-call emits no `meeting-ended`, and the flag would otherwise block updates until restart. The effect then calls `startSilentUpdater()`. Its cleanup stops the updater and unlistens.
 - `Updater` component: on Linux, render today's component unchanged (move it to an inner `LinuxUpdater`). Elsewhere, render `UpdateRetryButton`. It reads status through `useSyncExternalStore` and returns `null` unless the status is `install-failed`. Then it shows a small icon `Button` (`RefreshCw`) with `title`/`aria-label` `` `Update to ${version} failed - retry` ``, and `onClick={retryInstall}`. The non-Linux path never calls `check()`.
 
 - [ ] **Step 1: Write the failing scheduler tests**
 
-Use fake timers. `fakeUpdate(version)` is `{ version, download: vi.fn().mockResolvedValue(undefined), install: vi.fn().mockResolvedValue(undefined) }`. Pass `check`, `relaunch`, `readGateInput` and `now` as deps. Gate helpers: `idle` returns `{capturing:false, meetingActive:false, lastCaptureEndedAt:null, now}`, `busy` returns `{...idle, capturing:true}`.
+Use fake timers (Global Constraints). In `beforeEach`, call `__resetSilentUpdaterForTests()` and `installMemoryLocalStorage()`. `fakeUpdate(version)` is `{ version, download: vi.fn().mockResolvedValue(undefined), install: vi.fn().mockResolvedValue(undefined) }`. Pass `check`, `relaunch`, `readGateInput` and `now` as deps. Gate helpers: `idle` returns `{capturing:false, meetingActive:false, lastCaptureEndedAt:null, now}`, `busy` returns `{...idle, capturing:true}`.
 
 ```ts
 it("idle: downloads, installs, relaunches in order and stamps the last check", async () => {
@@ -213,16 +226,51 @@ it("a failed check installs nothing and retries on the next tick", async () => {
 });
 it("a failed download installs nothing; the next tick retries", async () => { /* download rejects */ });
 it("a failed install is not retried for that version until retryInstall", async () => {
-  // install rejects; status install-failed; next tick returns same version -> download not called again;
+  // install rejects; status install-failed; next tick: check called again, returns same version -> download not called again;
   // retryInstall() -> download + install called again
 });
 it("a newer version after a failed install installs automatically", async () => {
   // Review Focus 5: 1.6.0 install rejects; next tick returns 1.6.1 -> download + install for 1.6.1
 });
+it("a newer release while waiting for the gate replaces the held update", async () => {
+  // gate busy; 1.6.0 downloaded, waiting; next tick returns 1.6.1 -> downloaded; gate idle on re-check -> install only 1.6.1
+});
+it("a rejected relaunch shows install-failed and retryInstall relaunches without reinstalling", async () => {
+  // relaunch rejects once; status install-failed; retryInstall(); expect install called once total, relaunch twice
+});
+it("a tick while a check or download is in flight is skipped", async () => {
+  // download pending (unresolved promise); advance UPDATE_TICK_MS; check called once
+});
 it("stop() cancels pending timers", async () => { /* stop, advance 2*UPDATE_TICK_MS, check called once */ });
+it("stop() mid-download installs nothing", async () => {
+  // download pending; stop(); resolve download; flush; expect install and relaunch not called
+});
+it("StrictMode start/stop/start: the stale generation is discarded", async () => {
+  // first check() pending; stop(); start again (second check resolves u2); resolve first with u1;
+  // expect only u2.download/install; status not touched by u1
+});
+it("the status getter returns a stable reference", () => {
+  expect(getSilentUpdaterStatus()).toBe(getSilentUpdaterStatus());
+});
+it("the default check dep passes CHECK_TIMEOUT_MS", async () => {
+  // mock @tauri-apps/plugin-updater check; start with no check dep; expect check called with { timeout: CHECK_TIMEOUT_MS }
+});
 it("readGateInput fails closed when get_capture_status rejects", async () => {
   // Review Focus 1: mock invoke reject; expect (await readGateInput()).capturing === true
 });
+it.each([
+  [false, false, false], [true, false, true], [false, true, true], [true, true, true],
+])("readGateInput: store %s, rust %s -> capturing %s", async (store, rust, expected) => { /* setCaptureActive / invoke mock */ });
+```
+
+```tsx
+// use-silent-updater.test.tsx (mock listen, getCurrentWindow, isLinux, invoke; renderHook)
+it("does nothing outside the main window", ...)                      // label "dashboard" -> listen not called
+it("does nothing on Linux", ...)                                     // isLinux -> true -> listen not called
+it("tracks meeting state from the three events", ...)
+// fire meeting-detected -> getActivitySnapshot().meetingActive true; meeting-ended -> false;
+// detected again, then meeting-watcher-stopped -> false
+it("unmount stops the updater and unlistens", ...)                   // every unlisten mock called
 ```
 
 - [ ] **Step 2: Write the failing retry-button tests**
@@ -236,20 +284,20 @@ it("on Linux renders the legacy updater and never the retry button", ...)   // m
 
 - [ ] **Step 3: Run to verify they fail**
 
-Run: `npx vitest run src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx`
+Run: `npx vitest run src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx`
 Expected: FAIL.
 
-- [ ] **Step 4: Implement `silent-updater.ts`, `useSilentUpdater`, the `Updater` split and the App call**
+- [ ] **Step 4: Implement `silent-updater.ts`, `useSilentUpdater`, the `Updater` split, the App call and `installMemoryLocalStorage`**
 
 - [ ] **Step 5: Run tests and type-check**
 
-Run: `npx vitest run src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx && npm run type-check`
+Run: `npx vitest run src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx && npm run type-check`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/updater/silent-updater.ts src/hooks/useSilentUpdater.ts src/hooks/index.ts src/pages/app/index.tsx src/components/updater/index.tsx src/config/constants.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx
+git add src/lib/updater/silent-updater.ts src/hooks/useSilentUpdater.ts src/hooks/index.ts src/pages/app/index.tsx src/components/updater/index.tsx src/config/constants.ts src/tests/memory-local-storage.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx
 git commit -m "feat(updater): silent background updates gated on recording activity"
 ```
 
@@ -261,7 +309,7 @@ git commit -m "feat(updater): silent background updates gated on recording activ
 - Modify: `src/hooks/useSilentUpdater.ts` (record the version on mount in `main`, Linux included, before the Linux early return)
 - Modify: `src/pages/settings/index.tsx` (render `<AppStatusLine />` last)
 - Modify: `src/config/constants.ts` (`STORAGE_KEYS.APP_LAST_VERSION: "app_last_version"`, `STORAGE_KEYS.APP_UPDATED_TO: "app_updated_to"`, `STORAGE_KEYS.TEAM_LAST_SYNCED_AT: "team_last_synced_at"`)
-- Test: `src/tests/version-note.test.ts`, `src/tests/app-status-line.test.tsx`
+- Test: `src/tests/version-note.test.ts`, `src/tests/app-status-line.test.tsx`, `src/tests/use-silent-updater.test.tsx` (extend)
 
 **Interfaces:**
 - Produces:
@@ -286,24 +334,29 @@ it("shows version, last update check and team sync when present", ...)
 it("hides the team line when never synced", ...)
 it("shows 'Updated to 1.6.0' when the note matches", ...)
 it("refreshes on a storage event from another window", ...)            // dispatch new StorageEvent("storage", { key: "updater_last_check_at" })
+// use-silent-updater.test.tsx (extend)
+it("records the app version in main on Linux too, and not in other windows", ...)
+// isLinux true -> invoke("get_app_version") called, listen not called; label "dashboard" -> get_app_version not called
 ```
+
+Both files call `installMemoryLocalStorage()` in `beforeEach`.
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npx vitest run src/tests/version-note.test.ts src/tests/app-status-line.test.tsx`
+Run: `npx vitest run src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/use-silent-updater.test.tsx`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the functions, the component (dates via `toLocaleString()`, re-read on `window` `storage` events) and the hook call `invoke<string>("get_app_version").then(v => recordAppVersion(v, Date.now())).catch(() => {})`**
 
 - [ ] **Step 4: Run tests and type-check**
 
-Run: `npx vitest run src/tests/version-note.test.ts src/tests/app-status-line.test.tsx && npm run type-check`
+Run: `npx vitest run src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/use-silent-updater.test.tsx && npm run type-check`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/lib/updater/version-note.ts src/pages/settings src/hooks/useSilentUpdater.ts src/config/constants.ts src/tests/version-note.test.ts src/tests/app-status-line.test.tsx
+git add src/lib/updater/version-note.ts src/pages/settings src/hooks/useSilentUpdater.ts src/config/constants.ts src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/use-silent-updater.test.tsx
 git commit -m "feat(settings): app status line with update and team sync times"
 ```
 
@@ -429,7 +482,7 @@ Pinned rules:
 
 - [ ] **Step 1: Write the failing tests**
 
-Mock `@/lib/notion/token`, `@/lib/storage/notion-config.storage` (keep the real `parseNotionDatabaseId` via `vi.importActual`) and `@/lib/storage/google-config.storage`. Seed localStorage. `ownerSeed()` writes the selected AI (`openai`, `{api_key:"sk-owner", model:"gpt-x"}`), the selected STT, a token, Notion config `{meetingsDbUrl: <valid notion url>, knowledgeDbUrl:"", teamTimes:{mon:"09:00"}, yourName:"Owner"}` and a complete Google config.
+Mock `@/lib/notion/token`, `@/lib/storage/notion-config.storage` (keep the real `parseNotionDatabaseId` via `vi.importActual`) and `@/lib/storage/google-config.storage`. Seed localStorage through `installMemoryLocalStorage()` (Task 3). `ownerSeed()` writes the selected AI (`openai`, `{api_key:"sk-owner", model:"gpt-x"}`), the selected STT, a token, Notion config `{meetingsDbUrl: <valid notion url>, knowledgeDbUrl:"", teamTimes:{monday:"09:00"}, yourName:"Owner"}` and a complete Google config. `Weekday` keys are full names (`src/lib/storage/notion-config.storage.ts:14-21`).
 
 ```ts
 it("exports owner settings that parse back identically and carry no yourName", async () => {
@@ -481,9 +534,10 @@ git commit -m "feat(team): team file schema, validation and owner export"
 
 Pinned:
 - **Id check.** A gist id that fails `/^[0-9a-f]{20,32}$/` → `TEAM_LINK_INVALID` with no request.
-- **Request.** `tauriFetch(GIST_API_BASE + gistId, { method: "GET", headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }, maxRedirections: 0, connectTimeout: TEAM_FETCH_TIMEOUT_MS })`.
-- **Fetch failures.** All of these → `TEAM_FETCH_FAILED`: a throw, any status other than 200, or a body that is not JSON.
-- **File pick.** Take the files whose `content.trim()` starts with `"mwt1."`. Exactly one → return its trimmed content. Zero, more than one, or `truncated === true` on the chosen file → `TEAM_FILE_INVALID`.
+- **Request.** `tauriFetch(GIST_API_BASE + gistId, { method: "GET", headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }, maxRedirections: 0, connectTimeout: TEAM_FETCH_TIMEOUT_MS, signal })`.
+- **Overall bound.** `connectTimeout` does not cover a response that stalls after connecting, and `syncTeam` calls are serialized, so one hang would block every later sync, a confirm-join included. Race the whole request and body read against a `TEAM_FETCH_TIMEOUT_MS` timer. When the timer wins, abort the `AbortController` behind `signal` and return `TEAM_FETCH_FAILED`.
+- **Fetch failures.** All of these → `TEAM_FETCH_FAILED`: a throw, the timeout, any status other than 200, a body that is not JSON, or a JSON body whose `files` is not a non-null object.
+- **File pick.** Skip entries whose `content` is not a string. Take the files whose `content.trim()` starts with `"mwt1."`. Exactly one → return its trimmed content. Zero, more than one, or `truncated === true` on the chosen file → `TEAM_FILE_INVALID`.
 - **No logging.** Nothing is logged with the id or URL.
 
 - [ ] **Step 1: Write the failing tests**
@@ -492,10 +546,15 @@ Pinned:
 const ID = "b".repeat(32);
 it("returns the blob and calls only the gist API with redirects off", async () => {
   // mock fetch -> 200 { files: { "team.txt": { content: "mwt1.x.y", truncated: false } } }
-  // expect value "mwt1.x.y"; expect fetch called with (GIST_API_BASE + ID, objectContaining({ maxRedirections: 0 }))
+  // expect value "mwt1.x.y"; expect fetch called with (GIST_API_BASE + ID, objectContaining({ maxRedirections: 0,
+  //   connectTimeout: TEAM_FETCH_TIMEOUT_MS, headers: objectContaining({ Accept: "application/vnd.github+json" }) }))
 });
 it.each([404, 500, 301])("status %i -> TEAM_FETCH_FAILED", ...);
 it("network error -> TEAM_FETCH_FAILED", ...);
+it("a response that never finishes -> TEAM_FETCH_FAILED after TEAM_FETCH_TIMEOUT_MS and the signal is aborted", ...);  // fake timers; json() never resolves
+it("200 with a body that is not JSON -> TEAM_FETCH_FAILED", ...);
+it.each([{}, { files: null }, { files: "x" }])("200 with malformed files %j -> TEAM_FETCH_FAILED, no throw", ...);
+it("a file whose content is not a string is skipped", ...);       // { a: { content: null }, b: { content: "mwt1.x.y" } } -> "mwt1.x.y"
 it("picks the mwt1 file next to a README and trims the trailing newline", ...);  // Review Focus 3
 it("two mwt1 files -> TEAM_FILE_INVALID", ...);
 it("no files -> TEAM_FILE_INVALID", ...); it("truncated file -> TEAM_FILE_INVALID", ...);
@@ -530,35 +589,39 @@ git commit -m "feat(team): fetch the encrypted team blob from a secret gist"
 - Test: `src/tests/team-apply.test.ts`
 
 **Interfaces:**
-- Consumes: `TeamFileV1`, `TeamResult` (Task 6). `saveSecureAIConfig`, `saveSecureSTTConfig`, `resetSecureProviderConfigsCache`, `AI_CONFIGS_KEY`, `STT_CONFIGS_KEY`. `secureGet`, `secureSet`, `secureDelete` (`@/lib/secure-storage`). `loadNotionToken`, `saveNotionToken`, `clearNotionToken`. `loadNotionConfig`, `saveNotionConfig`, `SECURE_NOTION_CONFIG_KEY`. `loadGoogleConfigState`, `saveGoogleConfig`, `SECURE_GOOGLE_CONFIG_KEY`. `safeLocalStorage`, `STORAGE_KEYS`.
+- Consumes: `TeamFileV1`, `TeamErrorCode` (Task 6). `buildTeamLink`, `TeamLink` (Task 5). `resetSecureProviderConfigsCache`, `AI_CONFIGS_KEY`, `STT_CONFIGS_KEY`. `secureGet`, `secureSet`, `secureDelete` (`@/lib/secure-storage`). `loadNotionToken`, `saveNotionToken`, `clearNotionToken`. `loadNotionConfig`, `saveNotionConfig`, `SECURE_NOTION_CONFIG_KEY`. `loadGoogleConfigState`, `saveGoogleConfig`, `SECURE_GOOGLE_CONFIG_KEY`. `safeLocalStorage`, `STORAGE_KEYS`. `installMemoryLocalStorage` (Task 3, tests only).
 - Produces:
+  - `TEAM_LINK_SECURE_KEY = "team_link"`. It lives here, not in `team-sync`, so the link write can be an undoable apply step without an import cycle. Task 9 imports it.
   - `interface ApplyOutcome { changed: boolean; googleClientChanged: boolean }`
-  - `applyTeamFile(file: TeamFileV1, opts: { firstJoin: boolean }): Promise<TeamResult<ApplyOutcome>>`
-  - The test util: `createTeamStorageFake()` returns `{ secure: Map<string, string>; keychain: { token: string | null }; invoke: (cmd: string, args?: any) => Promise<unknown>; secureModule: { secureGet; secureSet; secureDelete; secureHas }; snapshot(): string; failWhen(pred: (op: string, key?: string) => boolean): void }`. Test files wire it with `vi.hoisted` + `vi.mock("@/lib/secure-storage")` and `vi.mock("@tauri-apps/api/core")`. The fake `invoke` handles `notion_token_get`, `notion_token_set`, `notion_token_clear`, `notion_keychain_available` and `google_disconnect`. `snapshot()` is the JSON of the secure map, every localStorage entry and the token.
+  - `type ApplyResult = { ok: true; value: ApplyOutcome } | { ok: false; code: TeamErrorCode; landed: boolean; googleClientChanged: boolean }`. `landed` is true when a write stays in storage after the failure.
+  - `applyTeamFile(file: TeamFileV1, opts: { firstJoin: false } | { firstJoin: true; link: TeamLink }): Promise<ApplyResult>`
+  - The test util: `createTeamStorageFake()` returns `{ secure: Map<string, string>; local: Map<string, string>; keychain: { token: string | null }; invoke: (cmd: string, args?: any) => Promise<unknown>; secureModule: { secureGet; secureSet; secureDelete; secureHas }; snapshot(): string; failWhen(pred: (op: string, key?: string) => boolean): void }`. `local` is the Map returned by `installMemoryLocalStorage()`, which the fake calls itself. `failWhen` covers localStorage writes too (`op` `"localSet"` / `"localRemove"`). Test files wire it with `vi.hoisted` + `vi.mock("@/lib/secure-storage")` and `vi.mock("@tauri-apps/api/core")`. The fake `invoke` handles `notion_token_get`, `notion_token_set`, `notion_token_clear`, `notion_keychain_available` and `google_disconnect`. `snapshot()` is the JSON of the secure map, every `local` entry and the token.
 
 Algorithm, pinned:
-1. **Snapshot before any write.** Read the Notion token, the raw `AI_CONFIGS_KEY`/`STT_CONFIGS_KEY`/`SECURE_GOOGLE_CONFIG_KEY`/`SECURE_NOTION_CONFIG_KEY` values, `loadGoogleConfigState()`, `loadNotionConfig()` (a throw means unreadable, treated as `null`), and the raw localStorage `CUSTOM_AI_PROVIDERS`, `CUSTOM_SPEECH_PROVIDERS`, `SELECTED_AI_PROVIDER`, `SELECTED_STT_PROVIDER`. If a snapshot read throws → `TEAM_WRITE_FAILED`, nothing written. Never call `loadNotionConfigState` (it stamps `NOTION_SETUP_AT`).
+1. **Snapshot before any write.** Read the Notion token, the raw `AI_CONFIGS_KEY`/`STT_CONFIGS_KEY`/`SECURE_GOOGLE_CONFIG_KEY`/`SECURE_NOTION_CONFIG_KEY`/`TEAM_LINK_SECURE_KEY` values, `loadGoogleConfigState()`, `loadNotionConfig()` (a throw means unreadable, treated as `null`), and the raw localStorage `CUSTOM_AI_PROVIDERS`, `CUSTOM_SPEECH_PROVIDERS`, `SELECTED_AI_PROVIDER`, `SELECTED_STT_PROVIDER`. If a snapshot read throws → `TEAM_WRITE_FAILED`, nothing written, `landed: false`. Never call `loadNotionConfigState` (it stamps `NOTION_SETUP_AT`).
 2. **Targets.**
-   - AI variables: `aiVars = { ...(storedAiConfigs[file.ai.provider] ?? {}), ...file.ai.variables }`. STT the same way.
+   - AI variables: the merge base is the stored selection's `variables` when `SELECTED_AI_PROVIDER` parses and its provider equals `file.ai.provider`. AppContext keeps the live values of the active provider there and writes the secure blob only on switch-away (`app.context.tsx:526-534`, `:581-596`). Otherwise the base is `storedAiConfigs[file.ai.provider] ?? {}`. Then `aiVars = { ...base, ...file.ai.variables }`. STT the same way.
+   - AI secure blob: `JSON.stringify({ ...storedAiConfigs, [file.ai.provider]: aiVars })`, where `storedAiConfigs` is the snapshot's raw value parsed (unparseable or `null` → `{}`). Never write it through `saveSecureAIConfig`. That function rewrites the whole blob from the window's in-memory cache (`secure-provider-configs.ts:94-97`, `:168-181`). `main` loaded that cache at startup, so an unattended sync would revert keys the user saved since then in the dashboard. STT the same way.
    - Custom lists: upsert `{ ...file.ai.custom, isCustom: true }` by id only when `custom` is present.
    - Selections: `{ provider, variables: aiVars }`.
    - Notion blob: `{ ...(current ?? EMPTY), meetingsDbUrl, knowledgeDbUrl: file value ?? current, teamTimes: file value ?? current, yourName: current?.yourName ?? "" }`.
 3. **Steps.** Build an ordered list of `{ run, undo }`, including only steps whose target differs from the snapshot (compare with `JSON.stringify`). Order: secrets first, then configs that reference them.
    1. Notion token: run `saveNotionToken`; undo restores the old one or calls `clearNotionToken`.
-   2. AI secure config: run `saveSecureAIConfig`; undo restores the raw value (`secureSet`, or `secureDelete` if it was `null`).
-   3. STT secure config: same as AI.
+   2. AI secure blob: run `secureSet(AI_CONFIGS_KEY, target)`; undo restores the raw value (`secureSet`, or `secureDelete` if it was `null`).
+   3. STT secure blob: same as AI.
    4. Google config: run `saveGoogleConfig`; undo restores the raw value.
    5. Custom AI list: localStorage; undo restores the raw value or removes the key.
    6. Custom STT list: same as AI.
    7. Selected AI: localStorage; undo restores the raw value.
    8. Selected STT: same as AI.
    9. Notion blob: run `saveNotionConfig`; undo restores the raw value.
-4. **Run in order.** On the first rejection:
-   - If `firstJoin`, run the undos of the completed steps in reverse, each in its own try/catch.
-   - Then call `resetSecureProviderConfigsCache()` and return `TEAM_WRITE_FAILED`.
-   - Later steps are not attempted.
-5. **Google client change.** `googleClientChanged` is true when the old Google state was `complete` and its `clientId !== file.google.clientId`. In that case call `invoke("google_disconnect")` after all steps succeed, best effort.
-6. **Result.** Return `{ ok: true, value: { changed: steps.length > 0, googleClientChanged } }`.
+   10. Team link, only when `firstJoin`: `secureSet(TEAM_LINK_SECURE_KEY, buildTeamLink(opts.link))`; undo restores the raw value (a switch) or deletes it. It is last, so a stored link always means every setting landed.
+4. **Run in order.** After any run, success or failure, call `resetSecureProviderConfigsCache()` when step 2 or 3 ran, so the next reader reloads the raw blob. On the first rejection:
+   - If `firstJoin`, run the undos of the completed steps in reverse, each in its own try/catch. `landed` is true only if an undo itself failed.
+   - If not `firstJoin`, keep what landed: `landed` is true when any step completed.
+   - Return `TEAM_WRITE_FAILED`. Later steps are not attempted.
+5. **Google client change.** `googleClientChanged` is true when the old Google state was `complete`, its `clientId !== file.google.clientId`, and step 4 completed and was not undone. In that case call `invoke("google_disconnect")` best effort, after all steps succeed or, on a later-sync failure, after the failing step. A first-join rollback restores the old client, so there is no disconnect.
+6. **Result.** Return `{ ok: true, value: { changed: steps.length > 0, googleClientChanged } }`, or the failure with `landed` and `googleClientChanged`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -575,8 +638,17 @@ it("absent optional fields keep local values", ...)
 // local knowledgeDbUrl + teamTimes + model; file without them -> kept
 it("first join: a write failing mid-apply restores storage byte-identically", ...)
 // failWhen(op === "secureSet" && key === AI_CONFIGS_KEY); before = snapshot(); result TEAM_WRITE_FAILED; snapshot() === before
-it("later sync: a failing write keeps earlier writes and attempts no later ones", ...)
-// firstJoin false; failWhen google config write -> token + AI + STT written; selections and notion blob untouched
+it("first join: a failing link write rolls back every setting and stores no link", ...)
+// failWhen(op === "secureSet" && key === TEAM_LINK_SECURE_KEY); snapshot() === before; landed false
+it("later sync: a failing write keeps earlier writes, attempts no later ones and reports landed", ...)
+// firstJoin false; failWhen google config write -> token + AI + STT written; selections and notion blob untouched; landed true
+it("later sync: a failure after the Google step still clears the old sign-in", ...)
+// firstJoin false; new clientId; failWhen notion blob write -> google_disconnect called; result googleClientChanged true
+it("writes the raw provider blob, not the stale in-memory cache", ...)
+// loadSecureAIConfigs() caches {}; then secure AI_CONFIGS_KEY gets {groq:{api_key:"g"}} behind the cache's back;
+// apply openai -> stored blob has both groq and openai; resetSecureProviderConfigsCache called
+it("merges on top of the active selection's variables", ...)
+// SELECTED_AI_PROVIDER {provider:"openai", variables:{model:"local-m"}}; blob openai {model:"old"}; file without model -> model "local-m"
 it("replaces an unreadable notion blob with team fields and a blank yourName", ...)
 it("a changed Google client id clears the sign-in; the same id does not", ...)
 it("never stamps NOTION_SETUP_AT", ...)
@@ -605,32 +677,35 @@ git commit -m "feat(team): change-only apply with first-join rollback"
 
 **Files:**
 - Create: `src/lib/team/team-sync.ts`
-- Modify: `src/config/constants.ts` (`TEAM_SETTINGS_APPLIED_EVENT = "team-settings-applied"`, exported next to the other event constants)
+- Modify: `src/config/constants.ts` (`TEAM_SETTINGS_APPLIED_EVENT = "team-settings-applied"`, a new top-level export)
 - Test: `src/tests/team-sync.test.ts`, `src/tests/team-redact.test.ts`
 
 **Interfaces:**
-- Consumes: `parseTeamLink`, `buildTeamLink`, `decryptTeamPayload`, `encryptTeamPayload` (Task 5). `parseTeamFile`, `exportTeamSettings` (Task 6). `fetchTeamBlob` (Task 7). `applyTeamFile`, `ApplyOutcome` (Task 8). `NOTION_CONFIG_CHANGED_EVENT`, `broadcastGoogleConnectionChanged`, `STORAGE_KEYS.TEAM_LAST_SYNCED_AT` (Task 4).
+- Consumes: `parseTeamLink`, `buildTeamLink`, `decryptTeamPayload`, `encryptTeamPayload` (Task 5). `parseTeamFile`, `exportTeamSettings` (Task 6). `fetchTeamBlob` (Task 7). `applyTeamFile`, `ApplyOutcome`, `ApplyResult`, `TEAM_LINK_SECURE_KEY` (Task 8). `NOTION_CONFIG_CHANGED_EVENT`, `broadcastGoogleConnectionChanged`, `STORAGE_KEYS.TEAM_LAST_SYNCED_AT` (Task 4).
 - Produces:
-  - `TEAM_LINK_SECURE_KEY = "team_link"`, `TEAM_OWNER_KEY_SECURE_KEY = "team_owner_key"`, `TEAM_OWNER_GIST_SECURE_KEY = "team_owner_gist_id"`
+  - `TEAM_OWNER_KEY_SECURE_KEY = "team_owner_key"`, `TEAM_OWNER_GIST_SECURE_KEY = "team_owner_gist_id"`. Re-export `TEAM_LINK_SECURE_KEY`.
+  - `TEAM_SETTINGS_APPLIED_EVENT = "team-settings-applied"`, a new top-level export in `src/config/constants.ts`. That file has no other event constants. The existing ones live in their storage modules.
   - `loadStoredTeamLink(): Promise<TeamLink | null>`, which parses the stored link with `parseTeamLink`
   - `loadOwnerTeamLink(): Promise<TeamLink | null>`, built from the owner key and gist id
   - `fetchTeamFile(link: TeamLink): Promise<TeamResult<TeamFileV1>>`. Steps: `fetchTeamBlob`, then decrypt (`null` → `TEAM_DECRYPT_FAILED`), then `parseTeamFile`.
-  - `syncTeam(link: TeamLink, opts: { firstJoin: boolean }): Promise<TeamResult<ApplyOutcome>>`
+  - `syncTeam(link: TeamLink, opts: { firstJoin: boolean }): Promise<ApplyResult>`. A fetch failure returns `{ ok: false, code, landed: false, googleClientChanged: false }`.
   - `leaveTeam(): Promise<void>`. Deletes `TEAM_LINK_SECURE_KEY` and removes `TEAM_LAST_SYNCED_AT`. Settings stay as they are.
+  - `__resetTeamSyncForTests(): void`, which resets the promise chain.
 
 `syncTeam`, pinned:
-- **Serialized.** Calls queue behind each other through a module promise chain, so two calls never overlap.
+- **Serialized and never rejects.** Calls queue through a module promise chain, `chain = chain.then(run, run)`, so two calls never overlap and one failure never poisons the next. The body is wrapped in try/catch. An unexpected throw maps to `TEAM_WRITE_FAILED` with `landed: true`, because the caller cannot know what landed.
 - **Fetch fails** → return the code. Nothing is written.
-- **Apply fails** → return the code.
+- **Apply.** `applyTeamFile(file, firstJoin ? { firstJoin: true, link } : { firstJoin: false })`. The link write is the last apply step, so its failure rolls back the whole join.
+- **Apply fails** → return the failure and do not stamp last synced. If `landed`, emit the events below anyway, so other windows drop stale caches and forms.
 - **On success:**
-  1. If `firstJoin`, `secureSet(TEAM_LINK_SECURE_KEY, buildTeamLink(link))`. If that throws → `TEAM_WRITE_FAILED`.
-  2. Set `TEAM_LAST_SYNCED_AT = String(Date.now())`.
-  3. If `changed`, emit `TEAM_SETTINGS_APPLIED_EVENT` and `NOTION_CONFIG_CHANGED_EVENT`, and call `broadcastGoogleConnectionChanged()`. Each is best effort.
+  1. Set `TEAM_LAST_SYNCED_AT = String(Date.now())`.
+  2. If `changed`, emit the events.
+- **Events.** Emit `TEAM_SETTINGS_APPLIED_EVENT` and `NOTION_CONFIG_CHANGED_EVENT`, and call `broadcastGoogleConnectionChanged()`. Each is best effort.
 - **Logging.** Only `console.warn("[team] sync failed:", code)`.
 
 - [ ] **Step 1: Write the failing sync tests**
 
-Use `createTeamStorageFake` (Task 8) and mock `@tauri-apps/plugin-http` `fetch` and `@tauri-apps/api/event` `emit`. Build a real encrypted blob with a test key from a valid `TeamFileV1`.
+Use `createTeamStorageFake` (Task 8) and mock `@tauri-apps/plugin-http` `fetch` and `@tauri-apps/api/event` `emit`. Call `__resetTeamSyncForTests()` in `beforeEach`. Build a real encrypted blob with a test key from a valid `TeamFileV1`.
 
 ```ts
 it.each([
@@ -642,7 +717,11 @@ it.each([
 });
 it("first join success stores the link, stamps last synced and emits the three events once", ...);
 it("a no-op re-sync stamps last synced and emits nothing", ...);
+it("later sync: an apply failure stamps no last synced and still emits the events when something landed", ...);
+// seed TEAM_LAST_SYNCED_AT absent; firstJoin false; failWhen notion blob write -> key still absent; emit TEAM_SETTINGS_APPLIED_EVENT called
 it("two concurrent syncs run one after the other", ...);   // second fetch starts only after the first resolves
+it("a sync whose body throws resolves TEAM_WRITE_FAILED and the next sync still runs", ...);
+// mock applyTeamFile to throw once -> first result {ok:false, code:"TEAM_WRITE_FAILED"}; second syncTeam resolves normally
 it("leaveTeam deletes the link and last-synced and keeps settings", ...);
 it("Copy -> apply round trip reproduces the owner's settings", ...);
 // owner storage -> exportTeamSettings -> encryptTeamPayload -> gist mock returns blob -> wipe storage -> syncTeam -> AI/STT/notion/google equal owner's
@@ -700,7 +779,7 @@ git commit -m "feat(team): sync orchestration that keeps the last good settings 
   - TS: `interface GoogleConnectResult { connected: boolean; sessionOnly: boolean; name: string | null }`
   - `connectGoogle(config: GoogleConfig): Promise<{ ok: true; status: GraphStatus } | { ok: false; code: GoogleErrorCode }>`. It runs `saveGoogleConfig(config)`, then `invoke<GoogleConnectResult>("google_connect", { clientId, clientSecret })`, then on success `fillYourNameIfBlank(result.name)`. It calls `broadcastGoogleConnectionChanged()` in `finally`. Errors map through `toGoogleCode`.
   - `reconnectGoogle()` keeps its signature. It loads the saved config, returns `GOOGLE_AUTH_REJECTED` when it is not `complete`, and otherwise delegates to `connectGoogle`.
-  - `fillYourNameIfBlank(name: string | null): Promise<void>` (exported for tests). It does nothing when `name` is blank, when `loadNotionConfig()` throws or returns `null`, or when `yourName.trim() !== ""`. Otherwise it runs `saveNotionConfig({ ...cfg, yourName: name.trim() })`, then emits `NOTION_CONFIG_CHANGED_EVENT` and `TEAM_SETTINGS_APPLIED_EVENT` (best effort), so mounted forms re-read (Task 12).
+  - `fillYourNameIfBlank(name: string | null): Promise<void>` (exported for tests). It never rejects. It does nothing when `name` is blank, when `loadNotionConfig()` throws or returns `null`, or when `yourName.trim() !== ""`. Otherwise it runs `saveNotionConfig({ ...cfg, yourName: name.trim() })`, then emits `NOTION_CONFIG_CHANGED_EVENT` (best effort). A mounted Notion card picks the name up (Task 12). It does not emit `TEAM_SETTINGS_APPLIED_EVENT`. On a plain manual connect, that event would make the Notion card fully reload and wipe the user's unsaved link edits. A save failure logs `console.warn("[google] name fill failed")` and is swallowed, so a successful connect never turns into an error.
 
 - [ ] **Step 1: Write the failing Rust tests in `auth.rs`**
 
@@ -725,7 +804,8 @@ Expected: PASS, including `no_exposed_command_return_type_serializes_a_credentia
 
 ```ts
 it("fills a blank yourName from the Google name and tells other windows", ...)
-// invoke google_connect -> {connected:true, sessionOnly:false, name:"Ana"}; notion cfg yourName "" -> saved "Ana"; emit called with NOTION_CONFIG_CHANGED_EVENT and TEAM_SETTINGS_APPLIED_EVENT
+// invoke google_connect -> {connected:true, sessionOnly:false, name:"Ana"}; notion cfg yourName "" -> saved "Ana"; emit called with NOTION_CONFIG_CHANGED_EVENT, never TEAM_SETTINGS_APPLIED_EVENT
+it("a failing name save still returns ok", ...)        // saveNotionConfig rejects -> connectGoogle resolves { ok: true }
 it("keeps a typed yourName", ...)
 it("leaves yourName blank when the sign-in has no name", ...)
 it("skips the name when the notion config is unreadable but still connects", ...)
@@ -760,7 +840,7 @@ git commit -m "feat(google): profile scope fills a blank Notion name; shared con
 **Interfaces:**
 - Produces:
   - `SEND_REF_PREFIX = "Meetwings ref "`
-  - `sendRefOf(sendId: string): string` returns `sendId.replace(/-/g, "").toLowerCase().slice(0, 12)`
+  - `sendRefOf(sendId: string): string` returns `sendId.replace(/-/g, "").toLowerCase().slice(0, 12)`. Send ids are `crypto.randomUUID()` (`src/lib/notion/actions.ts:78`), so the result is always 12 hex characters.
   - `sendRefBlock(sendId: string): NotionBlockInput`: a `paragraph` with one rich-text item, content `SEND_REF_PREFIX + sendRefOf(sendId)`, annotation `color: "gray"`
   - `Candidate.sendRef: string | null`. Set from `children[0]` only: a `paragraph` whose plain text matches `/^Meetwings ref ([0-9a-f]{12})$/`. Otherwise `null`.
 
@@ -820,8 +900,8 @@ git commit -m "fix(notion): prove page ownership by per-send ref so shared token
 
 Pinned:
 - AppContext: `listen(TEAM_SETTINGS_APPLIED_EVENT, async () => { resetSecureProviderConfigsCache(); await Promise.all([loadSecureAIConfigs(), loadSecureSTTConfigs()]); loadData(); })`. Register it with the cancelled-flag pattern and `[]` deps (same reasoning as `pages/app/index.tsx:149-156`).
-- NotionSettingsCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. Don't add `NOTION_CONFIG_CHANGED_EVENT`: the card emits that itself on every token save, and reloading would wipe unsaved link edits.
-- GoogleCalendarCard: move the mount load into `reload()`. Call it on mount, on `TEAM_SETTINGS_APPLIED_EVENT` and on `GOOGLE_CONNECTION_CHANGED_EVENT`, so the status shows a connect made from `main`.
+- NotionSettingsCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. Never fully reload on `NOTION_CONFIG_CHANGED_EVENT`: the card emits that itself on every token save, and a reload would wipe unsaved link edits. On that event, re-read only `yourName`, and adopt it only when the form's `yourName` is blank. This is how a Google name fill (Task 10) reaches an open card without touching anything typed.
+- GoogleCalendarCard: move the mount load into `reload()`. Call it on mount and on `TEAM_SETTINGS_APPLIED_EVENT`. On `GOOGLE_CONNECTION_CHANGED_EVENT`, refresh only `status` via `google_status`, never the Client ID and secret fields. The card broadcasts that event itself on connect and disconnect, and Tauri delivers it to the emitting window too, so a form reload there would wipe unsaved edits.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -831,7 +911,12 @@ Mock `listen` to capture handlers by event name.
 it("AppContext reloads provider selection and secure caches on team-settings-applied", ...)
 // consumer renders selectedAIProvider.provider; change localStorage SELECTED_AI_PROVIDER; fire handler -> new provider shown; resetSecureProviderConfigsCache called
 it("NotionSettingsCard re-reads storage on team-settings-applied", ...)     // meetings link input shows the new value
-it("GoogleCalendarCard re-reads config and status on team-settings-applied and google-connection-changed", ...)
+it("NotionSettingsCard on notion-config-changed fills a blank name and keeps typed edits", ...)
+// type into the meetings link input; stored yourName "Ana"; fire handler -> link edit kept, name "Ana";
+// with a typed name "Bo" -> stays "Bo"
+it("GoogleCalendarCard re-reads config and status on team-settings-applied", ...)
+it("GoogleCalendarCard on google-connection-changed refreshes status only", ...)
+// type into Client ID; fire handler -> google_status re-queried, typed Client ID kept
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -870,7 +955,8 @@ git commit -m "feat(team): app context and settings cards re-read after a team a
 - Consumes: `parseTeamLink`, `shortGistId` (Task 5). `TeamErrorCode` (Task 6). `fetchTeamFile`, `syncTeam`, `leaveTeam`, `loadStoredTeamLink`, `loadOwnerTeamLink` (Task 9). `reconnectGoogle` (Task 10). `onOpenUrl`, `getCurrent` (`@tauri-apps/plugin-deep-link`).
 - Produces:
   - `TEAM_STATE_EVENT = "team-state"`, `TEAM_ACTION_EVENT = "team-action"`, `TEAM_REFRESH_MS = 4 * 60 * 60 * 1000`, `TEAM_START_RETRY_MS = 60_000`
-  - `interface TeamUiState { joined: boolean; pending: { gistShort: string; switching: boolean } | null; busy: boolean; error: TeamErrorCode | null; check: { ok: true } | { ok: false; code: TeamErrorCode } | null; googleNeedsConnect: boolean }`
+  - `interface TeamUiState { joined: boolean; pending: { gistShort: string; switching: boolean } | null; busy: boolean; error: TeamErrorCode | null; errorSeq: number; check: { ok: true } | { ok: false; code: TeamErrorCode } | null; googleNeedsConnect: boolean }`. `errorSeq` goes up by one every time `error` is set, so the same error twice still toasts twice (Task 14).
+  - `__resetTeamControllerForTests(): void`, which clears the pending link and resets state.
   - `type TeamAction = { type: "state-request" } | { type: "join"; link: string } | { type: "confirm" } | { type: "decline" } | { type: "leave" } | { type: "check-owner-link" } | { type: "connect-google" }`
   - `startTeamController(): () => void`
   - `useTeamSync(): void`. A label-gated effect (only `main`) that calls `startTeamController()` and returns its stop.
@@ -886,15 +972,19 @@ Controller, pinned:
   3. `getCurrent()`, which handles a cold-start URL.
   4. The startup sync, if a link is stored: `syncTeam(stored, { firstJoin: false })`. On `TEAM_FETCH_FAILED`, retry once after `TEAM_START_RETRY_MS`.
   5. `setInterval(refresh, TEAM_REFRESH_MS)`.
-  6. At start, set `joined` from the stored link. Set `googleNeedsConnect = joined && !(await invoke<GraphStatus>("google_status")).connected`; a rejected invoke counts as not connected.
+  6. At start, set `joined` from the stored link. Set `googleNeedsConnect = joined && !(await invoke<GraphStatus>("google_status")).connected`.
+  7. `emit(TEAM_STATE_EVENT, state)`, so a dashboard that asked for state before step 6 gets the real `joined` and `googleNeedsConnect` values. Emit again when the startup sync settles.
 - **Generation counter.** As in Task 3: `stop()` bumps it and clears timers and listeners.
+- **Async registration.** `listen` and `onOpenUrl` resolve after a delay. Register both through one helper, `register(promise)`. When the promise resolves after `stop()`, so the generation is stale, it calls the returned unlisten at once. Otherwise it keeps the unlisten for `stop()`. Without this, the first StrictMode mount leaks handlers, and a `confirm` would run `syncTeam(firstJoin: true)` twice. Precedent: `useMeetingAutoRecord.ts:891-898`.
+- **Never throw, never stick.** Every action handler, timer callback and start step runs in try/catch/finally. A throw sets `error = "TEAM_WRITE_FAILED"` and logs `console.warn("[team] controller step failed")`, never the error object. `finally` clears `busy` and emits state. A rejected `google_status` counts as not connected everywhere.
+- **Error clearing.** Each incoming link and each user action (`join`, `confirm`, `leave`, `check-owner-link`, `connect-google`) sets `error = null` first. Every place that sets a non-null `error` also bumps `errorSeq`.
 - **`handleIncomingLink(raw)`.**
   - Invalid → `error = "TEAM_LINK_INVALID"`, `invoke("open_dashboard")`, emit state.
   - Same gist id and key as the stored link → `syncTeam(link, { firstJoin: false })` with no prompt.
   - Otherwise → keep the parsed link in a module variable (never in state). Set `pending = { gistShort: shortGistId(id), switching: stored !== null }`, `invoke("open_dashboard")`, emit state.
   - A second link while pending replaces the pending link. Nothing is applied.
 - **Actions.**
-  - `confirm`: no pending → ignore. Else `busy`, `syncTeam(pending, { firstJoin: true })`, clear pending. On failure → `error = code`. On success → `joined = true`, `error = null`. If `google_status` is not connected, `await reconnectGoogle()`; not ok → `googleNeedsConnect = true`, else `false`.
+  - `confirm`: no pending → ignore. Else `busy`, `syncTeam(pending, { firstJoin: true })`, clear pending. On failure → `error = code`. On success → `joined = true`. Then set `busy = false` and emit state *before* any Google sign-in. `google_connect` blocks until the browser callback, and the prompt must not sit open and busy over settings that have already landed. Then, if `google_status` is not connected, `await reconnectGoogle()`: not ok → `googleNeedsConnect = true`, else `false`.
   - `decline`: clear pending.
   - `leave`: `leaveTeam()`, `joined = false`, `googleNeedsConnect = false`.
   - `check-owner-link`: `loadOwnerTeamLink()`. `null` → `check = { ok: false, code: "TEAM_LINK_INVALID" }`. Else `fetchTeamFile(link)` → `check = { ok: true }` or the code. Nothing is applied.
@@ -902,11 +992,11 @@ Controller, pinned:
   - `join`: `handleIncomingLink(link)`.
   - `state-request`: emit state.
   - Every action ends with `emit(TEAM_STATE_EVENT, state)`.
-- **Refresh results.** A tick or startup sync that returns `googleClientChanged` sets `googleNeedsConnect = true` and never calls `reconnectGoogle` (no unprompted browser).
+- **Refresh results.** A tick or startup sync whose result carries `googleClientChanged` (on either branch, see `ApplyResult`) sets `googleNeedsConnect = true` and never calls `reconnectGoogle`, so no browser opens unprompted.
 
 - [ ] **Step 1: Write the failing controller tests**
 
-Mock `@tauri-apps/plugin-deep-link`, `@tauri-apps/api/event` (capture `listen` handlers, record `emit`), `@tauri-apps/api/core` `invoke`, `@/lib/team/team-sync` and `@/lib/calendar/google-connect`. Use fake timers.
+Mock `@tauri-apps/plugin-deep-link`, `@tauri-apps/api/event` (capture `listen` handlers, record `emit`), `@tauri-apps/api/core` `invoke`, `@/lib/team/team-sync` and `@/lib/calendar/google-connect`. Use fake timers, with `advanceTimersByTimeAsync` for the retry and refresh tests. Call `__resetTeamControllerForTests()` in `beforeEach`.
 
 ```ts
 it("cold start link -> pending prompt, dashboard opened, nothing applied", ...)       // getCurrent -> [LINK]
@@ -921,6 +1011,21 @@ it("start: stored link syncs; a fetch failure retries once after 60 s, then wait
 it("a refresh that changes the Google client sets googleNeedsConnect and opens no browser", ...)
 it("check-owner-link reports ok or the code and applies nothing", ...)
 it("stop() clears timers and listeners", ...)
+it("a listener that resolves after stop() is unlistened at once and never handles an event", ...)
+// hold the listen/onOpenUrl promises; stop(); resolve them -> each unlisten called; fire a confirm action -> syncTeam not called
+it("start emits state after google_status resolves", ...)        // stored link; last emit has joined true, googleNeedsConnect per google_status
+it("confirm emits a non-busy state before Google sign-in starts", ...)
+// reconnectGoogle pending -> an emitted state has pending null, busy false, joined true
+it("a confirm whose sync fails sets the error, clears pending and leaves joined false", ...)
+it("a confirm followed by a failed Google sign-in sets googleNeedsConnect", ...)
+it("a throwing action clears busy and reports TEAM_WRITE_FAILED", ...)   // syncTeam rejects -> state busy false, error TEAM_WRITE_FAILED
+it("a rejected google_status counts as not connected", ...)
+it("the same error twice bumps errorSeq twice", ...)                     // two invalid links -> errorSeq +2
+it("leave and connect-google update joined and googleNeedsConnect", ...)
+it("the same gist with a different key prompts", ...)
+it("confirm with nothing pending is ignored", ...)
+it("getCurrent() null or [] starts with no prompt", ...)
+it("the 4 h tick re-syncs the stored link", ...)                         // advanceTimersByTimeAsync(TEAM_REFRESH_MS) -> syncTeam called with firstJoin false
 it("useTeamSync does nothing outside the main window", ...)   // getCurrentWindow().label "dashboard" -> startTeamController not called
 ```
 
@@ -952,13 +1057,15 @@ git commit -m "feat(team): meetwings:// deep link and main-window team controlle
 - Create: `src/hooks/useTeamState.ts` (export from `src/hooks/index.ts`)
 - Create: `src/components/TeamJoinPrompt.tsx` (export from `src/components/index.ts`)
 - Modify: `src/layouts/DashboardLayout.tsx` (mount `<TeamJoinPrompt />` once)
+- Create: `src/components/TeamJoinBox.tsx` (export from `src/components/index.ts`): the paste box plus the "Join" button
 - Create: `src/pages/settings/components/TeamSettingsCard.tsx` (export from `./components` index)
 - Modify: `src/pages/settings/index.tsx` (render `<TeamSettingsCard />` right after `<Theme />`)
-- Test: `src/tests/team-join-prompt.test.tsx`, `src/tests/team-settings-card.test.tsx`
+- Modify: `src/pages/dev/index.tsx` (the `/api-setup` page: render `<TeamJoinBox />` above the "Required" section while `!state?.joined`). `DashboardLayout.tsx:17-21` redirects every other route to `/api-setup` until AI and speech are set up. A new colleague whose mail client does not make `meetwings://` clickable could otherwise never reach the paste box in Settings.
+- Test: `src/tests/team-join-prompt.test.tsx`, `src/tests/team-settings-card.test.tsx`, `src/tests/use-team-state.test.tsx`
 
 **Interfaces:**
 - Consumes: `TEAM_STATE_EVENT`, `TEAM_ACTION_EVENT`, `TeamUiState`, `TeamAction` (Task 13). `parseTeamLink`, `parseGistRef`, `buildTeamLink` (Task 5). `generateTeamKey`, `encryptTeamPayload` (Task 5). `exportTeamSettings`, `TEAM_COPY` (Task 6). `TEAM_OWNER_KEY_SECURE_KEY`, `TEAM_OWNER_GIST_SECURE_KEY` (Task 9). `secureGet`/`secureSet`. `Dialog*`, `Button`, `Input` from `@/components`. `toast` from `sonner`.
-- Produces: `useTeamState(): [TeamUiState | null, (a: TeamAction) => void]`. It listens to `TEAM_STATE_EVENT`, emits `{ type: "state-request" }` on mount, and sends actions with `emit(TEAM_ACTION_EVENT, a)`.
+- Produces: `useTeamState(): [TeamUiState | null, (a: TeamAction) => void]`. It listens to `TEAM_STATE_EVENT` and emits `{ type: "state-request" }` only after that `listen` promise resolves. Emitting earlier would let the reply arrive before the handler exists, the race documented at `useMeetingDetection.ts:68-77`. It uses the cancelled-flag pattern, so a listener that resolves after unmount is unlistened at once. It sends actions with `emit(TEAM_ACTION_EVENT, a)`. Main's end-of-start emit (Task 13) covers a dashboard that asked before main's controller was listening.
 
 UI, pinned (all copy is fixed text):
 - **TeamJoinPrompt.**
@@ -966,10 +1073,11 @@ UI, pinned (all copy is fixed text):
   - Title: "Use your team's settings?"
   - Body: `` `This replaces your AI, speech, Notion and Google settings with the ones in team file ${gistShort}…. Only accept a link from someone you trust.` `` When `switching`, it adds "You'll leave your current team settings."
   - Buttons: "Use team settings" sends `confirm`; "Not now" sends `decline`.
-  - When `state.error` changes to non-null, call `toast.error(TEAM_COPY[state.error])`.
+  - When `state.errorSeq` differs from the last value this component saw and `state.error` is non-null, call `toast.error(TEAM_COPY[state.error])`. That includes the first state received, so a cold-start invalid link still toasts. Keying on `errorSeq`, not on the `error` value, means the same bad link clicked twice toasts twice.
+- **TeamJoinBox.** Paste box (`Input`) plus a "Join" button. It runs `parseTeamLink` locally: invalid → show `TEAM_COPY.TEAM_LINK_INVALID` and send nothing. Valid → send `{ type: "join", link }`. It is rendered on the API Setup page and in the member half of the card.
 - **TeamSettingsCard, member half.**
   - Status line: "Using your team's settings" when `joined`, else "Not using team settings".
-  - Paste box (`Input`) plus a "Join" button. It runs `parseTeamLink` locally: invalid → show `TEAM_COPY.TEAM_LINK_INVALID` and send nothing. Valid → send `{ type: "join", link }`.
+  - `<TeamJoinBox />`.
   - "Leave team" button when `joined`. "Reconnect Google" button when `googleNeedsConnect` (sends `connect-google`). Shows `TEAM_COPY[state.error]` when set.
 - **TeamSettingsCard, owner half.** A collapsed section, "Share your settings with your team":
   - No owner key → "Create team key" button: `generateTeamKey()` → `secureSet(TEAM_OWNER_KEY_SECURE_KEY)`. No regenerate control exists, so existing links keep working.
@@ -988,6 +1096,10 @@ it("is closed without a pending join", ...)
 it("opens on a pending state and sends confirm / decline", ...)
 it("mentions leaving the current team when switching", ...)
 it("toasts the fixed copy when an error arrives", ...)
+it("toasts again when the same error arrives with a new errorSeq, and not on a re-render with the same errorSeq", ...)
+// use-team-state.test.tsx
+it("emits state-request only after the state listener resolves", ...)   // hold the listen promise; emit not called; resolve -> emit called
+it("a listener resolving after unmount is unlistened at once", ...)
 // team-settings-card.test.tsx
 it("requests state on mount", ...)                                   // emit(TEAM_ACTION_EVENT, {type:"state-request"})
 it("an invalid pasted link shows fixed copy and sends nothing", ...)
@@ -1001,25 +1113,25 @@ it("Reconnect Google appears only when googleNeedsConnect", ...)
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx`
+Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement the hook, prompt, card and the two mounts**
+- [ ] **Step 3: Implement the hook, prompt, join box, card and the three mounts**
 
 - [ ] **Step 4: Run tests and type-check**
 
-Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx && npm run type-check`
+Run: `npx vitest run src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx && npm run type-check`
 Expected: PASS.
 
 - [ ] **Step 5: Run every test file this plan touched**
 
-Run: `npx vitest run src/tests/install-gate.test.ts src/tests/recording-activity-store.test.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/team-link.test.ts src/tests/team-crypto.test.ts src/tests/team-file.test.ts src/tests/team-fetch.test.ts src/tests/team-apply.test.ts src/tests/team-sync.test.ts src/tests/team-redact.test.ts src/tests/google-connect.test.ts src/tests/google-calendar-card.test.tsx src/tests/notion-page-blocks.test.ts src/tests/notion-same-meeting.test.ts src/tests/notion-send.test.ts src/tests/team-settings-applied-consumers.test.tsx src/tests/notion-settings-card.test.tsx src/tests/team-controller.test.ts src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/secure-provider-configs.test.ts`
+Run: `npx vitest run src/tests/install-gate.test.ts src/tests/recording-activity-store.test.ts src/tests/silent-updater.test.ts src/tests/updater-retry-button.test.tsx src/tests/use-silent-updater.test.tsx src/tests/use-team-state.test.tsx src/tests/version-note.test.ts src/tests/app-status-line.test.tsx src/tests/team-link.test.ts src/tests/team-crypto.test.ts src/tests/team-file.test.ts src/tests/team-fetch.test.ts src/tests/team-apply.test.ts src/tests/team-sync.test.ts src/tests/team-redact.test.ts src/tests/google-connect.test.ts src/tests/google-calendar-card.test.tsx src/tests/notion-page-blocks.test.ts src/tests/notion-same-meeting.test.ts src/tests/notion-send.test.ts src/tests/team-settings-applied-consumers.test.tsx src/tests/notion-settings-card.test.tsx src/tests/team-controller.test.ts src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/secure-provider-configs.test.ts`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/hooks/useTeamState.ts src/hooks/index.ts src/components/TeamJoinPrompt.tsx src/components/index.ts src/layouts/DashboardLayout.tsx src/pages/settings src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx
+git add src/hooks/useTeamState.ts src/hooks/index.ts src/components/TeamJoinPrompt.tsx src/components/TeamJoinBox.tsx src/components/index.ts src/layouts/DashboardLayout.tsx src/pages/settings src/pages/dev/index.tsx src/tests/team-join-prompt.test.tsx src/tests/team-settings-card.test.tsx src/tests/use-team-state.test.tsx
 git commit -m "feat(team): dashboard join prompt and Team settings card"
 ```
 
