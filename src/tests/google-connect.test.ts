@@ -71,6 +71,7 @@ describe("connectGoogle", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(connectGoogle(CONFIG)).resolves.toMatchObject({ ok: true });
     expect(warn).toHaveBeenCalledWith("[google] name fill failed");
+    expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
 
@@ -125,6 +126,7 @@ describe("reconnectGoogle", () => {
     expect(h.invoke.mock.invocationCallOrder[0]).toBeLessThan(
       h.emit.mock.invocationCallOrder.at(-1)!,
     );
+    expect(emitted().at(-1)).toBe(GOOGLE_CONNECTION_CHANGED_EVENT);
   });
 
   // Was "broadcasts nothing": connectGoogle broadcasts on every path now.
