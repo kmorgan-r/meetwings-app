@@ -190,6 +190,10 @@ async function attemptInstall(gen: number): Promise<void> {
     setStatus({ kind: "install-failed", version: target.update.version });
     return;
   }
+  // Windows install() exits the process, so only macOS gets here; its restart
+  // may be deferred for minutes, and a quit meanwhile must not leave the flag
+  // to swallow the next deliberate link click. attemptRelaunch re-sets it.
+  safeLocalStorage.removeItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE);
   if (gen !== generation) return;
   target.installed = true;
   await attemptRelaunch(gen);
@@ -205,9 +209,11 @@ async function attemptRelaunch(gen: number): Promise<void> {
     scheduleRecheck(attemptRelaunch);
     return;
   }
+  safeLocalStorage.setItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE, "1");
   try {
     await deps.relaunch();
   } catch {
+    safeLocalStorage.removeItem(STORAGE_KEYS.RELAUNCH_AFTER_UPDATE);
     // The update stays marked installed, so a retry only relaunches.
     if (gen !== generation) return;
     setStatus({ kind: "install-failed", version: target.update.version });

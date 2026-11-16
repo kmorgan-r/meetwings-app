@@ -303,6 +303,31 @@ describe("silent updater scheduler", () => {
     expect(storage.has("mw_relaunch_after_update")).toBe(false);
   });
 
+  it("a deferred macOS relaunch holds no flag; the flag covers only the relaunch call", async () => {
+    // macOS install() returns; a quit while the relaunch waits must not leave
+    // the flag to swallow the next deliberate link click.
+    const u = fakeUpdate("1.6.0");
+    deps.check.mockResolvedValue(asUpdate(u));
+    deps.readGateInput.mockResolvedValueOnce(idle()).mockResolvedValue(busy());
+    let flagAtRelaunch: string | undefined;
+    deps.relaunch.mockImplementation(async () => {
+      flagAtRelaunch = storage.get("mw_relaunch_after_update");
+      throw new Error("relaunch failed");
+    });
+    start();
+    await flush();
+    expect(u.install).toHaveBeenCalledTimes(1);
+    expect(getSilentUpdaterStatus()).toEqual({ kind: "relaunch-pending", version: "1.6.0" });
+    expect(storage.has("mw_relaunch_after_update")).toBe(false);
+
+    deps.readGateInput.mockResolvedValue(idle());
+    await vi.advanceTimersByTimeAsync(INSTALL_RECHECK_MS);
+
+    expect(deps.relaunch).toHaveBeenCalledTimes(1);
+    expect(flagAtRelaunch).toBe("1");
+    expect(storage.has("mw_relaunch_after_update")).toBe(false);
+  });
+
   it("a newer version after a failed install installs automatically", async () => {
     const u1 = fakeUpdate("1.6.0");
     u1.install.mockRejectedValue(new Error("failed"));
