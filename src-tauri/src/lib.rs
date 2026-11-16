@@ -120,9 +120,8 @@ pub fn run() {
             // The dashboard, not the overlay: `main` is the 54px skipTaskbar
             // overlay whose visibility the toggle shortcut tracks in its own
             // state (shortcuts.rs `is_hidden`), which a direct show() here
-            // would desync. An existing dashboard is restored directly -
-            // `open_dashboard` only calls set_focus then show, and on Windows
-            // neither restores a MINIMIZED window.
+            // would desync. An existing dashboard is restored directly, in
+            // this sync callback, rather than through async `open_dashboard`.
             if let Some(dashboard) = app.get_webview_window("dashboard") {
                 let _ = dashboard.unminimize();
                 let _ = dashboard.show();
