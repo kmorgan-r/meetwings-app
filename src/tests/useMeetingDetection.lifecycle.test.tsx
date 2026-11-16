@@ -162,7 +162,7 @@ describe("useMeetingDetection", () => {
 
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
       direct: MEETING_DETECT_PROCESSES,
-      gated: [],
+      gated: ["chrome.exe"],
     });
   });
 
@@ -177,7 +177,7 @@ describe("useMeetingDetection", () => {
     await flush();
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
       direct: MEETING_DETECT_PROCESSES,
-      gated: [],
+      gated: ["chrome.exe"],
     });
   });
 
@@ -451,7 +451,7 @@ describe("useMeetingDetection", () => {
     }
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
       direct: MEETING_DETECT_PROCESSES,
-      gated: [],
+      gated: ["chrome.exe"],
     });
   });
 
@@ -482,7 +482,7 @@ describe("useMeetingDetection", () => {
     expect(invoke).toHaveBeenCalledWith("stop_meeting_watcher");
     expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
       direct: MEETING_DETECT_PROCESSES,
-      gated: [],
+      gated: ["chrome.exe"],
     });
 
     fire("meeting-detection-setting-changed", { enabled: false });
@@ -515,8 +515,8 @@ describe("useMeetingDetection", () => {
     );
   });
 
-  it("starts with Chrome gated once Google is set up", async () => {
-    for (const state of ["complete", "unreadable"]) {
+  it("starts with Chrome gated whatever the Google state", async () => {
+    for (const state of ["absent", "complete", "unreadable"]) {
       listeners.clear();
       vi.clearAllMocks();
       listen.mockImplementation(registerImmediately);

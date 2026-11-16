@@ -5,10 +5,7 @@ import {
   MEETING_DETECT_PROCESSES,
 } from "@/config/constants";
 import { EARLY_JOIN_MS, isDeclined } from "@/lib/calendar/current-meeting";
-import {
-  loadGoogleConfigState,
-  type GoogleConfigState,
-} from "@/lib/storage/google-config.storage";
+import type { GoogleConfigState } from "@/lib/storage/google-config.storage";
 import type { CalendarEvent, GoogleErrorCode } from "@/types/calendar";
 
 export interface WatchLists {
@@ -16,18 +13,9 @@ export interface WatchLists {
   gated: string[];
 }
 
-/** Gated processes are only watched once a Google config exists to check them against. */
-export function computeWatchLists(
-  configState: GoogleConfigState["state"]
-): WatchLists {
-  return {
-    direct: MEETING_DETECT_PROCESSES,
-    gated: configState === "absent" ? [] : MEETING_DETECT_GATED_PROCESSES,
-  };
-}
-
+/** Chrome is watched whether or not Google is set up: any Chrome mic use is a call. */
 export async function currentWatchLists(): Promise<WatchLists> {
-  return computeWatchLists((await loadGoogleConfigState()).state);
+  return { direct: MEETING_DETECT_PROCESSES, gated: MEETING_DETECT_GATED_PROCESSES };
 }
 
 export function meetingLabel(process?: string): string {

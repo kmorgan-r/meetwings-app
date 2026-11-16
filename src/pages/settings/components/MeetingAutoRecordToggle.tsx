@@ -189,9 +189,9 @@ export const MeetingAutoRecordToggle = ({
               Automatically record Teams and Google Meet calls
             </Label>
             <p className="text-xs text-muted-foreground mt-1">
-              Starts recording when a Teams call begins, or when a Google Meet
-              call on your Google Calendar starts in Chrome, and stops when it
-              ends. Requires voice detection to be enabled in audio settings.
+              Starts recording when a Teams call begins, or when Chrome starts
+              using the microphone (a Google Meet call or anything else), and
+              stops when it ends. Requires voice detection to be enabled in audio settings.
               Windows only. Participants may need to be told the call is being
               recorded — rules vary by country.
             </p>
@@ -251,11 +251,9 @@ export const MeetingAutoRecordToggle = ({
                   session.kind === "ignored" && "text-muted-foreground"
                 )}
               >
-                {session.kind === "direct"
-                  ? `Watched (${meetingLabel(session.name)})`
-                  : session.kind === "gated"
-                    ? `Watched after a calendar check (${meetingLabel(session.name)})`
-                    : "Not watched"}
+                {session.kind === "ignored"
+                  ? "Not watched"
+                  : `Watched (${meetingLabel(session.name)})`}
               </span>
             </div>
           ))}

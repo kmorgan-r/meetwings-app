@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/storage/google-config.storage", async (orig) => ({
+  ...(await orig<typeof import("@/lib/storage/google-config.storage")>()),
+  loadGoogleConfigState: async () => ({ state: "absent", config: null }),
+}));
+
 import {
   amberKindFor,
-  computeWatchLists,
+  currentWatchLists,
   hasQualifyingMeetEvent,
   isGatedProcess,
   meetingLabel,
@@ -87,13 +93,12 @@ describe("amberKindFor", () => {
   });
 });
 
-describe("computeWatchLists", () => {
-  it("absent has no gated list", () => {
-    expect(computeWatchLists("absent")).toEqual({ direct: MEETING_DETECT_PROCESSES, gated: [] });
-  });
-  it("unreadable and complete gate chrome", () => {
-    expect(computeWatchLists("unreadable").gated).toEqual(["chrome.exe"]);
-    expect(computeWatchLists("complete").gated).toEqual(["chrome.exe"]);
+describe("currentWatchLists", () => {
+  it("watches Chrome even when Google is not set up", async () => {
+    await expect(currentWatchLists()).resolves.toEqual({
+      direct: MEETING_DETECT_PROCESSES,
+      gated: ["chrome.exe"],
+    });
   });
 });
 
