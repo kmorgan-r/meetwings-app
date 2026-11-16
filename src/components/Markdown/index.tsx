@@ -14,7 +14,12 @@ interface MarkdownRendererProps {
   children: string;
 }
 
-export function Markdown({ children }: MarkdownRendererProps) {
+// memo: every render is a full remark/rehype parse, and lists render one per
+// message (conversation mode re-rendered all 715 of a long meeting on each new
+// line, ~430 ms). Same string in, same output, so an unchanged message skips it.
+export const Markdown = React.memo(function Markdown({
+  children,
+}: MarkdownRendererProps) {
   const fixedMarkdown = children
     .replace(/\\\[(.*?)\\\]/gs, "$$$1$$") // display math
     .replace(/\\\((.*?)\\\)/gs, "$$$1$"); // inline math
@@ -28,7 +33,7 @@ export function Markdown({ children }: MarkdownRendererProps) {
       {fixedMarkdown}
     </ReactMarkdown>
   );
-}
+});
 
 interface HighlightedPre extends React.HTMLAttributes<HTMLPreElement> {
   children: string;
