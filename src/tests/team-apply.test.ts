@@ -64,15 +64,27 @@ function writeCounts() {
 const secureSetKeys = () => h.fake.secureModule.secureSet.mock.calls.map((c) => c[0]);
 const disconnects = () => h.fake.invoke.mock.calls.filter((c) => c[0] === "google_disconnect").length;
 
+// Prior raws in a non-canonical form (indented, reordered): an undo that went
+// through a save function would re-normalize them and break byte identity.
+const PRIOR_NOTION_RAW = JSON.stringify(
+  { yourName: "Ana", teamTimes: {}, knowledgeDbUrl: "", meetingsDbUrl: OLD_MEETINGS_URL },
+  null,
+  1
+);
+const PRIOR_GOOGLE_RAW = JSON.stringify({ clientSecret: "old-s", clientId: "old-client" }, null, 1);
+
 /** A non-empty prior install, so a rollback test proves restoration. */
 function seedPriorState() {
   h.fake.keychain.token = "ntn_old";
-  h.fake.secure.set(AI_CONFIGS_KEY, JSON.stringify({ openai: { api_key: "sk-old" }, groq: { api_key: "g" } }));
-  h.fake.secure.set(SECURE_NOTION_CONFIG_KEY, notionBlob({ yourName: "Ana" }));
-  h.fake.secure.set(SECURE_GOOGLE_CONFIG_KEY, JSON.stringify({ clientId: "old-client", clientSecret: "old-s" }));
+  h.fake.secure.set(
+    AI_CONFIGS_KEY,
+    JSON.stringify({ openai: { api_key: "sk-old" }, groq: { api_key: "g" } }, null, 1)
+  );
+  h.fake.secure.set(SECURE_NOTION_CONFIG_KEY, PRIOR_NOTION_RAW);
+  h.fake.secure.set(SECURE_GOOGLE_CONFIG_KEY, PRIOR_GOOGLE_RAW);
   h.fake.local.set(
     STORAGE_KEYS.SELECTED_AI_PROVIDER,
-    JSON.stringify({ provider: "groq", variables: { api_key: "g" } })
+    JSON.stringify({ variables: { api_key: "g" }, provider: "groq" }, null, 1)
   );
 }
 
@@ -153,6 +165,23 @@ describe("applyTeamFile", () => {
     const afterFirst = writeCounts();
 
     const second = await applyTeamFile(teamFile(), { firstJoin: false });
+
+    expect(second).toEqual({ ok: true, value: { changed: false, googleClientChanged: false } });
+    expect(writeCounts()).toEqual(afterFirst);
+  });
+
+  it("padded team values are stored trimmed and a re-apply writes nothing", async () => {
+    const file = teamFile();
+    file.notion.token = "  ntn_team \n";
+    file.notion.meetingsDbUrl = ` ${MEETINGS_URL} `;
+    file.google = { clientId: " team-client.apps.googleusercontent.com ", clientSecret: " g-secret " };
+
+    await applyTeamFile(file, { firstJoin: false });
+    expect(h.fake.keychain.token).toBe("ntn_team");
+    expect(secureJson(SECURE_NOTION_CONFIG_KEY)).toMatchObject({ meetingsDbUrl: MEETINGS_URL });
+    const afterFirst = writeCounts();
+
+    const second = await applyTeamFile(file, { firstJoin: false });
 
     expect(second).toEqual({ ok: true, value: { changed: false, googleClientChanged: false } });
     expect(writeCounts()).toEqual(afterFirst);
@@ -332,10 +361,10 @@ describe("applyTeamFile", () => {
     expect(h.fake.keychain.token).toBe("ntn_team");
     expect(secureJson(AI_CONFIGS_KEY)).toMatchObject({ openai: { api_key: "sk-team" } });
     expect(secureJson(STT_CONFIGS_KEY)).toEqual({ "groq-whisper": { api_key: "stt-team" } });
-    expect(secureJson(SECURE_GOOGLE_CONFIG_KEY)).toEqual({ clientId: "old-client", clientSecret: "old-s" });
+    expect(h.fake.secure.get(SECURE_GOOGLE_CONFIG_KEY)).toBe(PRIOR_GOOGLE_RAW);
     expect(localJson(STORAGE_KEYS.SELECTED_AI_PROVIDER)).toEqual({ provider: "groq", variables: { api_key: "g" } });
     expect(h.fake.local.has(STORAGE_KEYS.SELECTED_STT_PROVIDER)).toBe(false);
-    expect(h.fake.secure.get(SECURE_NOTION_CONFIG_KEY)).toBe(notionBlob({ yourName: "Ana" }));
+    expect(h.fake.secure.get(SECURE_NOTION_CONFIG_KEY)).toBe(PRIOR_NOTION_RAW);
     expect(vi.mocked(localStorage.setItem)).not.toHaveBeenCalled();
     expect(disconnects()).toBe(0);
   });
@@ -425,9 +454,10 @@ describe("applyTeamFile", () => {
     expect(changed).toEqual({ ok: true, value: { changed: true, googleClientChanged: true } });
     expect(disconnects()).toBe(1);
 
-    // Same client id, rotated secret: the Google step runs, the sign-in stays.
+    // Same client id (padded in the file), rotated secret: the Google step
+    // runs, the sign-in stays.
     const file = teamFile();
-    file.google.clientSecret = "rotated";
+    file.google = { clientId: " team-client.apps.googleusercontent.com ", clientSecret: "rotated" };
     const same = await applyTeamFile(file, { firstJoin: false });
 
     expect(same).toEqual({ ok: true, value: { changed: true, googleClientChanged: false } });
