@@ -82,10 +82,21 @@ describe("TeamJoinPrompt", () => {
   it("toasts again when the same error arrives with a new errorSeq, and not on a re-render with the same errorSeq", () => {
     h.state = base({ error: "TEAM_LINK_INVALID", errorSeq: 1 });
     const { rerender } = render(<TeamJoinPrompt />);
+    // A fresh object with the same errorSeq, as a repeat broadcast arrives.
+    h.state = { ...(h.state as TeamUiState) };
     rerender(<TeamJoinPrompt />);
     expect(h.toastError).toHaveBeenCalledTimes(1);
     h.state = base({ error: "TEAM_LINK_INVALID", errorSeq: 2 });
     act(() => rerender(<TeamJoinPrompt />));
     expect(h.toastError).toHaveBeenCalledTimes(2);
+  });
+
+  it("locks both buttons and ignores Escape while joining", async () => {
+    h.state = base({ pending: pending(), busy: true });
+    render(<TeamJoinPrompt />);
+    expect(screen.getByRole("button", { name: "Use team settings" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Not now" })).toBeDisabled();
+    await userEvent.keyboard("{Escape}");
+    expect(h.send).not.toHaveBeenCalled();
   });
 });

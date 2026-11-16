@@ -10,6 +10,11 @@ const h = vi.hoisted(() => ({
   exportTeamSettings: vi.fn(),
   writeText: vi.fn(),
   toastError: vi.fn(),
+  holdLeft: 0,
+  release: null as null | (() => void),
+  hold: null as null | Promise<void>,
+  getFails: false,
+  sets: [] as string[],
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -20,8 +25,18 @@ vi.mock("@tauri-apps/api/event", () => ({
   emit: h.emit,
 }));
 vi.mock("@/lib/secure-storage", () => ({
-  secureGet: async (k: string) => h.store.get(k) ?? null,
-  secureSet: async (k: string, v: string) => void h.store.set(k, v),
+  secureGet: async (k: string) => {
+    if (h.holdLeft > 0) {
+      h.holdLeft -= 1;
+      await h.hold;
+    }
+    if (h.getFails) throw new Error("read failed");
+    return h.store.get(k) ?? null;
+  },
+  secureSet: async (k: string, v: string) => {
+    h.sets.push(k);
+    h.store.set(k, v);
+  },
 }));
 vi.mock("@/lib/team/team-file", async (orig) => ({
   ...(await orig<object>()),
@@ -70,6 +85,10 @@ beforeEach(() => {
   h.handler = null;
   h.emit.mockReset().mockResolvedValue(undefined);
   h.store.clear();
+  h.holdLeft = 0;
+  h.hold = null;
+  h.getFails = false;
+  h.sets = [];
   h.exportTeamSettings.mockReset();
   h.writeText.mockReset().mockResolvedValue(undefined);
   h.toastError.mockReset();
@@ -159,7 +178,9 @@ describe("TeamSettingsCard", () => {
     await mount();
     await userEvent.type(screen.getByLabelText("Gist link"), "nope");
     await userEvent.click(screen.getByRole("button", { name: "Save gist" }));
-    expect(screen.getByText(TEAM_COPY.TEAM_LINK_INVALID)).toBeInTheDocument();
+    expect(
+      screen.getByText("That isn't a gist link. Copy the link from the gist's page and try again.")
+    ).toBeInTheDocument();
     expect(h.store.has(TEAM_OWNER_GIST_SECURE_KEY)).toBe(false);
   });
 
@@ -170,6 +191,25 @@ describe("TeamSettingsCard", () => {
     const key = h.store.get(TEAM_OWNER_KEY_SECURE_KEY)!;
     expect(screen.queryByRole("button", { name: "Create team key" })).toBeNull();
     expect(document.body.textContent).not.toContain(key);
+  });
+
+  it("Create team key never overwrites a key the mount read has not surfaced yet", async () => {
+    h.store.set(TEAM_OWNER_KEY_SECURE_KEY, generateTeamKey());
+    h.holdLeft = 2; // the mount's two reads stay pending, so hasKey is still false
+    h.hold = new Promise<void>((r) => (h.release = r));
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Create team key" }));
+    await act(async () => {});
+    expect(h.sets).not.toContain(TEAM_OWNER_KEY_SECURE_KEY);
+    await act(async () => h.release?.());
+  });
+
+  it("Create team key writes nothing when the key read fails", async () => {
+    h.getFails = true;
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Create team key" }));
+    expect(await screen.findByText("Couldn't read the team key. Try again.")).toBeInTheDocument();
+    expect(h.sets).not.toContain(TEAM_OWNER_KEY_SECURE_KEY);
   });
 
   it("Check team link renders the controller's result", async () => {

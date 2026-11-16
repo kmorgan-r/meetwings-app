@@ -28,7 +28,7 @@ export const TeamJoinPrompt = () => {
   const pending = state?.pending ?? null;
 
   return (
-    <Dialog open={!!pending} onOpenChange={(open) => !open && send({ type: "decline" })}>
+    <Dialog open={!!pending} onOpenChange={(open) => !open && !state?.busy && send({ type: "decline" })}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Use your team's settings?</DialogTitle>
@@ -49,10 +49,10 @@ export const TeamJoinPrompt = () => {
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => send({ type: "decline" })}>
+          <Button variant="outline" disabled={state?.busy} onClick={() => send({ type: "decline" })}>
             Not now
           </Button>
-          <Button onClick={() => send({ type: "confirm" })}>Use team settings</Button>
+          <Button disabled={state?.busy} onClick={() => send({ type: "confirm" })}>Use team settings</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

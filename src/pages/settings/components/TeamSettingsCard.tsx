@@ -11,6 +11,8 @@ import {
   TEAM_OWNER_KEY_SECURE_KEY,
 } from "@/lib/team/team-sync";
 
+const GIST_INVALID =
+  "That isn't a gist link. Copy the link from the gist's page and try again.";
 const COPY_FAILED = "Couldn't copy. Try again.";
 
 /**
@@ -53,6 +55,15 @@ export const TeamSettingsCard = () => {
 
   const createKey = async () => {
     try {
+      // Overwriting the owner key silently breaks every colleague's link.
+      if (await secureGet(TEAM_OWNER_KEY_SECURE_KEY)) {
+        setHasKey(true);
+        return;
+      }
+    } catch {
+      return say(false, "Couldn't read the team key. Try again.");
+    }
+    try {
       await secureSet(TEAM_OWNER_KEY_SECURE_KEY, generateTeamKey());
       setHasKey(true);
     } catch {
@@ -62,7 +73,7 @@ export const TeamSettingsCard = () => {
 
   const saveGist = async () => {
     const id = parseGistRef(gistInput);
-    if (!id) return say(false, TEAM_COPY.TEAM_LINK_INVALID);
+    if (!id) return say(false, GIST_INVALID);
     try {
       await secureSet(TEAM_OWNER_GIST_SECURE_KEY, id);
       setHasGist(true);
