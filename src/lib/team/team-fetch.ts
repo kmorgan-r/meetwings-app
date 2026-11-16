@@ -9,9 +9,9 @@ import type { TeamErrorCode, TeamResult } from "@/lib/team/team-file";
  * Load-bearing details:
  * - tauriFetch, per CLAUDE.md - the webview fetch would not have the plugin's
  *   CORS bypass, and the plugin is what the rest of the repo already uses.
- * - Gist ids are pinned to /^[0-9a-f]{20,32}$/ BEFORE anything else, so the
- *   id is never echoed into a request or an error path - and nothing here is
- *   ever logged.
+ * - Gist ids are pinned to /^[0-9a-f]{20,32}$/ BEFORE anything else, so a
+ *   malformed id is never sent (the validated id is in the URL by design) -
+ *   and nothing here is ever logged.
  * - maxRedirections: 0 kills a redirect-based exfiltration of the id/url.
  * - connectTimeout does NOT cover a response that stalls after connecting,
  *   and syncTeam calls are serialized downstream, so one hang would block
@@ -38,7 +38,7 @@ const fail = (code: TeamErrorCode): { ok: false; code: TeamErrorCode } => ({ ok:
  */
 function pickBlob(parsed: unknown): TeamResult<string> {
   const files = (parsed as { files?: unknown } | null)?.files;
-  if (typeof files !== "object" || files === null) return fail("TEAM_FETCH_FAILED");
+  if (typeof files !== "object" || files === null || Array.isArray(files)) return fail("TEAM_FETCH_FAILED");
 
   const matches: string[] = [];
   for (const entry of Object.values(files as Record<string, unknown>)) {

@@ -70,6 +70,16 @@ describe("fetchTeamBlob", () => {
     );
   });
 
+  it("accepts a valid 20-character hex gist id and sends it to the gist API", async () => {
+    const gistId = "c".repeat(20);
+    vi.mocked(tauriFetch).mockResolvedValue(gistJson({ files: { "team.txt": { content: "mwt1.x.y" } } }));
+
+    const result = await fetchTeamBlob(gistId);
+
+    expect(result).toEqual({ ok: true, value: "mwt1.x.y" });
+    expect(tauriFetch).toHaveBeenCalledWith(GIST_API_BASE + gistId, expect.anything());
+  });
+
   it.each([404, 500, 301])("status %i -> TEAM_FETCH_FAILED", async (status) => {
     vi.mocked(tauriFetch).mockResolvedValue(gistResponse({ status }));
 
@@ -86,13 +96,39 @@ describe("fetchTeamBlob", () => {
     expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
   });
 
-  it("a response that never finishes -> TEAM_FETCH_FAILED after TEAM_FETCH_TIMEOUT_MS and the signal is aborted", async () => {
+  it("the headers never arrive -> TEAM_FETCH_FAILED exactly at TEAM_FETCH_TIMEOUT_MS and the signal is aborted", async () => {
     vi.useFakeTimers();
     vi.mocked(tauriFetch).mockImplementation(() => new Promise<Response>(() => {}));
 
     const pending = fetchTeamBlob(ID);
-    await vi.advanceTimersByTimeAsync(TEAM_FETCH_TIMEOUT_MS);
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(TEAM_FETCH_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
     const result = await pending;
+
+    expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
+    const options = vi.mocked(tauriFetch).mock.calls[0][1] as RequestInit;
+    expect(options.signal?.aborted).toBe(true);
+  });
+
+  it("headers arrive but the body never does -> TEAM_FETCH_FAILED after TEAM_FETCH_TIMEOUT_MS and the signal is aborted", async () => {
+    vi.useFakeTimers();
+    vi.mocked(tauriFetch).mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: () => new Promise<string>(() => {}),
+    } as unknown as Response);
+
+    const pending = fetchTeamBlob(ID);
+    await vi.advanceTimersByTimeAsync(TEAM_FETCH_TIMEOUT_MS);
+    // Bound the wait so a regression (stalled body raced by nothing) fails
+    // instead of hanging: the sentinel losing is the assertion.
+    const result = await Promise.race([pending, Promise.resolve({ ok: true, value: "sentinel-won" })]);
 
     expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
     const options = vi.mocked(tauriFetch).mock.calls[0][1] as RequestInit;
@@ -107,7 +143,7 @@ describe("fetchTeamBlob", () => {
     expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
   });
 
-  it.each([{}, { files: null }, { files: "x" }])("200 with malformed files %j -> TEAM_FETCH_FAILED, no throw", async (body) => {
+  it.each([{}, { files: null }, { files: "x" }, { files: [] }])("200 with malformed files %j -> TEAM_FETCH_FAILED, no throw", async (body) => {
     vi.mocked(tauriFetch).mockResolvedValue(gistJson(body));
 
     const result = await fetchTeamBlob(ID);
