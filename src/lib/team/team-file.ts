@@ -1,7 +1,6 @@
 import curl2Json from "@bany/curl-to-json";
 import { STORAGE_KEYS } from "@/config";
 import { AI_PROVIDERS } from "@/config/ai-providers.constants";
-import { SPEECH_TO_TEXT_PROVIDERS } from "@/config/stt.constants";
 import { loadNotionToken } from "@/lib/notion/token";
 import { parseSavedAiSelection } from "@/lib/storage/ai-providers";
 import { loadGoogleConfigState } from "@/lib/storage/google-config.storage";
@@ -13,7 +12,8 @@ import {
 } from "@/lib/storage/notion-config.storage";
 import type { TYPE_PROVIDER } from "@/types";
 
-export const TEAM_FILE_VERSION = 1;
+/** 2: speech settings left the file; each colleague brings their own speech key. */
+export const TEAM_FILE_VERSION = 2;
 
 export interface TeamProviderSettings {
   provider: string;
@@ -21,10 +21,9 @@ export interface TeamProviderSettings {
   custom?: TYPE_PROVIDER;
 }
 
-export interface TeamFileV1 {
-  version: 1;
+export interface TeamFile {
+  version: 2;
   ai: TeamProviderSettings;
-  stt: TeamProviderSettings;
   notion: {
     token: string;
     meetingsDbUrl: string;
@@ -56,7 +55,7 @@ export const TEAM_COPY: Record<TeamErrorCode, string> = {
   TEAM_FILE_TOO_NEW:
     "These team settings need a newer Meetwings. Update the app and try again.",
   TEAM_FIELD_MISSING:
-    "The team settings are missing a required key or link (AI, speech, Notion or Google).",
+    "The team settings are missing a required key or link (AI, Notion or Google).",
   TEAM_WRITE_FAILED:
     "Couldn't save the team settings on this computer. Please try again.",
   TEAM_KEY_INLINE:
@@ -138,7 +137,7 @@ function providerSettings(v: unknown): TeamProviderSettings {
   return out;
 }
 
-export function parseTeamFile(json: string): TeamResult<TeamFileV1> {
+export function parseTeamFile(json: string): TeamResult<TeamFile> {
   let raw: unknown;
   try {
     raw = JSON.parse(json);
@@ -150,11 +149,11 @@ export function parseTeamFile(json: string): TeamResult<TeamFileV1> {
   if (raw.version > TEAM_FILE_VERSION) return fail("TEAM_FILE_TOO_NEW");
   if (raw.version !== TEAM_FILE_VERSION) return fail("TEAM_FILE_INVALID");
 
-  let file: TeamFileV1;
+  let file: TeamFile;
   try {
     const n = obj(raw.notion);
     const g = obj(raw.google);
-    const notion: TeamFileV1["notion"] = { token: str(n.token), meetingsDbUrl: str(n.meetingsDbUrl) };
+    const notion: TeamFile["notion"] = { token: str(n.token), meetingsDbUrl: str(n.meetingsDbUrl) };
     if (n.knowledgeDbUrl !== undefined) notion.knowledgeDbUrl = str(n.knowledgeDbUrl);
     if (n.teamTimes !== undefined) {
       const times: Partial<Record<Weekday, string>> = {};
@@ -164,10 +163,10 @@ export function parseTeamFile(json: string): TeamResult<TeamFileV1> {
       }
       notion.teamTimes = times;
     }
+    // Any `stt` section is dropped unread: speech keys are never shared.
     file = {
-      version: 1,
+      version: 2,
       ai: providerSettings(raw.ai),
-      stt: providerSettings(raw.stt),
       notion,
       google: { clientId: str(g.clientId), clientSecret: str(g.clientSecret) },
     };
@@ -202,12 +201,10 @@ function providerKnown(s: TeamProviderSettings, builtIn: TYPE_PROVIDER[]): boole
   }
 }
 
-export function validateTeamFile(file: TeamFileV1): TeamErrorCode | null {
+export function validateTeamFile(file: TeamFile): TeamErrorCode | null {
   const required = [
     file.ai.provider,
     file.ai.variables.api_key,
-    file.stt.provider,
-    file.stt.variables.api_key,
     file.notion.token,
     file.notion.meetingsDbUrl,
     file.google.clientId,
@@ -215,9 +212,7 @@ export function validateTeamFile(file: TeamFileV1): TeamErrorCode | null {
   ];
   if (required.some((v) => typeof v !== "string" || v.trim() === "")) return "TEAM_FIELD_MISSING";
   if (parseNotionDatabaseId(file.notion.meetingsDbUrl) === null) return "TEAM_FILE_INVALID";
-  if (!providerKnown(file.ai, AI_PROVIDERS) || !providerKnown(file.stt, SPEECH_TO_TEXT_PROVIDERS)) {
-    return "TEAM_FILE_INVALID";
-  }
+  if (!providerKnown(file.ai, AI_PROVIDERS)) return "TEAM_FILE_INVALID";
   return null;
 }
 
@@ -255,26 +250,20 @@ async function orEmpty<T, E>(read: () => Promise<T>, empty: E): Promise<NonNulla
   }
 }
 
-export async function exportTeamSettings(): Promise<TeamResult<TeamFileV1>> {
+export async function exportTeamSettings(): Promise<TeamResult<TeamFile>> {
   try {
     const ai = exportProvider(STORAGE_KEYS.SELECTED_AI_PROVIDER, STORAGE_KEYS.CUSTOM_AI_PROVIDERS, AI_PROVIDERS);
-    const stt = exportProvider(
-      STORAGE_KEYS.SELECTED_STT_PROVIDER,
-      STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS,
-      SPEECH_TO_TEXT_PROVIDERS
-    );
     const token = await orEmpty(loadNotionToken, "");
     const cfg = await orEmpty(loadNotionConfig, null);
     const google = await orEmpty(loadGoogleConfigState, null);
 
-    const notion: TeamFileV1["notion"] = { token, meetingsDbUrl: cfg?.meetingsDbUrl ?? "" };
+    const notion: TeamFile["notion"] = { token, meetingsDbUrl: cfg?.meetingsDbUrl ?? "" };
     if (cfg?.knowledgeDbUrl?.trim()) notion.knowledgeDbUrl = cfg.knowledgeDbUrl;
     if (cfg?.teamTimes) notion.teamTimes = cfg.teamTimes;
 
-    const file: TeamFileV1 = {
-      version: 1,
+    const file: TeamFile = {
+      version: 2,
       ai,
-      stt,
       notion,
       google:
         google?.state === "complete"
@@ -282,10 +271,9 @@ export async function exportTeamSettings(): Promise<TeamResult<TeamFileV1>> {
           : { clientId: "", clientSecret: "" },
     };
 
-    for (const s of [ai, stt]) {
-      if (!s.custom) continue;
-      const key = s.variables.api_key;
-      if (!s.custom.curl.includes("{{API_KEY}}") || (key && s.custom.curl.includes(key))) {
+    if (ai.custom) {
+      const key = ai.variables.api_key;
+      if (!ai.custom.curl.includes("{{API_KEY}}") || (key && ai.custom.curl.includes(key))) {
         return fail("TEAM_KEY_INLINE");
       }
     }

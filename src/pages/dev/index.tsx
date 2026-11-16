@@ -14,7 +14,7 @@ import { PageLayout } from "@/layouts";
 
 const DevSpace = () => {
   const settings = useSettings();
-  const { isComplete } = useSetupStatus();
+  const { isComplete, sttConfigured } = useSetupStatus();
   const [teamState] = useTeamState();
 
   return (
@@ -45,6 +45,15 @@ const DevSpace = () => {
 
         {/* AI Provider Selection */}
         <AIProviders {...settings} />
+
+        {/* Speech keys are never shared by a team: point the colleague at their own */}
+        {teamState?.joined && !sttConfigured && (
+          <p className="text-sm rounded-md border border-primary/30 bg-primary/5 p-3">
+            Your team set up AI, Notion and Google. Speech uses your own key. We suggest
+            AssemblyAI, which is free to start and needs no card: press{" "}
+            <strong>Get API Key from AssemblyAI</strong> below, sign up, then paste your key.
+          </p>
+        )}
 
         {/* STT Providers */}
         <STTProviders {...settings} />

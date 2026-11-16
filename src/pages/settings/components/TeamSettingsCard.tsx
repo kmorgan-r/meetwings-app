@@ -114,7 +114,7 @@ export const TeamSettingsCard = () => {
     <div id="team" className="space-y-3">
       <Header
         title="Team settings"
-        description="Use the AI, speech, Notion and Google settings your team shares"
+        description="Use the AI, Notion and Google settings your team shares"
         isMainTitle
       />
 

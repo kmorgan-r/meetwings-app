@@ -136,7 +136,7 @@ export const STT_PROVIDER_INFO: Record<string, ProviderInfo> = {
   },
   "assemblyai-diarization": {
     name: "AssemblyAI",
-    signupUrl: "https://www.assemblyai.com/app/signup",
+    signupUrl: "https://www.assemblyai.com/dashboard/signup",
     pricingUrl: "https://www.assemblyai.com/pricing",
     description: "Get your API key from AssemblyAI",
   },

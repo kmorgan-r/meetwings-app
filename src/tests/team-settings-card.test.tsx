@@ -104,6 +104,11 @@ describe("TeamSettingsCard", () => {
     expect(h.emit).toHaveBeenCalledWith(TEAM_ACTION_EVENT, { type: "state-request" });
   });
 
+  it("describes the shared settings without speech", async () => {
+    await mount();
+    expect(screen.getByText("Use the AI, Notion and Google settings your team shares")).toBeInTheDocument();
+  });
+
   it("an invalid pasted link shows fixed copy and sends nothing", async () => {
     await mount();
     h.emit.mockClear();

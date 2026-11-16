@@ -14,17 +14,19 @@ import {
   SECURE_NOTION_CONFIG_KEY,
   type NotionConfig,
 } from "@/lib/storage/notion-config.storage";
-import {
-  AI_CONFIGS_KEY,
-  resetSecureProviderConfigsCache,
-  STT_CONFIGS_KEY,
-} from "@/lib/storage/secure-provider-configs";
+import { AI_CONFIGS_KEY, resetSecureProviderConfigsCache } from "@/lib/storage/secure-provider-configs";
 import type { TYPE_PROVIDER } from "@/types";
-import type { TeamErrorCode, TeamFileV1, TeamProviderSettings } from "./team-file";
+import type { TeamErrorCode, TeamFile, TeamProviderSettings } from "./team-file";
 import { buildTeamLink, type TeamLink } from "./team-link";
 
 /** Written last on a first join, so a stored link means every setting landed. */
 export const TEAM_LINK_SECURE_KEY = "team_link";
+
+/**
+ * Speech keys are never shared (free tiers rate-limit per key), so a first join
+ * only suggests AssemblyAI to a colleague with no speech provider, key left blank.
+ */
+const SUGGESTED_STT = { provider: "assemblyai-diarization", variables: {} };
 
 export interface ApplyOutcome {
   changed: boolean;
@@ -124,22 +126,20 @@ const failed = (landed: boolean, googleClientChanged: boolean): ApplyResult => (
  * whatever landed.
  */
 export async function applyTeamFile(
-  file: TeamFileV1,
+  file: TeamFile,
   opts: { firstJoin: false } | { firstJoin: true; link: TeamLink }
 ): Promise<ApplyResult> {
   // 1. Snapshot before any write.
   let token: string | null;
   let aiRaw: string | null;
-  let sttRaw: string | null;
   let googleRaw: string | null;
   let notionRaw: string | null;
   let linkRaw: string | null;
   let oldGoogle: Awaited<ReturnType<typeof loadGoogleConfigState>>;
-  let local: Record<"customAi" | "customStt" | "selectedAi" | "selectedStt", string | null>;
+  let local: Record<"customAi" | "selectedAi" | "selectedStt", string | null>;
   try {
     token = await loadNotionToken();
     aiRaw = await secureGet(AI_CONFIGS_KEY);
-    sttRaw = await secureGet(STT_CONFIGS_KEY);
     googleRaw = await secureGet(SECURE_GOOGLE_CONFIG_KEY);
     notionRaw = await secureGet(SECURE_NOTION_CONFIG_KEY);
     linkRaw = await secureGet(TEAM_LINK_SECURE_KEY);
@@ -148,7 +148,6 @@ export async function applyTeamFile(
     // "absent" and a rollback would then delete the key.
     local = {
       customAi: localStorage.getItem(STORAGE_KEYS.CUSTOM_AI_PROVIDERS),
-      customStt: localStorage.getItem(STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS),
       selectedAi: localStorage.getItem(STORAGE_KEYS.SELECTED_AI_PROVIDER),
       selectedStt: localStorage.getItem(STORAGE_KEYS.SELECTED_STT_PROVIDER),
     };
@@ -160,7 +159,8 @@ export async function applyTeamFile(
 
   // 2. Targets.
   const ai = providerTargets(file.ai, aiRaw, local.selectedAi);
-  const stt = providerTargets(file.stt, sttRaw, local.selectedStt);
+  const sttSel = parse(local.selectedStt);
+  const suggestStt = opts.firstJoin && !(isObj(sttSel) && sttSel.provider);
   const notionTarget: NotionConfig = {
     meetingsDbUrl: file.notion.meetingsDbUrl,
     knowledgeDbUrl: file.notion.knowledgeDbUrl ?? notion.knowledgeDbUrl,
@@ -189,14 +189,10 @@ export async function applyTeamFile(
       atomic: true,
     });
   }
-  for (const [key, raw, target] of [
-    [AI_CONFIGS_KEY, aiRaw, ai.blob],
-    [STT_CONFIGS_KEY, sttRaw, stt.blob],
-  ] as const) {
-    if (sameJson(raw, target)) continue;
+  if (!sameJson(aiRaw, ai.blob)) {
     steps.push({
-      run: thenResetCache(() => secureSet(key, JSON.stringify(target))),
-      undo: thenResetCache(restoreSecure(key, raw)),
+      run: thenResetCache(() => secureSet(AI_CONFIGS_KEY, JSON.stringify(ai.blob))),
+      undo: thenResetCache(restoreSecure(AI_CONFIGS_KEY, aiRaw)),
     });
   }
   let googleStep: Step | undefined;
@@ -208,15 +204,8 @@ export async function applyTeamFile(
   if (file.ai.custom) {
     localTargets.push([STORAGE_KEYS.CUSTOM_AI_PROVIDERS, local.customAi, upsertCustom(local.customAi, file.ai.custom)]);
   }
-  if (file.stt.custom) {
-    localTargets.push([
-      STORAGE_KEYS.CUSTOM_SPEECH_PROVIDERS,
-      local.customStt,
-      upsertCustom(local.customStt, file.stt.custom),
-    ]);
-  }
   localTargets.push([STORAGE_KEYS.SELECTED_AI_PROVIDER, local.selectedAi, ai.selected]);
-  localTargets.push([STORAGE_KEYS.SELECTED_STT_PROVIDER, local.selectedStt, stt.selected]);
+  if (suggestStt) localTargets.push([STORAGE_KEYS.SELECTED_STT_PROVIDER, local.selectedStt, SUGGESTED_STT]);
   for (const [key, raw, target] of localTargets) {
     if (sameJson(raw, target)) continue;
     steps.push({ run: () => writeLocal(key, JSON.stringify(target)), undo: () => writeLocal(key, raw) });

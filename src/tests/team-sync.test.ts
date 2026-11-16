@@ -40,7 +40,7 @@ import { NOTION_CONFIG_CHANGED_EVENT } from "@/lib/storage/notion-config.storage
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import { applyTeamFile, TEAM_LINK_SECURE_KEY } from "@/lib/team/team-apply";
 import { encryptTeamPayload, generateTeamKey } from "@/lib/team/team-crypto";
-import { exportTeamSettings, type TeamFileV1 } from "@/lib/team/team-file";
+import { exportTeamSettings, type TeamFile } from "@/lib/team/team-file";
 import { buildTeamLink, type TeamLink } from "@/lib/team/team-link";
 import {
   __resetTeamSyncForTests,
@@ -59,11 +59,10 @@ const MEETINGS_URL = "https://www.notion.so/acme/Meetings-0123456789abcdef012345
 const KEY = generateTeamKey();
 const LINK: TeamLink = { gistId: "0123456789abcdef0123", key: KEY };
 
-function teamFile(): TeamFileV1 {
+function teamFile(): TeamFile {
   return {
-    version: 1,
+    version: 2,
     ai: { provider: "openai", variables: { api_key: "sk-team", model: "gpt-team" } },
-    stt: { provider: "groq", variables: { api_key: "stt-team" } },
     notion: { token: "ntn_team", meetingsDbUrl: MEETINGS_URL },
     google: { clientId: "team-client.apps.googleusercontent.com", clientSecret: "g-secret" },
   };
@@ -106,7 +105,7 @@ beforeEach(() => {
 });
 
 describe("syncTeam failures", () => {
-  const withFile = (over: (f: TeamFileV1) => void) => async () => {
+  const withFile = (over: (f: TeamFile) => void) => async () => {
     const f = teamFile();
     over(f);
     await serve(f);
@@ -116,7 +115,7 @@ describe("syncTeam failures", () => {
     ["network error", () => void vi.mocked(tauriFetch).mockRejectedValue(new Error("offline")), "TEAM_FETCH_FAILED"],
     ["wrong key", () => serve(teamFile(), generateTeamKey()), "TEAM_DECRYPT_FAILED"],
     ["not JSON inside", () => serve("not json at all"), "TEAM_FILE_INVALID"],
-    ["version 2", () => serve({ ...teamFile(), version: 2 }), "TEAM_FILE_TOO_NEW"],
+    ["version 3", () => serve({ ...teamFile(), version: 3 }), "TEAM_FILE_TOO_NEW"],
     ["missing required field", withFile((f) => (f.notion.token = "")), "TEAM_FIELD_MISSING"],
   ])("%s leaves storage byte-identical and stores no link", async (_n, setup, code) => {
     seedPrior();

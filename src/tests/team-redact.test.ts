@@ -17,24 +17,22 @@ vi.mock("@tauri-apps/api/event", () => ({ emit: vi.fn(async () => undefined) }))
 
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import { encryptTeamPayload, generateTeamKey } from "@/lib/team/team-crypto";
-import type { TeamFileV1 } from "@/lib/team/team-file";
+import type { TeamFile } from "@/lib/team/team-file";
 import { __resetTeamSyncForTests, syncTeam } from "@/lib/team/team-sync";
 import { resetSecureProviderConfigsCache } from "@/lib/storage/secure-provider-configs";
 import { createTeamStorageFake } from "./team-test-utils";
 
 const AI = "SENTINEL_AI_KEY_7f3";
-const STT = "SENTINEL_STT_KEY_9a1";
 const NOTION = "SENTINEL_NOTION_TOKEN_2c8";
 const GOOGLE = "SENTINEL_GOOGLE_SECRET_5d4";
 const GIST_ID = "abcdef0123456789abcdef";
 const LINK_KEY = "SENTINEL_LINK_KEY_abcdefghijklmnopqrstuvwxy"; // 43 chars
-const SENTINELS = [AI, STT, NOTION, GOOGLE, GIST_ID, LINK_KEY];
+const SENTINELS = [AI, NOTION, GOOGLE, GIST_ID, LINK_KEY];
 const LINK = { gistId: GIST_ID, key: LINK_KEY };
 
-const file = (): TeamFileV1 => ({
-  version: 1,
+const file = (): TeamFile => ({
+  version: 2,
   ai: { provider: "openai", variables: { api_key: AI } },
-  stt: { provider: "groq", variables: { api_key: STT } },
   notion: {
     token: NOTION,
     meetingsDbUrl: "https://www.notion.so/acme/Meetings-0123456789abcdef0123456789abcdef",
