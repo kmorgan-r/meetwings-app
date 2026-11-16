@@ -50,8 +50,8 @@ const DevSpace = () => {
         {teamState?.joined && !sttConfigured && (
           <p className="text-sm rounded-md border border-primary/30 bg-primary/5 p-3">
             Your team set up AI, Notion and Google. Speech uses your own key. We suggest
-            AssemblyAI, which is free to start and needs no card: press{" "}
-            <strong>Get API Key from AssemblyAI</strong> below, sign up, then paste your key.
+            AssemblyAI, which is free to start and needs no card: choose it below, press{" "}
+            <strong>Get API Key from AssemblyAI</strong>, sign up, then paste your key.
           </p>
         )}
 
