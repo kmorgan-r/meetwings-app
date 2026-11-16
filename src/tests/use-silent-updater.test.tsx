@@ -9,12 +9,14 @@ const h = vi.hoisted(() => ({
   listen: vi.fn(),
   stop: vi.fn(),
   start: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: h.listen }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: h.label }),
 }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 vi.mock("@/lib/platform", () => ({ isLinux: () => h.linux }));
 vi.mock("@/lib/updater/silent-updater", () => ({ startSilentUpdater: h.start }));
 
@@ -35,6 +37,7 @@ beforeEach(() => {
   h.unlisteners.length = 0;
   h.stop.mockReset();
   h.start.mockReset().mockReturnValue(h.stop);
+  h.invoke.mockReset().mockResolvedValue("1.6.0");
   h.listen.mockReset().mockImplementation(
     async (event: string, cb: () => void) => {
       h.listeners.set(event, cb);
@@ -62,6 +65,24 @@ describe("useSilentUpdater", () => {
 
     expect(h.listen).not.toHaveBeenCalled();
     expect(h.start).not.toHaveBeenCalled();
+  });
+
+  it("records the app version in main on Linux too, and not in other windows", async () => {
+    h.linux = true;
+    renderHook(() => useSilentUpdater());
+    await flush();
+
+    expect(h.invoke).toHaveBeenCalledWith("get_app_version");
+    // Linux keeps the click-to-install Updater: no listeners, no silent start.
+    expect(h.listen).not.toHaveBeenCalled();
+    expect(h.start).not.toHaveBeenCalled();
+
+    h.label = "dashboard";
+    h.linux = false;
+    renderHook(() => useSilentUpdater());
+    await flush();
+
+    expect(h.invoke).toHaveBeenCalledTimes(1);
   });
 
   it("tracks meeting state from the three events", async () => {

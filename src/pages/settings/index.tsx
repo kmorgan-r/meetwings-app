@@ -3,6 +3,7 @@ import {
   AITitlesToggle,
   AlwaysOnTopToggle,
   AppIconToggle,
+  AppStatusLine,
   AutostartToggle,
   ContentProtectionToggle,
   MeetingAutoRecordToggle,
@@ -37,6 +38,9 @@ const Settings = () => {
 
       {/* Auto-record Meetings Toggle - Windows only */}
       {isWindows() && <MeetingAutoRecordToggle />}
+
+      {/* Version, update-check and team-sync status */}
+      <AppStatusLine />
     </PageLayout>
   );
 };

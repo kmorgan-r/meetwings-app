@@ -1,9 +1,11 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isLinux } from "@/lib/platform";
 import { startSilentUpdater } from "@/lib/updater/silent-updater";
 import { setMeetingActive } from "@/lib/updater/recording-activity.store";
+import { recordAppVersion } from "@/lib/updater/version-note";
 
 /**
  * Runs the silent updater in the `main` window on Windows and macOS, and feeds
@@ -12,6 +14,12 @@ import { setMeetingActive } from "@/lib/updater/recording-activity.store";
 export function useSilentUpdater(): void {
   useEffect(() => {
     if (getCurrentWindow().label !== "main") return;
+    // Record the running version on every OS (Settings shows the "Updated to
+    // X" note); use invoke directly — getAppVersion() returns "Unknown" on
+    // failure, which would be recorded as a version change.
+    invoke<string>("get_app_version")
+      .then((v) => recordAppVersion(v, Date.now()))
+      .catch(() => {});
     if (isLinux()) return;
     let cancelled = false;
     const unlisteners: Array<() => void> = [];

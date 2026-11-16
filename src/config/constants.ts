@@ -93,6 +93,13 @@ export const STORAGE_KEYS = {
 
   // When the silent updater last completed an update check (ms epoch).
   UPDATER_LAST_CHECK_AT: "updater_last_check_at",
+
+  // Version recorded at last launch; a change means an update was installed.
+  APP_LAST_VERSION: "app_last_version",
+  // One-time "Updated to X" note: JSON {version, at} for the Settings readout.
+  APP_UPDATED_TO: "app_updated_to",
+  // When team settings were last fetched from the cloud (ms epoch).
+  TEAM_LAST_SYNCED_AT: "team_last_synced_at",
 } as const;
 
 // Process image names that indicate a meeting call is in progress. Passed to the
