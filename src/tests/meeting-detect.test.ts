@@ -1,66 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/storage/google-config.storage", async (orig) => ({
+  ...(await orig<typeof import("@/lib/storage/google-config.storage")>()),
+  loadGoogleConfigState: async () => ({ state: "absent", config: null }),
+}));
+
 import {
   amberKindFor,
-  computeWatchLists,
-  hasQualifyingMeetEvent,
+  currentWatchLists,
   isGatedProcess,
   meetingLabel,
 } from "@/lib/meeting-detect";
-import { EARLY_JOIN_MS } from "@/lib/calendar/current-meeting";
 import { MEETING_DETECT_PROCESSES } from "@/config/constants";
-import type { CalendarEvent, GoogleErrorCode } from "@/types";
-
-const NOW = Date.UTC(2026, 10, 13, 14, 0, 0);
-const MIN = 60_000;
-
-function event(over: Partial<CalendarEvent> = {}): CalendarEvent {
-  return {
-    id: "e1",
-    subject: "Sync",
-    startMs: NOW + 10 * MIN,
-    endMs: NOW + 40 * MIN,
-    isCancelled: false,
-    isAllDay: false,
-    ownResponse: "accepted",
-    hasMeetLink: true,
-    participants: [
-      { address: "me@corp.test", name: null, type: "required", isOrganizer: true },
-      { address: "a@acme.example", name: null, type: "required", isOrganizer: false },
-    ],
-    ...over,
-  };
-}
-
-describe("hasQualifyingMeetEvent", () => {
-  it("requires a Meet link", () => {
-    const inWindow = NOW + 8 * MIN;
-    expect(hasQualifyingMeetEvent([event()], inWindow)).toBe(true);
-    expect(hasQualifyingMeetEvent([event({ hasMeetLink: false })], inWindow)).toBe(false);
-  });
-  it("accepts now == startMs - EARLY_JOIN_MS", () => {
-    const e = event();
-    expect(hasQualifyingMeetEvent([e], e.startMs - EARLY_JOIN_MS)).toBe(true);
-    expect(hasQualifyingMeetEvent([e], e.startMs - EARLY_JOIN_MS - 1)).toBe(false);
-  });
-  it("rejects now == endMs", () => {
-    const e = event();
-    expect(hasQualifyingMeetEvent([e], e.endMs)).toBe(false);
-    expect(hasQualifyingMeetEvent([e], e.endMs - 1)).toBe(true);
-  });
-  it("accepts a solo event", () => {
-    const e = event({ participants: [event().participants[0]] });
-    expect(hasQualifyingMeetEvent([e], NOW + 8 * MIN)).toBe(true);
-  });
-  it("rejects declined, cancelled and all-day", () => {
-    expect(hasQualifyingMeetEvent([event({ ownResponse: "declined" })], NOW + 8 * MIN)).toBe(false);
-    expect(hasQualifyingMeetEvent([event({ isCancelled: true })], NOW + 8 * MIN)).toBe(false);
-    expect(hasQualifyingMeetEvent([event({ isAllDay: true })], NOW + 8 * MIN)).toBe(false);
-  });
-  it("any qualifying event among several", () => {
-    const events = [event({ hasMeetLink: false }), event({ id: "e2" })];
-    expect(hasQualifyingMeetEvent(events, NOW + 8 * MIN)).toBe(true);
-  });
-});
+import type { GoogleErrorCode } from "@/types";
 
 describe("amberKindFor", () => {
   const reconnect: GoogleErrorCode[] = [
@@ -87,13 +39,12 @@ describe("amberKindFor", () => {
   });
 });
 
-describe("computeWatchLists", () => {
-  it("absent has no gated list", () => {
-    expect(computeWatchLists("absent")).toEqual({ direct: MEETING_DETECT_PROCESSES, gated: [] });
-  });
-  it("unreadable and complete gate chrome", () => {
-    expect(computeWatchLists("unreadable").gated).toEqual(["chrome.exe"]);
-    expect(computeWatchLists("complete").gated).toEqual(["chrome.exe"]);
+describe("currentWatchLists", () => {
+  it("watches Chrome even when Google is not set up", async () => {
+    await expect(currentWatchLists()).resolves.toEqual({
+      direct: MEETING_DETECT_PROCESSES,
+      gated: ["chrome.exe"],
+    });
   });
 });
 

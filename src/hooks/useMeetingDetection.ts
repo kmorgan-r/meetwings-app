@@ -61,7 +61,7 @@ export const useMeetingDetection = () => {
   // check, no test - will catch it. Fix them there first.
   const chainRef = useRef<Promise<unknown>>(Promise.resolve());
 
-  // The Meet calendar check loop. Created and stopped by effect 2. It never
+  // Confirms Chrome call candidates. Created and stopped by effect 2. It never
   // touches the watcher, so it needs no place in the command queue.
   const gateRef = useRef<MeetGate | null>(null);
 
@@ -94,8 +94,7 @@ export const useMeetingDetection = () => {
     return chainRef.current;
   };
 
-  // Always called inside an enqueued op: the lists are read from secure storage
-  // asynchronously, so computing them before enqueueing could go stale.
+  // Always called inside an enqueued op, so it runs in order with stop/update.
   const startWatcher = async () =>
     invoke("start_meeting_watcher", { ...(await currentWatchLists()) });
 

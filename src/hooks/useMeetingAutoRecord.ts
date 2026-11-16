@@ -20,6 +20,7 @@ import {
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
 import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
+import { detectionLog } from "@/lib/detection-log";
 import {
   autoRecordingStarted,
   autoRecordingStopped,
@@ -398,6 +399,7 @@ export const useMeetingAutoRecord = ({
       vadOpen,
       vadEnabled: audio.vadConfig.enabled,
     });
+    detectionLog(`detected ${process} decision=${decision}`);
 
     if (decision === "tell-vad") {
       toastOnce(vadToastedRef, VAD_MESSAGE, "info");
@@ -611,6 +613,7 @@ export const useMeetingAutoRecord = ({
     widen?: boolean;
   }): Promise<void> => {
     if (!mountedRef.current || !enableVADRef.current) return;
+    detectionLog(`stop reason=${o.reason} auto=${o.auto}`);
 
     // Before the write, so the ownership layout effect's release branch never
     // runs and never calls autoRecordingStopped() without `auto`.
@@ -748,10 +751,17 @@ export const useMeetingAutoRecord = ({
     const prev = prevEnableVADRef.current;
     prevEnableVADRef.current = enableVAD;
     if (prev === enableVAD) return;
+    // mode "meeting" on open = auto-started; null = opened by hand. A close
+    // right after a "stop reason=" line is ours; with none, it was by hand.
+    if (isMain) {
+      detectionLog(
+        `mic ${enableVAD ? "open" : "close"} mode=${startedModeRef.current}`
+      );
+    }
     if (enableVAD && startedModeRef.current === "meeting") return;
     if (prev) closeCapRef.current = capAtGraceEnd();
     cancelGrace();
-  }, [enableVAD]);
+  }, [enableVAD, isMain]);
 
   // A close cap nothing took in its commit would cap a later, unrelated row.
   // Passive effects run after every layout effect of the commit, so a trigger
@@ -766,9 +776,9 @@ export const useMeetingAutoRecord = ({
   // The calendar read behind the same-call decision. Bounded: the op that calls
   // it holds the chain, so a hung read must not freeze every later command.
   // Unreadable (not "ok", a throw, or a timeout) is null, which isSameCall
-  // counts as the same call. A Meet call (a gated process) is detected only
-  // against a Google event, so its slots come from Google; every other app's
-  // from Outlook. Reading Outlook for Meet would merge every back-to-back Meet.
+  // counts as the same call. A Meet call's (a gated process) slots come from
+  // Google, every other app's from Outlook. Reading Outlook for Meet would merge
+  // every back-to-back Meet.
   const readCalendarEvents = async (
     process: string | undefined
   ): Promise<CalendarEvent[] | null> => {
@@ -816,6 +826,9 @@ export const useMeetingAutoRecord = ({
           endedAt: g.endedAt,
           now: Date.now(),
         });
+        detectionLog(
+          `in-grace detect ${process} same=${same} events=${events?.length ?? "null"}`
+        );
         cancelGrace();
         if (same) return; // recording continues; no card
         // auto:false: no quiet window for B. widen:false: B's audio is
@@ -845,8 +858,10 @@ export const useMeetingAutoRecord = ({
     // Deleting this line as "redundant with useRef(true)" kills the
     // stop-confirm loop on poll 1 in every dev build - F53 is what catches it.
     mountedRef.current = true;
+    if (isMain) detectionLog("autorecord mount");
     return () => {
       mountedRef.current = false;
+      if (isMain) detectionLog("autorecord unmount");
       // Unmount closes an open mic: capped like a hand close. Passive
       // destroys run in hook order, so useMeetingLog's unmount trigger,
       // mounted after this hook, takes it.
@@ -914,6 +929,9 @@ export const useMeetingAutoRecord = ({
         // unless auto-record was turned off since the event (no automatic
         // call-end stop then, spec G2).
         enqueue(async () => {
+          detectionLog(
+            `ended ${endedProcess} mode=${startedModeRef.current} mic=${enableVADRef.current} enabled=${enabledRef.current}`
+          );
           if (startedModeRef.current === "transcribing") {
             return handleStop({ auto: true });
           }

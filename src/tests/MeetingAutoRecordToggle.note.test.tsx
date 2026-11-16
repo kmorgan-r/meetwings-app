@@ -250,9 +250,7 @@ describe("MeetingAutoRecordToggle", () => {
     const chromeRow = within(screen.getByText("chrome.exe").parentElement!);
     expect(chromeRow.getByText("On the microphone")).toBeInTheDocument();
     expect(chromeRow.queryByText("Idle")).toBeNull();
-    expect(
-      chromeRow.getByText("Watched after a calendar check (Google Meet)")
-    ).toBeInTheDocument();
+    expect(chromeRow.getByText("Watched (Google Meet)")).toBeInTheDocument();
     const spotifyRow = within(screen.getByText("spotify.exe").parentElement!);
     expect(spotifyRow.getByText("Idle")).toBeInTheDocument();
     expect(spotifyRow.queryByText("On the microphone")).toBeNull();

@@ -121,12 +121,10 @@ export const MEETING_DETECT_LABELS: Record<string, string> = {
 
 export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
 
-// Processes that only count as a call when a calendar event with a Meet link is
-// live: Chrome is running for every browsing session, so audio alone proves nothing.
+// Processes on Rust's gated path: a longer end debounce (Meet's join drop is 3
+// polls) and a confirm handshake. The frontend confirms every candidate, so any
+// mic use counts as a call, calendar event or not (owner decision, 2026-11-16).
 export const MEETING_DETECT_GATED_PROCESSES = ["chrome.exe"];
-
-// How often a gated process is re-checked against the calendar.
-export const MEET_RECHECK_MS = 60_000;
 
 // The serialized form of the Rust StopOutcome::TimedOut variant. Kept here so
 // the string that gates the disable-failure ladder has exactly one home; a
