@@ -46,7 +46,10 @@ const blobResponse = async (plaintext: string, key = LINK_KEY) =>
   ({
     status: 200,
     text: async () =>
-      JSON.stringify({ files: { "t.txt": { content: await encryptTeamPayload(plaintext, key) } } }),
+      JSON.stringify({
+        owner: { login: "team-owner" },
+        files: { "t.txt": { content: await encryptTeamPayload(plaintext, key) } },
+      }),
   }) as unknown as Response;
 
 const spies = () =>
