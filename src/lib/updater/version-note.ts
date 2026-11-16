@@ -9,7 +9,8 @@ export interface TYPE_APP_UPDATED_NOTE {
 /**
  * Records the currently running version and detects upgrades. First install
  * writes APP_LAST_VERSION silently; a changed version (an update just
- * installed) also writes a one-time APP_UPDATED_TO note for Settings to show.
+ * installed) also writes the APP_UPDATED_TO note Settings shows. Written once
+ * per update; it stays readable until the next update replaces it.
  */
 export function recordAppVersion(current: string, now: number): void {
   const last = safeLocalStorage.getItem(STORAGE_KEYS.APP_LAST_VERSION);
@@ -23,8 +24,8 @@ export function recordAppVersion(current: string, now: number): void {
 }
 
 /**
- * The one-time "Updated to X" note, but only when X is the version actually
- * running now — a note left over from an older update is never shown.
+ * The "Updated to X" note, shown for as long as X is the version running —
+ * a note left over from an older update is never shown.
  */
 export function readUpdatedNote(current: string): TYPE_APP_UPDATED_NOTE | null {
   const raw = safeLocalStorage.getItem(STORAGE_KEYS.APP_UPDATED_TO);

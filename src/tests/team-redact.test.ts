@@ -106,8 +106,10 @@ describe("team sync redaction", () => {
       async () => {
         vi.mocked(tauriFetch).mockResolvedValue(await blobResponse(JSON.stringify(file())));
         const orig = h.fake.invoke.getMockImplementation()!;
-        h.fake.invoke.mockImplementation(async (cmd: string, args?: any) => {
-          if (cmd === "notion_token_set") throw new Error(`keychain rejected ${args.token}`);
+        h.fake.invoke.mockImplementation(async (cmd: string, args?: unknown) => {
+          if (cmd === "notion_token_set") {
+            throw new Error(`keychain rejected ${(args as { token?: string } | undefined)?.token}`);
+          }
           return orig(cmd, args);
         });
       },

@@ -99,7 +99,7 @@ export const STORAGE_KEYS = {
 
   // Version recorded at last launch; a change means an update was installed.
   APP_LAST_VERSION: "app_last_version",
-  // One-time "Updated to X" note: JSON {version, at} for the Settings readout.
+  // "Updated to X" note, shown while X runs: JSON {version, at} for the Settings readout.
   APP_UPDATED_TO: "app_updated_to",
   // When team settings were last fetched from the cloud (ms epoch).
   TEAM_LAST_SYNCED_AT: "team_last_synced_at",

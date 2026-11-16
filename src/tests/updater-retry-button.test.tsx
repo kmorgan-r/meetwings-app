@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 type Status =
   | { kind: "idle" }
@@ -29,11 +30,15 @@ vi.mock("@/hooks", () => ({
   useWindowResize: () => ({ resizeWindow: () => {} }),
 }));
 vi.mock("@/components", () => {
-  const Pass = ({ children }: { children?: any }) => (
+  const Pass = ({ children }: { children?: ReactNode }) => (
     <div>{children}</div>
   );
+  type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+    size?: unknown;
+    variant?: unknown;
+  };
   return {
-    Button: ({ children, size: _size, variant: _variant, ...rest }: any) => (
+    Button: ({ children, size: _size, variant: _variant, ...rest }: ButtonProps) => (
       <button {...rest}>{children}</button>
     ),
     Popover: Pass,

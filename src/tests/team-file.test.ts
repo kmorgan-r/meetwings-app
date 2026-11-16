@@ -16,7 +16,12 @@ vi.mock("@/lib/storage/google-config.storage", () => ({
   loadGoogleConfigState: h.google,
 }));
 
-import { exportTeamSettings, parseTeamFile, TEAM_COPY } from "@/lib/team/team-file";
+import {
+  exportTeamSettings,
+  parseTeamFile,
+  TEAM_COPY,
+  type TeamResult,
+} from "@/lib/team/team-file";
 
 const NOTION_URL = "https://www.notion.so/ws/0123456789abcdef0123456789abcdef?v=1";
 let store: Map<string, string>;
@@ -61,7 +66,16 @@ function seedCustom(curl = CUSTOM.curl) {
   return p;
 }
 
-function valid(): any {
+// Tests write deliberately wrong values into these, so they are not TeamFileV1.
+interface Fixture {
+  [key: string]: unknown;
+  ai: Record<string, unknown> & { variables: Record<string, unknown> };
+  stt: Record<string, unknown> & { variables: Record<string, unknown> };
+  notion: Record<string, unknown>;
+  google: Record<string, unknown>;
+}
+
+function valid(): Fixture {
   return {
     version: 1,
     ai: { provider: "openai", variables: { api_key: "k" } },
@@ -71,7 +85,11 @@ function valid(): any {
   };
 }
 const parse = (o: unknown) => parseTeamFile(JSON.stringify(o));
-const code = (r: any) => (r.ok ? null : r.code);
+const code = (r: TeamResult<unknown>) => (r.ok ? null : r.code);
+function okValue<T>(r: TeamResult<T>): T {
+  if (!r.ok) throw new Error(`expected ok, got ${r.code}`);
+  return r.value;
+}
 
 beforeEach(() => {
   store = installMemoryLocalStorage();
@@ -82,13 +100,13 @@ describe("exportTeamSettings", () => {
   it("exports owner settings that parse back identically and carry no yourName", async () => {
     ownerSeed();
     const r = await exportTeamSettings();
-    expect(r.ok).toBe(true);
-    const back = parseTeamFile(JSON.stringify((r as any).value));
+    const v = okValue(r);
+    const back = parseTeamFile(JSON.stringify(v));
     expect(back).toEqual(r);
     expect(JSON.stringify(r)).not.toContain("Owner");
-    expect((r as any).value.notion.knowledgeDbUrl).toBeUndefined();
-    expect((r as any).value.ai.variables).toEqual({ api_key: "sk-owner", model: "gpt-x" });
-    expect((r as any).value.notion.teamTimes).toEqual({ monday: "09:00" });
+    expect(v.notion.knowledgeDbUrl).toBeUndefined();
+    expect(v.ai.variables).toEqual({ api_key: "sk-owner", model: "gpt-x" });
+    expect(v.notion.teamTimes).toEqual({ monday: "09:00" });
   });
 
   it("export refuses a custom STT provider whose curl has the key inline", async () => {
@@ -133,10 +151,10 @@ describe("exportTeamSettings", () => {
   it("export includes the custom definition for a selected custom provider", async () => {
     ownerSeed();
     const p = seedCustom();
-    const r: any = await exportTeamSettings();
-    expect(r.ok).toBe(true);
-    expect(r.value.ai.custom).toEqual(p);
-    expect(parseTeamFile(JSON.stringify(r.value))).toEqual(r);
+    const r = await exportTeamSettings();
+    const v = okValue(r);
+    expect(v.ai.custom).toEqual(p);
+    expect(parseTeamFile(JSON.stringify(v))).toEqual(r);
   });
 });
 
@@ -191,7 +209,7 @@ describe("parseTeamFile", () => {
     f.extra = 1;
     f.notion.yourName = "Owner";
     f.ai = { provider: "custom-1", variables: { api_key: "k" }, custom: { ...CUSTOM, extra: 3 }, extra: 2 };
-    const r: any = parse(f);
+    const r = parse(f);
     expect(r.ok).toBe(true);
     expect(JSON.stringify(r)).not.toContain("extra");
     expect(JSON.stringify(r)).not.toContain("Owner");

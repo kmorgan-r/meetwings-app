@@ -66,13 +66,13 @@ export function createTeamStorageFake() {
     }),
   };
 
-  const invoke = vi.fn(async (cmd: string, args?: any): Promise<unknown> => {
+  const invoke = vi.fn(async (cmd: string, args?: unknown): Promise<unknown> => {
     check(cmd);
     switch (cmd) {
       case "notion_token_get":
         return keychain.token;
       case "notion_token_set":
-        keychain.token = args.token;
+        keychain.token = (args as { token?: string } | undefined)?.token ?? null;
         return undefined;
       case "notion_token_clear":
         keychain.token = null;

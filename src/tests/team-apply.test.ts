@@ -76,9 +76,9 @@ const PRIOR_AI_RAW = JSON.stringify({ openai: { api_key: "sk-old" }, groq: { api
 
 /** Every write in call order: secure/local writes by key, keychain writes as "token". */
 function writeLog(): string[] {
-  type Fn = { mock: { calls: any[][]; invocationCallOrder: number[] } };
+  type Fn = { mock: { calls: unknown[][]; invocationCallOrder: number[] } };
   const entries: [number, string][] = [];
-  const add = (fn: Fn, label: (call: any[]) => string | null) =>
+  const add = (fn: Fn, label: (call: unknown[]) => string | null) =>
     fn.mock.calls.forEach((call, i) => {
       const l = label(call);
       if (l !== null) entries.push([fn.mock.invocationCallOrder[i], l]);

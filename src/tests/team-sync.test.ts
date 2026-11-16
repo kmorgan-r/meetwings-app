@@ -106,7 +106,7 @@ beforeEach(() => {
 });
 
 describe("syncTeam failures", () => {
-  const withFile = (over: (f: any) => void) => async () => {
+  const withFile = (over: (f: TeamFileV1) => void) => async () => {
     const f = teamFile();
     over(f);
     await serve(f);
