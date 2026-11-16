@@ -2,7 +2,7 @@ import type { NotionProperty } from "./client";
 import type { NotionConfig, Weekday } from "@/lib/storage/notion-config.storage";
 
 /**
- * Which Notion data source a meeting lands in, and what the page is titled.
+ * Which Notion data source a meeting lands in.
  *
  * Weekday and time-of-day are LOCAL (`Date.getDay`/`getHours`/`getMinutes`,
  * no UTC): a team time is configured in the user's wall clock, so a meeting
@@ -20,6 +20,10 @@ export interface SubTable {
   calendarEventProp: string | null;
   /** Why calendarEventProp is null: no such column, or one of another type. */
   calendarEventIssue: "missing" | "wrong-type" | null;
+  /** The "Attendees" multi-select column, when present and a multi-select. */
+  attendeesProp: string | null;
+  /** Why attendeesProp is null: no such column (send adds it), or one of another type (left alone). */
+  attendeesIssue: "missing" | "wrong-type" | null;
 }
 
 export interface Mapping {
@@ -50,20 +54,24 @@ const WEEKDAYS: Weekday[] = [
 ];
 
 export const CALENDAR_EVENT_COLUMN = "Calendar event";
+export const ATTENDEES_COLUMN = "Attendees";
 
-/** The first property named "calendar event" (any case): usable only as rich_text. */
-export function calendarEventColumn(properties: Record<string, NotionProperty>): {
-  prop: string | null;
-  issue: "missing" | "wrong-type" | null;
-} {
+/** The first property with this name (any case): usable only when it has this type. */
+function namedColumn(
+  properties: Record<string, NotionProperty>,
+  column: string,
+  type: string,
+): { prop: string | null; issue: "missing" | "wrong-type" | null } {
   for (const [name, property] of Object.entries(properties)) {
-    if (name.toLowerCase() !== CALENDAR_EVENT_COLUMN.toLowerCase()) continue;
-    return property.type === "rich_text"
-      ? { prop: name, issue: null }
-      : { prop: null, issue: "wrong-type" };
+    if (name.toLowerCase() !== column.toLowerCase()) continue;
+    return property.type === type ? { prop: name, issue: null } : { prop: null, issue: "wrong-type" };
   }
   return { prop: null, issue: "missing" };
 }
+
+/** The first property named "calendar event" (any case): usable only as rich_text. */
+export const calendarEventColumn = (properties: Record<string, NotionProperty>) =>
+  namedColumn(properties, CALENDAR_EVENT_COLUMN, "rich_text");
 
 /** Strict "HH:MM": two digits, 00-23 hours, 00-59 minutes. */
 const HH_MM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
@@ -116,6 +124,7 @@ export function describeSubTable(ds: {
   if (titleProp === null || dateProp === null) return null;
 
   const calendar = calendarEventColumn(ds.properties);
+  const attendees = namedColumn(ds.properties, ATTENDEES_COLUMN, "multi_select");
   return {
     dataSourceId: ds.id,
     name: ds.name,
@@ -124,6 +133,8 @@ export function describeSubTable(ds: {
     recordedByProp,
     calendarEventProp: calendar.prop,
     calendarEventIssue: calendar.issue,
+    attendeesProp: attendees.prop,
+    attendeesIssue: attendees.issue,
   };
 }
 
@@ -158,34 +169,29 @@ export function buildMapping(subTables: SubTable[]): Mapping | null {
  * Routes a meeting: the weekday sub-table only when the meeting starts within
  * TEAM_TIME_WINDOW_MS of that day's team time, or when the day has no valid
  * team time ("", missing or malformed means any start that day). Anything
- * else goes to `other`, keeping the AI's title.
+ * else goes to `other`. The title is not decided here: every route takes the
+ * calendar event's name, else the AI's title (send.ts).
  */
 export function routeMeeting(
   startAt: number,
   m: Mapping,
   teamTimes: NotionConfig["teamTimes"],
-  aiTitle: string,
-): { subTable: SubTable; title: string } {
+): SubTable {
   const date = new Date(startAt);
   const weekday = JS_DAY[date.getDay()];
-  const weekdayTitle = `${capitalizeWeekday(weekday)} Meeting`;
 
   const subTable = m.byWeekday[weekday];
   if (subTable !== undefined) {
     const teamTime = teamTimes[weekday];
     // No usable team time ("", missing or malformed): any start that day counts.
-    if (typeof teamTime !== "string" || !HH_MM.test(teamTime)) {
-      return { subTable, title: weekdayTitle };
-    }
+    if (typeof teamTime !== "string" || !HH_MM.test(teamTime)) return subTable;
     const startMinutes = date.getHours() * 60 + date.getMinutes();
     const [h, mm] = teamTime.split(":").map(Number);
     const teamMinutes = h * 60 + mm;
-    if (Math.abs(startMinutes - teamMinutes) * 60_000 <= TEAM_TIME_WINDOW_MS) {
-      return { subTable, title: weekdayTitle };
-    }
+    if (Math.abs(startMinutes - teamMinutes) * 60_000 <= TEAM_TIME_WINDOW_MS) return subTable;
   }
 
-  return { subTable: m.other, title: aiTitle };
+  return m.other;
 }
 
 /**

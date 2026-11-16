@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AttendeeGroups } from "@/lib/calendar/calendar-snapshot";
 import type { NotionBlockInput } from "@/lib/notion/client";
 import {
+  attendeeTags,
   batchBlocks,
   buildPageBlocks,
   pageProperties,
@@ -499,6 +500,8 @@ const SUB_TABLE: SubTable = {
   recordedByProp: "Recorded by",
   calendarEventProp: null,
   calendarEventIssue: null,
+  attendeesProp: null,
+  attendeesIssue: "missing",
 };
 
 describe("pageProperties", () => {
@@ -553,5 +556,28 @@ describe("pageProperties", () => {
     ).toEqual(today);
     expect(pageProperties(r, startAt, endAt, "user-owner-1", null)).toEqual(today);
     expect(pageProperties(r, startAt, endAt, "user-owner-1")).toEqual(today);
+  });
+
+  it("writes the attendees as multi-select tags only where the column exists and there are some", () => {
+    const withCol: SubTable = { ...SUB_TABLE, attendeesProp: "Attendees", attendeesIssue: null };
+    const written = pageProperties({ subTable: withCol, title: "T" }, startAt, endAt, null, null, ["Kim", "Lee"]);
+    expect(written["Attendees"]).toEqual({ multi_select: [{ name: "Kim" }, { name: "Lee" }] });
+    const today = pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, null);
+    expect(pageProperties({ subTable: SUB_TABLE, title: "T" }, startAt, endAt, null, null, ["Kim"])).toEqual(today);
+    expect(pageProperties({ subTable: withCol, title: "T" }, startAt, endAt, null, null, [])).toEqual(today);
+  });
+});
+
+describe("attendeeTags", () => {
+  it("flattens the groups in order, drops commas, and keeps each name once (any case)", () => {
+    expect(
+      attendeeTags({
+        teamLabel: "Team",
+        team: ["Kim", "Smith, John"],
+        external: [{ domain: "acme.com", people: ["Bea", "kim"] }],
+        otherGuests: ["pat@gmail.com", " , "],
+        omitted: 3,
+      }),
+    ).toEqual(["Kim", "Smith John", "Bea", "pat@gmail.com"]);
   });
 });

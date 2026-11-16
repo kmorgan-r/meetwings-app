@@ -19,7 +19,7 @@ import {
 import type { DbNotionSend } from "@/types/notion";
 import { createNotionAi, type NotionAi } from "./ai";
 import { appendResumable } from "./append";
-import { createNotionClient, type NotionClient } from "./client";
+import { createNotionClient, type NotionClient, type NotionPage } from "./client";
 import {
   NOTION_SHOW_AT_ONCE,
   NotionError,
@@ -32,9 +32,24 @@ import {
   type SummaryErrorCode,
 } from "./errors";
 import { addPractices, readKnowledge } from "./knowledge";
-import { batchBlocks, buildPageBlocks, pageProperties, sendRefBlock, sendRefOf, transcriptBlocks } from "./page-blocks";
+import {
+  attendeeTags,
+  batchBlocks,
+  buildPageBlocks,
+  pageProperties,
+  sendRefBlock,
+  sendRefOf,
+  transcriptBlocks,
+} from "./page-blocks";
 import { armNotionRedactor } from "./redact";
-import { buildMapping, describeSubTable, routeMeeting, type Mapping, type SubTable } from "./routing";
+import {
+  ATTENDEES_COLUMN,
+  buildMapping,
+  describeSubTable,
+  routeMeeting,
+  type Mapping,
+  type SubTable,
+} from "./routing";
 import { findKeyMatch, pickWinner, type Candidate, readCandidates, sameMeeting } from "./same-meeting";
 import { summarizeForNotion, type NotionSummary } from "./summarize";
 import { loadNotionToken } from "./token";
@@ -67,6 +82,20 @@ const linkOf = (c: { pageId: string; url: string }) =>
 
 /** Thrown when a restamp, patch or finish is refused: another attempt owns the send. */
 class LostClaim extends Error {}
+
+/** Refusals that adding the Attendees column meets on every try: the page goes without it. */
+const COLUMN_REFUSED: ReadonlySet<NotionErrorCode> = new Set(["NOTION_NO_ACCESS", "NOTION_NOT_FOUND", "NOTION_INVALID"]);
+
+/** Adds the Attendees multi-select column; null when Notion refuses it. A transient error throws (the send retries). */
+async function addAttendeesColumn(client: NotionClient, dataSourceId: string): Promise<string | null> {
+  try {
+    await client.updateDataSourceProperties(dataSourceId, { [ATTENDEES_COLUMN]: { multi_select: {} } });
+    return ATTENDEES_COLUMN;
+  } catch (thrown) {
+    if (thrown instanceof NotionError && COLUMN_REFUSED.has(thrown.code)) return null;
+    throw thrown;
+  }
+}
 
 type StepError = { code: NotionErrorCode | SummaryErrorCode; retryAfterMs?: number };
 
@@ -259,15 +288,45 @@ export async function runNotionSend(sendId: string, deps: NotionSendDeps): Promi
             return await finish("already");
           }
         }
+        let subTable = routeMeeting(s.span_start_at, mapping, config.teamTimes);
+        const tags = attendees ? attendeeTags(attendees) : [];
+        // Before create_started_at: a failure here retries the send with no own-page recovery to do.
+        // Only a missing column is added; one of another type is the team's, never converted.
+        if (tags.length > 0 && subTable.attendeesIssue === "missing") {
+          await stamp();
+          subTable = { ...subTable, attendeesProp: await addAttendeesColumn(deps.client, subTable.dataSourceId) };
+        }
         await stamp();
         await patch({ create_started_at: deps.now() });
-        const r = routeMeeting(s.span_start_at, mapping, config.teamTimes, summary.title);
-        const page = await deps.client.createPage({
-          parent: { type: "data_source_id", data_source_id: r.subTable.dataSourceId },
-          // The key is recorded even when this send cannot match by it (it ends too late).
-          properties: pageProperties(r, s.span_start_at, s.span_end_at, me.ownerUserId, snap?.key ?? null),
-          children: batchBlocks(blocks)[0] ?? [],
-        });
+        // The event's name, else the AI's. The bold body line stays the AI's title: the
+        // same-meeting judge, the legacy rule and the resume compare all read it.
+        const title = snap?.subject?.trim() || summary.title;
+        const create = (withTags: string[]) =>
+          deps.client.createPage({
+            parent: { type: "data_source_id", data_source_id: subTable.dataSourceId },
+            // The key is recorded even when this send cannot match by it (it ends too late).
+            properties: pageProperties(
+              { subTable, title },
+              s.span_start_at,
+              s.span_end_at,
+              me.ownerUserId,
+              snap?.key ?? null,
+              withTags,
+            ),
+            children: batchBlocks(blocks)[0] ?? [],
+          });
+        let page: NotionPage;
+        try {
+          page = await create(tags);
+        } catch (thrown) {
+          // A refused Attendees value must not cost the meeting its page: once more without it.
+          // A refusal wrote nothing; should a page exist anyway, it carries this send's ref and
+          // the recheck trashes it as an orphan.
+          const tagged = tags.length > 0 && subTable.attendeesProp !== null;
+          if (!(tagged && thrown instanceof NotionError && thrown.code === "NOTION_INVALID")) throw thrown;
+          await stamp();
+          page = await create([]);
+        }
         if (!page.id || !page.url) throw new NotionError("NOTION_INTERNAL");
         await patch({ page_id: page.id, page_url: page.url, page_created_time: page.created_time ?? "" });
       }
