@@ -179,19 +179,20 @@ export const MeetingTranscriptPanel = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const { sttTranslationEnabled } = useApp();
 
-  // Auto-scroll to bottom when new transcripts are added
+  // Follow new lines only while the reader is at the bottom; scrolled up to
+  // read back, they keep their place. Measured against the height at the last
+  // update, because the new line has already grown scrollHeight. Instant, not
+  // smooth: a smooth scroll still in flight would read as "scrolled up".
+  const followedHeightRef = useRef(0);
   useEffect(() => {
-    if (scrollRef.current) {
-      const scrollElement = scrollRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]"
-      );
-      if (scrollElement) {
-        scrollElement.scrollTo({
-          top: scrollElement.scrollHeight,
-          behavior: "smooth",
-        });
-      }
+    const el = scrollRef.current?.querySelector(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (!el) return;
+    if (followedHeightRef.current - el.scrollTop - el.clientHeight < 80) {
+      el.scrollTop = el.scrollHeight;
     }
+    followedHeightRef.current = el.scrollHeight;
   }, [meetingTranscript]);
 
   if (meetingTranscript.length === 0) {
