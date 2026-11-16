@@ -25,6 +25,7 @@ import {
   __resetActivityForTests,
   getActivitySnapshot,
 } from "@/lib/updater/recording-activity.store";
+import { installMemoryLocalStorage } from "./memory-local-storage";
 
 const flush = () => act(async () => {});
 const fire = (event: string) => act(() => h.listeners.get(event)?.());
@@ -58,7 +59,7 @@ describe("useSilentUpdater", () => {
     expect(h.start).not.toHaveBeenCalled();
   });
 
-  it("does nothing on Linux", async () => {
+  it("does not start the updater or listen for meetings on Linux", async () => {
     h.linux = true;
     renderHook(() => useSilentUpdater());
     await flush();
@@ -68,11 +69,13 @@ describe("useSilentUpdater", () => {
   });
 
   it("records the app version in main on Linux too, and not in other windows", async () => {
+    installMemoryLocalStorage();
     h.linux = true;
     renderHook(() => useSilentUpdater());
     await flush();
 
     expect(h.invoke).toHaveBeenCalledWith("get_app_version");
+    expect(localStorage.getItem("app_last_version")).toBe("1.6.0");
     // Linux keeps the click-to-install Updater: no listeners, no silent start.
     expect(h.listen).not.toHaveBeenCalled();
     expect(h.start).not.toHaveBeenCalled();

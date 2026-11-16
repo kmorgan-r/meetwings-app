@@ -98,4 +98,25 @@ describe("AppStatusLine", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Last update check: never")).toBeNull();
   });
+
+  it("shows a note that arrives via a note-only storage event", async () => {
+    renderLine();
+    await flush();
+    expect(screen.getByText("Meetwings 1.6.0")).toBeInTheDocument();
+    expect(screen.queryByText(/^Updated to /)).toBeNull();
+
+    // Only APP_UPDATED_TO changes - neither timestamp does, so without the
+    // note raw string in state React would bail out and keep the old note.
+    store.set(
+      STORAGE_KEYS.APP_UPDATED_TO,
+      JSON.stringify({ version: "1.6.0", at: 1736700000000 })
+    );
+    act(() => {
+      window.dispatchEvent(
+        new StorageEvent("storage", { key: STORAGE_KEYS.APP_UPDATED_TO })
+      );
+    });
+
+    expect(screen.getByText("Updated to 1.6.0")).toBeInTheDocument();
+  });
 });

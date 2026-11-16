@@ -25,6 +25,10 @@ export const AppStatusLine = ({ className }: AppStatusLineProps) => {
   const [version, setVersion] = useState<string | null>(null);
   const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const [teamSyncedAt, setTeamSyncedAt] = useState<number | null>(null);
+  // The raw note string is held in state so a storage event that changes only
+  // APP_UPDATED_TO still re-renders (otherwise React bails out when neither
+  // timestamp changed and the note read below never refreshes).
+  const [, setNoteRaw] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,6 +39,7 @@ export const AppStatusLine = ({ className }: AppStatusLineProps) => {
       if (cancelled) return;
       setCheckedAt(checked);
       setTeamSyncedAt(synced);
+      setNoteRaw(safeLocalStorage.getItem(STORAGE_KEYS.APP_UPDATED_TO));
     };
 
     readKeys();
@@ -53,7 +58,8 @@ export const AppStatusLine = ({ className }: AppStatusLineProps) => {
     };
   }, []);
 
-  // Read at render time so a storage-event rerender also re-evaluates the note.
+  // Re-evaluated at render time against the raw note string held in state, so
+  // a storage-event rerender also re-evaluates the note.
   const note = version === null ? null : readUpdatedNote(version);
 
   return (
