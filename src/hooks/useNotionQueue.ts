@@ -84,7 +84,7 @@ const RANKED: ReadonlyArray<{ state: NotionBadgeState; match: (item: NotionItem)
     state: "waiting",
     match: (i) =>
       i.kind === "rows" && (i.status === "held" || i.status === "waiting")
-        ? badge("Waiting for the meeting to end", "waiting")
+        ? badge("Queued for Notion", "waiting")
         : null,
   },
   {

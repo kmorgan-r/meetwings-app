@@ -15,9 +15,9 @@ export type CheckResult =
   | { ok: false; message: string };
 
 const MEETINGS_UNSEEN =
-  "Can't see the Weekly Team Meetings database: open it in Notion and check you have edit access.";
+  "Can't open the Weekly Team Meetings database. Check the link, then in Notion open the database's ••• menu > Connections and add your integration.";
 const KNOWLEDGE_UNSEEN =
-  "Can't see the Team Knowledge database: open it in Notion and check you have edit access.";
+  "Can't open the Team Knowledge database. Check the link, then in Notion open the database's ••• menu > Connections and add your integration.";
 const WEEKDAY_ORDER: Weekday[] = [
   "monday",
   "tuesday",

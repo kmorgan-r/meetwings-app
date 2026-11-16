@@ -337,7 +337,7 @@ describe("the Meetings page, Notion side", () => {
 
     current = () => [rows({ status: "held" })];
     await renderPage();
-    await within(card("c1")).findByText("Waiting for the meeting to end");
+    await within(card("c1")).findByText("Queued for Notion");
     expect(screen.queryByRole("button", { name: "Don't send" })).toBeNull();
   });
 
@@ -461,7 +461,7 @@ describe("buildBadgeMap", () => {
       [send({ status: "retry", page_id: "p", practices_error_code: "PRACTICES_UNDECIDED" }), "Practices not added yet"],
       [send({ status: "sending" }), "Sending to Notion"],
       [rows({ status: "offered" }), "Send to Notion"],
-      [rows({ status: "held" }), "Waiting for the meeting to end"],
+      [rows({ status: "held" }), "Queued for Notion"],
       [send({ status: "already" }), "Already in Notion"],
       [send({ status: "sent" }), "In Notion"],
     ];
