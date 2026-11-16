@@ -8,6 +8,7 @@ import {
   ContentProtectionToggle,
   MeetingAutoRecordToggle,
   OverlayPillStyleSelect,
+  TeamSettingsCard,
 } from "./components";
 import { PageLayout } from "@/layouts";
 import { isWindows } from "@/lib/platform";
@@ -17,6 +18,9 @@ const Settings = () => {
     <PageLayout title="Settings" description="Manage your settings">
       {/* Theme */}
       <Theme />
+
+      {/* Team settings (join, leave, share) */}
+      <TeamSettingsCard />
 
       {/* Autostart Toggle */}
       <AutostartToggle />

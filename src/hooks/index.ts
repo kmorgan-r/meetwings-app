@@ -33,3 +33,4 @@ export * from "./useGoogleMeetingCapture";
 export * from "./usePillRecordAction";
 export * from "./useSilentUpdater";
 export * from "./useTeamSync";
+export * from "./useTeamState";

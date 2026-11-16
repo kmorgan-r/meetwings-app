@@ -7,3 +7,4 @@ export * from "./ContentProtectionToggle";
 export * from "./MeetingAutoRecordToggle";
 export * from "./OverlayPillStyleSelect";
 export * from "./Theme";
+export * from "./TeamSettingsCard";
