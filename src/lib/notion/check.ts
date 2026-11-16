@@ -120,6 +120,11 @@ export async function checkNotionSetup(token: string, cfg: NotionConfig): Promis
         `"${st.name}" has a "Calendar event" column that isn't a text column, so it is ignored.`,
       );
     }
+    if (st.attendeesIssue === "wrong-type") {
+      warnings.push(
+        `"${st.name}" has an "Attendees" column that isn't a multi-select, so attendees are only listed in the page.`,
+      );
+    }
   }
   if (cfg.knowledgeDbUrl.trim() === "") {
     warnings.push("No Team Knowledge link: practices will only appear on the meeting page.");

@@ -10,8 +10,6 @@ import {
 } from "@/lib/notion/routing";
 import type { Weekday } from "@/lib/storage/notion-config.storage";
 
-const AI_TITLE = "Sprint planning kickoff";
-
 function subTable(id: string, name: string, overrides: Partial<SubTable> = {}): SubTable {
   return {
     dataSourceId: id,
@@ -21,6 +19,8 @@ function subTable(id: string, name: string, overrides: Partial<SubTable> = {}): 
     recordedByProp: "Recorded by",
     calendarEventProp: null,
     calendarEventIssue: null,
+    attendeesProp: null,
+    attendeesIssue: "missing",
     ...overrides,
   };
 }
@@ -49,43 +49,40 @@ function localStartAt(weekday: Weekday, clock: string): number {
   return new Date(2026, 10, WEEKDAY_DATE[weekday], h, m).getTime();
 }
 
-/** [weekday, start clock, team time (null = entry absent), sub-table, title] */
-type RouteCase = [Weekday, string, string | null, string, string];
+/** [weekday, start clock, team time (null = entry absent), sub-table] */
+type RouteCase = [Weekday, string, string | null, string];
 
 const ROUTE_CASES: RouteCase[] = [
   // Monday, team time 09:00: the 30-minute window holds on both edges.
-  ["monday", "08:30", "09:00", "Monday Meetings", "Monday Meeting"],
-  ["monday", "09:30", "09:00", "Monday Meetings", "Monday Meeting"],
+  ["monday", "08:30", "09:00", "Monday Meetings"],
+  ["monday", "09:30", "09:00", "Monday Meetings"],
   // The same Monday window misses by one minute on either side.
-  ["monday", "08:29", "09:00", "Other Meetings", AI_TITLE],
-  ["monday", "09:31", "09:00", "Other Meetings", AI_TITLE],
-  ["monday", "08:30", "", "Monday Meetings", "Monday Meeting"],
-  ["monday", "22:47", "", "Monday Meetings", "Monday Meeting"],
-  ["monday", "04:03", null, "Monday Meetings", "Monday Meeting"],
-  ["monday", "10:15", "25:61", "Monday Meetings", "Monday Meeting"],
-  ["monday", "09:00", "9:00", "Monday Meetings", "Monday Meeting"],
-  ["tuesday", "09:00", "09:00", "Other Meetings", AI_TITLE],
-  ["wednesday", "14:29", "14:00", "Wednesday Meetings", "Wednesday Meeting"],
-  ["sunday", "19:58", "", "Sunday Reviews", "Sunday Meeting"],
+  ["monday", "08:29", "09:00", "Other Meetings"],
+  ["monday", "09:31", "09:00", "Other Meetings"],
+  ["monday", "08:30", "", "Monday Meetings"],
+  ["monday", "22:47", "", "Monday Meetings"],
+  ["monday", "04:03", null, "Monday Meetings"],
+  ["monday", "10:15", "25:61", "Monday Meetings"],
+  ["monday", "09:00", "9:00", "Monday Meetings"],
+  ["tuesday", "09:00", "09:00", "Other Meetings"],
+  ["wednesday", "14:29", "14:00", "Wednesday Meetings"],
+  ["sunday", "19:58", "", "Sunday Reviews"],
 ];
 
 describe("routeMeeting", () => {
-  it.each(ROUTE_CASES)("%s %s (team %s) routes to %s titled %s", (weekday, startClock, teamTime, expectedName, expectedTitle) => {
+  it.each(ROUTE_CASES)("%s %s (team %s) routes to %s", (weekday, startClock, teamTime, expectedName) => {
     const teamTimes: Partial<Record<Weekday, string>> =
       teamTime === null ? {} : { [weekday]: teamTime };
-    const result = routeMeeting(localStartAt(weekday, startClock), MAPPING, teamTimes, AI_TITLE);
-    expect(result.subTable.name).toBe(expectedName);
-    expect(result.subTable.dataSourceId).toBe(
+    const result = routeMeeting(localStartAt(weekday, startClock), MAPPING, teamTimes);
+    expect(result.name).toBe(expectedName);
+    expect(result.dataSourceId).toBe(
       [MONDAY, WEDNESDAY, SUNDAY, OTHER].find((ds) => ds.name === expectedName)?.dataSourceId,
     );
-    expect(result.title).toBe(expectedTitle);
   });
 
   it("without an Other sub-table a Tuesday start goes to the first sub-table", () => {
     const mapping = buildMapping([MONDAY, WEDNESDAY]) as Mapping;
-    const result = routeMeeting(localStartAt("tuesday", "08:00"), mapping, {}, AI_TITLE);
-    expect(result.subTable).toEqual(MONDAY);
-    expect(result.title).toBe(AI_TITLE);
+    expect(routeMeeting(localStartAt("tuesday", "08:00"), mapping, {})).toEqual(MONDAY);
   });
 
   it("TEAM_TIME_WINDOW_MS is 30 minutes", () => {
@@ -142,7 +139,23 @@ describe("describeSubTable", () => {
       recordedByProp: "recorded by",
       calendarEventProp: null,
       calendarEventIssue: "missing",
+      attendeesProp: null,
+      attendeesIssue: "missing",
     });
+  });
+
+  it.each([
+    ["multi_select", "attendees", null],
+    ["people", null, "wrong-type"],
+    ["rich_text", null, "wrong-type"],
+  ])("an 'attendees' %s column reads as prop %s, issue %s", (type, prop, issue) => {
+    const st = describeSubTable({
+      id: "ds-a",
+      name: "Monday Meetings",
+      properties: { Name: { type: "title" }, Date: { type: "date" }, attendees: { type } },
+    });
+    expect(st?.attendeesProp).toBe(prop);
+    expect(st?.attendeesIssue).toBe(issue);
   });
 
   it("detects the column case-insensitively", () => {

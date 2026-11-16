@@ -122,6 +122,20 @@ describe("checkNotionSetup", () => {
     ]);
   });
 
+  it("a non-multi-select Attendees column is a warning; a missing one is not (the send adds it)", async () => {
+    wire({
+      meetings: [
+        { id: "ds-mon", name: "Monday Meetings", properties: { ...meetingsProps, Attendees: { type: "people" } } },
+        { id: "ds-other", name: "Other Meetings", properties: meetingsProps },
+      ],
+    });
+    const result = await checkNotionSetup("t", cfg());
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.warnings).toEqual([
+      `"Monday Meetings" has an "Attendees" column that isn't a multi-select, so attendees are only listed in the page.`,
+    ]);
+  });
+
   it("warns for a sub-table the mapping does not place", async () => {
     wire({
       meetings: [

@@ -157,6 +157,10 @@ function makeWorld() {
     queries: [] as object[],
     /** The type of ds-main's "Calendar event" column; null = no such column. */
     calendarCol: null as string | null,
+    /** The type of ds-main's "Attendees" column; null = no such column (a schema update adds it). */
+    attendeesCol: null as string | null,
+    /** Every schema update, in order. */
+    schemaUpdates: [] as { id: string; properties: Record<string, object> }[],
     loseNextCreateResponse: false,
     onCreate: undefined as ((p: Page) => void) | undefined,
     onMe: undefined as (() => void) | undefined,
@@ -216,7 +220,13 @@ function makeWorld() {
         Name: { type: "title" }, Date: { type: "date" }, "Recorded by": { type: "people" },
       };
       if (w.calendarCol !== null) properties["Calendar event"] = { type: w.calendarCol };
+      if (w.attendeesCol !== null) properties.Attendees = { type: w.attendeesCol };
       return { id, name: "Other", properties };
+    },
+    updateDataSourceProperties: async (id: string, properties: Record<string, object>) => {
+      tick("updateDataSourceProperties");
+      w.schemaUpdates.push({ id, properties });
+      if (id === "ds-main" && "Attendees" in properties) w.attendeesCol = "multi_select";
     },
     queryAll: async (ds: string, body: object) => {
       tick("queryAll");
@@ -1369,6 +1379,89 @@ describe("one page per meeting: the calendar key", () => {
       expect(blocksOf(world, "pg-1").some((b) => b.type === "heading_3" && b.text === "Attendees")).toBe(false);
       expect(blocksOf(world, "pg-1")).toEqual(expectedBlocks(WEEKLY, null));
       expect(asks(world, "summary")[0].user).not.toContain("ATTENDEES");
+    });
+
+    describe("the event's name and the Attendees column", () => {
+      const TAGS = { multi_select: ["Kim", "Lee", "Bea", "pat@gmail.com"].map((name) => ({ name })) };
+      const titleOf = (p: Page) =>
+        ((p.properties.Name?.title ?? []) as { text?: { content?: string } }[]).map((i) => i.text?.content ?? "").join("");
+
+      it("titles the page with the event's name, keeps the AI title in the body, and adds and fills the column", async () => {
+        await seedKeyed([EV_START, EV_END], snapshotJson({ subject: "  Design review  " }));
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        const page = world.pages.get("pg-1") as Page;
+        expect(titleOf(page)).toBe("Design review");
+        // The bold line under Meeting Notes is still the AI's "Weekly sync".
+        expect(blocksOf(world, "pg-1")).toEqual(expectedBlocks(WEEKLY, ATTENDEES));
+        expect(world.schemaUpdates).toEqual([{ id: "ds-main", properties: { Attendees: { multi_select: {} } } }]);
+        expect(page.properties.Attendees).toEqual(TAGS);
+      });
+
+      it.each([null, "   "])("a subject of %j falls back to the AI title", async (subject) => {
+        await seedKeyed([EV_START, EV_END], snapshotJson({ subject }));
+        world.defaultSummary = summaryJson({ title: "AI picked this" });
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(titleOf(world.pages.get("pg-1") as Page)).toBe("AI picked this");
+      });
+
+      it("an existing multi-select column is filled with no schema update", async () => {
+        world.attendeesCol = "multi_select";
+        await seedKeyed();
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(world.schemaUpdates).toEqual([]);
+        expect((world.pages.get("pg-1") as Page).properties.Attendees).toEqual(TAGS);
+      });
+
+      it.each(["people", "rich_text"])("an Attendees column of type %s is never converted or written", async (type) => {
+        world.attendeesCol = type;
+        await seedKeyed();
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(world.schemaUpdates).toEqual([]);
+        expect((world.pages.get("pg-1") as Page).properties.Attendees).toBeUndefined();
+      });
+
+      it("no participants: no schema update", async () => {
+        await seedKeyed([EV_START, EV_END], snapshotJson({ participants: [] }));
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(world.schemaUpdates).toEqual([]);
+      });
+
+      it("a refused column update still sends the page, without the property", async () => {
+        failAt(world, "updateDataSourceProperties", 1, new NotionError("NOTION_NO_ACCESS"));
+        await seedKeyed();
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect((world.pages.get("pg-1") as Page).properties.Attendees).toBeUndefined();
+      });
+
+      it("Notion refusing the tags creates the page once more without them", async () => {
+        failAt(world, "createPage", 1, new NotionError("NOTION_INVALID"));
+        await seedKeyed();
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
+        expect(world.calls.createPage).toBe(2);
+        expect(mainPages(world)).toHaveLength(1);
+        expect(mainPages(world)[0].properties.Attendees).toBeUndefined();
+        expect(titleOf(mainPages(world)[0])).toBe("Weekly sync");
+      });
+
+      it("a refused create with no tags still fails as before", async () => {
+        failAt(world, "createPage", 1, new NotionError("NOTION_INVALID"));
+        await seedKeyed([EV_START, EV_END], snapshotJson({ participants: [] }));
+        expect(await runNotionSend("s1", makeDeps(world))).toBe("failed");
+        expect(world.calls.createPage).toBe(1);
+      });
+
+      it("a transient column-update failure retries before the create starts, then fills the column", async () => {
+        failAt(world, "updateDataSourceProperties", 1, new NotionError("NOTION_SERVER"));
+        await seedKeyed();
+        const deps = makeDeps(world);
+        expect(await runNotionSend("s1", deps)).toBe("retry");
+        expect(await sendOf()).toMatchObject({ create_started_at: null, page_id: null });
+        expect(world.calls.createPage).toBeUndefined();
+        await retrySend("s1");
+        expect(await runNotionSend("s1", deps)).toBe("sent");
+        expect(mainPages(world)).toHaveLength(1);
+        expect(mainPages(world)[0].properties.Attendees).toEqual(TAGS);
+      });
     });
   });
 });

@@ -83,6 +83,8 @@ export interface NotionClient {
   userName(id: string): Promise<string | null>;
   database(id: string): Promise<{ dataSources: { id: string; name: string }[] }>;
   dataSource(id: string): Promise<{ id: string; name: string; properties: Record<string, NotionProperty> }>;
+  /** Adds (or changes) schema columns: `properties` maps a column name to its schema. */
+  updateDataSourceProperties(id: string, properties: Record<string, object>): Promise<void>;
   queryAll(dataSourceId: string, body: object): Promise<NotionPage[]>;
   createPage(body: object): Promise<NotionPage>;
   listChildren(blockId: string): Promise<NotionBlock[]>;
@@ -322,6 +324,11 @@ export function createNotionClient(deps: NotionClientDeps): NotionClient {
       // "Team K"+""nowledge"-style titles arrive as separate rich-text runs.
       const name = body.name ?? (body.title ?? []).map((t) => t.plain_text).join("");
       return { id: body.id ?? id, name, properties: body.properties ?? {} };
+    },
+
+    async updateDataSourceProperties(id, properties) {
+      // Idempotent (same name, same schema), so the default 5xx retry is safe.
+      await request("PATCH", `/v1/data_sources/${encodeURIComponent(id)}`, { properties });
     },
 
     async queryAll(dataSourceId, body) {

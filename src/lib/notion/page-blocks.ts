@@ -217,9 +217,27 @@ export function batchBlocks(
 }
 
 /**
+ * The Attendees column's tags: the body's people list (same order, cap and
+ * elision), commas dropped - Notion refuses them in an option name - and each
+ * name once, case-insensitively, since one request may not repeat an option.
+ */
+export function attendeeTags(a: AttendeeGroups): string[] {
+  const seen = new Set<string>();
+  const tags: string[] = [];
+  for (const raw of [...a.team, ...a.external.flatMap((e) => e.people), ...a.otherGuests]) {
+    const name = raw.replace(/,/g, " ").replace(/\s+/g, " ").trim();
+    if (name === "" || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    tags.push(name);
+  }
+  return tags;
+}
+
+/**
  * The page's properties: the title under the data source's title column, the
  * meeting's datetime range, and - only when the data source has a "Recorded
  * by" people column AND the integration's owner is known - who sent the page.
+ * The attendees go in only when there are some and the column exists.
  */
 export function pageProperties(
   r: { subTable: SubTable; title: string },
@@ -227,6 +245,7 @@ export function pageProperties(
   endAt: number,
   ownerUserId: string | null,
   calendarKey: string | null = null,
+  attendees: string[] = [],
 ): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     [r.subTable.titleProp]: { title: richText(r.title) },
@@ -242,6 +261,9 @@ export function pageProperties(
   }
   if (r.subTable.calendarEventProp !== null && calendarKey !== null) {
     properties[r.subTable.calendarEventProp] = { rich_text: richText(calendarKey) };
+  }
+  if (attendees.length > 0 && r.subTable.attendeesProp) {
+    properties[r.subTable.attendeesProp] = { multi_select: attendees.map((name) => ({ name })) };
   }
   return properties;
 }
