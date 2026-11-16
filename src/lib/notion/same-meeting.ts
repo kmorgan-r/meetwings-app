@@ -3,6 +3,7 @@ import { extractJsonObject } from "@/lib/functions/meeting-summarizer";
 import type { NotionBlock, NotionClient, NotionPage } from "./client";
 import { NotionError, SummaryError } from "./errors";
 import { blockPlainText } from "./append";
+import { SEND_REF_PREFIX } from "./page-blocks";
 import type { SubTable } from "./routing";
 import type { NotionSummary } from "./summarize";
 
@@ -34,7 +35,7 @@ export interface Candidate {
   sendRef: string | null;
 }
 
-const SEND_REF_RE = /^Meetwings ref ([0-9a-f]{12})$/;
+const SEND_REF_RE = new RegExp(`^${SEND_REF_PREFIX}([0-9a-f]{12})$`);
 
 /** The send ref, read from the first block only. */
 function sendRefOfChildren(children: NotionBlock[]): string | null {

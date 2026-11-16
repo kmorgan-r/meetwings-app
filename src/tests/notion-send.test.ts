@@ -674,10 +674,43 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
       expect(asks(world, "same").length).toBeGreaterThan(0);
     });
 
-    it("a page carrying this send's ref is adopted", async () => {
+    it("recheck: a legacy-complete rival with another send's ref is a rival, not an orphan: not trashed, the judge is asked", async () => {
+      await seedSend(UID);
+      const theirs = addRival(
+        world,
+        { id: "other-hidden", created_by: { id: "bot-1" }, hidden: true, created_time: "2026-11-09T14:00:00.000Z", url: "https://notion.invalid/other-hidden" },
+        "Weekly sync",
+      );
+      world.kids.set("other-hidden", [sendRefBlock(OTHER_UID) as unknown as NotionBlock, ...titleKids("Weekly sync")]);
+      world.onSleep = () => {
+        theirs.hidden = false;
+      };
+      world.sameAnswer = true;
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("already");
+      expect(theirs.trashed).toBe(false);
+      expect(asks(world, "same").length).toBeGreaterThan(0);
+      // The earlier page wins; ours is the one trashed.
+      expect((await sendOf(UID)).lost_to_url).toBe("https://notion.invalid/other-hidden");
+      expect(world.pages.get("pg-1")?.trashed).toBe(true);
+    });
+
+    it("recheck: a hidden orphan carrying this send's ref is trashed, whatever its title", async () => {
+      await seedSend(UID);
+      const orphan = addRival(world, { id: "orphan-ref", created_by: { id: "bot-1" }, hidden: true }, "Another topic");
+      world.kids.set("orphan-ref", [sendRefBlock(UID) as unknown as NotionBlock, ...titleKids("Another topic")]);
+      world.onSleep = () => {
+        orphan.hidden = false;
+      };
+      expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
+      expect(orphan.trashed).toBe(true);
+      expect(world.pages.get("pg-1")?.trashed).toBe(false);
+      expect(asks(world, "same")).toHaveLength(0);
+    });
+
+    it("a page carrying this send's ref is adopted, even with a title the legacy rule would reject", async () => {
       await seedSend(UID);
       db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
-      addRival(world, { id: "mine-ref", created_by: { id: "bot-1" } }, "Weekly sync");
+      addRival(world, { id: "mine-ref", created_by: { id: "bot-1" } }, "Renamed by a human");
       withBody("mine-ref", [sendRefBlock(UID), ...buildPageBlocks(summary)]);
       expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
       expect((await sendOf(UID)).page_id).toBe("mine-ref");
@@ -689,7 +722,10 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
       db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
       addRival(world, { id: "legacy-own", created_by: { id: "bot-1" } }, "Weekly sync");
       withBody("legacy-own", buildPageBlocks(summary));
-      await runNotionSend(UID, makeDeps(world));
+      const outcome = await runNotionSend(UID, makeDeps(world));
+      // The documented ceiling: legacy blocks have no ref, so the resume compare fails.
+      expect(outcome).not.toBe("sent");
+      expect(await sendOf(UID)).toMatchObject({ error_code: "NOTION_PAGE_CHANGED" });
       expect((await sendOf(UID)).page_id).toBe("legacy-own");
       expect(world.calls.createPage).toBeUndefined();
       expect(world.pages.get("legacy-own")?.trashed).toBe(false);
@@ -1228,6 +1264,8 @@ describe("one page per meeting: the calendar key", () => {
         expect(await runNotionSend("s1", makeDeps(world))).toBe("sent");
 
         expect(mainPages(world)).toHaveLength(1);
+        expect(blocksOf(plain, mainPages(plain)[0].id)[0].text).toBe("Meetwings ref s0");
+        expect(blocksOf(world, mainPages(world)[0].id)[0].text).toBe("Meetwings ref s1");
         expect(pageOf(world)).toEqual(pageOf(plain));
         expect(keyQueries()).toHaveLength(0);
         expect(Object.keys(mainPages(world)[0].properties)).not.toContain("Calendar event");
