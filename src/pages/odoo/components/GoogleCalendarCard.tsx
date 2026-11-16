@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Input, Label } from "@/components";
-import { broadcastGoogleConnectionChanged as broadcast } from "@/lib/calendar/google-connect";
+import {
+  broadcastGoogleConnectionChanged as broadcast,
+  connectGoogle,
+} from "@/lib/calendar/google-connect";
 import { GOOGLE_COPY, toGoogleCode } from "@/lib/calendar/google-errors";
 import {
   classifyGoogleConfig,
   loadGoogleConfigState,
-  saveGoogleConfig,
 } from "@/lib/storage/google-config.storage";
 import type { GraphStatus } from "@/types";
 
@@ -57,21 +59,11 @@ export function GoogleCalendarCard() {
       return;
     }
     setBusy(true);
-    try {
-      await saveGoogleConfig(form.config);
-      setStatus(await invoke<GraphStatus>("google_connect", {
-          clientId: form.config.clientId,
-          clientSecret: form.config.clientSecret,
-        })
-      );
-    } catch (err) {
-      setError(GOOGLE_COPY[toGoogleCode(err)]);
-    } finally {
-      // saveGoogleConfig already ran, so even a cancelled first sign-in leaves a
-      // complete config the running watcher has not seen.
-      await broadcast();
-      setBusy(false);
-    }
+    // connectGoogle saves, connects, fills the Notion name and broadcasts.
+    const r = await connectGoogle(form.config);
+    if (r.ok) setStatus(r.status);
+    else setError(GOOGLE_COPY[r.code]);
+    setBusy(false);
   }
 
   async function handleDisconnect() {

@@ -889,6 +889,12 @@ mod tests {
                 session_only: false,
             })
             .unwrap(),
+            serde_json::to_string(&crate::google::GoogleConnectResult {
+                connected: true,
+                session_only: false,
+                name: Some("Ana".into()),
+            })
+            .unwrap(),
             serde_json::to_string(&CurrentMeetings {
                 own_address: Some("me@corp.test".into()),
                 events: vec![CalendarEvent {

@@ -5,7 +5,7 @@ use super::{
 use crate::oauth;
 
 pub const GOOGLE_SCOPES: &str =
-    "openid email https://www.googleapis.com/auth/calendar.events.readonly";
+    "openid email profile https://www.googleapis.com/auth/calendar.events.readonly";
 pub const AUTHORIZE_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 
@@ -70,6 +70,16 @@ pub fn email_from_id_token(id_token: &str) -> Option<String> {
         None
     } else {
         Some(email.to_string())
+    }
+}
+
+pub fn name_from_id_token(id_token: &str) -> Option<String> {
+    let claims = oauth::id_token_claims(id_token)?;
+    let name = claims.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -244,6 +254,27 @@ mod tests {
             None
         );
         assert_eq!(email_from_id_token("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn scopes_include_profile() {
+        assert!(GOOGLE_SCOPES.split(' ').any(|s| s == "profile"));
+    }
+
+    #[test]
+    fn name_from_id_token_reads_the_name_claim() {
+        assert_eq!(
+            name_from_id_token(&fake_id_token(r#"{"name":" Ana Lima "}"#)),
+            Some("Ana Lima".to_string())
+        );
+    }
+
+    #[test]
+    fn name_from_id_token_is_none_without_a_usable_name() {
+        for claims in [r#"{}"#, r#"{"name":""}"#, r#"{"name":"   "}"#, r#"{"name":42}"#] {
+            assert_eq!(name_from_id_token(&fake_id_token(claims)), None, "{claims}");
+        }
+        assert_eq!(name_from_id_token("not-a-jwt"), None);
     }
 
     #[test]

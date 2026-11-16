@@ -91,6 +91,16 @@ export interface GraphStatus {
   sessionOnly: boolean;
 }
 
+/**
+ * Return of `google_connect`. NO TOKEN FIELD, EVER (same cargo test covers it).
+ * `name` is the Google profile name, used once to fill a blank Notion name.
+ */
+export interface GoogleConnectResult {
+  connected: boolean;
+  sessionOnly: boolean;
+  name: string | null;
+}
+
 export interface CurrentMeetings {
   /**
    * The preferred_username (falling back to upn) claim of the ID token, or
