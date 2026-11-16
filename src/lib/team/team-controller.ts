@@ -21,7 +21,8 @@ export const TEAM_START_RETRY_MS = 60_000;
 
 export interface TeamUiState {
   joined: boolean;
-  pending: { gistShort: string; switching: boolean } | null;
+  /** `owner` is the gist owner's GitHub login: public, and the only lasting trust signal. */
+  pending: { gistShort: string; owner: string; switching: boolean } | null;
   busy: boolean;
   error: TeamErrorCode | null;
   /** Up by one on every non-null `error`, so the same error twice toasts twice. */
@@ -52,6 +53,8 @@ const initialState = (): TeamUiState => ({
 // The link is a secret (its fragment is the AES key): it lives only here,
 // never in state, emits, logs or errors.
 let pendingLink: TeamLink | null = null;
+// Bumped per incoming link, so a preview that resolves after a newer link is dropped.
+let linkSeq = 0;
 let state: TeamUiState = initialState();
 // Bumped by stop(). Every continuation after an await checks it, so a stale
 // run (StrictMode's first mount) never touches state, timers or listeners.
@@ -107,8 +110,12 @@ function register(gen: number, subscribe: () => Promise<UnlistenFn>): void {
 
 const sameLink = (a: TeamLink, b: TeamLink) => a.gistId === b.gistId && a.key === b.key;
 
-/** A sync that changed the Google client asks for a reconnect; it never opens a browser. */
+/**
+ * A sync that changed the Google client asks for a reconnect; it never opens a
+ * browser. Not after a leave that landed while the sync ran.
+ */
 function noteGoogleChange(result: ApplyResult): void {
+  if (!state.joined) return;
   if (result.ok ? result.value.googleClientChanged : result.googleClientChanged) {
     state.googleNeedsConnect = true;
   }
@@ -128,6 +135,7 @@ async function refresh(gen: number): Promise<void> {
 }
 
 async function handleIncomingLink(gen: number, raw: string): Promise<void> {
+  const seq = ++linkSeq;
   state.error = null;
   const link = parseTeamLink(raw);
   if (!link) {
@@ -141,9 +149,26 @@ async function handleIncomingLink(gen: number, raw: string): Promise<void> {
     await resync(gen, link);
     return;
   }
-  // A second link while the prompt is open replaces the first.
+  if (seq !== linkSeq) return;
+  // A new link replaces any open prompt at once, so a confirm racing the
+  // preview can never apply the older link.
+  pendingLink = null;
+  state.pending = null;
+  emitState();
+  // Applies nothing; names the gist owner, the only lasting trust signal.
+  const preview = await fetchTeamFile(link);
+  if (gen !== generation || seq !== linkSeq) return;
+  if (!preview.ok) {
+    setError(preview.code);
+    openDashboard();
+    return;
+  }
   pendingLink = link;
-  state.pending = { gistShort: shortGistId(link.gistId), switching: stored !== null };
+  state.pending = {
+    gistShort: shortGistId(link.gistId),
+    owner: preview.value.ownerLogin,
+    switching: stored !== null,
+  };
   openDashboard();
 }
 
@@ -173,11 +198,16 @@ async function confirm(gen: number): Promise<void> {
   state.joined = true;
   // google_connect blocks until the browser callback: show the landed join first.
   emitState();
-  if (await googleConnected()) return;
+  const connected = await googleConnected();
   if (gen !== generation) return;
+  if (connected) {
+    state.googleNeedsConnect = false;
+    return;
+  }
   const google = await reconnectGoogle();
   if (gen !== generation) return;
-  state.googleNeedsConnect = !google.ok;
+  // The sign-in can block for minutes; a leave meanwhile wins.
+  state.googleNeedsConnect = state.joined && !google.ok;
 }
 
 async function handleAction(gen: number, action: TeamAction): Promise<void> {
@@ -193,6 +223,8 @@ async function handleAction(gen: number, action: TeamAction): Promise<void> {
       state.pending = null;
       return;
     case "leave": {
+      // A join in flight would land after the leave.
+      if (state.busy) return;
       state.error = null;
       await leaveTeam();
       if (gen !== generation) return;
@@ -217,7 +249,7 @@ async function handleAction(gen: number, action: TeamAction): Promise<void> {
       state.error = null;
       const google = await reconnectGoogle();
       if (gen !== generation) return;
-      state.googleNeedsConnect = !google.ok;
+      state.googleNeedsConnect = state.joined && !google.ok;
       return;
     }
   }
@@ -278,12 +310,15 @@ function stopTeamController(): void {
   refreshTimer = null;
   retryTimer = null;
   unlisteners.splice(0).forEach((un) => un());
-  // A join cut off by stop() must not leave the next run busy.
+  // A join cut off by stop() must not leave the next run busy, or showing a
+  // prompt whose link is gone.
   state.busy = false;
+  pendingLink = null;
+  state.pending = null;
 }
 
 export function __resetTeamControllerForTests(): void {
   stopTeamController();
-  pendingLink = null;
+  linkSeq = 0;
   state = initialState();
 }

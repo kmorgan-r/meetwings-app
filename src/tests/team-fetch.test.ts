@@ -17,6 +17,7 @@ import { GIST_API_BASE, TEAM_FETCH_TIMEOUT_MS, fetchTeamBlob } from "@/lib/team/
 
 // Fake id only - never a real gist id.
 const ID = "b".repeat(32);
+const OWNER = "octo-cat";
 
 type FakeResponseInit = {
   status?: number;
@@ -32,9 +33,13 @@ function gistResponse({ status = 200, body = "" }: FakeResponseInit = {}): Respo
   } as unknown as Response;
 }
 
-function gistJson(body: unknown): Response {
-  return gistResponse({ body: JSON.stringify(body) });
+/** A gist API body; it carries `owner.login` unless `body` overrides `owner`. */
+function gistJson(body: Record<string, unknown>): Response {
+  return gistResponse({ body: JSON.stringify({ owner: { login: OWNER }, ...body }) });
 }
+
+const blobOf = (blob: string, ownerLogin = OWNER) => ({ ok: true, value: { blob, ownerLogin } });
+const VALID_FILES = { files: { "team.txt": { content: "mwt1.x.y" } } };
 
 function okResponseWithTextBody(text: string): Response {
   return { status: 200, ok: true, text: () => Promise.resolve(text) } as unknown as Response;
@@ -54,7 +59,7 @@ describe("fetchTeamBlob", () => {
 
     const result = await fetchTeamBlob(ID);
 
-    expect(result).toEqual({ ok: true, value: "mwt1.x.y" });
+    expect(result).toEqual(blobOf("mwt1.x.y"));
     expect(tauriFetch).toHaveBeenCalledTimes(1);
     expect(tauriFetch).toHaveBeenCalledWith(
       GIST_API_BASE + ID,
@@ -76,7 +81,7 @@ describe("fetchTeamBlob", () => {
 
     const result = await fetchTeamBlob(gistId);
 
-    expect(result).toEqual({ ok: true, value: "mwt1.x.y" });
+    expect(result).toEqual(blobOf("mwt1.x.y"));
     expect(tauriFetch).toHaveBeenCalledWith(GIST_API_BASE + gistId, expect.anything());
   });
 
@@ -156,7 +161,7 @@ describe("fetchTeamBlob", () => {
 
     const result = await fetchTeamBlob(ID);
 
-    expect(result).toEqual({ ok: true, value: "mwt1.x.y" });
+    expect(result).toEqual(blobOf("mwt1.x.y"));
   });
 
   it("picks the mwt1 file next to a README and trims the trailing newline", async () => {
@@ -166,7 +171,7 @@ describe("fetchTeamBlob", () => {
 
     const result = await fetchTeamBlob(ID);
 
-    expect(result).toEqual({ ok: true, value: "mwt1.x.y" });
+    expect(result).toEqual(blobOf("mwt1.x.y"));
   });
 
   it("two mwt1 files -> TEAM_FILE_INVALID", async () => {
@@ -200,6 +205,37 @@ describe("fetchTeamBlob", () => {
 
       expect(result).toEqual({ ok: false, code: "TEAM_LINK_INVALID" });
       expect(tauriFetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["a", "Team-Owner-1", "x".repeat(39)])("returns the gist owner's login %j with the blob", async (login) => {
+    vi.mocked(tauriFetch).mockResolvedValue(gistJson({ owner: { login }, ...VALID_FILES }));
+
+    const result = await fetchTeamBlob(ID);
+
+    expect(result).toEqual(blobOf("mwt1.x.y", login));
+  });
+
+  it.each([
+    ["no owner", { ...VALID_FILES }],
+    ["owner null", { owner: null, ...VALID_FILES }],
+    ["owner without login", { owner: {}, ...VALID_FILES }],
+  ])("%s -> TEAM_FETCH_FAILED", async (_name, body) => {
+    vi.mocked(tauriFetch).mockResolvedValue(gistResponse({ body: JSON.stringify(body) }));
+
+    const result = await fetchTeamBlob(ID);
+
+    expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
+  });
+
+  it.each<unknown>(["a b", "", "x".repeat(40), "-lead", "a_b", 42, null, ["octo"]])(
+    "owner.login %j has a bad shape -> TEAM_FETCH_FAILED",
+    async (login) => {
+      vi.mocked(tauriFetch).mockResolvedValue(gistJson({ owner: { login }, ...VALID_FILES }));
+
+      const result = await fetchTeamBlob(ID);
+
+      expect(result).toEqual({ ok: false, code: "TEAM_FETCH_FAILED" });
     },
   );
 });

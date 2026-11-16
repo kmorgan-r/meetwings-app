@@ -3,8 +3,8 @@ import type { TeamErrorCode, TeamResult } from "@/lib/team/team-file";
 
 /**
  * Fetches the encrypted team-settings blob ("mwt1."-prefixed text) out of the
- * owner's secret GitHub Gist. Trust boundary: everything read here comes from
- * the internet.
+ * owner's secret GitHub Gist, with the gist owner's login (the join prompt
+ * names it). Trust boundary: everything read here comes from the internet.
  *
  * Load-bearing details:
  * - tauriFetch, per CLAUDE.md - the webview fetch would not have the plugin's
@@ -29,12 +29,22 @@ const GIST_ID_RE = /^[0-9a-f]{20,32}$/;
 
 const BLOB_PREFIX = "mwt1.";
 
+// GitHub's login shape. The join prompt shows it, so it is validated here.
+const OWNER_LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
 const fail = (code: TeamErrorCode): { ok: false; code: TeamErrorCode } => ({ ok: false, code });
 
+/** `owner.login`, or null when it is missing or not a GitHub login. */
+function pickOwnerLogin(parsed: unknown): string | null {
+  const owner = (parsed as { owner?: unknown } | null)?.owner;
+  const login = typeof owner === "object" && owner !== null ? (owner as { login?: unknown }).login : undefined;
+  return typeof login === "string" && OWNER_LOGIN_RE.test(login) ? login : null;
+}
+
 /**
- * `files` must be a non-null object. Entries whose `content` is not a string
- * are skipped; the file whose trimmed content starts with "mwt1." must be
- * exactly one and not truncated.
+ * `files` must be a plain object (not null, not an array). Entries whose
+ * `content` is not a string are skipped; the file whose trimmed content
+ * starts with "mwt1." must be exactly one and not truncated.
  */
 function pickBlob(parsed: unknown): TeamResult<string> {
   const files = (parsed as { files?: unknown } | null)?.files;
@@ -54,7 +64,9 @@ function pickBlob(parsed: unknown): TeamResult<string> {
   return { ok: true, value: matches[0] };
 }
 
-export async function fetchTeamBlob(gistId: string): Promise<TeamResult<string>> {
+export async function fetchTeamBlob(
+  gistId: string,
+): Promise<TeamResult<{ blob: string; ownerLogin: string }>> {
   if (!GIST_ID_RE.test(gistId)) return fail("TEAM_LINK_INVALID");
 
   const controller = new AbortController();
@@ -89,12 +101,17 @@ export async function fetchTeamBlob(gistId: string): Promise<TeamResult<string>>
     // The body read is inside the same race: a stalled body must hit the
     // timer too.
     const text = (await Promise.race([response.text(), timerPromise])) as string;
+    let parsed: unknown;
     try {
-      return pickBlob(JSON.parse(text) as unknown);
+      parsed = JSON.parse(text);
     } catch {
       // A 200 that is not JSON: the internet, not the file, is broken.
       return fail("TEAM_FETCH_FAILED");
     }
+    const ownerLogin = pickOwnerLogin(parsed);
+    if (ownerLogin === null) return fail("TEAM_FETCH_FAILED");
+    const blob = pickBlob(parsed);
+    return blob.ok ? { ok: true, value: { blob: blob.value, ownerLogin } } : blob;
   } catch {
     // A throw, or the timer winning the race - same user-facing answer.
     return fail("TEAM_FETCH_FAILED");

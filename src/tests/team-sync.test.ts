@@ -44,6 +44,7 @@ import { exportTeamSettings, type TeamFileV1 } from "@/lib/team/team-file";
 import { buildTeamLink, type TeamLink } from "@/lib/team/team-link";
 import {
   __resetTeamSyncForTests,
+  fetchTeamFile,
   leaveTeam,
   loadOwnerTeamLink,
   loadStoredTeamLink,
@@ -68,8 +69,12 @@ function teamFile(): TeamFileV1 {
   };
 }
 
+const OWNER_LOGIN = "team-owner";
 const gistResponse = (blob: string, status = 200) =>
-  ({ status, text: async () => JSON.stringify({ files: { "team.txt": { content: blob } } }) }) as unknown as Response;
+  ({
+    status,
+    text: async () => JSON.stringify({ owner: { login: OWNER_LOGIN }, files: { "team.txt": { content: blob } } }),
+  }) as unknown as Response;
 
 const serve = async (payload: unknown, key = KEY) =>
   vi.mocked(tauriFetch).mockResolvedValue(
@@ -124,6 +129,19 @@ describe("syncTeam failures", () => {
     expect(h.fake.secure.has(TEAM_LINK_SECURE_KEY)).toBe(false);
     expect(h.fake.local.has(STORAGE_KEYS.TEAM_LAST_SYNCED_AT)).toBe(false);
     expect(emitted()).toEqual([]);
+  });
+});
+
+describe("fetchTeamFile", () => {
+  it("returns the parsed file and the gist owner's login, and applies nothing", async () => {
+    await serve(teamFile());
+    const before = h.fake.snapshot();
+
+    const r = await fetchTeamFile(LINK);
+
+    expect(r).toEqual({ ok: true, value: { file: teamFile(), ownerLogin: OWNER_LOGIN } });
+    expect(h.apply).not.toHaveBeenCalled();
+    expect(h.fake.snapshot()).toBe(before);
   });
 });
 

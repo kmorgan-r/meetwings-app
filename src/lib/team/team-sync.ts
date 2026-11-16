@@ -37,12 +37,16 @@ export async function loadOwnerTeamLink(): Promise<TeamLink | null> {
   }
 }
 
-export async function fetchTeamFile(link: TeamLink): Promise<TeamResult<TeamFileV1>> {
-  const blob = await fetchTeamBlob(link.gistId);
-  if (!blob.ok) return blob;
-  const plain = await decryptTeamPayload(blob.value, link.key);
+/** Fetches, decrypts and validates; applies nothing. */
+export async function fetchTeamFile(
+  link: TeamLink
+): Promise<TeamResult<{ file: TeamFileV1; ownerLogin: string }>> {
+  const fetched = await fetchTeamBlob(link.gistId);
+  if (!fetched.ok) return fetched;
+  const plain = await decryptTeamPayload(fetched.value.blob, link.key);
   if (plain === null) return { ok: false, code: "TEAM_DECRYPT_FAILED" };
-  return parseTeamFile(plain);
+  const file = parseTeamFile(plain);
+  return file.ok ? { ok: true, value: { file: file.value, ownerLogin: fetched.value.ownerLogin } } : file;
 }
 
 // Each emit is independent: one failing never skips the others.
@@ -70,7 +74,10 @@ async function run(link: TeamLink, opts: { firstJoin: boolean }): Promise<ApplyR
       warn(file.code);
       return { ok: false, code: file.code, landed: false, googleClientChanged: false };
     }
-    const result = await applyTeamFile(file.value, opts.firstJoin ? { firstJoin: true, link } : { firstJoin: false });
+    const result = await applyTeamFile(
+      file.value.file,
+      opts.firstJoin ? { firstJoin: true, link } : { firstJoin: false }
+    );
     if (!result.ok) {
       warn(result.code);
       if (result.landed) emitChanged();

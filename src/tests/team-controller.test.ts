@@ -66,6 +66,10 @@ const LINK_A1 = linkOf(GIST_A, KEY_1);
 const LINK_A2 = linkOf(GIST_A, KEY_2);
 const LINK_B1 = linkOf(GIST_B, KEY_1);
 
+const OWNER = "team-owner";
+const prompt = (gistShort: string, switching: boolean, owner = OWNER) => ({ gistShort, owner, switching });
+const preview = (ownerLogin = OWNER) => ({ ok: true, value: { file: {}, ownerLogin } });
+
 const OK = { ok: true, value: { changed: true, googleClientChanged: false } };
 const fail = (code: string, googleClientChanged = false) => ({
   ok: false,
@@ -137,7 +141,7 @@ beforeEach(() => {
     cmd === "google_status" ? { connected: h.googleConnected, sessionOnly: false } : undefined
   );
   h.syncTeam.mockReset().mockResolvedValue(OK);
-  h.fetchTeamFile.mockReset().mockResolvedValue({ ok: true, value: {} });
+  h.fetchTeamFile.mockReset().mockResolvedValue(preview());
   h.leaveTeam.mockReset().mockResolvedValue(undefined);
   h.loadStoredTeamLink.mockReset().mockImplementation(async () => h.stored);
   h.loadOwnerTeamLink.mockReset().mockResolvedValue(null);
@@ -155,7 +159,7 @@ describe("team controller: incoming links", () => {
     h.getCurrent.mockResolvedValue([LINK_A1]);
     await start();
 
-    expect(lastState().pending).toEqual({ gistShort: "012345", switching: false });
+    expect(lastState().pending).toEqual(prompt("012345", false));
     expect(lastState().joined).toBe(false);
     expect(invokedCount("open_dashboard")).toBe(1);
     expect(h.syncTeam).not.toHaveBeenCalled();
@@ -167,7 +171,7 @@ describe("team controller: incoming links", () => {
 
     await openUrl(LINK_B1);
 
-    expect(lastState().pending).toEqual({ gistShort: "fedcba", switching: false });
+    expect(lastState().pending).toEqual(prompt("fedcba", false));
     expect(invokedCount("open_dashboard")).toBe(1);
     expect(h.syncTeam).not.toHaveBeenCalled();
   });
@@ -181,6 +185,7 @@ describe("team controller: incoming links", () => {
 
     expect(h.syncTeam).toHaveBeenCalledTimes(1);
     expect(h.syncTeam).toHaveBeenCalledWith(A1, { firstJoin: false });
+    expect(h.fetchTeamFile).not.toHaveBeenCalled();
     expect(lastState().pending).toBeNull();
     expect(invokedCount("open_dashboard")).toBe(0);
   });
@@ -191,7 +196,7 @@ describe("team controller: incoming links", () => {
 
     await openUrl(LINK_B1);
 
-    expect(lastState().pending).toEqual({ gistShort: "fedcba", switching: true });
+    expect(lastState().pending).toEqual(prompt("fedcba", true));
   });
 
   it("the same gist with a different key prompts", async () => {
@@ -201,7 +206,7 @@ describe("team controller: incoming links", () => {
 
     await openUrl(LINK_A2);
 
-    expect(lastState().pending).toEqual({ gistShort: "012345", switching: true });
+    expect(lastState().pending).toEqual(prompt("012345", true));
     expect(invokedCount("open_dashboard")).toBe(1);
     expect(h.syncTeam).not.toHaveBeenCalled();
   });
@@ -220,13 +225,20 @@ describe("team controller: incoming links", () => {
     expect(lastState().pending).toBeNull();
     expect(invokedCount("open_dashboard")).toBe(1);
 
-    // A valid link whose key carries the sentinel, then a join that throws an
-    // Error naming the link: neither may reach a log, an emit or an invoke.
+    // A valid link whose key carries the sentinel: a preview that throws an
+    // Error naming the link, then a join that does the same. None of it may
+    // reach a log, an emit or an invoke.
     const secretKey = (SENTINEL + "x".repeat(43)).slice(0, 43);
     const secretLink = linkOf(GIST_B, secretKey);
+    h.fetchTeamFile.mockRejectedValueOnce(new Error(`preview ${secretLink}`));
+    await openUrl(secretLink);
+    expect(lastState().error).toBe("TEAM_WRITE_FAILED");
+    expect(lastState().pending).toBeNull();
+
     h.syncTeam.mockRejectedValue(new Error(`boom ${secretLink}`));
     await openUrl(secretLink);
-    expect(lastState().pending).toEqual({ gistShort: "fedcba", switching: false });
+    expect(h.fetchTeamFile).toHaveBeenLastCalledWith({ gistId: GIST_B, key: secretKey });
+    expect(lastState().pending).toEqual(prompt("fedcba", false));
     await act({ type: "confirm" });
     expect(lastState().error).toBe("TEAM_WRITE_FAILED");
 
@@ -249,11 +261,62 @@ describe("team controller: incoming links", () => {
     await openUrl(LINK_A1);
     await openUrl(LINK_B1);
 
-    expect(lastState().pending).toEqual({ gistShort: "fedcba", switching: false });
+    expect(lastState().pending).toEqual(prompt("fedcba", false));
     expect(h.syncTeam).not.toHaveBeenCalled();
 
     await act({ type: "confirm" });
 
+    expect(h.syncTeam).toHaveBeenCalledTimes(1);
+    expect(h.syncTeam).toHaveBeenCalledWith({ gistId: GIST_B, key: KEY_1 }, { firstJoin: true });
+  });
+
+  it("the prompt names the gist owner", async () => {
+    h.fetchTeamFile.mockResolvedValue(preview("octo-cat"));
+    await start();
+
+    await openUrl(LINK_B1);
+
+    expect(h.fetchTeamFile).toHaveBeenCalledWith({ gistId: GIST_B, key: KEY_1 });
+    expect(lastState().pending?.owner).toBe("octo-cat");
+    expect(lastState().pending).toEqual(prompt("fedcba", false, "octo-cat"));
+  });
+
+  it("a link whose preview fails shows the error and no prompt, and applies nothing", async () => {
+    await start();
+    h.fetchTeamFile.mockResolvedValue({ ok: false, code: "TEAM_DECRYPT_FAILED" });
+
+    await openUrl(LINK_B1);
+
+    expect(lastState()).toMatchObject({ pending: null, error: "TEAM_DECRYPT_FAILED", errorSeq: 1 });
+    expect(invokedCount("open_dashboard")).toBe(1);
+    await act({ type: "confirm" });
+    expect(h.syncTeam).not.toHaveBeenCalled();
+  });
+
+  it("a preview that resolves after a newer link is dropped", async () => {
+    await start();
+    const slowA = deferred<ReturnType<typeof preview>>();
+    h.fetchTeamFile
+      .mockResolvedValueOnce(preview("first-owner"))
+      .mockReturnValueOnce(slowA.promise)
+      .mockResolvedValueOnce(preview("bee-owner"));
+    await openUrl(LINK_A2);
+    expect(lastState().pending).toEqual(prompt("012345", false, "first-owner"));
+
+    await openUrl(LINK_A1);
+    // The older prompt is gone while A previews: a racing confirm joins nothing.
+    expect(lastState().pending).toBeNull();
+    await act({ type: "confirm" });
+    expect(h.syncTeam).not.toHaveBeenCalled();
+    await openUrl(LINK_B1);
+    expect(lastState().pending).toEqual(prompt("fedcba", false, "bee-owner"));
+
+    slowA.resolve(preview("aye-owner"));
+    await flush();
+
+    expect(lastState().pending).toEqual(prompt("fedcba", false, "bee-owner"));
+    expect(h.syncTeam).not.toHaveBeenCalled();
+    await act({ type: "confirm" });
     expect(h.syncTeam).toHaveBeenCalledTimes(1);
     expect(h.syncTeam).toHaveBeenCalledWith({ gistId: GIST_B, key: KEY_1 }, { firstJoin: true });
   });
@@ -405,6 +468,72 @@ describe("team controller: actions", () => {
     await act({ type: "confirm" });
 
     expect(lastState()).toMatchObject({ joined: true, googleNeedsConnect: true, error: null });
+
+    // A later join that finds Google connected clears the stale flag.
+    h.googleConnected = true;
+    await openUrl(LINK_B1);
+    await act({ type: "confirm" });
+    expect(h.reconnectGoogle).toHaveBeenCalledTimes(1);
+    expect(lastState()).toMatchObject({ joined: true, googleNeedsConnect: false });
+  });
+
+  it("a leave during Google sign-in keeps googleNeedsConnect off", async () => {
+    await start();
+    await openUrl(LINK_A1);
+    const google = deferred<{ ok: false; code: string }>();
+    h.reconnectGoogle.mockReturnValue(google.promise);
+
+    await act({ type: "confirm" });
+    expect(lastState()).toMatchObject({ joined: true, busy: false });
+    await act({ type: "leave" });
+    google.resolve({ ok: false, code: "GOOGLE_AUTH_REJECTED" });
+    await flush();
+
+    expect(h.leaveTeam).toHaveBeenCalledTimes(1);
+    expect(lastState()).toMatchObject({ joined: false, googleNeedsConnect: false });
+
+    // A tick already in flight when the user left changes nothing either.
+    h.stored = A1;
+    const tick = deferred<unknown>();
+    h.syncTeam.mockReturnValueOnce(tick.promise);
+    await vi.advanceTimersByTimeAsync(TEAM_REFRESH_MS);
+    tick.resolve({ ok: true, value: { changed: true, googleClientChanged: true } });
+    await flush();
+    expect(lastState()).toMatchObject({ joined: false, googleNeedsConnect: false });
+  });
+
+  it("a leave during an in-flight confirm is ignored", async () => {
+    await start();
+    await openUrl(LINK_A1);
+    const sync = deferred<typeof OK>();
+    h.syncTeam.mockReturnValue(sync.promise);
+
+    h.actionHandler!({ payload: { type: "confirm" } });
+    await flush();
+    await act({ type: "leave" });
+
+    expect(h.leaveTeam).not.toHaveBeenCalled();
+    sync.resolve(OK);
+    await flush();
+    expect(lastState().joined).toBe(true);
+  });
+
+  it("a state-request mid-confirm reports busy", async () => {
+    await start();
+    await openUrl(LINK_A1);
+    const sync = deferred<typeof OK>();
+    h.syncTeam.mockReturnValue(sync.promise);
+    h.actionHandler!({ payload: { type: "confirm" } });
+    await flush();
+    h.emit.mockClear();
+
+    await act({ type: "state-request" });
+
+    expect(states()).toHaveLength(1);
+    expect(lastState().busy).toBe(true);
+    sync.resolve(OK);
+    await flush();
+    expect(lastState().busy).toBe(false);
   });
 
   it("a throwing action clears busy and reports TEAM_WRITE_FAILED", async () => {
@@ -444,6 +573,15 @@ describe("team controller: actions", () => {
     await start();
     expect(lastState()).toMatchObject({ joined: true, googleNeedsConnect: true });
 
+    h.reconnectGoogle.mockResolvedValue({ ok: true });
+    await act({ type: "connect-google" });
+    expect(lastState().googleNeedsConnect).toBe(false);
+
+    h.reconnectGoogle.mockResolvedValue({ ok: false, code: "GOOGLE_AUTH_REJECTED" });
+    await act({ type: "connect-google" });
+    expect(h.reconnectGoogle).toHaveBeenCalledTimes(2);
+    expect(lastState().googleNeedsConnect).toBe(true);
+
     await act({ type: "leave" });
     expect(h.leaveTeam).toHaveBeenCalledTimes(1);
     expect(lastState()).toMatchObject({ joined: false, googleNeedsConnect: false });
@@ -453,13 +591,9 @@ describe("team controller: actions", () => {
     await vi.advanceTimersByTimeAsync(TEAM_REFRESH_MS);
     expect(h.syncTeam).not.toHaveBeenCalled();
 
-    h.reconnectGoogle.mockResolvedValue({ ok: false, code: "GOOGLE_AUTH_REJECTED" });
+    // Not joined: a failed sign-in asks for no reconnect.
     await act({ type: "connect-google" });
-    expect(lastState().googleNeedsConnect).toBe(true);
-
-    h.reconnectGoogle.mockResolvedValue({ ok: true });
-    await act({ type: "connect-google" });
-    expect(h.reconnectGoogle).toHaveBeenCalledTimes(2);
+    expect(h.reconnectGoogle).toHaveBeenCalledTimes(3);
     expect(lastState().googleNeedsConnect).toBe(false);
   });
 
@@ -491,7 +625,7 @@ describe("team controller: actions", () => {
     expect(states()).toHaveLength(1);
 
     await act({ type: "join", link: LINK_A1 });
-    expect(lastState().pending).toEqual({ gistShort: "012345", switching: false });
+    expect(lastState().pending).toEqual(prompt("012345", false));
     expect(h.listen).toHaveBeenCalledWith(TEAM_ACTION_EVENT, expect.any(Function));
   });
 });
@@ -597,6 +731,21 @@ describe("team controller: start, refresh and stop", () => {
     expect(h.syncTeam).not.toHaveBeenCalled();
   });
 
+  it("stop() during a confirm leaves the next run with no prompt and not busy", async () => {
+    await start();
+    await openUrl(LINK_B1);
+    h.syncTeam.mockReturnValue(new Promise(() => {}));
+    h.actionHandler!({ payload: { type: "confirm" } });
+    await flush();
+    expect(lastState()).toMatchObject({ busy: true, pending: { gistShort: "fedcba" } });
+
+    stop!();
+    h.emit.mockClear();
+    await start();
+
+    expect(lastState()).toMatchObject({ busy: false, pending: null });
+  });
+
   it("a listener that resolves after stop() is unlistened at once and never handles an event", async () => {
     h.stored = A1;
     h.getCurrent.mockResolvedValue([LINK_B1]);
@@ -639,7 +788,7 @@ describe("team controller: start, refresh and stop", () => {
     h.getCurrent.mockResolvedValue(null);
     await start();
     await openUrl(LINK_B1);
-    expect(lastState().pending).toEqual({ gistShort: "fedcba", switching: true });
+    expect(lastState().pending).toEqual(prompt("fedcba", true));
     h.emit.mockClear();
     h.invoke.mockClear();
 
