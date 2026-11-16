@@ -263,7 +263,12 @@ clicks.
   - **Confirm before the first apply**, and again before switching to a
     different gist: an in-app prompt names what will change (AI, speech,
     Notion and Google settings) and the source gist. (My call, from spec
-    review.)
+    review.) The source is named by the gist owner's GitHub login: the app
+    fetches and validates the file (applying nothing) before the prompt
+    shows, so a link that fails shows the join error instead of a prompt.
+    Anyone can make a gist and a link, and after a join the owner can change
+    the file at will, so the owner is the only lasting trust signal.
+    (Added during implementation, from a security review.)
   - On confirm, the app fetches, validates and applies everything, then
     starts Google sign-in if not already connected. The link is stored like a
     secret (secure storage, never localStorage).
