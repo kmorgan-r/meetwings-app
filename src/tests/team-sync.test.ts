@@ -111,7 +111,7 @@ describe("syncTeam failures", () => {
     over(f);
     await serve(f);
   };
-  it.each<[string, () => Promise<void> | void, string]>([
+  it.each<[string, () => unknown, string]>([
     ["HTTP 404", () => void vi.mocked(tauriFetch).mockResolvedValue(gistResponse("", 404)), "TEAM_FETCH_FAILED"],
     ["network error", () => void vi.mocked(tauriFetch).mockRejectedValue(new Error("offline")), "TEAM_FETCH_FAILED"],
     ["wrong key", () => serve(teamFile(), generateTeamKey()), "TEAM_DECRYPT_FAILED"],

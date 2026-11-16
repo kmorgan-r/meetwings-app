@@ -124,9 +124,9 @@ describe("reconnectGoogle", () => {
     expect(h.save).toHaveBeenCalledWith(CONFIG);
     expect(h.invoke).toHaveBeenCalledWith("google_connect", { clientId: "id", clientSecret: "s" });
     expect(h.invoke.mock.invocationCallOrder[0]).toBeLessThan(
-      h.emit.mock.invocationCallOrder.at(-1)!,
+      h.emit.mock.invocationCallOrder[h.emit.mock.invocationCallOrder.length - 1],
     );
-    expect(emitted().at(-1)).toBe(GOOGLE_CONNECTION_CHANGED_EVENT);
+    expect(emitted().slice(-1)[0]).toBe(GOOGLE_CONNECTION_CHANGED_EVENT);
   });
 
   // Was "broadcasts nothing": connectGoogle broadcasts on every path now.
