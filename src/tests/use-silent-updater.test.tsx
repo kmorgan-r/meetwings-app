@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, renderHook } from "@testing-library/react";
 
 const h = vi.hoisted(() => ({
   label: "main",
@@ -20,15 +19,17 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 vi.mock("@/lib/platform", () => ({ isLinux: () => h.linux }));
 vi.mock("@/lib/updater/silent-updater", () => ({ startSilentUpdater: h.start }));
 
-import { useSilentUpdater } from "@/hooks/useSilentUpdater";
+import { startMainWindowUpdater } from "@/lib/updater/main-window-updater";
 import {
   __resetActivityForTests,
   getActivitySnapshot,
 } from "@/lib/updater/recording-activity.store";
 import { installMemoryLocalStorage } from "./memory-local-storage";
 
-const flush = () => act(async () => {});
-const fire = (event: string) => act(() => h.listeners.get(event)?.());
+const flush = async () => {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+};
+const fire = (event: string) => h.listeners.get(event)?.();
 
 beforeEach(() => {
   __resetActivityForTests();
@@ -49,19 +50,21 @@ beforeEach(() => {
   );
 });
 
-describe("useSilentUpdater", () => {
+describe("startMainWindowUpdater", () => {
   it("does nothing outside the main window", async () => {
     h.label = "dashboard";
-    renderHook(() => useSilentUpdater());
+    const stop = startMainWindowUpdater();
     await flush();
 
+    expect(h.invoke).not.toHaveBeenCalled();
     expect(h.listen).not.toHaveBeenCalled();
     expect(h.start).not.toHaveBeenCalled();
+    stop();
   });
 
   it("does not start the updater or listen for meetings on Linux", async () => {
     h.linux = true;
-    renderHook(() => useSilentUpdater());
+    startMainWindowUpdater();
     await flush();
 
     expect(h.listen).not.toHaveBeenCalled();
@@ -71,7 +74,7 @@ describe("useSilentUpdater", () => {
   it("records the app version in main on Linux too, and not in other windows", async () => {
     installMemoryLocalStorage();
     h.linux = true;
-    renderHook(() => useSilentUpdater());
+    startMainWindowUpdater();
     await flush();
 
     expect(h.invoke).toHaveBeenCalledWith("get_app_version");
@@ -82,14 +85,14 @@ describe("useSilentUpdater", () => {
 
     h.label = "dashboard";
     h.linux = false;
-    renderHook(() => useSilentUpdater());
+    startMainWindowUpdater();
     await flush();
 
     expect(h.invoke).toHaveBeenCalledTimes(1);
   });
 
   it("tracks meeting state from the three events", async () => {
-    renderHook(() => useSilentUpdater());
+    startMainWindowUpdater();
     await flush();
 
     expect(h.listen.mock.calls.map(([event]) => event).sort()).toEqual([
@@ -111,21 +114,21 @@ describe("useSilentUpdater", () => {
     expect(getActivitySnapshot().meetingActive).toBe(false);
   });
 
-  it("unmount stops the updater and unlistens", async () => {
-    const { unmount } = renderHook(() => useSilentUpdater());
+  it("stop() stops the updater and unlistens", async () => {
+    const stop = startMainWindowUpdater();
     await flush();
     expect(h.unlisteners).toHaveLength(3);
     expect(h.stop).not.toHaveBeenCalled();
 
-    unmount();
+    stop();
 
     expect(h.stop).toHaveBeenCalledTimes(1);
     h.unlisteners.forEach((un) => expect(un).toHaveBeenCalledTimes(1));
   });
 
-  it("unmount before listen() resolves still unlistens (cancelled flag)", async () => {
-    const { unmount } = renderHook(() => useSilentUpdater());
-    unmount();
+  it("stop() before listen() resolves still unlistens (cancelled flag)", async () => {
+    const stop = startMainWindowUpdater();
+    stop();
     await flush();
 
     expect(h.stop).toHaveBeenCalledTimes(1);

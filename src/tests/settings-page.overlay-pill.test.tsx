@@ -210,7 +210,6 @@ describe("main window listens for overlay-pill-style-changed", () => {
         sttConfigured: true,
       }),
       useMeetingDetection: () => ({}),
-      useSilentUpdater: () => {},
       useTeamSync: () => {},
       useMeetingCardHost: () => null,
     }));

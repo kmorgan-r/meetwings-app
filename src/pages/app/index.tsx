@@ -12,7 +12,6 @@ import {
   useSetupStatus,
   useMeetingDetection,
   useMeetingCardHost,
-  useSilentUpdater,
   useTeamSync,
 } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
@@ -43,9 +42,6 @@ const App = () => {
   // Teams and Google Meet call detection. Self-gating: inert outside the `main` window and off
   // Windows. Takes no arguments and never touches capture state.
   useMeetingDetection();
-  // Silent background updates, gated on recording activity. Self-gating: inert
-  // outside the `main` window and on Linux.
-  useSilentUpdater();
   // Team deep links and re-syncs. Self-gating: inert outside the `main` window.
   useTeamSync();
   const { customizable, setOverlayPillStyle } = useAppContext();

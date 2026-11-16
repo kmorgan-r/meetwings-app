@@ -131,7 +131,6 @@ describe("app page mounts the detection hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection,
-      useSilentUpdater: () => {},
       useTeamSync: () => {},
     }));
     mockAppRenderDeps();
@@ -631,7 +630,6 @@ describe("<Completion /> mounts the auto-record hook", () => {
         sttConfigured: true,
       }),
       useMeetingDetection: vi.fn(),
-      useSilentUpdater: () => {},
       useTeamSync: () => {},
       useMeetingAutoRecord,
     }));

@@ -68,7 +68,6 @@ const mockAppPage = () => {
       sttConfigured: true,
     }),
     useMeetingDetection: () => ({}),
-    useSilentUpdater: () => {},
     useTeamSync: () => {},
     useMeetingCardHost: () => null,
   }));

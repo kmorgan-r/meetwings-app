@@ -41,7 +41,7 @@ interface DownloadProgress {
   percentage: number;
 }
 
-// Windows and macOS update silently (useSilentUpdater); Linux keeps the
+// Windows and macOS update silently (startMainWindowUpdater); Linux keeps the
 // click-to-install flow.
 export const Updater = () =>
   isLinux() ? <LinuxUpdater /> : <UpdateRetryButton />;
