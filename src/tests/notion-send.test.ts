@@ -707,10 +707,12 @@ describe("only a page proven to be this send's is adopted or trashed", () => {
       expect(asks(world, "same")).toHaveLength(0);
     });
 
-    it("a page carrying this send's ref is adopted, even with a title the legacy rule would reject", async () => {
+    it("a page carrying this send's ref is adopted even when the legacy rule would reject it", async () => {
       await seedSend(UID);
       db.run("UPDATE notion_sends SET create_started_at = 1 WHERE id = ?", [UID]);
-      addRival(world, { id: "mine-ref", created_by: { id: "bot-1" } }, "Renamed by a human");
+      // A creator that is neither me.id nor me.ownerUserId: legacyRule rejects it,
+      // and the resume compare ignores the creator, so only the ref can adopt it.
+      addRival(world, { id: "mine-ref", created_by: { id: "person-2" } });
       withBody("mine-ref", [sendRefBlock(UID), ...buildPageBlocks(summary)]);
       expect(await runNotionSend(UID, makeDeps(world))).toBe("sent");
       expect((await sendOf(UID)).page_id).toBe("mine-ref");
