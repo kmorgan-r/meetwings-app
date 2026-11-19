@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   windowLabel: { value: "main" },
   isWindows: vi.fn(() => true),
+  isMacOS: vi.fn(() => false),
   // Event names whose listen() should reject, so the partial-subscription-failure
   // path is reachable from a test.
   failListenFor: new Set<string>(),
@@ -34,7 +35,13 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
-vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+// isMacOS: jsdom is not a Mac, and currentWatchLists now reads it. A spy, so
+// the Mac cases can turn it on. A factory mock throws when code reads an
+// export it does not define.
+vi.mock("@/lib/platform", () => ({
+  isWindows: mocks.isWindows,
+  isMacOS: mocks.isMacOS,
+}));
 // A detection inside a grace reads the calendar to tell the same call from a
 // new one; no calendar connected here.
 vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
@@ -384,6 +391,7 @@ beforeEach(async () => {
   stored = { meeting_auto_record_enabled: "true" };
   mocks.windowLabel.value = "main";
   mocks.isWindows.mockReturnValue(true);
+  mocks.isMacOS.mockReturnValue(false);
   mocks.failListenFor.clear();
   seedStatus([]);
 });
@@ -489,6 +497,19 @@ describe("useMeetingAutoRecord - enablement and consent", () => {
     await flush();
 
     expect(registered("meeting-detected")).toBe(0);
+  });
+
+  it("F30c: registers listeners on Mac", async () => {
+    // isWindows false with isMacOS true: Linux stays inert (F30b), the Mac
+    // owns the same listeners Windows does.
+    mocks.isWindows.mockReturnValue(false);
+    mocks.isMacOS.mockReturnValue(true);
+
+    mount();
+    await flush();
+
+    expect(registered("meeting-detected")).toBe(1);
+    expect(registered("meeting-ended")).toBe(1);
   });
 
   it("F31: registers each event exactly once and releases them on unmount", async () => {

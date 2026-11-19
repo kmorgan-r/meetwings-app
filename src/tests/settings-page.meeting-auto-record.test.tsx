@@ -2,12 +2,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-let onWindows = true;
+let platform: "windows" | "macos" | "linux" = "windows";
 vi.mock("@/lib/platform", () => ({
-  isWindows: () => onWindows,
-  isMacOS: () => false,
-  isLinux: () => !onWindows,
-  getPlatform: () => (onWindows ? "windows" : "linux"),
+  isWindows: () => platform === "windows",
+  isMacOS: () => platform === "macos",
+  isLinux: () => platform === "linux",
+  getPlatform: () => platform,
 }));
 
 // The toggle's own behaviour is covered by its unit test; here we only care
@@ -43,19 +43,26 @@ vi.mock("@/pages/settings/components", async (importOriginal) => {
 import Settings from "@/pages/settings";
 
 beforeEach(() => {
-  onWindows = true;
+  platform = "windows";
 });
 
 describe("settings page auto-record gate", () => {
   // F28
-  it("renders the toggle on Windows only", () => {
+  it("renders the toggle on Windows and Mac only", () => {
     const { unmount } = render(<Settings />);
     expect(
       screen.queryByLabelText(/automatically record teams and google meet calls/i)
     ).not.toBeNull();
     unmount();
 
-    onWindows = false;
+    platform = "macos";
+    const macUnmount = render(<Settings />).unmount;
+    expect(
+      screen.queryByLabelText(/automatically record teams and google meet calls/i)
+    ).not.toBeNull();
+    macUnmount();
+
+    platform = "linux";
     render(<Settings />);
     expect(
       screen.queryByLabelText(/automatically record teams and google meet calls/i)

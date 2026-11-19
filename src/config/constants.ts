@@ -53,6 +53,10 @@ export const STORAGE_KEYS = {
   // only ("Does not start or stop recording"), so reusing it would silently expand
   // what the user agreed to. The old key is deleted, not migrated.
   MEETING_AUTO_RECORD_ENABLED: "meeting_auto_record_enabled",
+  // Mac-only JSON StartFailure (see lib/meeting-start-failure.ts): the last
+  // automatic-record start failure, shown by the toggle until the next
+  // toggle-on.
+  MEETING_AUTO_RECORD_START_FAILURE: "meeting_auto_record_start_failure",
   CALENDAR_AUTO_SELECT_ENABLED: "calendar_auto_select_enabled",
 
   // User Identity settings
@@ -109,14 +113,17 @@ export const STORAGE_KEYS = {
 // Rust watcher, so adding an app here is a config change rather than a Rust one.
 export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe", "Zoom.exe"];
 
-// Display names for the detection toasts, keyed by LOWERCASED process name.
-// Matching on the Rust side is case-insensitive and the observed basename keeps
-// its original case, so the lookup must lowercase before indexing.
+// Display names for the detection toasts, keyed by process image name (Windows)
+// or bundle ID (Mac). meetingLabel looks a key up with entryMatches on every
+// platform, which is case-insensitive on both sides, so key case does not matter.
+// A bundle-ID key (com.google.Chrome) also matches its helper processes
+// (com.google.Chrome.helper). An .exe key matches only that exact name.
 export const MEETING_DETECT_LABELS: Record<string, string> = {
   "ms-teams.exe": "Teams",
   "teams.exe": "Teams",
   "chrome.exe": "Google Meet",
   "zoom.exe": "Zoom",
+  "com.google.chrome": "Google Meet",
 };
 
 export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
@@ -125,6 +132,12 @@ export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
 // polls) and a confirm handshake. The frontend confirms every candidate, so any
 // mic use counts as a call, calendar event or not (owner decision, 2026-11-16).
 export const MEETING_DETECT_GATED_PROCESSES = ["chrome.exe"];
+
+// The Mac twins of the lists above. Mac IDs are bundle IDs matched with the
+// helper-prefix rule (entryMatches), and they are provisional until the
+// readout on a real Mac confirms Chrome's ID (spec §7 step 3).
+export const MEETING_DETECT_PROCESSES_MAC: string[] = [];
+export const MEETING_DETECT_GATED_PROCESSES_MAC = ["com.google.Chrome"];
 
 // The serialized form of the Rust StopOutcome::TimedOut variant. Kept here so
 // the string that gates the disable-failure ladder has exactly one home; a

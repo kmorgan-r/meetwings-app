@@ -4,9 +4,15 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
-import { isWindows } from "@/lib/platform";
 import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
-import { currentWatchLists } from "@/lib/meeting-detect";
+import { currentWatchLists, isMeetingDetectionPlatform } from "@/lib/meeting-detect";
+import { isMacOS } from "@/lib/platform";
+import { hasMicGrant } from "@/lib/mac-permissions";
+import {
+  MicGrantMissingError,
+  toStartFailure,
+  writeStartFailure,
+} from "@/lib/meeting-start-failure";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import {
   createMeetGate,
@@ -32,7 +38,7 @@ const readSetting = () =>
  */
 export const useMeetingDetection = () => {
   const isOwner = useMemo(
-    () => getCurrentWindow().label === "main" && isWindows(),
+    () => getCurrentWindow().label === "main" && isMeetingDetectionPlatform(),
     []
   );
 
@@ -95,8 +101,24 @@ export const useMeetingDetection = () => {
   };
 
   // Always called inside an enqueued op, so it runs in order with stop/update.
-  const startWatcher = async () =>
-    invoke("start_meeting_watcher", { ...(await currentWatchLists()) });
+  // Returns false when the run was cancelled before the invoke.
+  const startWatcher = async (
+    isCancelled: () => boolean = () => false
+  ): Promise<boolean> => {
+    if (isMacOS()) {
+      const granted = await hasMicGrant();
+      // Checked before acting on the answer: a cancelled run must not throw, or
+      // its catch would write "false", save a failure and emit enabled:false,
+      // switching off a newer toggle-on.
+      if (isCancelled()) return false;
+      if (!granted) throw new MicGrantMissingError();
+    }
+    const lists = await currentWatchLists();
+    // Last statement before the invoke, after every await.
+    if (isCancelled()) return false;
+    await invoke("start_meeting_watcher", { ...lists });
+    return true;
+  };
 
   // Effect 1: the setting and retry channels. Mount-only - putting the setting
   // listener in the [enabled] effect means the first toggle-on is never received,
@@ -142,6 +164,24 @@ export const useMeetingDetection = () => {
             await startWatcher();
             await emit("meeting-detection-watcher-restarted", { ok: true });
           } catch (error) {
+            if (isMacOS() && error instanceof MicGrantMissingError) {
+              const failure = toStartFailure(error);
+              safeLocalStorage.setItem(
+                STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
+                "false"
+              );
+              setEnabled(false);
+              writeStartFailure(failure);
+              await emit("meeting-detection-setting-changed", {
+                enabled: false,
+                failure,
+              });
+              await emit("meeting-detection-watcher-restarted", {
+                ok: false,
+                error: failure.message,
+              });
+              return;
+            }
             await emit("meeting-detection-watcher-restarted", {
               ok: false,
               error: String(error),
@@ -255,18 +295,29 @@ export const useMeetingDetection = () => {
       // Listeners first, always - see listenersReadyRef.
       await listenersReadyRef.current!.promise;
       if (cancelled) return;
+      let started = false;
       try {
-        await startWatcher();
+        started = await startWatcher(() => cancelled);
       } catch (error) {
         safeLocalStorage.setItem(
           STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
           "false"
         );
         setEnabled(false);
-        await emit("meeting-detection-setting-changed", { enabled: false });
+        if (isMacOS()) {
+          const failure = toStartFailure(error);
+          writeStartFailure(failure);
+          await emit("meeting-detection-setting-changed", {
+            enabled: false,
+            failure,
+          });
+        } else {
+          await emit("meeting-detection-setting-changed", { enabled: false });
+        }
         toast.error("Could not turn on auto-record");
         throw error;
       }
+      if (!started) return;
       await emit("meeting-detection-watcher-restarted", { ok: true });
     });
 

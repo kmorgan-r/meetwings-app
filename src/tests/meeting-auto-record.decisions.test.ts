@@ -242,4 +242,26 @@ describe("isSameCall", () => {
       })
     ).toBe(false);
   });
+
+  // A Mac app and its helper are the same call in both directions: the helper
+  // rule matches a suffix the case-insensitive equality of step 1 cannot see.
+  it.each([
+    ["com.google.Chrome", "com.google.Chrome.helper"],
+    ["com.google.Chrome.helper", "com.google.Chrome"],
+  ])("treats a Mac sibling as the same call (%s then %s)", (a, b) => {
+    expect(isSameCall({ endedProcess: a, process: b, events: null, endedAt, now })).toBe(true);
+    expect(isSameCall({ endedProcess: a, process: b, events: [meetingEvent()], endedAt, now })).toBe(true);
+  });
+
+  it("is false when a sibling is no helper of the ended entry", () => {
+    expect(
+      isSameCall({
+        endedProcess: "com.google.Chrome",
+        process: "com.google.ChromeX",
+        events: null,
+        endedAt,
+        now,
+      })
+    ).toBe(false);
+  });
 });

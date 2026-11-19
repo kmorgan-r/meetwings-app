@@ -403,9 +403,10 @@ fn plan_start(
     support: impl FnOnce() -> Result<(), String>,
 ) -> StartAction {
     match (running, stopping) {
-        // The probe runs only when a spawn is actually possible; the two running
-        // arms never probe (a webview reload on an unsupported OS must not pay
-        // for a Core Audio call).
+        // The probe runs only when a spawn is actually possible. The two running
+        // arms never probe: probing a running watcher could turn a transient
+        // Core Audio read failure into `Refuse`, which would switch off a
+        // healthy toggle.
         (false, _) => match support() {
             Ok(()) => StartAction::Spawn,
             Err(e) => StartAction::Refuse(e),

@@ -11,7 +11,7 @@ import {
   TeamSettingsCard,
 } from "./components";
 import { PageLayout } from "@/layouts";
-import { isWindows } from "@/lib/platform";
+import { isMeetingDetectionPlatform } from "@/lib/meeting-detect";
 
 const Settings = () => {
   return (
@@ -40,8 +40,8 @@ const Settings = () => {
       {/* AI Conversation Titles Toggle */}
       <AITitlesToggle />
 
-      {/* Auto-record Meetings Toggle - Windows only */}
-      {isWindows() && <MeetingAutoRecordToggle />}
+      {/* Auto-record Meetings Toggle - Windows and Mac only */}
+      {isMeetingDetectionPlatform() && <MeetingAutoRecordToggle />}
 
       {/* Version, update-check and team-sync status */}
       <AppStatusLine />

@@ -23,7 +23,27 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel }),
 }));
-vi.mock("@/lib/platform", () => ({ isWindows: () => onWindows }));
+vi.mock("@/lib/platform", () => ({
+  isWindows: () => platform === "windows",
+  isMacOS: () => platform === "macos",
+}));
+vi.mock("@/lib/mac-permissions", () => ({
+  hasMicGrant: vi.fn(async () => true),
+}));
+// Lets a test hold the list-load await open: the window between the grant
+// check and the invoke, where the final cancel guard is the only protection.
+const listsGate = vi.hoisted(() => ({ hold: null as Promise<void> | null }));
+vi.mock("@/lib/meeting-detect", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/meeting-detect")>();
+  return {
+    ...actual,
+    currentWatchLists: async () => {
+      const lists = await actual.currentWatchLists();
+      if (listsGate.hold) await listsGate.hold;
+      return lists;
+    },
+  };
+});
 vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
   ...(await importActual<Record<string, unknown>>()),
   loadGoogleConfigState: vi.fn(),
@@ -65,7 +85,7 @@ vi.mock("@/lib/meet-gate", () => ({
 const lastGate = () => gates[gates.length - 1];
 
 let windowLabel = "main";
-let onWindows = true;
+let platform: "windows" | "macos" | "linux" = "windows";
 let stored: Record<string, string> = {};
 
 vi.mock("@/lib", async (importOriginal) => {
@@ -86,6 +106,8 @@ vi.mock("@/lib", async (importOriginal) => {
 
 import { useMeetingDetection } from "@/hooks/useMeetingDetection";
 import { MEETING_DETECT_PROCESSES, STORAGE_KEYS } from "@/config/constants";
+import { hasMicGrant } from "@/lib/mac-permissions";
+import { PERMISSION_RESET_MESSAGE } from "@/lib/meeting-start-failure";
 import {
   GOOGLE_CONNECTION_CHANGED_EVENT,
   loadGoogleConfigState,
@@ -139,8 +161,10 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined);
   emit.mockResolvedValue(undefined);
   loadState.mockResolvedValue({ state: "absent", config: null } as never);
+  vi.mocked(hasMicGrant).mockImplementation(async () => true);
+  listsGate.hold = null;
   windowLabel = "main";
-  onWindows = true;
+  platform = "windows";
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
 });
 
@@ -207,10 +231,33 @@ describe("useMeetingDetection", () => {
 
   // F6
   it("is inert on a non-Windows platform even with the setting persisted on", async () => {
-    onWindows = false;
+    platform = "linux";
     renderHook(() => useMeetingDetection());
     await flush();
 
+    expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
+  });
+
+  // The Mac owns the watcher once its side lands: with the setting seeded on,
+  // the start carries the Mac watch lists; Linux keeps staying inert.
+  it("owns the watcher on Mac, not on Linux", async () => {
+    platform = "macos";
+    const { unmount } = renderHook(() => useMeetingDetection());
+    await flush();
+
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+    expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
+      direct: [],
+      gated: ["com.google.Chrome"],
+    });
+    unmount();
+
+    platform = "linux";
+    invoke.mockClear();
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    expect(cmdCount("start_meeting_watcher")).toBe(0);
     expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
   });
 
@@ -696,6 +743,181 @@ describe("useMeetingDetection", () => {
     expect(order.indexOf("gate.stop")).toBeLessThan(
       order.indexOf("start_meeting_watcher")
     );
+  });
+
+  describe("Mac start checks", () => {
+    const resetFailure = {
+      kind: "permission-reset",
+      message: PERMISSION_RESET_MESSAGE,
+    };
+    const storedFailure = () =>
+      JSON.parse(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]);
+    const emitIndex = (event: string, match: (payload: unknown) => boolean) =>
+      emit.mock.calls.findIndex(([e, p]) => e === event && match(p));
+    const deferredGrant = () => {
+      let resolve: (granted: boolean) => void = () => {};
+      vi.mocked(hasMicGrant).mockImplementation(
+        () =>
+          new Promise<boolean>((r) => {
+            resolve = r;
+          })
+      );
+      return (granted: boolean) => resolve(granted);
+    };
+
+    it("Mac: a start with the mic grant missing never invokes the watcher and turns the toggle off", async () => {
+      platform = "macos";
+      vi.mocked(hasMicGrant).mockImplementation(async () => false);
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("false");
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+        failure: resetFailure,
+      });
+      expect(storedFailure()).toEqual(resetFailure);
+    });
+
+    it("Mac: a refused start is persisted and carried", async () => {
+      platform = "macos";
+      const refused = {
+        kind: "start-error",
+        message: "Auto-record needs macOS 14.2 or later",
+      };
+      invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "start_meeting_watcher") {
+          throw "Auto-record needs macOS 14.2 or later";
+        }
+        return undefined;
+      });
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+        failure: refused,
+      });
+      expect(storedFailure()).toEqual(refused);
+    });
+
+    it("Mac: turning off during the mic check fires no start", async () => {
+      platform = "macos";
+      const resolveGrant = deferredGrant();
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      resolveGrant(true);
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+    });
+
+    it("Mac: a denied mic check that arrives after toggle-off changes nothing", async () => {
+      platform = "macos";
+      const resolveGrant = deferredGrant();
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      emit.mockClear();
+      resolveGrant(false);
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(
+        emit.mock.calls.some(([, payload]) => (payload as { failure?: unknown } | undefined)?.failure)
+      ).toBe(false);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it("a toggle-off while the watch lists load fires no start and announces no restart", async () => {
+      let release: () => void = () => {};
+      listsGate.hold = new Promise<void>((r) => {
+        release = r;
+      });
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      release();
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(emit).not.toHaveBeenCalledWith("meeting-detection-watcher-restarted", {
+        ok: true,
+      });
+    });
+
+    it("Mac: retry with the mic grant gone turns the toggle off", async () => {
+      platform = "macos";
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+      expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+      vi.mocked(hasMicGrant).mockImplementation(async () => false);
+      fire("meeting-detection-retry-requested");
+      await flush();
+      await flush();
+
+      expect(cmdCount("stop_meeting_watcher")).toBeGreaterThanOrEqual(1);
+      expect(cmdCount("start_meeting_watcher")).toBe(1);
+      const changed = emitIndex(
+        "meeting-detection-setting-changed",
+        (p) =>
+          (p as { failure?: { kind?: string } } | undefined)?.failure?.kind ===
+          "permission-reset"
+      );
+      const restarted = emitIndex(
+        "meeting-detection-watcher-restarted",
+        (p) => (p as { ok?: boolean } | undefined)?.ok === false
+      );
+      expect(changed).toBeGreaterThanOrEqual(0);
+      expect(restarted).toBeGreaterThan(changed);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("false");
+    });
+
+    it("Windows: no permission calls, and the failure payload is unchanged", async () => {
+      platform = "windows";
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+      fire("meeting-detection-retry-requested");
+      await flush();
+      await flush();
+      expect(cmdCount("start_meeting_watcher")).toBe(2);
+
+      invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "start_meeting_watcher") throw new Error("boom");
+        return undefined;
+      });
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      fire("meeting-detection-setting-changed", { enabled: true });
+      await flush();
+      await flush();
+
+      expect(hasMicGrant).not.toHaveBeenCalled();
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+      });
+      expect(
+        emit.mock.calls.some(([, payload]) => (payload as { failure?: unknown } | undefined)?.failure)
+      ).toBe(false);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
+    });
   });
 
   it("StrictMode creates one live gate", async () => {

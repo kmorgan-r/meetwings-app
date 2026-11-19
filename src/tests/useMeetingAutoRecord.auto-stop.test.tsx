@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   windowLabel: { value: "main" },
   isWindows: vi.fn(() => true),
+  isMacOS: vi.fn(() => false),
   // Event names whose listen() should reject, so the partial-subscription-failure
   // path is reachable from a test.
   failListenFor: new Set<string>(),
@@ -39,7 +40,14 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
-vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+// jsdom is not a Mac: the watcher lists stay the Windows ones here. isMacOS is
+// a spy, not a literal, so the Mac cases can turn it on. A factory
+// mock throws when code reads an export it does not define, and
+// currentWatchLists now reads isMacOS.
+vi.mock("@/lib/platform", () => ({
+  isWindows: mocks.isWindows,
+  isMacOS: mocks.isMacOS,
+}));
 vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
   fetchCurrentMeetings: mocks.fetchMeetings,
 }));
@@ -452,6 +460,7 @@ beforeEach(async () => {
   stored = { meeting_auto_record_enabled: "true" };
   mocks.windowLabel.value = "main";
   mocks.isWindows.mockReturnValue(true);
+  mocks.isMacOS.mockReturnValue(false);
   mocks.failListenFor.clear();
   mocks.fetchMeetings.mockReset();
   mocks.fetchMeetings.mockResolvedValue({ kind: "absent" });
@@ -1032,6 +1041,36 @@ describe("useMeetingAutoRecord - same call or new call during the grace", () => 
     expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
     expect(recordingId()).toBe(id);
     expect(h.startNewConversation).not.toHaveBeenCalled();
+  });
+
+  // A Chrome helper under a bundle ID was a new call before the matcher; the
+  // shared entryMatches rule must let it continue the recording. The exact read
+  // count proves onDetected didn't skip the calendar read as a "new call" - an
+  // exact comparison passes the other three assertions anyway.
+  it.each([
+    ["com.google.Chrome", "com.google.Chrome.helper"],
+    ["com.google.Chrome.helper", "com.google.Chrome"],
+  ])("a Chrome helper returning in the grace is the same call (%s then %s)", async (first, second) => {
+    seedStatus([false]); // the start's probe only: nothing stops
+    const now = Date.now();
+    mocks.fetchGoogle.mockResolvedValue({
+      kind: "ok",
+      events: [slot("e1", now - 60_000, now + 60_000)],
+      ownAddress: null,
+    });
+    const { h } = await startAndEnd(first);
+    const id = recordingId();
+    expect(id).not.toBeNull();
+    await sleep(GRACE / 6);
+
+    const reads = mocks.fetchGoogle.mock.calls.length;
+    await fireActed("meeting-detected", { process: second });
+    await settle(GRACE * 2);
+
+    expect(h.setEnableVAD.mock.calls).toEqual([[true]]);
+    expect(recordingId()).toBe(id);
+    expect(h.startNewConversation).not.toHaveBeenCalled();
+    expect(mocks.fetchGoogle.mock.calls.length).toBe(reads + 1);
   });
 
   it("a hand-opened mic with no prior detection and an unreadable calendar counts as the same call", async () => {

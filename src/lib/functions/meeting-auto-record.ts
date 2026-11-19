@@ -8,6 +8,7 @@
 
 import type { CalendarEvent } from "@/types";
 import { slotEventAt } from "@/lib/calendar/current-meeting";
+import { sameCallId } from "@/lib/meeting-detect";
 
 export type StartedMode = "meeting" | "transcribing" | null;
 
@@ -15,8 +16,10 @@ export type StartedMode = "meeting" | "transcribing" | null;
  * Whether a call re-detected at `now` is the SAME call that ended at `endedAt`.
  *
  * The decision, in order:
- * 1. When both process names are known and differ case-insensitively, the
- *    capture moved to a different application - never the same call.
+ * 1. When both process ids are known and sameCallId separates them, the
+ *    capture moved to a different application - never the same call. (Before
+ *    Mac support this was a case-insensitive inequality; it now goes through
+ *    the shared matcher, so an app and its helper stay one call.)
  * 2. When the calendar is unreadable (`events` null), give the benefit of the
  *    doubt: without slot information there is nothing to distinguish the two
  *    moments, and wrongly stopping a live call is the worse error.
@@ -32,9 +35,8 @@ export function isSameCall(s: {
   endedAt: number;
   now: number;
 }): boolean {
-  const ended = s.endedProcess?.toLowerCase();
-  const current = s.process?.toLowerCase();
-  if (ended && current && ended !== current) return false;
+  if (s.endedProcess && s.process && !sameCallId(s.endedProcess, s.process))
+    return false;
   if (s.events === null) return true;
   return (
     (slotEventAt(s.events, s.endedAt)?.id ?? null) ===
