@@ -27,8 +27,6 @@ vi.mock("@/lib/platform", () => ({
   isWindows: () => platform === "windows",
   isMacOS: () => platform === "macos",
 }));
-// Task 10 adds the mic-grant check; until then this mock is unused but in
-// place, so nothing imports it yet.
 vi.mock("@/lib/mac-permissions", () => ({
   hasMicGrant: vi.fn(async () => true),
 }));
@@ -94,6 +92,8 @@ vi.mock("@/lib", async (importOriginal) => {
 
 import { useMeetingDetection } from "@/hooks/useMeetingDetection";
 import { MEETING_DETECT_PROCESSES, STORAGE_KEYS } from "@/config/constants";
+import { hasMicGrant } from "@/lib/mac-permissions";
+import { PERMISSION_RESET_MESSAGE } from "@/lib/meeting-start-failure";
 import {
   GOOGLE_CONNECTION_CHANGED_EVENT,
   loadGoogleConfigState,
@@ -147,6 +147,7 @@ beforeEach(() => {
   invoke.mockResolvedValue(undefined);
   emit.mockResolvedValue(undefined);
   loadState.mockResolvedValue({ state: "absent", config: null } as never);
+  vi.mocked(hasMicGrant).mockImplementation(async () => true);
   windowLabel = "main";
   platform = "windows";
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
@@ -727,6 +728,159 @@ describe("useMeetingDetection", () => {
     expect(order.indexOf("gate.stop")).toBeLessThan(
       order.indexOf("start_meeting_watcher")
     );
+  });
+
+  describe("Mac start checks", () => {
+    const resetFailure = {
+      kind: "permission-reset",
+      message: PERMISSION_RESET_MESSAGE,
+    };
+    const storedFailure = () =>
+      JSON.parse(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]);
+    const emitIndex = (event: string, match: (payload: any) => boolean) =>
+      emit.mock.calls.findIndex(([e, p]) => e === event && match(p));
+    const deferredGrant = () => {
+      let resolve: (granted: boolean) => void = () => {};
+      vi.mocked(hasMicGrant).mockImplementation(
+        () =>
+          new Promise<boolean>((r) => {
+            resolve = r;
+          })
+      );
+      return (granted: boolean) => resolve(granted);
+    };
+
+    it("Mac: a start with the mic grant missing never invokes the watcher and turns the toggle off", async () => {
+      platform = "macos";
+      vi.mocked(hasMicGrant).mockImplementation(async () => false);
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("false");
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+        failure: resetFailure,
+      });
+      expect(storedFailure()).toEqual(resetFailure);
+    });
+
+    it("Mac: a refused start is persisted and carried", async () => {
+      platform = "macos";
+      const refused = {
+        kind: "start-error",
+        message: "Auto-record needs macOS 14.2 or later",
+      };
+      invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "start_meeting_watcher") {
+          throw "Auto-record needs macOS 14.2 or later";
+        }
+        return undefined;
+      });
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+        failure: refused,
+      });
+      expect(storedFailure()).toEqual(refused);
+    });
+
+    it("Mac: turning off during the mic check fires no start", async () => {
+      platform = "macos";
+      const resolveGrant = deferredGrant();
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      resolveGrant(true);
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+    });
+
+    it("Mac: a denied mic check that arrives after toggle-off changes nothing", async () => {
+      platform = "macos";
+      const resolveGrant = deferredGrant();
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      emit.mockClear();
+      resolveGrant(false);
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(
+        emit.mock.calls.some(([, payload]) => (payload as any)?.failure)
+      ).toBe(false);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
+      expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it("Mac: retry with the mic grant gone turns the toggle off", async () => {
+      platform = "macos";
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+      expect(cmdCount("start_meeting_watcher")).toBe(1);
+
+      vi.mocked(hasMicGrant).mockImplementation(async () => false);
+      fire("meeting-detection-retry-requested");
+      await flush();
+      await flush();
+
+      expect(cmdCount("stop_meeting_watcher")).toBeGreaterThanOrEqual(1);
+      expect(cmdCount("start_meeting_watcher")).toBe(1);
+      const changed = emitIndex(
+        "meeting-detection-setting-changed",
+        (p) => p?.failure?.kind === "permission-reset"
+      );
+      const restarted = emitIndex(
+        "meeting-detection-watcher-restarted",
+        (p) => p?.ok === false
+      );
+      expect(changed).toBeGreaterThanOrEqual(0);
+      expect(restarted).toBeGreaterThan(changed);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]).toBe("false");
+    });
+
+    it("Windows: no permission calls, and the failure payload is unchanged", async () => {
+      platform = "windows";
+      renderHook(() => useMeetingDetection());
+      await flush();
+      await flush();
+      fire("meeting-detection-retry-requested");
+      await flush();
+      await flush();
+      expect(cmdCount("start_meeting_watcher")).toBe(2);
+
+      invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === "start_meeting_watcher") throw new Error("boom");
+        return undefined;
+      });
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      fire("meeting-detection-setting-changed", { enabled: true });
+      await flush();
+      await flush();
+
+      expect(hasMicGrant).not.toHaveBeenCalled();
+      expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+        enabled: false,
+      });
+      expect(
+        emit.mock.calls.some(([, payload]) => (payload as any)?.failure)
+      ).toBe(false);
+      expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
+    });
   });
 
   it("StrictMode creates one live gate", async () => {
