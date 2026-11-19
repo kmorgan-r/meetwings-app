@@ -128,6 +128,42 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --manifest-path=src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
+  # Same gap as the Windows job above, for `#[cfg(target_os = "macos")]` code:
+  # without this job it is compiled only by publish.yml at release time, never
+  # linted, and its tests never run. It cannot be cross-checked from Windows or
+  # Linux either, because cidre's build script needs xcrun and xcodebuild.
+  backend-macos:
+    name: Backend Lint & Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned with the Linux job above; see its comment.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: clippy
+
+      - name: Create dummy .env file
+        shell: bash
+        run: |
+          echo "API_ACCESS_KEY=dummy" > src-tauri/.env
+          echo "PAYMENT_ENDPOINT=dummy" >> src-tauri/.env
+          echo "APP_ENDPOINT=dummy" >> src-tauri/.env
+          echo "POSTHOG_API_KEY=dummy" >> src-tauri/.env
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Run Clippy
+        run: cargo clippy --manifest-path=src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Run backend tests
+        run: cargo test --manifest-path=src-tauri/Cargo.toml --all-features
+
   backend-format:
     name: Backend Format Check (Rust)
     runs-on: ubuntu-latest
