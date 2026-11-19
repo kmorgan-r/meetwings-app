@@ -241,7 +241,7 @@ Add one `tick` test. The spec requires one with the direct list empty (§5.3, §
 - Produces. Every item carries `#[cfg_attr(not(target_os = "macos"), allow(dead_code))]`, because only `macos.rs` and tests call them:
   - `pub(super) struct RawProcess { pub pid: Option<u32>, pub running_input: Option<bool>, pub bundle_id: Option<String>, pub exe_path: Option<String> }`. `None` means the read failed or there was no value.
   - `pub(super) fn sessions_from_processes(procs: Vec<RawProcess>) -> Result<Vec<SessionInfo>, String>`:
-    - if `procs` is non-empty and **no** process has `running_input: Some(_)`, return `Err(INPUT_STATE_UNREADABLE.to_string())`. If every per-process read failed, an empty `Ok` would look like a healthy "no call" forever. `Err` routes it into the poll loop's existing failure path (`last_error`, the readout and `detection.log`), as Windows' `Unknown` does (`mod.rs:82-84`);
+    - if `procs` is non-empty and **no** process has `running_input: Some(_)`, return `Err(INPUT_STATE_UNREADABLE.to_string())`. If every per-process read failed, an empty `Ok` would look like a healthy "no call" forever. `Err` routes it into the poll loop's existing failure path (`last_error`, the readout and `detection.log`), like a failed process-list read. It is a failed poll (`mod.rs:668`), and the watcher stops after `FAILURE_LIMIT`, about 60 s (`mod.rs:139-149`);
     - otherwise skip a process whose `pid` is `None`, or whose `running_input` is `None` or `Some(false)`;
     - `image_name` = the bundle ID if non-empty after `trim()`, else `exe_path.as_deref().and_then(image_name_from_path)`, else `None`;
     - `active: true`.
@@ -360,7 +360,7 @@ fn probe_passes_on_a_supported_system() {
   - `pub fn probe() -> Result<(), String>`
 
 The cidre calls (0.11.3, `use cidre::{arc, cf, core_audio as ca};`; `speaker/macos.rs:2` imports `core_audio as ca` the same way):
-- **List:** `ca::System::processes()` returns `os::Result<Vec<ca::Process>>` (`hardware.rs:373`). Only this read can fail the whole call. Map its error with `format!("Core Audio process list: {e:?}")`.
+- **List:** `ca::System::processes()` returns `os::Result<Vec<ca::Process>>` (`hardware.rs:373`). This is the only Core Audio read whose error fails the whole call. `sessions_from_processes` also fails it when every input read fails, and that `Err` is returned, not swallowed. Map its error with `format!("Core Audio process list: {e:?}")`.
 - **Per process:**
   - `pid: p.pid().ok().and_then(|v| u32::try_from(v).ok())` (`hardware.rs:257`; `sys::Pid` is `i32`);
   - `running_input: p.is_running_input().ok()` (`:269`);
@@ -409,6 +409,7 @@ The cidre calls (0.11.3, `use cidre::{arc, cf, core_audio as ca};`; `speaker/mac
   - Make `start_meeting_watcher` a `pub async fn`. Keep `#[tauri::command]` as it is and the body unchanged; it contains no `.await`, so `State` never crosses one. Tauri v2 has no `(async)` argument and infers async from the signature alone (`mod.rs:918-921`, which `stop_meeting_watcher` follows).
     - Why: a non-async command runs on the main thread. The Mac probe makes Core Audio calls, and those can stall while coreaudiod restarts, freezing both windows.
     - On Windows only the calling thread changes. Nothing in the body needs the main thread (the poll thread initialises COM itself), and the frontend already serialises start and stop through `enqueue`.
+    - Async also drops the main thread's implicit ordering of starts. A webview reload during a hanging Mac probe could let two starts both reach `Spawn`, which widens the start-path race already accepted at `mod.rs:806-811`. That race stays out of scope here; do not change the start lifecycle in this plan.
   - `list_capture_sessions`' blocking closure keeps the Windows COM init and uninit around `capture_rows(platform_support(), enumerate_capture_sessions, &lists, std::process::id())`.
   - Leave the existing `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` attributes as they are. An `allow` on an item that is now used is not a lint, and narrowing 40 of them could only be checked on the macOS job.
 
