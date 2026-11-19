@@ -35,7 +35,7 @@
 These are the five inputs most likely to bite a Mac user that no automated test can fully exercise.
 
 1. **A fresh mic grant must pass the next launch's check.** The toggle-on grant comes from WebKit `getUserMedia`. The start check reads `AVCaptureDevice` through the plugin. If those two disagree, every launch turns the toggle off with "permission was reset". This can't be automated. It is manual check **M2a** (Task 11's manual list): relaunch after M2, and the toggle must stay on with no note.
-2. **Chrome's mic process may have no bundle ID.** Its executable name (for example `Google Chrome Helper`) must still appear in the readout and `detection.log`. Pinned by Task 2's `missing_empty_or_failed_bundle_id_falls_back_to_exe_name`.
+2. **Chrome's mic process may have no bundle ID.** Its executable name (for example `Google Chrome Helper`) must still appear in the readout and `detection.log`. Pinned by Task 2's `missing_empty_or_failed_bundle_id_falls_back_to_exe_name`. A NULL bundle-ID string must not crash the poll thread either, so Task 3 reads the property null-safely instead of through cidre's `bundle_id()`; only the macOS runner exercises that read.
 3. **Several Chrome helpers can hold the mic at once.** Every row must read "gated" with its raw name, and `classify` must go Active. Pinned by Task 1's `describe_sessions_marks_mac_helpers`.
 4. **Non-ASCII IDs, or IDs shorter than the entry.** The matcher runs on the poll thread and must never panic. Pinned by Task 1's `entry_matches_does_not_panic_on_odd_input`.
 5. **No microphone hardware.** `getUserMedia` rejects with `NotFoundError`. The toggle must show the mic note, whose copy also says to check that a microphone is connected, and save nothing. Pinned by Task 9's `requestMicAccess` cases and Task 11's mic-denial test.
@@ -111,7 +111,7 @@ Spec §5.7 says to add the CI job first, against unchanged code. Spec §5.8 says
   - `git add .github/workflows/ci.yml .github/workflows/macos-test-build.yml`
   - `git commit -m "ci: lint and test the Mac build; add a manual macOS test-build workflow"`
   - `git push -u origin ci/macos-build`
-  - `gh pr create --base main --title "ci: macOS lint/test job and a manual macOS test-build workflow" --body <file>`. The body explains both files: the dispatch workflow must be on `main` before it can be run, and it produces no release. Record the PR number in ship state's `phase_log`.
+  - `gh pr create --base main --title "ci: macOS lint/test job and a manual macOS test-build workflow" --body-file <file>`. The body explains both files: the dispatch workflow must be on `main` before it can be run, and it produces no release. Record the PR number in ship state's `phase_log`.
 
 - [ ] **Step 5: Put the commits on the feature branch.** `git switch feat/macos-meeting-detection-design`, then `git cherry-pick <sha>` for each Task 0 commit. Identical changes mean a later merge of `main` into this branch is clean (§5.8).
 
@@ -120,7 +120,12 @@ Spec §5.7 says to add the CI job first, against unchanged code. Spec §5.8 says
   - push, then cherry-pick each fix onto the feature branch;
   - an Anthropic implementer writes the fix, since it can't be compiled locally.
 
-  Exit: every check on the CI PR is green. Later tasks may run while you wait.
+  Exit: every check on the CI PR is green. Later tasks may run while you wait, under one rule. This worktree has one index and one checked-out branch, so there is **one writer at a time**:
+  - switch to `ci/macos-build` only when no implementer is in flight and `git status --porcelain` shows no tracked changes;
+  - switch back before the next dispatch;
+  - never let a CI-fix commit and an implementer's commit overlap.
+
+  A `git switch` under a live implementer moves its edits onto the wrong branch. Overlapping `git add`/`git commit` runs can sweep feature files into the CI PR to `main`.
 
 ---
 
@@ -235,10 +240,12 @@ Add one `tick` test. The spec requires one with the direct list empty (§5.3, §
 - Consumes: `super::SessionInfo`, `super::image_name_from_path` (`mod.rs:50`).
 - Produces. Every item carries `#[cfg_attr(not(target_os = "macos"), allow(dead_code))]`, because only `macos.rs` and tests call them:
   - `pub(super) struct RawProcess { pub pid: Option<u32>, pub running_input: Option<bool>, pub bundle_id: Option<String>, pub exe_path: Option<String> }`. `None` means the read failed or there was no value.
-  - `pub(super) fn sessions_from_processes(procs: Vec<RawProcess>) -> Vec<SessionInfo>`:
-    - skip a process whose `pid` is `None`, or whose `running_input` is `None` or `Some(false)`;
-    - `image_name` = the bundle ID if non-empty after `trim()`, else `exe_path.and_then(image_name_from_path)`, else `None`;
+  - `pub(super) fn sessions_from_processes(procs: Vec<RawProcess>) -> Result<Vec<SessionInfo>, String>`:
+    - if `procs` is non-empty and **no** process has `running_input: Some(_)`, return `Err(INPUT_STATE_UNREADABLE.to_string())`. If every per-process read failed, an empty `Ok` would look like a healthy "no call" forever. `Err` routes it into the poll loop's existing failure path (`last_error`, the readout and `detection.log`), as Windows' `Unknown` does (`mod.rs:82-84`);
+    - otherwise skip a process whose `pid` is `None`, or whose `running_input` is `None` or `Some(false)`;
+    - `image_name` = the bundle ID if non-empty after `trim()`, else `exe_path.as_deref().and_then(image_name_from_path)`, else `None`;
     - `active: true`.
+  - `pub(super) const INPUT_STATE_UNREADABLE: &str = "Couldn't read which Mac apps are using the microphone";`
   - `pub(super) const UNSUPPORTED_MACOS: &str = "Auto-record needs macOS 14.2 or later";`. The floor is the process-tap API, macOS 14.2 (`kAudioHardwarePropertyTapList`). The process-object list is 14.0 (`kAudioHardwarePropertyProcessObjectList`). Both values come from the `API_AVAILABLE` annotations in CoreAudio's `AudioHardware.h`. The probe still tests both (§5.5).
   - `pub(super) const AUDIO_READ_FAILED: &str = "Couldn't read the Mac's audio system, try again";`
   - `pub(super) fn probe_verdict(has_process_list: bool, has_tap_list: bool, trial_read: Result<(), String>) -> Result<(), String>`:
@@ -257,18 +264,21 @@ fn raw(pid: Option<u32>, input: Option<bool>, bundle: Option<&str>, exe: Option<
         exe_path: exe.map(str::to_string),
     }
 }
+fn ok(procs: Vec<RawProcess>) -> Vec<SessionInfo> {
+    sessions_from_processes(procs).expect("readable")
+}
 const HELPER: &str = "/Applications/Google Chrome.app/Contents/Frameworks/x/Google Chrome Helper";
 
 #[test]
 fn maps_the_raw_bundle_id() {
-    let s = sessions_from_processes(vec![raw(Some(7), Some(true), Some("com.google.Chrome.helper"), None)]);
+    let s = ok(vec![raw(Some(7), Some(true), Some("com.google.Chrome.helper"), None)]);
     assert_eq!((s[0].pid, s[0].image_name.as_deref(), s[0].active), (7, Some("com.google.Chrome.helper"), true));
 }
 
 #[test]
 fn missing_empty_or_failed_bundle_id_falls_back_to_exe_name() {
     for bundle in [None, Some(""), Some("  ")] {
-        let s = sessions_from_processes(vec![raw(Some(7), Some(true), bundle, Some(HELPER))]);
+        let s = ok(vec![raw(Some(7), Some(true), bundle, Some(HELPER))]);
         assert_eq!(s.len(), 1, "the process stays listed");
         assert_eq!(s[0].image_name.as_deref(), Some("Google Chrome Helper"));
     }
@@ -276,24 +286,38 @@ fn missing_empty_or_failed_bundle_id_falls_back_to_exe_name() {
 
 #[test]
 fn no_bundle_and_no_exe_gives_none_but_stays_listed() {
-    let s = sessions_from_processes(vec![raw(Some(7), Some(true), None, None)]);
+    let s = ok(vec![raw(Some(7), Some(true), None, None)]);
     assert_eq!(s.len(), 1);
     assert_eq!(s[0].image_name, None);
 }
 
 #[test]
 fn a_process_not_running_input_is_left_out() {
-    assert!(sessions_from_processes(vec![raw(Some(7), Some(false), Some("com.google.Chrome"), None)]).is_empty());
+    assert!(ok(vec![raw(Some(7), Some(false), Some("com.google.Chrome"), None)]).is_empty());
 }
 
 #[test]
 fn a_failed_pid_or_input_read_skips_only_that_process() {
-    let s = sessions_from_processes(vec![
+    let s = ok(vec![
         raw(None, Some(true), Some("a.b"), None),
         raw(Some(2), None, Some("c.d"), None),
         raw(Some(3), Some(true), Some("e.f"), None),
     ]);
     assert_eq!(s.iter().map(|x| x.pid).collect::<Vec<_>>(), vec![3]);
+}
+
+#[test]
+fn every_input_read_failing_is_an_error_not_silence() {
+    let got = sessions_from_processes(vec![
+        raw(Some(1), None, Some("a.b"), None),
+        raw(Some(2), None, Some("com.google.Chrome"), None),
+    ]);
+    assert_eq!(got.unwrap_err(), INPUT_STATE_UNREADABLE);
+}
+
+#[test]
+fn an_empty_process_list_is_ok_and_empty() {
+    assert!(ok(vec![]).is_empty());
 }
 
 #[test]
@@ -335,12 +359,12 @@ fn probe_passes_on_a_supported_system() {
   - `pub fn enumerate_capture_sessions() -> Result<Vec<SessionInfo>, String>`
   - `pub fn probe() -> Result<(), String>`
 
-The cidre calls (0.11.3, `use cidre::core_audio as ca;`, as `speaker/macos.rs:2` imports it):
+The cidre calls (0.11.3, `use cidre::{arc, cf, core_audio as ca};`; `speaker/macos.rs:2` imports `core_audio as ca` the same way):
 - **List:** `ca::System::processes()` returns `os::Result<Vec<ca::Process>>` (`hardware.rs:373`). Only this read can fail the whole call. Map its error with `format!("Core Audio process list: {e:?}")`.
 - **Per process:**
   - `pid: p.pid().ok().and_then(|v| u32::try_from(v).ok())` (`hardware.rs:257`; `sys::Pid` is `i32`);
   - `running_input: p.is_running_input().ok()` (`:269`);
-  - `bundle_id: p.bundle_id().ok().map(|s| s.to_string())` (`:261`; `cf::String` implements `Display`);
+  - `bundle_id: p.prop::<Option<arc::R<cf::String>>>(&ca::PropSelector::PROCESS_BUNDLE_ID.global_addr()).ok().flatten().map(|s| s.to_string())`. Do **not** call `p.bundle_id()`. It goes through `cf_prop` (`hardware.rs:104-116`), which stores Core Audio's pointer in an `arc::R` with no null check, so a success with a NULL string (a process with no bundle ID, Review Focus 2) would be a null `R`, and `to_string()` would crash in a way `catch_unwind` cannot catch. `Process` derefs to `Obj` (`:240-248`), whose `prop<T>` (`:65`) is public, and `Option<arc::R<_>>` reads NULL as `None`. `cf::String` implements `Display`;
   - `exe_path: pid.and_then(exe_path)`.
 - **`fn exe_path(pid: u32) -> Option<String>`:** `libc::proc_pidpath(pid as i32, buf.as_mut_ptr().cast(), buf.len() as u32)` into a `[0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize]` buffer. Return `None` when the result is `<= 0`. Otherwise `String::from_utf8_lossy(&buf[..n])`. The `unsafe` block gets a `// SAFETY:` comment naming the buffer length.
 - **`probe()`:**
@@ -350,6 +374,9 @@ The cidre calls (0.11.3, `use cidre::core_audio as ca;`, as `speaker/macos.rs:2`
   - return `probe_verdict(has_list, has_taps, read)`.
 - The module doc says the poll loop needs no per-thread setup on Mac. The COM block stays `#[cfg(target_os = "windows")]` (§5.1).
 - `detection.log` needs no change. `log_line` and `session_signature` already work on any platform, and the latter logs the raw names.
+
+- `enumerate_capture_sessions` returns `sessions_from_processes(raw)` as is. Its `Err` (every input read failed) is a poll failure like any other.
+- A `#[cfg(test)] mod tests` in `macos.rs` (spec §8, macOS CI only) holds `probe_passes_on_this_runner` (`assert_eq!(probe(), Ok(()))`) and `enumerate_works_on_this_runner` (`assert!(enumerate_capture_sessions().is_ok())`). They run only on the `backend-macos` job. If the runner's sandbox refuses Core Audio, mark them `#[ignore = "<the runner's error>"]` and log that in ship state, rather than deleting them.
 
 - [ ] **Step 1: Write `macos.rs`** to the above.
 - [ ] **Step 2: Local regression check.** Run clippy, the Rust tests and fmt on Windows. Expected: PASS, because `macos.rs` is not compiled here. The macOS compile is verified in Task 6.
@@ -372,13 +399,16 @@ The cidre calls (0.11.3, `use cidre::core_audio as ca;`, as `speaker/macos.rs:2`
 - Consumes: `macos::probe` (Task 3), and `mac_logic::{probe_verdict, UNSUPPORTED_MACOS}` in tests (Task 2).
 - Produces:
   - `pub const UNSUPPORTED_PLATFORM: &str = "Meeting detection is not supported on this platform";`
-  - `fn platform_support() -> Result<(), String>`. Windows: `Ok(())`. macOS: `macos::probe()`. Otherwise: `Err(UNSUPPORTED_PLATFORM.to_string())`. One `#[cfg]` block per arm.
+  - `fn platform_support() -> Result<(), String>`. Windows: `Ok(())`. macOS: `std::panic::catch_unwind(macos::probe).unwrap_or_else(|_| Err("Core Audio probe panicked".to_string()))`; a panic in cidre must become a refusal, not a crashed command. Otherwise: `Err(UNSUPPORTED_PLATFORM.to_string())`. One `#[cfg]` block per arm.
   - `StartAction::Refuse(String)`. A start that must not spawn; the command returns the message as its `Err` and writes **no** state (`watch_list`, `confirmed` and `last_error` are untouched).
   - `fn plan_start(running: bool, stopping: bool, support: impl FnOnce() -> Result<(), String>) -> StartAction`. `support` is called only on the `(false, _)` arm: `Ok` gives `Spawn`, `Err(e)` gives `Refuse(e)`. The two running arms are unchanged and never probe.
   - `fn capture_rows(support: Result<(), String>, enumerate: impl FnOnce() -> Result<Vec<SessionInfo>, String>, lists: &WatchLists, own_pid: u32) -> Result<Vec<MicSession>, String>`. Return `support`'s error without calling `enumerate`; otherwise `describe_sessions(&enumerate()?, lists, own_pid)`.
 - Wiring:
   - All six guards become `cfg!(not(any(target_os = "windows", target_os = "macos")))`.
   - `start_meeting_watcher` calls `plan_start(running, stopping, platform_support)` and adds the match arm `StartAction::Refuse(message) => Err(message)`. The existing `log_line` before the match records the refusal.
+  - Make `start_meeting_watcher` a `pub async fn`. Keep `#[tauri::command]` as it is and the body unchanged; it contains no `.await`, so `State` never crosses one. Tauri v2 has no `(async)` argument and infers async from the signature alone (`mod.rs:918-921`, which `stop_meeting_watcher` follows).
+    - Why: a non-async command runs on the main thread. The Mac probe makes Core Audio calls, and those can stall while coreaudiod restarts, freezing both windows.
+    - On Windows only the calling thread changes. Nothing in the body needs the main thread (the poll thread initialises COM itself), and the frontend already serialises start and stop through `enqueue`.
   - `list_capture_sessions`' blocking closure keeps the Windows COM init and uninit around `capture_rows(platform_support(), enumerate_capture_sessions, &lists, std::process::id())`.
   - Leave the existing `#[cfg_attr(not(target_os = "windows"), allow(dead_code))]` attributes as they are. An `allow` on an item that is now used is not a lint, and narrowing 40 of them could only be checked on the macOS job.
 
@@ -458,15 +488,19 @@ fn unsupported_platform_text_names_no_platform() {
 - Modify: `src-tauri/src/lib.rs:233-234`. Register `speaker::prime_system_audio_access` and `speaker::open_microphone_settings` next to `speaker::request_system_audio_access`. Also re-export them wherever `speaker/mod.rs` re-exports the other commands. Follow that file's existing pattern.
 
 **Interfaces** (consumed by Task 9):
-- `#[tauri::command] pub async fn prime_system_audio_access() -> Result<bool, String>`.
+- `#[tauri::command] pub async fn prime_system_audio_access() -> Result<(), String>`.
   - Why it exists: which call raises the system-audio prompt is unverified (§5.6). Building the tap alone (`check_system_audio_access`) may not prompt; starting IO does. `SpeakerInput::stream()` reaches `start_device` (`speaker/macos.rs:143, 168`).
   - macOS body, in `tauri::async_runtime::spawn_blocking`:
     - `std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let s = SpeakerInput::new()?.stream(); std::thread::sleep(Duration::from_millis(300)); drop(s); anyhow::Ok(()) }))`;
-    - `Ok(Ok(()))` gives `Ok(true)`;
-    - an inner `Err`, or a panic (`stream()` unwraps `start_device`, `speaker/macos.rs:168`), is logged with `error!` and gives `Ok(false)`.
-  - Non-macOS body: `Ok(true)`. It is never called there.
+    - `Ok(Ok(()))` gives `Ok(())`;
+    - an inner `Err(e)` gives `Err(format!("{e:#}"))`;
+    - a panic (`stream()` unwraps at `speaker/macos.rs:144, 146, 168`) gives `Err("system audio capture failed to start".into())`;
+    - a `JoinError` from `spawn_blocking` gives `Err(e.to_string())`;
+    - log every `Err` with `error!` as well. The text reaches the user through Task 9's note, so a missing output device is not misreported as a permission denial. `Cargo.toml` sets no `panic = "abort"`, so `catch_unwind` is effective.
+  - Non-macOS body: `Ok(())`. It is never called there.
+  - **Known limit:** the call returns after 300 ms, whatever the user later does with the system-audio prompt, so a first-time "Don't Allow" is not reported at toggle-on. It surfaces when the first recording's capture fails. Spec §5.6 asks toggle-on to await both answers, and this is the closest the API allows without a permission callback. M2 records what a first-time Deny does.
   - If M2 shows building the tap alone prompts, this body may shrink; the frontend does not change.
-- `#[tauri::command] pub async fn open_microphone_settings(app: AppHandle) -> Result<(), String>`. Same shape as `request_system_audio_access`'s macOS arm (`:517-527`) with the URL `x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone`. Non-macOS: `Ok(())`. The opener plugin is not used, because its default scope allows only http, https, mailto and tel.
+- `#[tauri::command] pub async fn open_microphone_settings(app: AppHandle) -> Result<(), String>`. Same shape as `request_system_audio_access`'s macOS arm (`:517-527`) with the URL `x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone`. Non-macOS: `let _ = app; Ok(())`. A bare `Ok(())` leaves `app` unused on Windows and Linux, which is an error under clippy `-D warnings`. The opener plugin is not used, because its default scope allows only http, https, mailto and tel.
 
 - [ ] **Step 1: Implement both commands and register them.**
 - [ ] **Step 2: Run clippy and fmt on Windows.** Expected: PASS. The macOS arms are verified in Task 6.
@@ -480,7 +514,7 @@ fn unsupported_platform_text_names_no_platform() {
 
 - [ ] **Step 1:** `git push -u origin feat/macos-meeting-detection-design`.
 - [ ] **Step 2:** `gh pr create --draft --base main --title "feat(meeting-detect): auto-record Google Meet in Chrome on Mac" --body-file <tmp>`. The body is a one-paragraph summary plus "Draft: opened early so the macOS CI job compiles the Mac code". Write `pr` into ship state.
-- [ ] **Step 3: Watch `Backend Lint & Test (macOS)`.** For each failure in Tasks 3–5's Mac code, dispatch an Anthropic implementer with the failing log, the file and the cidre source path. Make one commit per fix, run `cargo fmt --check`, push, and repeat. Exit: the macOS job is green. Tasks 7–11 may run meanwhile; P5 waits for this exit.
+- [ ] **Step 3: Watch `Backend Lint & Test (macOS)`.** For each failure in Tasks 3–5's Mac code, dispatch an Anthropic implementer with the failing log, the file and the cidre source path. Make one commit per fix, run `cargo fmt --check`, push, and repeat. Exit: the macOS job is green. Tasks 7–11 may run meanwhile, but under Task 0 Step 6's one-writer rule: a CI-fix implementer works on this same branch and index, so dispatch it between implementer tasks, never alongside one. P5 waits for this exit.
 
 ---
 
@@ -578,7 +612,7 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
 
 **Files:**
 - Modify: `src/hooks/useMeetingDetection.ts:7, 35`; `src/hooks/useMeetingAutoRecord.ts:14, 170`; `src/pages/settings/index.tsx:14, 44`. Each uses `isMeetingDetectionPlatform()` from `@/lib/meeting-detect`. Drop any `isWindows` import that becomes unused.
-- Test, mock updates found by `grep -rn 'Mock("@/lib/platform"' src/tests` (the spec's §8 list plus what grep found):
+- Test, mock updates found by `grep -rn '@/lib/platform' src/tests` (the spec's §8 list plus what grep found; the files use both `vi.mock(` and `vi.doMock(`):
   - `useMeetingAutoRecord.auto-stop.test.tsx:29, 42, 454, 553` and `useMeetingAutoRecord.lifecycle.test.tsx:26, 37, 386, 466, 486`: replace Task 7's `isMacOS: () => false` with `isMacOS: vi.fn(() => false)` in the hoisted `mocks` and the factory, and reset it in `beforeEach` beside `mocks.isWindows.mockReturnValue(true)`. The existing "off Windows" cases set `isWindows` false with `isMacOS` false, so they now mean Linux and stay inactive.
   - `useMeetingDetection.lifecycle.test.tsx:26`: replace `let onWindows` with `let platform: "windows" | "macos" | "linux" = "windows"`, use a factory with `isWindows: () => platform === "windows"` and `isMacOS: () => platform === "macos"`, and turn every `onWindows = false` into `platform = "linux"`.
   - `settings-page.meeting-auto-record.test.tsx:5-11`: use the same three-state `platform` with all four exports.
@@ -611,7 +645,7 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
 `mac-permissions.ts` (header comment: macOS only; the plugin is imported dynamically because a static import breaks the Windows build):
 - `export async function hasMicGrant(): Promise<boolean>` calls `checkMicrophonePermission()` from `await import("tauri-plugin-macos-permissions-api")`. It **fails open**: if the check throws, log `console.warn` and return `true`. A broken check must not turn auto-record off at every launch.
 - `export async function requestMicAccess(): Promise<boolean>` calls `navigator.mediaDevices.getUserMedia({ audio: true })`, stops every track and returns `true`. Any rejection (`NotAllowedError`, `NotFoundError`, …), or a missing `navigator.mediaDevices`, returns `false`. Why not the plugin's request: `request_microphone_permission` passes a nil completion handler and returns before the user answers (plugin `commands.rs:198-212`). `getUserMedia` settles on the answer and is the same WebKit path the auto-start opens (`AutoSpeechVad.tsx:98`).
-- `export async function requestSystemAudioAccess(): Promise<boolean>` is `invoke<boolean>("prime_system_audio_access")`, with a rejection mapped to `false`.
+- `export async function requestSystemAudioAccess(): Promise<string | null>` invokes `prime_system_audio_access`. It resolves `null` when the command resolves, and the rejection text (`String(error)`, the Rust detail) when it rejects.
 - `export async function openMicSettings(): Promise<void>` is `invoke("open_microphone_settings")`. `export async function openSystemAudioSettings(): Promise<void>` is `invoke("request_system_audio_access")`.
 
 `meeting-start-failure.ts` (imports `safeLocalStorage` from `@/lib`, `STORAGE_KEYS`, `invoke`, `currentWatchLists`, and the `mac-permissions` functions):
@@ -619,21 +653,21 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
 - `export function readStartFailure(): StartFailure | null` returns `null` on a missing value, invalid JSON, or a value without a string `message` and a known `kind`. `export function writeStartFailure(f: StartFailure): void` and `export function clearStartFailure(): void` (`removeItem`).
 - The copy below is exact, so the tests can pin it:
   - `export const MIC_DENIED_MESSAGE = "Meetwings can't use the microphone. Allow it in System Settings → Privacy & Security → Microphone, and check that a microphone is connected.";`
-  - `export const AUDIO_DENIED_MESSAGE = "Meetwings can't record system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then turn auto-record on again.";`
+  - `export const AUDIO_DENIED_MESSAGE = "Meetwings couldn't record system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then turn auto-record on again.";`. The note shows it followed by ` (<detail>)`; see step 3 of `macToggleOnCheck` below.
   - `export const PERMISSION_RESET_MESSAGE = "Microphone permission was reset (this can happen after an update). Turn auto-record on again to allow it.";`
 - `export class MicGrantMissingError extends Error {}`.
 - `export function toStartFailure(error: unknown): StartFailure`. A `MicGrantMissingError` becomes `{ kind: "permission-reset", message: PERMISSION_RESET_MESSAGE }`; anything else becomes `{ kind: "start-error", message: String(error) }` (Tauri rejects with the Rust string itself).
 - `export async function macToggleOnCheck(): Promise<StartFailure | null>`, in strict order and stopping at the first failure:
   1. `invoke("list_capture_sessions", { ...(await currentWatchLists()) })`. A rejection gives `start-error` with its text. This is the same probe the watcher runs (Task 4), and asking it first means an unsupported macOS prompts for nothing (§5.5).
   2. `requestMicAccess()`. False gives `mic-denied`.
-  3. `requestSystemAudioAccess()`. False gives `audio-denied`.
+  3. `requestSystemAudioAccess()`. A returned string `detail` gives `{ kind: "audio-denied", message: \`${AUDIO_DENIED_MESSAGE} (${detail})\` }`.
   4. Otherwise `null`.
 
 - [ ] **Step 1: Write the failing tests.**
   - `mac-permissions.test.ts`: mock `tauri-plugin-macos-permissions-api` and `@tauri-apps/api/core`, and stub `navigator.mediaDevices`.
     - `requestMicAccess`: resolves `true` and calls `stop()` on every track; `false` on a `DOMException` named `NotAllowedError`; `false` on `NotFoundError`; `false` with `mediaDevices` undefined.
     - `hasMicGrant`: returns the plugin's `true` or `false`; returns `true` and warns when the plugin throws.
-    - `requestSystemAudioAccess`: invokes `prime_system_audio_access` and passes its boolean through; `false` on a rejection.
+    - `requestSystemAudioAccess`: invokes `prime_system_audio_access`; resolves `null` when it resolves; resolves `"no output device"` when it rejects with `"no output device"`.
     - The two `open*` functions invoke `open_microphone_settings` and `request_system_audio_access`.
   - `meeting-start-failure.test.ts`: mock `@/lib` (spread original, plus a `stored`-backed `safeLocalStorage`, as `MeetingAutoRecordToggle.note.test.tsx:30-45` does), `@/lib/mac-permissions` and `@tauri-apps/api/core`.
     - The record round-trips; invalid JSON and `{"kind":"nope"}` both read `null`; clear removes it.
@@ -641,7 +675,7 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
     - `macToggleOnCheck`:
       - a probe rejection gives `start-error`, and neither request is called;
       - mic `false` gives `mic-denied`, and system audio is not requested;
-      - system audio `false` gives `audio-denied`;
+      - system audio resolving `"tap failed"` gives `audio-denied`, with a message that starts with `AUDIO_DENIED_MESSAGE` and ends with `(tap failed)`;
       - all OK gives `null`, and `requestMicAccess` ran before `requestSystemAudioAccess` (compare `mock.invocationCallOrder`).
 - [ ] **Step 2: Run, expect failure.** `npx vitest run src/tests/mac-permissions.test.ts src/tests/meeting-start-failure.test.ts`.
 - [ ] **Step 3: Implement** to the Interfaces.
@@ -654,16 +688,19 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
 
 **Files:**
 - Modify: `src/hooks/useMeetingDetection.ts`: `startWatcher` (`:97-99`), the retry handler (`:131-150`) and effect 3 (`:254-271`).
-- Test: `src/tests/useMeetingDetection.lifecycle.test.tsx`, using the Task 8 three-state mock and `@/lib/mac-permissions` mock.
+- Test: `src/tests/useMeetingDetection.lifecycle.test.tsx`, using the Task 8 three-state mock and `@/lib/mac-permissions` mock. The file's `beforeEach` runs `vi.clearAllMocks()`, which keeps implementations (its own comment at `:135-139` warns about this), so also reset `hasMicGrant` to `async () => true` and `platform` to `"windows"` there. Otherwise one test's `false` or pending grant leaks into the next.
 
 **Interfaces:**
 - Consumes: `hasMicGrant` (Task 9); `MicGrantMissingError`, `toStartFailure` and `writeStartFailure` (Task 9); `isMacOS` from `@/lib/platform`.
 - `const startWatcher = async (isCancelled: () => boolean = () => false): Promise<boolean>`:
-  - on Mac, `if (isMacOS() && !(await hasMicGrant())) throw new MicGrantMissingError()`;
+  - on Mac:
+    - `const granted = await hasMicGrant()`;
+    - then `if (isCancelled()) return false`, **before** acting on the answer. A run cancelled during the check must not throw: its catch would write `"false"`, save a "permission was reset" record and emit `enabled: false`, which could switch off a newer toggle-on;
+    - then `if (!granted) throw new MicGrantMissingError()`;
   - then `const lists = await currentWatchLists()`;
   - then **`if (isCancelled()) return false`**. This is the last statement before the invoke, after every await (§5.6);
   - then `await invoke("start_meeting_watcher", { ...lists })` and `return true`.
-- Effect 3 calls `const started = await startWatcher(() => cancelled)`. After the try/catch it adds `if (!started) return;` before emitting `watcher-restarted`. The catch keeps its four statements and order. The only change is the emit payload: on Mac (`isMacOS()`), `const failure = toStartFailure(error)`, then `writeStartFailure(failure)` and emit `{ enabled: false, failure }`. On Windows the payload stays exactly `{ enabled: false }` and nothing is written.
+- Effect 3 declares `let started = false;` before the `try`, which then runs `started = await startWatcher(() => cancelled)`; a `const` inside the `try` would be out of scope after it. After the try/catch it adds `if (!started) return;` before emitting `watcher-restarted`. The catch keeps its four statements and order. The only change is the emit payload: on Mac (`isMacOS()`), `const failure = toStartFailure(error)`, then `writeStartFailure(failure)` and emit `{ enabled: false, failure }`. On Windows the payload stays exactly `{ enabled: false }` and nothing is written.
 - Retry handler catch: if `isMacOS() && error instanceof MicGrantMissingError`:
   - set the setting `"false"`;
   - `setEnabled(false)`;
@@ -681,6 +718,11 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
     - the stored record parses to the same pair.
   - "Mac: a refused start is persisted and carried". With `hasMicGrant` `true` and `start_meeting_watcher` rejecting `"Auto-record needs macOS 14.2 or later"`, the emit payload and the stored record are `{ kind: "start-error", message: "Auto-record needs macOS 14.2 or later" }`.
   - "Mac: turning off during the mic check fires no start". `hasMicGrant` returns a deferred promise. Mount and flush, then fire `meeting-detection-setting-changed` `{ enabled: false }` and flush. Resolve the deferred with `true` and flush. Expect `cmdCount("start_meeting_watcher") === 0`.
+  - "Mac: a denied mic check that arrives after toggle-off changes nothing". Same as the previous test, but resolve the deferred with `false`. Expect:
+    - `cmdCount("start_meeting_watcher") === 0`;
+    - no `emit` call whose payload has a `failure`;
+    - no stored `MEETING_AUTO_RECORD_START_FAILURE`;
+    - `toast.error` not called.
   - "Mac: retry with the mic grant gone turns the toggle off".
     - Start healthy (`hasMicGrant` `true`), then make `hasMicGrant` resolve `false`, fire `meeting-detection-retry-requested` and flush.
     - `stop_meeting_watcher` was invoked, and `start_meeting_watcher` was invoked exactly once overall.
@@ -697,7 +739,11 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
 
 **Files:**
 - Modify: `src/pages/settings/components/MeetingAutoRecordToggle.tsx`
-- Test: `src/tests/MeetingAutoRecordToggle.mac.test.tsx` (new). Copy the harness of `MeetingAutoRecordToggle.note.test.tsx:1-79`, and add a three-state `@/lib/platform` mock (default `"macos"`) and an `@/lib/mac-permissions` mock (all `vi.fn`, default resolving `true`). `MeetingAutoRecordToggle.note.test.tsx` stays untouched and must stay green; it is the non-Mac path.
+- Test: `src/tests/MeetingAutoRecordToggle.mac.test.tsx` (new). Copy the harness of `MeetingAutoRecordToggle.note.test.tsx:1-79`, and add a three-state `@/lib/platform` mock (default `"macos"`) and an `@/lib/mac-permissions` mock (all `vi.fn`). `beforeEach` re-sets every default, because `vi.clearAllMocks()` (`MeetingAutoRecordToggle.note.test.tsx:76`) keeps implementations between tests:
+- `hasMicGrant` and `requestMicAccess` resolve `true`;
+- `requestSystemAudioAccess` resolves `null`;
+- the two `open*` functions resolve `undefined`;
+- `platform` is `"macos"`. `MeetingAutoRecordToggle.note.test.tsx` stays untouched and must stay green; it is the non-Mac path.
 
 **Interfaces:**
 - Consumes: `macToggleOnCheck`, `readStartFailure`, `writeStartFailure`, `clearStartFailure` and `StartFailure` (Task 9); `openMicSettings` and `openSystemAudioSettings` (Task 9); `isMacOS` from `@/lib/platform`.
@@ -737,7 +783,7 @@ Three test files mock `@/lib/platform` with `isWindows` only: `useMeetingAutoRec
     - `MIC_DENIED_MESSAGE` is visible;
     - clicking "Open Microphone settings" calls `openMicSettings`;
     - `requestSystemAudioAccess` was not called, and nothing emitted `enabled: true`.
-  - "a system-audio denial names system audio". `AUDIO_DENIED_MESSAGE` is visible, and "Open System Audio settings" calls `openSystemAudioSettings`.
+  - "a system-audio denial names system audio". With `requestSystemAudioAccess` resolving `"tap failed"`, text containing both `AUDIO_DENIED_MESSAGE` and `(tap failed)` is visible, and "Open System Audio settings" calls `openSystemAudioSettings`.
   - "a click while the requests are pending changes nothing". With the mic deferred, click twice. `requestMicAccess` was called once. Resolve `false`; `stored[ENABLED]` is not `"true"`.
   - "a failure stored before mount shows while the toggle is off". Seed `stored[START_FAILURE]` with `{ kind: "start-error", message: "Auto-record needs macOS 14.2 or later" }` and render: the text is visible and `sw()` is unchecked. This is the Settings window mounted after the failure (§8).
   - "a failure carried by setting-changed shows at once". Fire `{ enabled: false, failure: { kind: "permission-reset", message: PERMISSION_RESET_MESSAGE } }`: the text is visible.
