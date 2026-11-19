@@ -13,6 +13,9 @@ use gate::{gated_step, GatedEvent, GatedInput, GatedState};
 mod detect_log;
 use detect_log::{log_line, session_signature};
 
+// Pure Mac part of the Core Audio enumeration; `macos.rs` supplies the reads.
+mod mac_logic;
+
 #[cfg(target_os = "windows")]
 mod win32;
 #[cfg(target_os = "windows")]
