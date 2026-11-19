@@ -30,6 +30,20 @@ vi.mock("@/lib/platform", () => ({
 vi.mock("@/lib/mac-permissions", () => ({
   hasMicGrant: vi.fn(async () => true),
 }));
+// Lets a test hold the list-load await open: the window between the grant
+// check and the invoke, where the final cancel guard is the only protection.
+const listsGate = vi.hoisted(() => ({ hold: null as Promise<void> | null }));
+vi.mock("@/lib/meeting-detect", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/meeting-detect")>();
+  return {
+    ...actual,
+    currentWatchLists: async () => {
+      const lists = await actual.currentWatchLists();
+      if (listsGate.hold) await listsGate.hold;
+      return lists;
+    },
+  };
+});
 vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
   ...(await importActual<Record<string, unknown>>()),
   loadGoogleConfigState: vi.fn(),
@@ -148,6 +162,7 @@ beforeEach(() => {
   emit.mockResolvedValue(undefined);
   loadState.mockResolvedValue({ state: "absent", config: null } as never);
   vi.mocked(hasMicGrant).mockImplementation(async () => true);
+  listsGate.hold = null;
   windowLabel = "main";
   platform = "windows";
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
@@ -737,7 +752,7 @@ describe("useMeetingDetection", () => {
     };
     const storedFailure = () =>
       JSON.parse(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]);
-    const emitIndex = (event: string, match: (payload: any) => boolean) =>
+    const emitIndex = (event: string, match: (payload: unknown) => boolean) =>
       emit.mock.calls.findIndex(([e, p]) => e === event && match(p));
     const deferredGrant = () => {
       let resolve: (granted: boolean) => void = () => {};
@@ -819,10 +834,30 @@ describe("useMeetingDetection", () => {
 
       expect(cmdCount("start_meeting_watcher")).toBe(0);
       expect(
-        emit.mock.calls.some(([, payload]) => (payload as any)?.failure)
+        emit.mock.calls.some(([, payload]) => (payload as { failure?: unknown } | undefined)?.failure)
       ).toBe(false);
       expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
       expect(toast.error).not.toHaveBeenCalled();
+    });
+
+    it("a toggle-off while the watch lists load fires no start and announces no restart", async () => {
+      let release: () => void = () => {};
+      listsGate.hold = new Promise<void>((r) => {
+        release = r;
+      });
+      renderHook(() => useMeetingDetection());
+      await flush();
+
+      fire("meeting-detection-setting-changed", { enabled: false });
+      await flush();
+      release();
+      await flush();
+      await flush();
+
+      expect(cmdCount("start_meeting_watcher")).toBe(0);
+      expect(emit).not.toHaveBeenCalledWith("meeting-detection-watcher-restarted", {
+        ok: true,
+      });
     });
 
     it("Mac: retry with the mic grant gone turns the toggle off", async () => {
@@ -841,11 +876,13 @@ describe("useMeetingDetection", () => {
       expect(cmdCount("start_meeting_watcher")).toBe(1);
       const changed = emitIndex(
         "meeting-detection-setting-changed",
-        (p) => p?.failure?.kind === "permission-reset"
+        (p) =>
+          (p as { failure?: { kind?: string } } | undefined)?.failure?.kind ===
+          "permission-reset"
       );
       const restarted = emitIndex(
         "meeting-detection-watcher-restarted",
-        (p) => p?.ok === false
+        (p) => (p as { ok?: boolean } | undefined)?.ok === false
       );
       expect(changed).toBeGreaterThanOrEqual(0);
       expect(restarted).toBeGreaterThan(changed);
@@ -877,7 +914,7 @@ describe("useMeetingDetection", () => {
         enabled: false,
       });
       expect(
-        emit.mock.calls.some(([, payload]) => (payload as any)?.failure)
+        emit.mock.calls.some(([, payload]) => (payload as { failure?: unknown } | undefined)?.failure)
       ).toBe(false);
       expect(stored[STORAGE_KEYS.MEETING_AUTO_RECORD_START_FAILURE]).toBeUndefined();
     });
