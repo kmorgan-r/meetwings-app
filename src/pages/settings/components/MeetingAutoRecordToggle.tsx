@@ -5,6 +5,15 @@ import { Switch, Label, Header, Button } from "@/components";
 import { safeLocalStorage } from "@/lib";
 import { STORAGE_KEYS } from "@/config/constants";
 import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
+import {
+  clearStartFailure,
+  macToggleOnCheck,
+  readStartFailure,
+  writeStartFailure,
+  type StartFailure,
+} from "@/lib/meeting-start-failure";
+import { openMicSettings, openSystemAudioSettings } from "@/lib/mac-permissions";
+import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 
 interface MeetingAutoRecordToggleProps {
@@ -24,6 +33,22 @@ type Readout =
   | { kind: "ok"; sessions: MicSession[] }
   | { kind: "failed"; reason: string };
 
+const WINDOWS_COPY = {
+  title: "Auto-record meetings",
+  description: "Record Teams and Google Meet calls automatically",
+  label: "Automatically record Teams and Google Meet calls",
+  paragraph:
+    "Starts recording when a Teams call begins, or when Chrome starts using the microphone (a Google Meet call or anything else), and stops when it ends. Requires voice detection to be enabled in audio settings. Participants may need to be told the call is being recorded — rules vary by country.",
+};
+
+const MAC_COPY = {
+  title: "Auto-record meetings",
+  description: "Record Google Meet calls in Chrome automatically",
+  label: "Automatically record Google Meet calls in Chrome",
+  paragraph:
+    "Starts recording when Chrome starts using the microphone (a Google Meet call or anything else), and stops when it ends. Requires voice detection to be enabled in audio settings. Turning this on asks for microphone and system audio permission. Participants may need to be told the call is being recorded — rules vary by country.",
+};
+
 type Status =
   | { kind: "pending" }
   | { kind: "ok"; running: boolean; lastError: string | null }
@@ -40,6 +65,10 @@ export const MeetingAutoRecordToggle = ({
   // Three-valued: `pending` renders no note, or the note flashes on every visit
   // to this page before the query resolves.
   const [status, setStatus] = useState<Status>({ kind: "pending" });
+  const [startFailure, setStartFailure] = useState<StartFailure | null>(() =>
+    isMacOS() ? readStartFailure() : null
+  );
+  const [requesting, setRequesting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -113,7 +142,9 @@ export const MeetingAutoRecordToggle = ({
         // assumption no test here could falsify.
         const enabled = Boolean(payload?.enabled);
         setIsEnabled(enabled);
+        if (payload?.failure) setStartFailure(payload.failure);
         if (enabled) {
+          setStartFailure(null);
           // The card's `running` is otherwise the stale mount value, so enabling
           // would paint "auto-record unavailable" over a watcher that started fine.
           setStatus({ kind: "pending" });
@@ -130,7 +161,7 @@ export const MeetingAutoRecordToggle = ({
     };
   }, []);
 
-  const handleSwitchChange = async (checked: boolean) => {
+  const saveAndAnnounce = async (checked: boolean) => {
     setIsEnabled(checked);
     safeLocalStorage.setItem(
       STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
@@ -141,6 +172,29 @@ export const MeetingAutoRecordToggle = ({
       await emit("meeting-detection-setting-changed", { enabled: checked });
     } catch (error) {
       console.error("Failed to announce the meeting detection setting:", error);
+    }
+  };
+
+  const handleSwitchChange = async (checked: boolean) => {
+    if (!isMacOS() || !checked) {
+      await saveAndAnnounce(checked);
+      return;
+    }
+    // On a Mac, nothing is saved or announced until the probe and both
+    // permission requests pass; a failure stays visible as a note instead.
+    setRequesting(true);
+    clearStartFailure();
+    setStartFailure(null);
+    try {
+      const failure = await macToggleOnCheck();
+      if (failure) {
+        writeStartFailure(failure);
+        setStartFailure(failure);
+        return;
+      }
+      await saveAndAnnounce(true);
+    } finally {
+      setRequesting(false);
     }
   };
 
@@ -175,34 +229,46 @@ export const MeetingAutoRecordToggle = ({
     (status.kind === "rejected" ||
       (status.kind === "ok" && (!status.running || status.lastError !== null)));
 
+  const copy = isMacOS() ? MAC_COPY : WINDOWS_COPY;
+
   return (
     <div id="meeting-auto-record" className={`space-y-2 ${className ?? ""}`}>
       <Header
-        title="Auto-record meetings"
-        description="Record Teams and Google Meet calls automatically"
+        title={copy.title}
+        description={copy.description}
         isMainTitle
       />
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div>
-            <Label className="text-sm font-medium">
-              Automatically record Teams and Google Meet calls
-            </Label>
+            <Label className="text-sm font-medium">{copy.label}</Label>
             <p className="text-xs text-muted-foreground mt-1">
-              Starts recording when a Teams call begins, or when Chrome starts
-              using the microphone (a Google Meet call or anything else), and
-              stops when it ends. Requires voice detection to be enabled in audio settings.
-              Windows only. Participants may need to be told the call is being
-              recorded — rules vary by country.
+              {copy.paragraph}
             </p>
           </div>
         </div>
         <Switch
           checked={isEnabled}
           onCheckedChange={handleSwitchChange}
-          aria-label="Automatically record Teams and Google Meet calls"
+          disabled={requesting}
+          aria-label={copy.label}
         />
       </div>
+      {startFailure && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 px-3 py-2">
+          <p className="text-xs text-destructive">{startFailure.message}</p>
+          {startFailure.kind === "mic-denied" && (
+            <Button size="sm" variant="outline" onClick={openMicSettings}>
+              Open Microphone settings
+            </Button>
+          )}
+          {startFailure.kind === "audio-denied" && (
+            <Button size="sm" variant="outline" onClick={openSystemAudioSettings}>
+              Open System Audio settings
+            </Button>
+          )}
+        </div>
+      )}
       {showNote && (
         <div className="flex items-center justify-between rounded-md border border-destructive/40 px-3 py-2">
           <p className="text-xs text-destructive">
