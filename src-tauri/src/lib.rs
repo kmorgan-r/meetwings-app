@@ -232,6 +232,8 @@ pub fn run() {
             speaker::manual_stop_continuous,
             speaker::check_system_audio_access,
             speaker::request_system_audio_access,
+            speaker::prime_system_audio_access,
+            speaker::open_microphone_settings,
             speaker::get_vad_config,
             speaker::update_vad_config,
             speaker::get_capture_status,
