@@ -53,6 +53,10 @@ export const STORAGE_KEYS = {
   // only ("Does not start or stop recording"), so reusing it would silently expand
   // what the user agreed to. The old key is deleted, not migrated.
   MEETING_AUTO_RECORD_ENABLED: "meeting_auto_record_enabled",
+  // Mac-only JSON StartFailure (see lib/meeting-start-failure.ts): the last
+  // automatic-record start failure, shown by the toggle until the next
+  // toggle-on.
+  MEETING_AUTO_RECORD_START_FAILURE: "meeting_auto_record_start_failure",
   CALENDAR_AUTO_SELECT_ENABLED: "calendar_auto_select_enabled",
 
   // User Identity settings
