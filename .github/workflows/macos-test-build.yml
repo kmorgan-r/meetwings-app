@@ -1,0 +1,76 @@
+# Manual only. Builds an unsigned macOS DMG for testers and uploads it as a
+# workflow ARTIFACT. It creates no GitHub release, never touches latest.json,
+# and cannot reach the auto-updater.
+#
+# Run it from any branch once this file is on main:
+#   gh workflow run macos-test-build.yml --ref <branch>
+# then download the artifact from the run page. Testers open the unsigned app
+# the way publish.yml's release notes describe (System Settings > Privacy &
+# Security > "Allow Anyway").
+name: macOS test build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test DMG (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Pinned with ci.yml and publish.yml; see the comment in ci.yml.
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Create environment file
+        run: |
+          echo "API_ACCESS_KEY=${{ secrets.API_ACCESS_KEY }}" > src-tauri/.env
+          echo "PAYMENT_ENDPOINT=${{ secrets.PAYMENT_ENDPOINT }}" >> src-tauri/.env
+          echo "APP_ENDPOINT=${{ secrets.APP_ENDPOINT }}" >> src-tauri/.env
+          echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}" >> src-tauri/.env
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # No tagName/releaseName/releaseId: tauri-action only builds.
+      # The signing key is still required because tauri.conf.json sets
+      # createUpdaterArtifacts: true.
+      - name: Build DMG
+        uses: tauri-apps/tauri-action@v0.5.16
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
+          PAYMENT_ENDPOINT: ${{ secrets.PAYMENT_ENDPOINT }}
+          APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+        with:
+          args: --target ${{ matrix.target }} --bundles dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: meetwings-macos-${{ matrix.arch }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
