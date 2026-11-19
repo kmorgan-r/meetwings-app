@@ -23,7 +23,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel }),
 }));
-vi.mock("@/lib/platform", () => ({ isWindows: () => onWindows }));
+vi.mock("@/lib/platform", () => ({
+  isWindows: () => onWindows,
+  // isMacOS: jsdom is not a Mac, and currentWatchLists now reads it. A factory
+  // mock throws when code reads an export it does not define.
+  isMacOS: () => false,
+}));
 vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
   ...(await importActual<Record<string, unknown>>()),
   loadGoogleConfigState: vi.fn(),

@@ -19,7 +19,7 @@ import {
   isSameCall,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
-import { isGatedProcess, meetingLabel } from "@/lib/meeting-detect";
+import { isGatedProcess, meetingLabel, sameCallId } from "@/lib/meeting-detect";
 import { detectionLog } from "@/lib/detection-log";
 import {
   autoRecordingStarted,
@@ -811,9 +811,7 @@ export const useMeetingAutoRecord = ({
     const g = graceRef.current;
     if (g) {
       const events =
-        g.endedProcess &&
-        process &&
-        g.endedProcess.toLowerCase() !== process.toLowerCase()
+        g.endedProcess && process && !sameCallId(g.endedProcess, process)
           ? null // already a new call; skip the read
           : await readCalendarEvents(process ?? g.endedProcess);
       // Identity, not truthiness: a grace cancelled or re-armed during the read

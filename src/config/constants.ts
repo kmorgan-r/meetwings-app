@@ -111,12 +111,15 @@ export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe", "Zoom.exe"
 
 // Display names for the detection toasts, keyed by LOWERCASED process name.
 // Matching on the Rust side is case-insensitive and the observed basename keeps
-// its original case, so the lookup must lowercase before indexing.
+// its original case, so the lookup must lowercase before indexing. On Mac the
+// lookup runs through entryMatches instead, so a bundle-ID key reaches its
+// helper processes too.
 export const MEETING_DETECT_LABELS: Record<string, string> = {
   "ms-teams.exe": "Teams",
   "teams.exe": "Teams",
   "chrome.exe": "Google Meet",
   "zoom.exe": "Zoom",
+  "com.google.chrome": "Google Meet",
 };
 
 export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
@@ -125,6 +128,12 @@ export const MEETING_DETECT_FALLBACK_LABEL = "Meeting";
 // polls) and a confirm handshake. The frontend confirms every candidate, so any
 // mic use counts as a call, calendar event or not (owner decision, 2026-11-16).
 export const MEETING_DETECT_GATED_PROCESSES = ["chrome.exe"];
+
+// The Mac twins of the lists above. Mac IDs are bundle IDs matched with the
+// helper-prefix rule (entryMatches), and they are provisional until the
+// readout on a real Mac confirms Chrome's ID (spec §7 step 3).
+export const MEETING_DETECT_PROCESSES_MAC: string[] = [];
+export const MEETING_DETECT_GATED_PROCESSES_MAC = ["com.google.Chrome"];
 
 // The serialized form of the Rust StopOutcome::TimedOut variant. Kept here so
 // the string that gates the disable-failure ladder has exactly one home; a

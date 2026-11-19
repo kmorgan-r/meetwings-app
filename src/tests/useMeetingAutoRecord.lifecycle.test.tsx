@@ -34,7 +34,12 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
-vi.mock("@/lib/platform", () => ({ isWindows: mocks.isWindows }));
+// isMacOS: jsdom is not a Mac, and currentWatchLists now reads it. A factory
+// mock throws when code reads an export it does not define.
+vi.mock("@/lib/platform", () => ({
+  isWindows: mocks.isWindows,
+  isMacOS: () => false,
+}));
 // A detection inside a grace reads the calendar to tell the same call from a
 // new one; no calendar connected here.
 vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
