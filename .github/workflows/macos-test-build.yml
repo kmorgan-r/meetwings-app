@@ -52,20 +52,23 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # tauri.conf.json sets createUpdaterArtifacts: true, which would make the
+      # build demand the updater signing key. A test DMG has no use for updater
+      # artifacts, and that key signs updates every installed copy trusts, so
+      # this build turns them off and is never given the key.
+      - name: Disable updater artifacts for this build
+        run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/no-updater.json"
+
       # No tagName/releaseName/releaseId: tauri-action only builds.
-      # The signing key is still required because tauri.conf.json sets
-      # createUpdaterArtifacts: true.
       - name: Build DMG
         uses: tauri-apps/tauri-action@v0.5.16
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           API_ACCESS_KEY: ${{ secrets.API_ACCESS_KEY }}
           PAYMENT_ENDPOINT: ${{ secrets.PAYMENT_ENDPOINT }}
           APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
         with:
-          args: --target ${{ matrix.target }} --bundles dmg
+          args: --target ${{ matrix.target }} --bundles dmg --config ${{ runner.temp }}/no-updater.json
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
