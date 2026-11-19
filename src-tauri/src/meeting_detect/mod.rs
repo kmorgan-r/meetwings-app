@@ -56,6 +56,25 @@ fn image_name_from_path(path: &str) -> Option<String> {
     }
 }
 
+/// Does a watch-list `entry` match a session image name?
+///
+/// Case-insensitive equality. A non-`.exe` entry (a Mac bundle ID) also
+/// matches its helper processes: `name` starts with `entry` and the next
+/// byte is `.`, so `com.google.Chrome` matches `com.google.Chrome.helper`
+/// but not `com.google.ChromeX`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn entry_matches(entry: &str, name: &str) -> bool {
+    if entry.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    if entry.to_ascii_lowercase().ends_with(".exe") {
+        return false;
+    }
+    name.get(..entry.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(entry))
+        && name.as_bytes().get(entry.len()) == Some(&b'.')
+}
+
 /// Decide what a single poll observed.
 ///
 /// `Inactive` covers a successful enumeration that saw nothing — that is the
@@ -73,7 +92,7 @@ fn classify(sessions: &[SessionInfo], watch_list: &[String], own_pid: u32) -> Po
 
         if session.active
             && session.pid != own_pid
-            && watch_list.iter().any(|w| w.eq_ignore_ascii_case(name))
+            && watch_list.iter().any(|w| entry_matches(w, name))
         {
             return PollResult::Active(name.clone());
         }
@@ -1016,13 +1035,13 @@ pub struct MicSession {
     pub kind: &'static str,
 }
 
-/// Same matching rule as `classify`: case-insensitive exact image name.
+/// Same matching rule as `classify`: see `entry_matches`.
 fn describe_sessions(
     sessions: &[SessionInfo],
     lists: &WatchLists,
     own_pid: u32,
 ) -> Vec<MicSession> {
-    let listed = |list: &[String], name: &str| list.iter().any(|w| w.eq_ignore_ascii_case(name));
+    let listed = |list: &[String], name: &str| list.iter().any(|w| entry_matches(w, name));
     let mut rows: Vec<MicSession> = sessions
         .iter()
         .filter(|s| s.pid != own_pid)
@@ -1093,6 +1112,69 @@ mod tests {
     }
 
     #[test]
+    fn entry_matches_mac_helper_prefix() {
+        assert!(entry_matches("com.google.Chrome", "com.google.Chrome"));
+        assert!(entry_matches(
+            "com.google.Chrome",
+            "com.google.Chrome.helper"
+        ));
+        assert!(entry_matches(
+            "com.google.Chrome",
+            "COM.GOOGLE.CHROME.HELPER"
+        ));
+        assert!(!entry_matches("com.google.Chrome", "com.google.ChromeX"));
+    }
+
+    #[test]
+    fn entry_matches_exe_entries_stay_exact() {
+        assert!(entry_matches("chrome.exe", "CHROME.EXE"));
+        assert!(entry_matches("Teams.exe", "teams.exe"));
+        assert!(!entry_matches("chrome.exe", "chrome.exe.foo"));
+    }
+
+    #[test]
+    fn entry_matches_never_matches_webkit() {
+        let entries = [
+            "com.google.Chrome",
+            "ms-teams.exe",
+            "Teams.exe",
+            "Zoom.exe",
+            "chrome.exe",
+        ];
+        for id in ["com.apple.WebKit.GPU", "com.apple.WebKit.WebContent"] {
+            assert!(
+                entries.iter().all(|e| !entry_matches(e, id)),
+                "{id} must never match"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_matches_does_not_panic_on_odd_input() {
+        assert!(!entry_matches("com.google.Chrome", "com.google.Chromé"));
+        assert!(!entry_matches(
+            "com.google.Chromé",
+            "com.google.Chrome.helper"
+        ));
+        assert!(!entry_matches("com.google.Chrome", "c"));
+        assert!(!entry_matches("com.google.Chrome", ""));
+    }
+
+    #[test]
+    fn classify_matches_a_mac_helper_and_keeps_its_raw_id() {
+        let gated = vec!["com.google.Chrome".to_string()];
+        let sessions = [
+            session(5, Some("com.apple.WebKit.GPU"), true),
+            session(7, Some("com.google.Chrome.helper"), true),
+        ];
+        assert_eq!(
+            classify(&sessions, &gated, 100),
+            PollResult::Active("com.google.Chrome.helper".to_string())
+        );
+        assert_eq!(classify(&sessions[..1], &gated, 100), PollResult::Inactive);
+    }
+
+    #[test]
     fn describe_sessions_marks_each_list() {
         let lists = WatchLists {
             direct: vec!["ms-teams.exe".to_string()],
@@ -1119,6 +1201,32 @@ mod tests {
                 ("chrome.exe", true, "gated"),
                 ("MS-TEAMS.EXE", false, "direct"),
                 ("spotify.exe", false, "ignored"),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_sessions_marks_mac_helpers() {
+        let lists = WatchLists {
+            direct: vec![],
+            gated: vec!["com.google.Chrome".to_string()],
+        };
+        let rows = describe_sessions(
+            &[
+                session(7, Some("com.google.Chrome.helper"), true),
+                session(8, Some("com.google.Chrome.helper.Renderer"), true),
+                session(9, Some("com.apple.WebKit.GPU"), true),
+            ],
+            &lists,
+            100,
+        );
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("com.apple.WebKit.GPU", "ignored"),
+                ("com.google.Chrome.helper", "gated"),
+                ("com.google.Chrome.helper.Renderer", "gated"),
             ]
         );
     }
@@ -1607,6 +1715,45 @@ mod tests {
                 detected("chrome.exe"),
                 ended("chrome.exe")
             ]
+        );
+    }
+
+    // §5.3, §8 — with no direct list, the gated path through `tick` must be
+    // byte-for-byte the chrome() fixture's behaviour, with only the process
+    // name differing.
+    #[test]
+    fn tick_gated_path_is_unchanged_with_an_empty_direct_list() {
+        let gated_list = vec!["com.google.Chrome".to_string()];
+        let during = [session(7, Some("com.google.Chrome.helper"), true)];
+
+        // Every outcome built through `classify`, as the real watcher does.
+        let outcome =
+            |s: &[SessionInfo], list: &[String]| PollOutcome::Classified(classify(s, list, 100));
+        let direct_during = outcome(&during, &[]);
+        let direct_end = outcome(&[], &[]);
+        let gated_during = outcome(&during, &gated_list);
+        let gated_end = outcome(&[], &gated_list);
+        assert_eq!(
+            gated_during,
+            PollOutcome::Classified(PollResult::Active("com.google.Chrome.helper".to_string()))
+        );
+
+        // The confirmed_meet() shape, followed by its end polls.
+        let mut seq = vec![
+            (direct_during.clone(), gated_during.clone(), None),
+            (direct_during.clone(), gated_during.clone(), None),
+            (direct_during, gated_during, Some(1)),
+        ];
+        seq.extend(vec![(direct_end, gated_end, None); 5]);
+
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                detected("com.google.Chrome.helper"),
+                ended("com.google.Chrome.helper")
+            ],
+            "the chrome() fixture run with each process name swapped for the helper id"
         );
     }
 
