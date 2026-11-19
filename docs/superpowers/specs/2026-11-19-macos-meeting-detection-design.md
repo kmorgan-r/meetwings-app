@@ -1,6 +1,6 @@
 # Meeting detection on Mac (parity with Windows)
 
-Status: design, awaiting approval (2026-11-19)
+Status: design, sent to build by the owner via /ship (2026-11-19); spec review applied
 Owner: Kevin
 Issues: #95 (closed as completed, but only its Windows half shipped), #114 (Mac lag, open)
 Builds on: `2026-11-13-google-meet-detection-design.md` (the 11-13 spec). Its section 7 designed the Mac
@@ -102,8 +102,14 @@ Mac direct = none, and no unverified IDs reaching users), section 7.4 (macOS CI 
 - List Core Audio's process objects. Keep **only those running input**. On Mac, a process that merely
   plays audio is not a mic session, and listing it would make the readout's "Idle" rows meaningless.
 - `SessionInfo { pid, image_name, active: true }`. `image_name` is the **raw bundle ID**. A process with
-  no bundle ID falls back to its executable name (from the PID), or to `None` if that fails too, which
-  feeds the existing `Unknown` path.
+  no bundle ID, or an empty one, falls back to its executable name (from the PID), or to `None` if that
+  fails too, which feeds the existing `Unknown` path.
+- **Only the list read can fail a poll.** A process can exit between the list read and its own
+  `pid`/`bundle_id`/`is_running_input` reads (`hardware.rs:257-275`, each a separate `os::Result`). A
+  failed per-process read skips that process, as `win32.rs:109-117` skips a bad session.
+- The step from raw per-process data (pid, bundle ID or none, executable name or none, running-input
+  flag) to `Vec<SessionInfo>` is a pure, cfg-free function, unit tested on every platform (section 8).
+  `macos.rs` only reads Core Audio and calls it.
 - Wire it with `#[cfg(target_os = "macos")]` beside the Windows one. `stub.rs` becomes Linux and other
   platforms only.
 
@@ -118,9 +124,22 @@ Mac apps often do their audio in helper processes whose bundle ID extends the ap
   (case-insensitive). So `com.google.Chrome` matches `com.google.Chrome.helper`.
 - Windows entries keep exact-modulo-case matching (the 11-13 spec's R9). The prefix rule must not apply
   to them.
-- `meetingLabel` and `isGatedProcess` (`src/lib/meeting-detect.ts`) apply the same rule, so a helper ID
-  gets the right card label and the gated path. So does `isSameCall`
-  (`src/lib/functions/meeting-auto-record.ts`), so a helper ID and its app ID count as the same call.
+- Every place that compares a session ID against a list entry or against another session ID applies the
+  same rule, through one shared matcher per language:
+  - Rust: `classify`, and `describe_sessions` (`mod.rs:1019-1025`), which decides the readout's
+    "Watched" column with its own exact-match closure today. Without it a helper row would read "Not
+    watched" while `classify` watches it, M1 would fail, and section 7 step 3 would "correct" a constant
+    that was right.
+  - TypeScript: `meetingLabel` and `isGatedProcess` (`src/lib/meeting-detect.ts`), so a helper ID gets
+    the right card label and the gated path; `isSameCall` (`src/lib/functions/meeting-auto-record.ts`),
+    so a helper ID and its app ID count as the same call; and the inline returning-call comparison in
+    `onDetected` (`useMeetingAutoRecord.ts:813-818`, `g.endedProcess.toLowerCase() !==
+    process.toLowerCase()`), which runs before `isSameCall`. Left exact, a call flapping between a helper
+    ID and its app ID would read as a new call, skip the calendar read, and reset the conversation
+    mid-call.
+- The matcher is **case-insensitive on both sides**. `meetingLabel` and `isGatedProcess` lowercase only
+  their input today (`meeting-detect.ts:22, 29`), so the mixed-case constant `com.google.Chrome` added
+  verbatim would never match, and the card would lose its calendar event (`useGoogleMeetingCapture.ts:137`).
 - The readout and `detection.log` always show the **raw** ID, never the folded one. That raw ID is how
   we learn the real identities.
 - Nothing matches `com.apple.WebKit.*` (anti-goal 1). A test pins this.
@@ -163,16 +182,31 @@ With the direct list empty, the direct state machine on Mac simply never fires. 
 
 Change from what I told the owner on 2026-11-19 ("hide the toggle"): the 11-13 spec's rule is kept. The
 toggle is shown, and on a macOS that cannot do this, turning it on fails at once with a clear message.
-- `start_meeting_watcher` **probes** before spawning: it reads the process list once. If Core Audio lacks
-  the property, it returns an error naming the requirement. Auto-record also records through the
-  system-audio process tap, so the feature's floor is the higher of the two APIs' floors. The message
-  states that floor once the builder has verified it against Apple's headers (believed to be 14.2, but
-  probe, don't hardcode a version check).
-- `list_capture_sessions` returns the same error, so the readout says it too.
-- The message **stays visible after the toggle flips itself off**. Today a start failure shows the
-  generic toast "Could not turn on auto-record" (`useMeetingDetection.ts:267`) and flips the toggle off,
-  which hides the note. It must never reach the poll loop, where 30 failed polls would replace it with
-  "30 consecutive failed polls".
+- `start_meeting_watcher` **probes** before spawning. Auto-record also records through the system-audio
+  process tap, so the feature's floor is the higher of the two APIs' floors, and the probe covers
+  **both**: the process-object list and the process-tap API. (Probing only the process list would let a
+  macOS between the two floors pass, turn the toggle on, and then fail at tap creation on every call.)
+  The builder confirms both floors from Apple's headers (believed 14.x and 14.2) and may probe only the
+  higher one if the headers show it implies the other. Probe, don't hardcode a version check.
+- **Unsupported vs. transient.** The "unsupported macOS" verdict comes only from a property-existence
+  test (`has_prop` / `AudioObjectHasProperty`, `hardware.rs:47-50`). A read that fails on a supported
+  macOS (for example, coreaudiod restarting) is an ordinary, retryable start error with its own wording,
+  never "unsupported".
+- The probe is one pure function, taking the platform reads as injectable inputs, and both
+  `start_meeting_watcher` and `list_capture_sessions` call it, so the readout gives the same error. On
+  failure the watcher is not spawned, and the error never reaches the poll loop, where 30 failed polls
+  would replace it with "30 consecutive failed polls".
+- **The message stays visible after the toggle flips itself off.** Today that cannot happen. The start
+  runs in the main window (`useMeetingDetection.ts:242-271`). Its catch shows only the generic toast
+  "Could not turn on auto-record" (`:267`), and Settings, in another window and often not open at all
+  (for example at app launch with the toggle on), receives only `{enabled:false}`
+  (`MeetingAutoRecordToggle.tsx:110-115`). The note renders only while `isEnabled` is true (`:173-176`),
+  and a pre-spawn `Err` never writes the watcher's `last_error` (`mod.rs:765-767, 793-795`). *(My call:)*
+  a start failure is **persisted** as a small record in localStorage (a new `STORAGE_KEYS` entry: the
+  message and a kind such as `unsupported`, `permission-reset` or `permission-denied`), and also carried
+  as an optional reason in the `meeting-detection-setting-changed` payload. The toggle reads the record on
+  mount and on that event, and renders the note when the record exists **regardless of `isEnabled`**.
+  The next toggle-on clears it.
 
 ### 5.6 Permissions (Mac only)
 
@@ -183,13 +217,29 @@ On Mac it can.
 - **Ask when the toggle is turned on, not mid-call.** On Mac, turning the toggle on triggers both
   permission requests while the user is looking at Settings. *(My call: otherwise the first detected
   call pops two system dialogs over the meeting.)*
+- **Order at toggle-on (Mac).** Today `handleSwitchChange` saves `"true"` and emits
+  `meeting-detection-setting-changed` at once (`MeetingAutoRecordToggle.tsx:133-145`), and the main window
+  starts the watcher and sets `enabledRef` on that event (`useMeetingDetection.ts:242-271`,
+  `useMeetingAutoRecord.ts:978-986`). On Mac the toggle-on path instead **awaits both requests before it
+  saves or emits anything**. While they are pending the Switch is disabled (or a per-attempt token
+  discards a stale result), so a late answer can never re-save `true` after the user flipped it off. A
+  denial never emits `enabled: true`. Windows keeps today's immediate path, with no permission calls.
 - **On denial,** the toggle stays off and the note says which permission is missing, with a button that
   opens the matching System Settings pane (`request_system_audio_access` already opens the audio-capture
   pane; the mic pane needs its own URL).
-- **Unverified:** whether a denied system-audio permission makes tap creation fail, or succeed and
-  deliver silence. If silence, a denial can't be detected up front. Then the existing
-  empty-transcription report in `useMeetingAudio` is the backstop, and the note's copy tells the user
-  what to check. The builder confirms which on the tester's Mac.
+- **Unverified: which call raises the system-audio prompt.** None does today.
+  `request_system_audio_access` only opens the Settings pane (`commands.rs:505-513`), and
+  `check_system_audio_access` builds a tap (`macos.rs:58-59`) without creating the aggregate device or
+  starting IO, which only happen in `start_device` (`macos.rs:136-138`). If building the tap alone does
+  not prompt, the toggle-on request must briefly start the aggregate device's IO and then tear it down.
+  The builder plans room for that; M2 settles it.
+- **Unverified: what a denied system-audio permission does** — tap creation fails, or it succeeds and
+  delivers silence. If it fails, the toggle-on request reports the denial like the mic's. If it delivers
+  silence, a denial cannot be detected in this work. The existing empty-transcription report is **not** a
+  backstop: it counts only segments where VAD already heard speech (`useMeetingAudio.ts:138-153`), and a
+  silent tap produces none. *(My call:)* this work does not add a silence detector. The denial note's
+  copy tells the user what to check, and M2c records which behaviour macOS shows. If it is silence, a
+  follow-up issue designs a detector.
 - Reading the process list is believed to need no permission. Also unverified; the readout settles it.
 - **Grants lost while the toggle stays on.** The Mac build has no Apple signing identity. If macOS ties
   the grants to each build's ad-hoc signature, every silent update drops them. A user can also revoke
@@ -200,6 +250,20 @@ On Mac it can.
   which re-runs the toggle-on prompts. The **system-audio** grant has no public check that cannot prompt
   (`check_system_audio_access` builds a real tap), so it is not checked at start. A lost system-audio
   grant can still prompt mid-call. That is a known limit, and M2b below measures how often it happens.
+- **Where the start check lives.** Inside `startWatcher` (`useMeetingDetection.ts:98-99`), the one
+  function both start paths use, so launch, toggle-on and retry all get it. Because toggle-on now waits
+  for its prompts first (above), the check sees the fresh grant there and does not misfire.
+  - macOS only, behind `isMacOS()` and a **dynamic** `import("tauri-plugin-macos-permissions-api")`, as
+    `useCompletion.ts:2190-2195` does. A static import would break the Windows build.
+  - Effect 3 tests `cancelled` only before `startWatcher()` today (`useMeetingDetection.ts:254-259`).
+    The new `await` opens a gap, so no `start_meeting_watcher` invoke may follow a `cancelled` that
+    flipped during the check (re-test after it, or pass the test into `startWatcher`). Otherwise a start
+    can fire after the user turned the toggle off and the cleanup's stop was queued.
+  - **Retry path** (effect 1, `useMeetingDetection.ts:124-150`). Today a failed retry reports
+    `watcher-restarted {ok:false}` and leaves the toggle on, so the Retry button stays reachable.
+    *(My call:)* a missing mic grant is the one retry failure that turns the toggle off, with the
+    "permission was reset" record (5.5), because retrying cannot restore a grant and toggle-on can.
+    Every other retry failure keeps today's behaviour. This is new code on that path.
 
 ### 5.7 CI
 
@@ -208,14 +272,24 @@ On Mac it can.
 `cargo test`, with the same pinned toolchain as the other jobs. The repo is public, so the macOS
 minutes are free.
 
+The existing Mac-only code (`speaker/macos.rs`, the macOS blocks in `lib.rs`) has never been through
+clippy `-D warnings`: the Linux job never parses cfg-gated modules (`ci.yml:94-99`), and `publish.yml`
+only builds. The first macOS job run may fail on lints that predate this feature. The plan adds the job
+first, against unchanged code, and fixes whatever it finds before the feature commits depend on it. The
+full `cargo test` then runs on macOS too, so any existing test that asserts the old
+`UNSUPPORTED_PLATFORM` text or relies on the stub is updated with the string change.
+
 ### 5.8 The Mac test build (from the 11-13 spec, section 7.5)
 
 A manually triggered workflow (`workflow_dispatch`) builds the Mac app and uploads the `.dmg` as a
 workflow **artifact**. It creates no release, does not touch `latest.json`, and reaches no other user.
 GitHub only lets you dispatch a workflow whose file is on the default branch, so it lands as **its own
-small PR to `main` first**. It then runs against the feature branch with `--ref`. Reuse `publish.yml`'s
-macOS steps if that can be done cleanly. The build is unsigned; the tester opens it the way the release
-notes say (`publish.yml:125`).
+small PR to `main` first**. It then runs against the feature branch with `--ref`. A dispatch with `--ref`
+runs the workflow file as it exists on that ref, so the feature branch must contain it too: merge or
+rebase `main` into the feature branch after the workflow PR merges. It builds **both** architectures,
+arm64 and x64, as `publish.yml:60-65` does, because the tester's chip is not yet known (#114 asks for it).
+Reuse `publish.yml`'s macOS steps if that can be done cleanly. The build is unsigned; the tester opens it
+the way the release notes say (`publish.yml:125`).
 
 ## 6. What the tester will see afterwards
 
@@ -224,14 +298,19 @@ notes say (`publish.yml:125`).
   drops down from the bar, labelled Google Meet. When the call is on the Google Calendar, the card fills
   in the event's title and guests once the calendar read lands. That is the visible sign Google Calendar
   is working.
-- Leaving the call stops the recording within about 10-20 s, and the "Recording saved" card shows.
+- Leaving the call stops the recording within about 15-25 s, and the "Recording saved" card shows. An
+  auto-started recording is the open-mic path, which waits out the gated end debounce (5 polls, about
+  10 s) and then the `CALL_END_GRACE_MS` grace (5 s, `constants.ts:230`) before it stops
+  (`useMeetingAutoRecord.ts:931-943`); only a transcribing session stops at once. Chrome's own delay in
+  releasing the mic adds to that.
 - Teams, Zoom and Safari calls are not detected (non-goals).
 - A recording started by hand looks the same as today: no calendar shown (a non-goal).
 
 ## 7. Order of work
 
 1. **The test-build workflow PR** (section 5.8) to `main`. Kevin merges it.
-2. **Feature branch:** sections 5.1 to 5.7, with the provisional Mac lists.
+2. **Feature branch:** sections 5.1 to 5.7, with the provisional Mac lists. The macOS CI job goes in
+   first, against unchanged code (5.7). Merge `main` in after step 1 so the branch carries the workflow.
 3. **Test DMG to the tester, readout first.** With auto-record **off** and a Meet call open in Chrome,
    the tester presses "Check microphone apps" and reports the raw IDs. This step records nothing, so it
    does not touch the capture path behind #114. Correct the Chrome ID from what it shows.
@@ -247,33 +326,62 @@ notes say (`publish.yml:125`).
 - `classify` with Mac IDs: `com.google.Chrome` and a Chrome helper ID both matching the gated entry
   through the dot-prefix rule; `com.google.ChromeX` not matching; `com.apple.WebKit.GPU` never
   matching; the Windows R9 cases unchanged (no prefix rule on `.exe` entries).
+- `describe_sessions` with Mac IDs: a Chrome helper row has `kind == "gated"` and keeps its raw name;
+  a `com.apple.WebKit.*` row is "ignored".
+- The 5.1 mapping function: a missing or empty bundle ID falls back to the executable name, then to
+  `None`; a process not running input is left out; a failed per-process read skips only that process.
 - `tick` with an empty direct list and a live Chrome episode: the gated path behaves exactly as with a
   non-empty direct list.
-- The 5.5 probe failure maps to the clear error (with the probe injectable or factored so it's testable
-  without a Mac).
+- The 5.5 probe, through the pure function both commands call, with injected reads: a missing property
+  gives the "unsupported" error and the watcher is **not spawned**; a failed read on a supported system
+  gives the retryable error, never "unsupported"; `list_capture_sessions` returns the same error. A test
+  of an error-mapping helper alone is not enough, because it passes with the wiring broken.
 
 **Automated, Rust on the macOS CI job only:** `macos.rs` compiles under clippy `-D warnings`. If the runner
-allows it, a smoke test that `enumerate_capture_sessions()` returns `Ok`.
+allows it, a smoke test that `enumerate_capture_sessions()` returns `Ok`. That smoke test proves only that
+the calls link and run; a runner with no mic user returns an empty list, so it says nothing about
+correctness. The mapping tests above carry that.
 
 **Automated, Vitest** (platform mocked to Mac):
+- **Platform mock first.** Every existing owner and settings test mocks `@/lib/platform` with a factory
+  that exposes only `isWindows` (`useMeetingAutoRecord.auto-stop.test.tsx:42, 553`,
+  `useMeetingAutoRecord.lifecycle.test.tsx:37, 466, 486`, `settings-page.meeting-auto-record.test.tsx:6-7`).
+  The new helper is missing from those factories, so the tests break. The plan updates them to a
+  three-state platform mock (Windows / Mac / Linux), keeping every Windows case passing unchanged.
 - Both owners (`useMeetingDetection`, `useMeetingAutoRecord`) are active on Mac and still inactive on
   Linux.
 - The toggle renders on Mac. `currentWatchLists()` returns the Mac lists on Mac and the unchanged
   Windows lists on Windows.
-- `meetingLabel` and `isGatedProcess` handle helper IDs.
-- An unsupported-macOS start error stays visible after the toggle flips off.
-- Permission denial keeps the toggle off and names the missing permission.
+- The shared TS matcher, through `meetingLabel`, `isGatedProcess`, `isSameCall` and the `onDetected`
+  returning-call comparison: a helper ID matches its app entry and is the same call as its app ID;
+  `com.google.ChromeX` matches nothing; `com.apple.WebKit.*` matches nothing; the mixed-case constant
+  `com.google.Chrome` matches; `.exe` entries keep exact matching (`chrome.exe.foo` does not match
+  `chrome.exe`).
+- An unsupported-macOS start error: after the toggle flips off, the note shows **that error's text**
+  (not only a toast), including in a Settings window mounted after the failure; the readout shows the
+  same error.
+- Permissions, with the permission plugin mocked:
+  - toggle-on on Mac requests both permissions before anything is saved or emitted;
+  - a denial keeps the toggle off, emits no `enabled: true`, and names the missing permission;
+  - flipping the toggle off while the requests are pending never re-saves `true`;
+  - at a watcher start on Mac with the mic grant missing, `start_meeting_watcher` is never invoked, the
+    toggle turns off, and the "permission was reset" note shows; the same on the retry path;
+  - Windows makes no permission calls on either path.
 
 **Manual, on the tester's Mac** (test DMG, Google connected):
 - M1. Readout, auto-record off: with a Meet call open in Chrome, Chrome's mic process is listed with
   its raw ID, shown as watched. Meetwings' own mic (start a recording by hand, no call) is listed as not
   watched. Note every row's raw ID and PID for the later Safari work.
-- M2. Turn the toggle on: both permission prompts appear now, not later.
+- M2. Turn the toggle on: both permission prompts appear now, not later. Note which call raised the
+  system-audio prompt (5.6).
+- M2c. Revoke system-audio permission in System Settings, then join a Meet call with the toggle on. Note
+  whether tap creation fails (a visible error) or recording runs with the other side silent. The answer
+  decides whether a silence detector follow-up is needed (5.6).
 - M2b. Install the next test DMG over the current one with the toggle on, then relaunch. Note whether
   the grants survived. If the mic grant is gone, the toggle is off with the "permission was reset" note.
   Note whether the system-audio prompt appears at the next call.
 - M5. Instant Meet in Chrome (`meet.new`, no calendar event): records, card says Google Meet. Leave: stops
-  within about 20 s.
+  within about 25 s (the open-mic path, debounce plus grace, section 6).
 - M6. Meet from a Google Calendar event: the card shows the event's title and guests.
 - M7. Stay in a Meet call for 3 minutes, muting and unmuting: recording continues.
 - M8. A recording started by hand with no call app open: no detection, no card.
@@ -290,7 +398,8 @@ comparable.)
 - Which browser the tester uses for Meet. If Safari, they won't get auto-record from this work (see the
   Safari non-goal).
 - Chrome's real bundle ID and which process holds the mic (settled by M1).
-- The macOS floor, and how a denied system-audio permission behaves (settled by the builder and M2).
+- The macOS floor (settled by the builder from the headers), which call raises the system-audio prompt
+  (M2), and how a denied system-audio permission behaves (M2c).
 
 ## 10. Left to the builder
 
