@@ -555,6 +555,60 @@ pub async fn request_system_audio_access(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// Starts the system-audio tap for 300 ms so macOS raises its permission prompt.
+// Known limit: returns after 300 ms whatever the user answers, so a first-time
+// "Don't Allow" surfaces only when the first recording's capture fails.
+#[tauri::command]
+pub async fn prime_system_audio_access() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let joined = tauri::async_runtime::spawn_blocking(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let s = SpeakerInput::new()?.stream();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(s);
+                anyhow::Ok(())
+            }))
+        })
+        .await;
+        let outcome = match joined {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(format!("{e:#}")),
+            Ok(Err(_)) => Err("system audio capture failed to start".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(msg) = &outcome {
+            error!("Priming system audio access failed: {}", msg);
+        }
+        outcome
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub async fn open_microphone_settings(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        app.shell()
+            .command("open")
+            .args(["x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"])
+            .spawn()
+            .map_err(|e| {
+                error!("Failed to open microphone settings: {}", e);
+                e.to_string()
+            })?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 // VAD Configuration Management
 #[tauri::command]
 pub async fn get_vad_config(app: AppHandle) -> Result<VadConfig, String> {

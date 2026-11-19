@@ -13,18 +13,46 @@ use gate::{gated_step, GatedEvent, GatedInput, GatedState};
 mod detect_log;
 use detect_log::{log_line, session_signature};
 
+// Pure Mac part of the Core Audio enumeration; `macos.rs` supplies the reads.
+mod mac_logic;
+
 #[cfg(target_os = "windows")]
 mod win32;
 #[cfg(target_os = "windows")]
 use win32::enumerate_capture_sessions;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::enumerate_capture_sessions;
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod stub;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use stub::enumerate_capture_sessions;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub const UNSUPPORTED_PLATFORM: &str = "Meeting detection is only supported on Windows";
+pub const UNSUPPORTED_PLATFORM: &str = "Meeting detection is not supported on this platform";
+
+/// Is meeting detection usable on this OS at all.
+///
+/// macOS: a panic inside cidre during the probe must become a refusal, not a
+/// crashed command, so the probe runs under `catch_unwind`.
+fn platform_support() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::panic::catch_unwind(macos::probe)
+            .unwrap_or_else(|_| Err("Core Audio probe panicked".to_string()))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Err(UNSUPPORTED_PLATFORM.to_string())
+    }
+}
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +84,25 @@ fn image_name_from_path(path: &str) -> Option<String> {
     }
 }
 
+/// Does a watch-list `entry` match a session image name?
+///
+/// Case-insensitive equality. A non-`.exe` entry (a Mac bundle ID) also
+/// matches its helper processes: `name` starts with `entry` and the next
+/// byte is `.`, so `com.google.Chrome` matches `com.google.Chrome.helper`
+/// but not `com.google.ChromeX`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn entry_matches(entry: &str, name: &str) -> bool {
+    if entry.eq_ignore_ascii_case(name) {
+        return true;
+    }
+    if entry.to_ascii_lowercase().ends_with(".exe") {
+        return false;
+    }
+    name.get(..entry.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(entry))
+        && name.as_bytes().get(entry.len()) == Some(&b'.')
+}
+
 /// Decide what a single poll observed.
 ///
 /// `Inactive` covers a successful enumeration that saw nothing — that is the
@@ -73,7 +120,7 @@ fn classify(sessions: &[SessionInfo], watch_list: &[String], own_pid: u32) -> Po
 
         if session.active
             && session.pid != own_pid
-            && watch_list.iter().any(|w| w.eq_ignore_ascii_case(name))
+            && watch_list.iter().any(|w| entry_matches(w, name))
         {
             return PollResult::Active(name.clone());
         }
@@ -331,6 +378,9 @@ pub enum StartAction {
     Spawn,
     UpdateWatchList,
     Retryable(&'static str),
+    /// A start that must not spawn: the command returns this message as its
+    /// `Err` and writes no state (`watch_list`, `confirmed`, `last_error`).
+    Refuse(String),
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -347,9 +397,19 @@ pub enum StopAction {
 /// before it waits, so a slot-derived rule could never observe a stop in flight
 /// and `Retryable` would be dead code.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn plan_start(running: bool, stopping: bool) -> StartAction {
+fn plan_start(
+    running: bool,
+    stopping: bool,
+    support: impl FnOnce() -> Result<(), String>,
+) -> StartAction {
     match (running, stopping) {
-        (false, _) => StartAction::Spawn,
+        // The probe runs only when a spawn is actually possible; the two running
+        // arms never probe (a webview reload on an unsupported OS must not pay
+        // for a Core Audio call).
+        (false, _) => match support() {
+            Ok(()) => StartAction::Spawn,
+            Err(e) => StartAction::Refuse(e),
+        },
         (true, true) => StartAction::Retryable("watcher is still stopping, retry"),
         (true, false) => StartAction::UpdateWatchList,
     }
@@ -756,13 +816,20 @@ fn poll_loop(
     // runs on every exit path including unwind.
 }
 
+/// async because the Mac support probe makes Core Audio calls that can stall
+/// while coreaudiod restarts; a non-async Tauri v2 command runs on the main
+/// thread and would freeze both windows. NOTE: `#[tauri::command]` infers async
+/// behavior from the `async fn` signature - there is no `(async)` argument in
+/// Tauri v2. On Windows only the calling thread changes: nothing in the body
+/// needs the main thread (the poll thread initialises COM itself), and the
+/// frontend already serialises start and stop through `enqueue`.
 #[tauri::command]
-pub fn start_meeting_watcher(
+pub async fn start_meeting_watcher(
     app: AppHandle,
     direct: Vec<String>,
     gated: Vec<String>,
 ) -> Result<(), String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
 
@@ -771,6 +838,7 @@ pub fn start_meeting_watcher(
     let action = plan_start(
         state.running.load(Ordering::SeqCst),
         state.stopping.load(Ordering::SeqCst),
+        platform_support,
     );
     log_line(
         &app,
@@ -789,6 +857,9 @@ pub fn start_meeting_watcher(
             Ok(())
         }
         StartAction::Retryable(message) => Err(message.to_string()),
+        // A refusal writes NO state - `watch_list`, `confirmed` and `last_error`
+        // are untouched, so a later start sees exactly what it would have seen.
+        StartAction::Refuse(message) => Err(message),
         StartAction::Spawn => {
             *lock_recover(&state.watch_list) = WatchLists { direct, gated };
             *lock_recover(&state.confirmed) = None;
@@ -870,7 +941,7 @@ pub fn update_meeting_watch_lists(
     direct: Vec<String>,
     gated: Vec<String>,
 ) -> Result<(), String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
     let state = app.state::<MeetingWatcherState>();
@@ -894,7 +965,7 @@ fn apply_confirm(running: bool, slot: &Mutex<Option<u64>>, episode: u64) -> Resu
 
 #[tauri::command]
 pub fn confirm_meeting_candidate(app: AppHandle, episode: u64) -> Result<(), String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
     let state = app.state::<MeetingWatcherState>();
@@ -921,7 +992,7 @@ pub fn log_detection(app: AppHandle, line: String) {
 /// argument in Tauri v2 (and the repo's speaker commands all use this exact form).
 #[tauri::command]
 pub async fn stop_meeting_watcher(app: AppHandle) -> Result<StopOutcome, String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
 
@@ -988,7 +1059,7 @@ pub async fn stop_meeting_watcher(app: AppHandle) -> Result<StopOutcome, String>
 
 #[tauri::command]
 pub fn get_meeting_watcher_status(app: AppHandle) -> Result<WatcherStatus, String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
 
@@ -1016,13 +1087,13 @@ pub struct MicSession {
     pub kind: &'static str,
 }
 
-/// Same matching rule as `classify`: case-insensitive exact image name.
+/// Same matching rule as `classify`: see `entry_matches`.
 fn describe_sessions(
     sessions: &[SessionInfo],
     lists: &WatchLists,
     own_pid: u32,
 ) -> Vec<MicSession> {
-    let listed = |list: &[String], name: &str| list.iter().any(|w| w.eq_ignore_ascii_case(name));
+    let listed = |list: &[String], name: &str| list.iter().any(|w| entry_matches(w, name));
     let mut rows: Vec<MicSession> = sessions
         .iter()
         .filter(|s| s.pid != own_pid)
@@ -1047,6 +1118,19 @@ fn describe_sessions(
     rows
 }
 
+/// The support verdict decides whether `enumerate` runs at all: a refusal
+/// returns the probe's error without ever touching Core Audio. Otherwise the
+/// rows are matched by the same rule as `classify`: see `entry_matches`.
+fn capture_rows(
+    support: Result<(), String>,
+    enumerate: impl FnOnce() -> Result<Vec<SessionInfo>, String>,
+    lists: &WatchLists,
+    own_pid: u32,
+) -> Result<Vec<MicSession>, String> {
+    support?;
+    Ok(describe_sessions(&enumerate()?, lists, own_pid))
+}
+
 /// Lists every app on the microphone and whether the watcher would watch it.
 /// Needs no watcher, so it works with auto-record off.
 #[tauri::command]
@@ -1054,7 +1138,7 @@ pub async fn list_capture_sessions(
     direct: Vec<String>,
     gated: Vec<String>,
 ) -> Result<Vec<MicSession>, String> {
-    if cfg!(not(target_os = "windows")) {
+    if cfg!(not(any(target_os = "windows", target_os = "macos"))) {
         return Err(UNSUPPORTED_PLATFORM.to_string());
     }
     let lists = WatchLists { direct, gated };
@@ -1064,13 +1148,18 @@ pub async fn list_capture_sessions(
             use ::windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
             unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok()
         };
-        let sessions = enumerate_capture_sessions();
+        let rows = capture_rows(
+            platform_support(),
+            enumerate_capture_sessions,
+            &lists,
+            std::process::id(),
+        );
         // Only pair CoUninitialize with a SUCCESSFUL init.
         #[cfg(target_os = "windows")]
         if com_initialized {
             unsafe { ::windows::Win32::System::Com::CoUninitialize() };
         }
-        Ok(describe_sessions(&sessions?, &lists, std::process::id()))
+        rows
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1090,6 +1179,69 @@ mod tests {
             image_name: name.map(|n| n.to_string()),
             active,
         }
+    }
+
+    #[test]
+    fn entry_matches_mac_helper_prefix() {
+        assert!(entry_matches("com.google.Chrome", "com.google.Chrome"));
+        assert!(entry_matches(
+            "com.google.Chrome",
+            "com.google.Chrome.helper"
+        ));
+        assert!(entry_matches(
+            "com.google.Chrome",
+            "COM.GOOGLE.CHROME.HELPER"
+        ));
+        assert!(!entry_matches("com.google.Chrome", "com.google.ChromeX"));
+    }
+
+    #[test]
+    fn entry_matches_exe_entries_stay_exact() {
+        assert!(entry_matches("chrome.exe", "CHROME.EXE"));
+        assert!(entry_matches("Teams.exe", "teams.exe"));
+        assert!(!entry_matches("chrome.exe", "chrome.exe.foo"));
+    }
+
+    #[test]
+    fn entry_matches_never_matches_webkit() {
+        let entries = [
+            "com.google.Chrome",
+            "ms-teams.exe",
+            "Teams.exe",
+            "Zoom.exe",
+            "chrome.exe",
+        ];
+        for id in ["com.apple.WebKit.GPU", "com.apple.WebKit.WebContent"] {
+            assert!(
+                entries.iter().all(|e| !entry_matches(e, id)),
+                "{id} must never match"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_matches_does_not_panic_on_odd_input() {
+        assert!(!entry_matches("com.google.Chrome", "com.google.Chromé"));
+        assert!(!entry_matches(
+            "com.google.Chromé",
+            "com.google.Chrome.helper"
+        ));
+        assert!(!entry_matches("com.google.Chrome", "c"));
+        assert!(!entry_matches("com.google.Chrome", ""));
+    }
+
+    #[test]
+    fn classify_matches_a_mac_helper_and_keeps_its_raw_id() {
+        let gated = vec!["com.google.Chrome".to_string()];
+        let sessions = [
+            session(5, Some("com.apple.WebKit.GPU"), true),
+            session(7, Some("com.google.Chrome.helper"), true),
+        ];
+        assert_eq!(
+            classify(&sessions, &gated, 100),
+            PollResult::Active("com.google.Chrome.helper".to_string())
+        );
+        assert_eq!(classify(&sessions[..1], &gated, 100), PollResult::Inactive);
     }
 
     #[test]
@@ -1119,6 +1271,32 @@ mod tests {
                 ("chrome.exe", true, "gated"),
                 ("MS-TEAMS.EXE", false, "direct"),
                 ("spotify.exe", false, "ignored"),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_sessions_marks_mac_helpers() {
+        let lists = WatchLists {
+            direct: vec![],
+            gated: vec!["com.google.Chrome".to_string()],
+        };
+        let rows = describe_sessions(
+            &[
+                session(7, Some("com.google.Chrome.helper"), true),
+                session(8, Some("com.google.Chrome.helper.Renderer"), true),
+                session(9, Some("com.apple.WebKit.GPU"), true),
+            ],
+            &lists,
+            100,
+        );
+        let got: Vec<(&str, &str)> = rows.iter().map(|r| (r.name.as_str(), r.kind)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("com.apple.WebKit.GPU", "ignored"),
+                ("com.google.Chrome.helper", "gated"),
+                ("com.google.Chrome.helper.Renderer", "gated"),
             ]
         );
     }
@@ -1411,9 +1589,9 @@ mod tests {
     // R13
     #[test]
     fn plan_start_spawns_when_not_running() {
-        assert_eq!(plan_start(false, false), StartAction::Spawn);
+        assert_eq!(plan_start(false, false, || Ok(())), StartAction::Spawn);
         assert_eq!(
-            plan_start(false, true),
+            plan_start(false, true, || Ok(())),
             StartAction::Spawn,
             "a stale stopping flag with nothing running still spawns"
         );
@@ -1422,17 +1600,100 @@ mod tests {
     // R14 — the two-concurrent-threads regression test
     #[test]
     fn plan_start_is_retryable_while_a_stop_is_in_flight() {
-        assert!(matches!(plan_start(true, true), StartAction::Retryable(_)));
+        assert!(matches!(
+            plan_start(true, true, || Ok(())),
+            StartAction::Retryable(_)
+        ));
         // Spawning here would leave two poll threads alive emitting duplicate
         // events, and whichever exited first would clear `running` out from
         // under the other.
-        assert_ne!(plan_start(true, true), StartAction::Spawn);
+        assert_ne!(plan_start(true, true, || Ok(())), StartAction::Spawn);
     }
 
     // R15
     #[test]
     fn plan_start_is_idempotent_when_already_running() {
-        assert_eq!(plan_start(true, false), StartAction::UpdateWatchList);
+        assert_eq!(
+            plan_start(true, false, || Ok(())),
+            StartAction::UpdateWatchList
+        );
+    }
+
+    #[test]
+    fn plan_start_refuses_without_spawning_on_an_unsupported_mac() {
+        assert_eq!(
+            plan_start(false, false, || mac_logic::probe_verdict(
+                true,
+                false,
+                Ok(())
+            )),
+            StartAction::Refuse(mac_logic::UNSUPPORTED_MACOS.to_string())
+        );
+    }
+
+    #[test]
+    fn plan_start_a_failed_read_is_a_retryable_refusal_not_unsupported() {
+        let StartAction::Refuse(msg) = plan_start(false, false, || {
+            mac_logic::probe_verdict(true, true, Err("x".into()))
+        }) else {
+            panic!("expected Refuse")
+        };
+        assert_ne!(msg, mac_logic::UNSUPPORTED_MACOS);
+    }
+
+    #[test]
+    fn plan_start_never_probes_a_running_watcher() {
+        let probed = std::cell::Cell::new(false);
+        let support = || {
+            probed.set(true);
+            Err("x".to_string())
+        };
+        assert_eq!(
+            plan_start(true, false, support),
+            StartAction::UpdateWatchList
+        );
+        assert!(!probed.get());
+    }
+
+    #[test]
+    fn capture_rows_returns_the_probe_error_without_enumerating() {
+        let called = std::cell::Cell::new(false);
+        let lists = WatchLists {
+            direct: vec![],
+            gated: vec!["com.google.Chrome".into()],
+        };
+        let got = capture_rows(
+            mac_logic::probe_verdict(false, true, Ok(())),
+            || {
+                called.set(true);
+                Ok(vec![])
+            },
+            &lists,
+            1,
+        );
+        assert_eq!(got.unwrap_err(), mac_logic::UNSUPPORTED_MACOS);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn capture_rows_describes_sessions_when_supported() {
+        let lists = WatchLists {
+            direct: vec![],
+            gated: vec!["com.google.Chrome".into()],
+        };
+        let rows = capture_rows(
+            Ok(()),
+            || Ok(vec![session(7, Some("com.google.Chrome.helper"), true)]),
+            &lists,
+            1,
+        )
+        .unwrap();
+        assert_eq!(rows[0].kind, "gated");
+    }
+
+    #[test]
+    fn unsupported_platform_text_names_no_platform() {
+        assert!(!UNSUPPORTED_PLATFORM.contains("Windows"));
     }
 
     // R16
@@ -1607,6 +1868,45 @@ mod tests {
                 detected("chrome.exe"),
                 ended("chrome.exe")
             ]
+        );
+    }
+
+    // §5.3, §8 — with no direct list, the gated path through `tick` must be
+    // byte-for-byte the chrome() fixture's behaviour, with only the process
+    // name differing.
+    #[test]
+    fn tick_gated_path_is_unchanged_with_an_empty_direct_list() {
+        let gated_list = vec!["com.google.Chrome".to_string()];
+        let during = [session(7, Some("com.google.Chrome.helper"), true)];
+
+        // Every outcome built through `classify`, as the real watcher does.
+        let outcome =
+            |s: &[SessionInfo], list: &[String]| PollOutcome::Classified(classify(s, list, 100));
+        let direct_during = outcome(&during, &[]);
+        let direct_end = outcome(&[], &[]);
+        let gated_during = outcome(&during, &gated_list);
+        let gated_end = outcome(&[], &gated_list);
+        assert_eq!(
+            gated_during,
+            PollOutcome::Classified(PollResult::Active("com.google.Chrome.helper".to_string()))
+        );
+
+        // The confirmed_meet() shape, followed by its end polls.
+        let mut seq = vec![
+            (direct_during.clone(), gated_during.clone(), None),
+            (direct_during.clone(), gated_during.clone(), None),
+            (direct_during, gated_during, Some(1)),
+        ];
+        seq.extend(vec![(direct_end, gated_end, None); 5]);
+
+        assert_eq!(
+            run_core(seq),
+            vec![
+                WatcherEvent::CandidateStarted(1),
+                detected("com.google.Chrome.helper"),
+                ended("com.google.Chrome.helper")
+            ],
+            "the chrome() fixture run with each process name swapped for the helper id"
         );
     }
 
