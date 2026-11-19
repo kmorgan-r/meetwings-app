@@ -63,8 +63,11 @@ describe("readStartFailure / writeStartFailure / clearStartFailure", () => {
   });
 
   it("reads null on invalid JSON", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     stored[KEY] = "{not json";
     expect(readStartFailure()).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("reads null on an unknown kind", () => {

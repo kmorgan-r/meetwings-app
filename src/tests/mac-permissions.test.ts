@@ -67,6 +67,7 @@ describe("requestMicAccess", () => {
   });
 
   it("resolves false on NotAllowedError", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     setGetUserMedia(
       vi.fn(async () => {
         throw new DOMException("denied", "NotAllowedError");
@@ -74,9 +75,12 @@ describe("requestMicAccess", () => {
     );
 
     await expect(requestMicAccess()).resolves.toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("resolves false on NotFoundError", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     setGetUserMedia(
       vi.fn(async () => {
         throw new DOMException("no mic", "NotFoundError");
@@ -84,6 +88,8 @@ describe("requestMicAccess", () => {
     );
 
     await expect(requestMicAccess()).resolves.toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it("resolves false when mediaDevices is missing", async () => {

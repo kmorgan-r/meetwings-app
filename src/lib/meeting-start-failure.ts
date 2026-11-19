@@ -52,7 +52,8 @@ export function readStartFailure(): StartFailure | null {
     const parsed: unknown = JSON.parse(raw);
     if (!isStartFailure(parsed)) return null;
     return parsed;
-  } catch {
+  } catch (error) {
+    console.warn("Could not read the auto-record start failure:", error);
     return null;
   }
 }

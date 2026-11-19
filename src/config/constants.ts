@@ -113,11 +113,11 @@ export const STORAGE_KEYS = {
 // Rust watcher, so adding an app here is a config change rather than a Rust one.
 export const MEETING_DETECT_PROCESSES = ["ms-teams.exe", "Teams.exe", "Zoom.exe"];
 
-// Display names for the detection toasts, keyed by LOWERCASED process name.
-// Matching on the Rust side is case-insensitive and the observed basename keeps
-// its original case, so the lookup must lowercase before indexing. On Mac the
-// lookup runs through entryMatches instead, so a bundle-ID key reaches its
-// helper processes too.
+// Display names for the detection toasts, keyed by process image name (Windows)
+// or bundle ID (Mac). meetingLabel looks a key up with entryMatches on every
+// platform, which is case-insensitive on both sides, so key case does not matter.
+// A bundle-ID key (com.google.Chrome) also matches its helper processes
+// (com.google.Chrome.helper). An .exe key matches only that exact name.
 export const MEETING_DETECT_LABELS: Record<string, string> = {
   "ms-teams.exe": "Teams",
   "teams.exe": "Teams",

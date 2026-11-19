@@ -38,7 +38,8 @@ export async function requestMicAccess(): Promise<boolean> {
       track.stop();
     }
     return true;
-  } catch {
+  } catch (error) {
+    console.warn("Could not get microphone access:", error);
     return false;
   }
 }

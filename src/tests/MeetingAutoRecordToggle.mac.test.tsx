@@ -199,6 +199,27 @@ describe("MeetingAutoRecordToggle on a Mac", () => {
     expect(openMicSettings).toHaveBeenCalled();
     expect(requestSystemAudioAccess).not.toHaveBeenCalled();
     expect(enabledEmits()).toHaveLength(0);
+    expect(sw()).toBeEnabled();
+  });
+
+  it("turning it off saves false and asks for nothing", async () => {
+    stored[ENABLED] = "true";
+    renderToggle();
+    await flush();
+    fireEvent.click(sw());
+    await flush();
+    await flush();
+
+    expect(stored[ENABLED]).toBe("false");
+    expect(emit).toHaveBeenCalledWith("meeting-detection-setting-changed", {
+      enabled: false,
+    });
+    expect(requestMicAccess).not.toHaveBeenCalled();
+    expect(requestSystemAudioAccess).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "list_capture_sessions",
+      expect.anything()
+    );
   });
 
   it("a system-audio denial names system audio", async () => {
