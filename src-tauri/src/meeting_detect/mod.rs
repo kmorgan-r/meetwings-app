@@ -21,9 +21,14 @@ mod win32;
 #[cfg(target_os = "windows")]
 use win32::enumerate_capture_sessions;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::enumerate_capture_sessions;
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod stub;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use stub::enumerate_capture_sessions;
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]

@@ -3191,6 +3191,7 @@ dependencies = [
  "hound",
  "image",
  "keyring",
+ "libc",
  "libpulse-binding",
  "libpulse-simple-binding",
  "once_cell",
