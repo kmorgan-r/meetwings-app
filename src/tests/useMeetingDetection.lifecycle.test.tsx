@@ -24,10 +24,13 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: windowLabel }),
 }));
 vi.mock("@/lib/platform", () => ({
-  isWindows: () => onWindows,
-  // isMacOS: jsdom is not a Mac, and currentWatchLists now reads it. A factory
-  // mock throws when code reads an export it does not define.
-  isMacOS: () => false,
+  isWindows: () => platform === "windows",
+  isMacOS: () => platform === "macos",
+}));
+// Task 10 adds the mic-grant check; until then this mock is unused but in
+// place, so nothing imports it yet.
+vi.mock("@/lib/mac-permissions", () => ({
+  hasMicGrant: vi.fn(async () => true),
 }));
 vi.mock("@/lib/storage/google-config.storage", async (importActual) => ({
   ...(await importActual<Record<string, unknown>>()),
@@ -70,7 +73,7 @@ vi.mock("@/lib/meet-gate", () => ({
 const lastGate = () => gates[gates.length - 1];
 
 let windowLabel = "main";
-let onWindows = true;
+let platform: "windows" | "macos" | "linux" = "windows";
 let stored: Record<string, string> = {};
 
 vi.mock("@/lib", async (importOriginal) => {
@@ -145,7 +148,7 @@ beforeEach(() => {
   emit.mockResolvedValue(undefined);
   loadState.mockResolvedValue({ state: "absent", config: null } as never);
   windowLabel = "main";
-  onWindows = true;
+  platform = "windows";
   stored = { [STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED]: "true" };
 });
 
@@ -212,10 +215,33 @@ describe("useMeetingDetection", () => {
 
   // F6
   it("is inert on a non-Windows platform even with the setting persisted on", async () => {
-    onWindows = false;
+    platform = "linux";
     renderHook(() => useMeetingDetection());
     await flush();
 
+    expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
+  });
+
+  // The Mac owns the watcher once its side lands: with the setting seeded on,
+  // the start carries the Mac watch lists; Linux keeps staying inert.
+  it("owns the watcher on Mac, not on Linux", async () => {
+    platform = "macos";
+    const { unmount } = renderHook(() => useMeetingDetection());
+    await flush();
+
+    expect(cmdCount("start_meeting_watcher")).toBe(1);
+    expect(invoke).toHaveBeenCalledWith("start_meeting_watcher", {
+      direct: [],
+      gated: ["com.google.Chrome"],
+    });
+    unmount();
+
+    platform = "linux";
+    invoke.mockClear();
+    renderHook(() => useMeetingDetection());
+    await flush();
+
+    expect(cmdCount("start_meeting_watcher")).toBe(0);
     expect(invoke).not.toHaveBeenCalledWith("start_meeting_watcher", expect.anything());
   });
 

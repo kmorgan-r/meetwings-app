@@ -11,7 +11,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
-import { isWindows } from "@/lib/platform";
 import {
   decideOnDetected,
   decideOnEnded,
@@ -19,7 +18,12 @@ import {
   isSameCall,
   type StartedMode,
 } from "@/lib/functions/meeting-auto-record";
-import { isGatedProcess, meetingLabel, sameCallId } from "@/lib/meeting-detect";
+import {
+  isGatedProcess,
+  isMeetingDetectionPlatform,
+  meetingLabel,
+  sameCallId,
+} from "@/lib/meeting-detect";
 import { detectionLog } from "@/lib/detection-log";
 import {
   autoRecordingStarted,
@@ -165,9 +169,9 @@ export const useMeetingAutoRecord = ({
 }: MeetingAutoRecordOptions) => {
   // Two gates. The silence timer and the shared stop op need only the main
   // window (they act on this window's own mic, whatever the platform); the
-  // detection listeners and grace logic also need Windows.
+  // detection listeners and grace logic also need a detection platform.
   const isMain = useMemo(() => getCurrentWindow().label === "main", []);
-  const isOwner = isMain && isWindows();
+  const isOwner = isMain && isMeetingDetectionPlatform();
 
   // Every mutable value a listener reads comes from a ref. The listeners are
   // registered once per window lifetime, and startCapture/stopCapture are

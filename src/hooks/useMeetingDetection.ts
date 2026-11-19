@@ -4,9 +4,8 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { safeLocalStorage } from "@/lib";
-import { isWindows } from "@/lib/platform";
 import { STOP_TIMED_OUT, STORAGE_KEYS } from "@/config/constants";
-import { currentWatchLists } from "@/lib/meeting-detect";
+import { currentWatchLists, isMeetingDetectionPlatform } from "@/lib/meeting-detect";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import {
   createMeetGate,
@@ -32,7 +31,7 @@ const readSetting = () =>
  */
 export const useMeetingDetection = () => {
   const isOwner = useMemo(
-    () => getCurrentWindow().label === "main" && isWindows(),
+    () => getCurrentWindow().label === "main" && isMeetingDetectionPlatform(),
     []
   );
 

@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   windowLabel: { value: "main" },
   isWindows: vi.fn(() => true),
+  isMacOS: vi.fn(() => false),
   // Event names whose listen() should reject, so the partial-subscription-failure
   // path is reachable from a test.
   failListenFor: new Set<string>(),
@@ -39,12 +40,13 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: mocks.windowLabel.value }),
 }));
-// jsdom is not a Mac: the watcher lists stay the Windows ones here. A factory
+// jsdom is not a Mac: the watcher lists stay the Windows ones here. isMacOS is
+// a spy, not a literal, so the Mac cases can turn it on. A factory
 // mock throws when code reads an export it does not define, and
 // currentWatchLists now reads isMacOS.
 vi.mock("@/lib/platform", () => ({
   isWindows: mocks.isWindows,
-  isMacOS: () => false,
+  isMacOS: mocks.isMacOS,
 }));
 vi.mock("@/lib/calendar/fetch-current-meetings", () => ({
   fetchCurrentMeetings: mocks.fetchMeetings,
@@ -458,6 +460,7 @@ beforeEach(async () => {
   stored = { meeting_auto_record_enabled: "true" };
   mocks.windowLabel.value = "main";
   mocks.isWindows.mockReturnValue(true);
+  mocks.isMacOS.mockReturnValue(false);
   mocks.failListenFor.clear();
   mocks.fetchMeetings.mockReset();
   mocks.fetchMeetings.mockResolvedValue({ kind: "absent" });
