@@ -17,6 +17,7 @@ async function renderCompletion(setup: { notion: boolean | null; odoo: string | 
       setEnableVAD: vi.fn(),
       meetingAssistMode: false,
       meetingTranscript: [],
+      currentMeetingTranscript: [],
       currentConversationId: null,
       submit: vi.fn(),
       submitWithMeetingContext: vi.fn(),

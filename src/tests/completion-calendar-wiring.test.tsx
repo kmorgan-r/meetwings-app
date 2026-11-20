@@ -68,6 +68,7 @@ describe("<Completion /> wires useCalendarProposal into ContactPicker", () => {
         setEnableVAD: vi.fn(),
         meetingAssistMode: false,
         meetingTranscript: [],
+        currentMeetingTranscript: [],
         currentConversationId: null,
         submit: vi.fn(),
         submitWithMeetingContext: vi.fn(),

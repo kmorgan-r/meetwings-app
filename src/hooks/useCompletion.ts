@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { toast } from "sonner";
 import { useWindowResize } from "./useWindow";
 import { useGlobalShortcuts } from "@/hooks";
@@ -216,6 +216,9 @@ export const useCompletion = () => {
   // mirroring the watermark useMeetingLog.ts's Odoo trigger already needs
   // for the identical reason.
   const conversationTranscriptStartRef = useRef(0);
+  // Its render-time mirror, written beside it at every site: what the overlay
+  // shows is this conversation's lines, not every meeting since launch.
+  const [conversationTranscriptStart, setConversationTranscriptStart] = useState(0);
 
   // Track meeting transcript length and what has been auto-saved so we can
   // periodically persist transcripts to chat history without stale closures.
@@ -613,6 +616,7 @@ export const useCompletion = () => {
     // push below so conversationTranscriptStartRef points at it, not past it.
     if (!currentConversationIdRef.current) {
       conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+      setConversationTranscriptStart(meetingTranscriptLengthRef.current);
     }
 
     // Add to meeting transcript array with TranscriptEntry structure
@@ -665,6 +669,7 @@ export const useCompletion = () => {
       // push below so conversationTranscriptStartRef points at it, not past it.
       if (!currentConversationIdRef.current) {
         conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+        setConversationTranscriptStart(meetingTranscriptLengthRef.current);
       }
 
       // Add all entries to meeting transcript
@@ -761,6 +766,7 @@ export const useCompletion = () => {
       // the first speaker in a meeting.
       if (!currentConversationIdRef.current) {
         conversationTranscriptStartRef.current = meetingTranscriptLengthRef.current;
+        setConversationTranscriptStart(meetingTranscriptLengthRef.current);
       }
 
       // Just append - timestamps are monotonically increasing
@@ -812,6 +818,7 @@ export const useCompletion = () => {
     // Knowledge" once cleared.
     clearActiveConversationId();
     conversationTranscriptStartRef.current = 0;
+    setConversationTranscriptStart(0);
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
@@ -1453,6 +1460,7 @@ export const useCompletion = () => {
     // The loaded conversation is now the in-progress one.
     setActiveConversationId(conversation.id);
     conversationTranscriptStartRef.current = meetingTranscript.length;
+    setConversationTranscriptStart(meetingTranscript.length);
     const switching = currentConversationIdRef.current !== conversation.id;
     currentConversationIdRef.current = conversation.id;
     conversationHistoryRef.current = conversation.messages; // Update ref immediately
@@ -1495,6 +1503,7 @@ export const useCompletion = () => {
     clearActiveConversationId();
     setMeetingPanelHidden(false);
     conversationTranscriptStartRef.current = meetingTranscript.length;
+    setConversationTranscriptStart(meetingTranscript.length);
     currentConversationIdRef.current = null;
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
@@ -1587,6 +1596,34 @@ export const useCompletion = () => {
       );
     }
   }, [meetingCaptureActive, flushUnsavedMeetingTranscript]);
+
+  // The mic has stayed closed past the gap after a meeting: it is over, by the
+  // rollover's own test (the next capture would start a new conversation).
+  // Announced now, so its Odoo contact leaves the overlay (useOdooTarget)
+  // rather than waiting there for the next call. The Odoo row was cut at the
+  // stop (useMeetingLog); the conversation and any answer stay for a recap.
+  const hadCaptureRef = useRef(false);
+  useEffect(() => {
+    if (meetingCaptureActive) {
+      hadCaptureRef.current = true;
+      return;
+    }
+    if (!hadCaptureRef.current) return; // launch: no meeting has run
+    let timer: ReturnType<typeof setTimeout>;
+    const check = () => {
+      const lastLineAt = conversationHistoryRef.current.reduce(
+        (max, m) => (m.audioSource != null && m.timestamp > max ? m.timestamp : max),
+        0
+      );
+      if (lastLineAt === 0) return; // nothing said, no meeting to end
+      // A line that landed after the stop moves the end.
+      const wait = lastLineAt + NEW_CONVERSATION_GAP_MS - Date.now();
+      if (wait >= 0) timer = setTimeout(check, wait + 1);
+      else window.dispatchEvent(new CustomEvent("meetingOver"));
+    };
+    timer = setTimeout(check, NEW_CONVERSATION_GAP_MS);
+    return () => clearTimeout(timer);
+  }, [meetingCaptureActive]);
 
   const saveCurrentConversation = useCallback(
     async (
@@ -2053,10 +2090,17 @@ export const useCompletion = () => {
     [state.attachedFiles.length, addFile]
   );
 
+  // This conversation's own lines: what the overlay shows. meetingTranscript
+  // is every meeting since launch.
+  const currentMeetingTranscript = useMemo(
+    () => meetingTranscript.slice(conversationTranscriptStart),
+    [meetingTranscript, conversationTranscriptStart]
+  );
+
   // Check if meeting transcript should trigger popover
   const hasMeetingTranscript =
     meetingAssistMode &&
-    meetingTranscript.length > 0 &&
+    currentMeetingTranscript.length > 0 &&
     !meetingTranscriptHidden;
 
   // Popover opens when there's content to show
@@ -2109,24 +2153,28 @@ export const useCompletion = () => {
     calendarBlockPresent,
   ]);
 
-  // Auto scroll to bottom when response updates
+  // Follow a streaming answer only while the reader is at its bottom; scrolled
+  // up to read, they keep their place. Judged against the height at the last
+  // chunk (this one has already grown it), and instant: a smooth scroll still
+  // in flight would read as "scrolled up". A new answer, or a scroll area that
+  // just mounted, starts at the bottom.
+  const answerFollowRef = useRef<{ el: Element | null; height: number }>({
+    el: null,
+    height: 0,
+  });
   useEffect(() => {
-    const responseSettings = getResponseSettings();
-    if (
-      !keepEngaged &&
-      state.response &&
-      scrollAreaRef.current &&
-      responseSettings.autoScroll
-    ) {
-      const scrollElement = scrollAreaRef.current.querySelector(
-        "[data-radix-scroll-area-viewport]"
-      );
-      if (scrollElement) {
-        scrollElement.scrollTo({
-          top: scrollElement.scrollHeight,
-          behavior: "smooth",
-        });
-      }
+    const el =
+      scrollAreaRef.current?.querySelector("[data-radix-scroll-area-viewport]") ?? null;
+    const last = answerFollowRef.current;
+    answerFollowRef.current = {
+      el: state.response ? el : null,
+      height: el?.scrollHeight ?? 0,
+    };
+    if (keepEngaged || !state.response || !el || !getResponseSettings().autoScroll) {
+      return;
+    }
+    if (last.el !== el || last.height - el.scrollTop - el.clientHeight <= 8) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [state.response, keepEngaged]);
 
@@ -2522,6 +2570,7 @@ export const useCompletion = () => {
     // Meeting Assist Mode
     meetingAssistMode,
     meetingTranscript,
+    currentMeetingTranscript,
     addMeetingTranscript,
     addMeetingTranscriptEntries,
     addSystemAudioTranscript,

@@ -13,6 +13,7 @@ vi.mock("@/components", () => ({
       {children}
     </button>
   ),
+  CopyButton: () => null,
   ScrollArea: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   SpeakerTaggingPopover: ({ children }: { children: ReactNode }) => {
     popoverRenders.count += 1;

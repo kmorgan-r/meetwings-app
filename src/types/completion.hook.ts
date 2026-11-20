@@ -145,8 +145,10 @@ export interface UseCompletionReturn {
   // Meeting Assist Mode
   /** Whether Meeting Assist Mode is enabled (accumulates transcripts instead of auto-responding) */
   meetingAssistMode: boolean;
-  /** Accumulated meeting transcript segments with translations */
+  /** Accumulated meeting transcript segments with translations: every meeting since launch */
   meetingTranscript: TranscriptEntry[];
+  /** The current conversation's own segments: what the overlay shows */
+  currentMeetingTranscript: TranscriptEntry[];
   /** Function to add a transcript segment to the meeting transcript with optional speaker info */
   addMeetingTranscript: (
     transcript: string,

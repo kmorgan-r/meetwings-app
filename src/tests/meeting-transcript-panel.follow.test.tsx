@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from "react";
-import { render } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TranscriptEntry } from "@/types";
 
@@ -20,8 +20,11 @@ const fakeViewport = (el: HTMLDivElement | null) => {
   el.scrollTo = ((opts: ScrollToOptions) => set(opts.top ?? geom.scrollTop)) as typeof el.scrollTo;
 };
 
-vi.mock("@/components", () => ({
+vi.mock("@/components", async () => ({
   Button: ({ children }: { children: ReactNode }) => <button type="button">{children}</button>,
+  CopyButton: (await vi.importActual<typeof import("@/components/Markdown/copy-button")>(
+    "@/components/Markdown/copy-button",
+  )).CopyButton,
   ScrollArea: ({ children, ref }: { children: ReactNode; ref?: Ref<HTMLDivElement> }) => (
     <div ref={ref}>
       <div data-radix-scroll-area-viewport="" ref={fakeViewport}>
@@ -33,7 +36,10 @@ vi.mock("@/components", () => ({
 }));
 vi.mock("@/contexts", () => ({ useApp: () => ({ sttTranslationEnabled: false }) }));
 
-import { MeetingTranscriptPanel } from "@/pages/app/components/completion/MeetingTranscriptPanel";
+import {
+  MeetingTranscriptPanel,
+  resetTranscriptScrollMemory,
+} from "@/pages/app/components/completion/MeetingTranscriptPanel";
 
 const line = (i: number): TranscriptEntry => ({
   original: `line ${i}`,
@@ -49,8 +55,17 @@ const panel = (meetingTranscript: TranscriptEntry[]) => (
   />
 );
 
+/** The reader scrolls: a browser moves scrollTop, then fires `scroll`. */
+const readerScrollsTo = (container: HTMLElement, top: number) => {
+  geom.scrollTop = top;
+  container
+    .querySelector("[data-radix-scroll-area-viewport]")!
+    .dispatchEvent(new Event("scroll"));
+};
+
 describe("MeetingTranscriptPanel scroll follow", () => {
   beforeEach(() => {
+    resetTranscriptScrollMemory();
     geom.scrollTop = 0;
     geom.scrollHeight = 1000;
     geom.clientHeight = 300;
@@ -69,21 +84,70 @@ describe("MeetingTranscriptPanel scroll follow", () => {
   });
 
   it("keeps the reader's place when they have scrolled up", () => {
-    const { rerender } = render(panel([line(0), line(1)]));
-    geom.scrollTop = 200; // reader scrolls back
+    const { container, rerender } = render(panel([line(0), line(1)]));
+    readerScrollsTo(container, 200);
     geom.scrollHeight = 1100;
     rerender(panel([line(0), line(1), line(2)]));
     expect(geom.scrollTop).toBe(200);
   });
 
-  it("follows again once the reader scrolls back to the bottom", () => {
-    const { rerender } = render(panel([line(0), line(1)]));
-    geom.scrollTop = 200;
+  it("keeps the reader's place when they have scrolled up only one line", () => {
+    const { container, rerender } = render(panel([line(0), line(1)]));
+    readerScrollsTo(container, 640); // 60 px above the bottom
     geom.scrollHeight = 1100;
     rerender(panel([line(0), line(1), line(2)]));
-    geom.scrollTop = 800; // reader returns to the bottom by hand
+    expect(geom.scrollTop).toBe(640);
+  });
+
+  it("follows again once the reader scrolls back to the bottom", () => {
+    const { container, rerender } = render(panel([line(0), line(1)]));
+    readerScrollsTo(container, 200);
+    geom.scrollHeight = 1100;
+    rerender(panel([line(0), line(1), line(2)]));
+    readerScrollsTo(container, 800);
     geom.scrollHeight = 1200;
     rerender(panel([line(0), line(1), line(2), line(3)]));
     expect(geom.scrollTop).toBe(900);
+  });
+
+  // The panel unmounts whenever an answer, a hide or a mic stop takes its
+  // place. Coming back must not snap a reader to the newest line.
+  it("puts the reader back where they were when the panel comes back", () => {
+    const first = render(panel([line(0), line(1)]));
+    readerScrollsTo(first.container, 200);
+    first.unmount();
+
+    geom.scrollTop = 0; // a fresh scroll area starts at the top
+    geom.scrollHeight = 1100;
+    render(panel([line(0), line(1), line(2)]));
+    expect(geom.scrollTop).toBe(200);
+  });
+
+  it("keeps following after the panel comes back when the reader was at the bottom", () => {
+    render(panel([line(0), line(1)])).unmount();
+
+    geom.scrollTop = 0;
+    geom.scrollHeight = 1100;
+    render(panel([line(0), line(1), line(2)]));
+    expect(geom.scrollTop).toBe(800);
+  });
+
+  it("copies just that line to the clipboard", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(panel([line(0), line(1)]));
+    const copy = screen.getAllByRole("button", { name: "Copy to clipboard" })[1];
+    await act(async () => fireEvent.click(copy));
+    expect(writeText).toHaveBeenCalledWith("line 1");
+  });
+
+  it("opens the next meeting at its newest line", () => {
+    const first = render(panel([line(0), line(1)]));
+    readerScrollsTo(first.container, 200);
+    first.unmount();
+
+    geom.scrollTop = 0;
+    render(panel([line(5), line(6)]));
+    expect(geom.scrollTop).toBe(700);
   });
 });

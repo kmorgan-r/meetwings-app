@@ -71,6 +71,7 @@ export const Input = ({
   onQuickActionClick,
   meetingAssistMode,
   meetingTranscript,
+  currentMeetingTranscript,
   clearMeetingTranscript,
   assignSpeaker,
   respondedModel,
@@ -116,14 +117,15 @@ export const Input = ({
 
   // Show meeting transcript panel when:
   // - Meeting mode is ON
-  // - Has transcripts
-  // - The stop did not hide them (hasContent and xHidesPanel below keep the
-  //   raw length: they guard reset(), which would drop the conversation)
+  // - This conversation has transcripts (hasContent and xHidesPanel below
+  //   keep the session-wide length: they guard reset(), which would drop the
+  //   conversation)
+  // - The stop did not hide them
   // - No AI response yet (once response comes, show normal view)
   // - Conversation mode is OFF (when ON, show conversation history instead)
   const showMeetingPanel =
     meetingAssistMode &&
-    meetingTranscript.length > 0 &&
+    currentMeetingTranscript.length > 0 &&
     !meetingTranscriptHidden &&
     !response &&
     !keepEngaged &&
@@ -321,7 +323,7 @@ export const Input = ({
           {showMeetingPanel ? (
             <div className="flex-1 min-h-0 flex flex-col">
               <MeetingTranscriptPanel
-                meetingTranscript={meetingTranscript}
+                meetingTranscript={currentMeetingTranscript}
                 clearMeetingTranscript={clearMeetingTranscript}
                 assignSpeaker={assignSpeaker}
               />

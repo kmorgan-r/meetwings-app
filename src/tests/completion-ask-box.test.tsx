@@ -60,6 +60,9 @@ function makeProps(overrides: Record<string, unknown> = {}) {
     meetingTranscript: [
       { original: "hello", timestamp: 1000, audioSource: "microphone" },
     ],
+    currentMeetingTranscript: [
+      { original: "hello", timestamp: 1000, audioSource: "microphone" },
+    ],
     clearMeetingTranscript: vi.fn(),
     assignSpeaker: vi.fn(),
     respondedModel: null,
@@ -198,6 +201,7 @@ describe("<Completion /> and the Ask box fold", () => {
       setEnableVAD: vi.fn(),
       meetingAssistMode: true,
       meetingTranscript: [],
+      currentMeetingTranscript: [],
       currentConversationId: null,
       submit: vi.fn(),
       submitWithMeetingContext: vi.fn(),
