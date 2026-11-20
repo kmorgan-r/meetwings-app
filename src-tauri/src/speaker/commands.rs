@@ -107,6 +107,14 @@ pub async fn start_system_audio_capture(
         &format!("capture start sr={sr} vad={}", vad_config.enabled),
     );
 
+    // is_capturing and stream_task change together under the stream_task
+    // lock, here and in stop: a stop still waiting on an older task must see
+    // both or neither, or it clears the flag of this live capture.
+    let mut task_slot = state
+        .stream_task
+        .lock()
+        .map_err(|e| format!("Failed to store task: {}", e))?;
+
     // Mark as capturing BEFORE spawning task
     *state
         .is_capturing
@@ -116,7 +124,6 @@ pub async fn start_system_audio_capture(
     // Emit capture started event
     let _ = app_clone.emit("capture-started", sr);
 
-    let state_clone = app.state::<crate::AudioState>();
     let task = tokio::spawn(async move {
         if vad_config.enabled {
             run_vad_capture(app_clone.clone(), stream, sr, vad_config).await;
@@ -135,10 +142,7 @@ pub async fn start_system_audio_capture(
         }
     });
 
-    *state_clone
-        .stream_task
-        .lock()
-        .map_err(|e| format!("Failed to store task: {}", e))? = Some(task);
+    *task_slot = Some(task);
 
     Ok(())
 }
@@ -575,20 +579,22 @@ pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     }
 
     // A start that ran while we waited owns the flag and the next stop now.
-    if state
-        .stream_task
-        .lock()
-        .map_err(|e| format!("Failed to acquire task lock: {}", e))?
-        .is_some()
+    // Checked and cleared under the stream_task lock, which start holds while
+    // it sets the flag and stores its task.
     {
-        log_line(&app, "capture stop superseded by a newer start");
-        return Ok(());
+        let task_slot = state
+            .stream_task
+            .lock()
+            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+        if task_slot.is_some() {
+            log_line(&app, "capture stop superseded by a newer start");
+            return Ok(());
+        }
+        *state
+            .is_capturing
+            .lock()
+            .map_err(|e| format!("Failed to update capturing state: {}", e))? = false;
     }
-
-    *state
-        .is_capturing
-        .lock()
-        .map_err(|e| format!("Failed to update capturing state: {}", e))? = false;
 
     log_line(&app, &format!("capture stop had_task={had_task}"));
     let _ = app.emit("capture-stopped", ());
