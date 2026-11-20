@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NEW_CONVERSATION_GAP_MS } from "@/config/constants";
 
 // Re-review finding: startNewConversation is not the ONLY path to the
 // blank-slate signature ("currentConversationId: null, conversationHistory:
@@ -69,6 +70,7 @@ vi.mock("@/lib", () => ({
   shouldUseMeetwingsAPI: vi.fn(async () => false),
   MESSAGE_ID_OFFSET: 1,
   generateConversationId: vi.fn(() => "conversation-1"),
+  ensureConversationId: vi.fn((ref: { current: string | null }) => (ref.current ??= "conversation-1")),
   generateMessageId: vi.fn((role: string, timestamp: number) => `${role}-${timestamp}`),
   generateRequestId: vi.fn(() => "request-1"),
   getResponseSettings: vi.fn(() => ({ autoScroll: false })),
@@ -210,6 +212,43 @@ describe("clearing the Odoo target from the meeting-transcript reset paths", () 
     });
 
     await waitFor(() => expect(result.current.odoo.targetRef.current).toBeNull());
+    expect(action.clearTargets).toHaveBeenCalled();
+  });
+});
+
+// 2026-11-19: "Bryan Wong" stayed on the overlay a day after his meeting.
+// Nothing cleared the contact until the NEXT capture's rollover.
+describe("clearing the Odoo target once the meeting is over", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("clears once the mic has stayed closed past the gap", async () => {
+    action.loadTargets.mockResolvedValue([{ model: "res.partner", resId: 1, name: "Bryan Wong" }]);
+    const { result } = mountCombined();
+    await waitFor(() => expect(result.current.odoo.targets).toHaveLength(1));
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    act(() => {
+      result.current.completion.setEnableVAD(true);
+    });
+    act(() => {
+      result.current.completion.addMeetingTranscript("Take care. Bye.", undefined, "microphone");
+    });
+    act(() => {
+      result.current.completion.setEnableVAD(false);
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(NEW_CONVERSATION_GAP_MS - 1000);
+    });
+    expect(result.current.odoo.targets).toHaveLength(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    vi.useRealTimers();
+    await waitFor(() => expect(result.current.odoo.targets).toHaveLength(0));
     expect(action.clearTargets).toHaveBeenCalled();
   });
 });

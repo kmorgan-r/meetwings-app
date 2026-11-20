@@ -852,7 +852,10 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
       await act(async () => {
         await probe.completion.startNewConversation();
       });
-      // The meeting transcript survives a new conversation; it opens the panel again.
+      // The last meeting's lines stay out of the new conversation's panel...
+      expect(probe.completion.isPopoverOpen).toBe(false);
+      // ...and the next meeting's first line opens it, un-hidden.
+      act(() => probe.completion.addMeetingTranscript("Next meeting", undefined, "microphone"));
       await waitFor(() => expect(probe.completion.isPopoverOpen).toBe(true));
     });
 

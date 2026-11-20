@@ -76,6 +76,7 @@ const hooksBarrelStub = async (
       }, []);
       return {
         meetingTranscript: transcriptSeed,
+        currentMeetingTranscript: transcriptSeed,
         meetingAssistMode: true,
         isContactPickerOpen: false,
         setIsContactPickerOpen: vi.fn(),

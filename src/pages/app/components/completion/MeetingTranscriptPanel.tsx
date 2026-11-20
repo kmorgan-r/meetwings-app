@@ -7,7 +7,7 @@ import {
 } from "@/types";
 import { Button, ScrollArea, SpeakerTaggingPopover } from "@/components";
 import { TrashIcon, UsersIcon, Loader2 } from "lucide-react";
-import { memo, useEffect, useRef } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import { useApp } from "@/contexts";
 
 // Speaker color palette for visual distinction
@@ -68,7 +68,7 @@ interface TranscriptRowProps {
   sttTranslationEnabled: boolean;
 }
 
-// memo: the transcript is session-wide and only ever appended to, and every
+// memo: the transcript is only ever appended to, and every
 // edit (speaker, translation) replaces just the entry it touches, so an
 // unchanged row keeps its entry object and skips the re-render each new line
 // would otherwise cost it. Keep these props stable: no inline callbacks.
@@ -165,6 +165,26 @@ const TranscriptRow = memo(function TranscriptRow({
   );
 });
 
+/** Within this of the end counts as the bottom: rounding, not reading. */
+const AT_BOTTOM_PX = 8;
+
+/**
+ * Where a reader who scrolled up left this meeting's transcript. Module scope
+ * because the panel unmounts whenever an answer, a hide or a mic stop takes
+ * its place, and a fresh mount used to snap them to the newest line. Keyed on
+ * the meeting's first line, so the next meeting still opens at its newest.
+ * One panel exists at a time (the main window). Null = following.
+ */
+let readerPosition: { firstLine: number; top: number } | null = null;
+
+/** Test-only. */
+export function resetTranscriptScrollMemory(): void {
+  readerPosition = null;
+}
+
+const viewportOf = (root: HTMLElement | null) =>
+  root?.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]") ?? null;
+
 interface MeetingTranscriptPanelProps {
   meetingTranscript: UseCompletionReturn["meetingTranscript"];
   clearMeetingTranscript: UseCompletionReturn["clearMeetingTranscript"];
@@ -180,19 +200,33 @@ export const MeetingTranscriptPanel = ({
   const { sttTranslationEnabled } = useApp();
 
   // Follow new lines only while the reader is at the bottom; scrolled up to
-  // read back, they keep their place. Measured against the height at the last
-  // update, because the new line has already grown scrollHeight. Instant, not
-  // smooth: a smooth scroll still in flight would read as "scrolled up".
-  const followedHeightRef = useRef(0);
-  useEffect(() => {
-    const el = scrollRef.current?.querySelector(
-      "[data-radix-scroll-area-viewport]"
-    );
+  // read back, they keep their place, across remounts too. The reader's own
+  // scrolls decide it, so a new line's height can't. Instant, not smooth: a
+  // smooth scroll still in flight would read as "scrolled up".
+  const followingRef = useRef(true);
+  const hasLines = meetingTranscript.length > 0;
+  const firstLine = meetingTranscript[0]?.timestamp ?? 0;
+
+  // The scroll area exists only once there is a line. Declared before the
+  // follow effect so a restored place is in before it runs.
+  useLayoutEffect(() => {
+    const el = hasLines ? viewportOf(scrollRef.current) : null;
     if (!el) return;
-    if (followedHeightRef.current - el.scrollTop - el.clientHeight < 80) {
-      el.scrollTop = el.scrollHeight;
-    }
-    followedHeightRef.current = el.scrollHeight;
+    const saved = readerPosition?.firstLine === firstLine ? readerPosition : null;
+    followingRef.current = saved === null;
+    if (saved) el.scrollTop = saved.top;
+    const onScroll = () => {
+      followingRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_PX;
+      readerPosition = followingRef.current ? null : { firstLine, top: el.scrollTop };
+    };
+    el.addEventListener("scroll", onScroll);
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [hasLines, firstLine]);
+
+  useLayoutEffect(() => {
+    const el = viewportOf(scrollRef.current);
+    if (el && followingRef.current) el.scrollTop = el.scrollHeight;
   }, [meetingTranscript]);
 
   if (meetingTranscript.length === 0) {

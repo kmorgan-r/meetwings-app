@@ -225,10 +225,11 @@ export const Completion = ({
   // cross-window), which changes no transcript entry but must still update
   // the pill's status dot.
   useEffect(() => {
-    const lastEntry =
-      completion.meetingTranscript[completion.meetingTranscript.length - 1];
+    // This conversation's lines, like the panel, not every meeting since launch.
+    const lines = completion.currentMeetingTranscript;
+    const lastEntry = lines[lines.length - 1];
     setPillData({
-      segmentCount: completion.meetingTranscript.length,
+      segmentCount: lines.length,
       lastLine: lastEntry?.original ?? "",
       status: systemAudio.error
         ? "error"
@@ -242,7 +243,7 @@ export const Completion = ({
       recording: completion.recording,
     });
   }, [
-    completion.meetingTranscript,
+    completion.currentMeetingTranscript,
     completion.recording,
     systemAudio.error,
     systemAudio.capturing,

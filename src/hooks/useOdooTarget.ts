@@ -847,7 +847,14 @@ export function useOdooTarget({
 
   useEffect(() => {
     window.addEventListener("newConversationStarted", handleNewChat);
-    return () => window.removeEventListener("newConversationStarted", handleNewChat);
+    // useCompletion: the mic has stayed closed past the gap after a meeting.
+    // Its contact goes with it, by the same wipe, instead of sitting on the
+    // overlay until the next call's rollover clears it anyway.
+    window.addEventListener("meetingOver", handleNewChat);
+    return () => {
+      window.removeEventListener("newConversationStarted", handleNewChat);
+      window.removeEventListener("meetingOver", handleNewChat);
+    };
   }, [handleNewChat]);
 
   const onSelect = useCallback(

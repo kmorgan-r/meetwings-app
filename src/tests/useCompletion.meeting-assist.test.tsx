@@ -10,6 +10,7 @@ import {
   generateConversationId,
   generateConversationTitle,
   getConversationById,
+  getResponseSettings,
   saveConversation,
   setActiveConversationId,
   shouldUseMeetwingsAPI,
@@ -903,6 +904,46 @@ describe("useCompletion meeting assist mode", () => {
       events.stop();
     });
 
+    // 2026-11-19: the panel showed 960 segments, every meeting since launch,
+    // for a conversation of 78 lines.
+    it("shows only the new meeting's lines once it rolls over", async () => {
+      const result = await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS + 60_000);
+      expect(result.current.meetingTranscript).toHaveLength(2);
+      expect(result.current.currentMeetingTranscript.map((e) => e.original)).toEqual([
+        "Next line",
+      ]);
+    });
+
+    it("shows both halves of a meeting that resumes within the gap", async () => {
+      const result = await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS / 2);
+      expect(result.current.currentMeetingTranscript.map((e) => e.original)).toEqual([
+        "First meeting",
+        "Next line",
+      ]);
+    });
+
+    it("does not reopen the panel on the last meeting before the next one says anything", async () => {
+      vi.mocked(generateConversationId).mockReturnValueOnce("chat-a").mockReturnValueOnce("chat-b");
+      const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+      act(() => {
+        result.current.setEnableVAD(true);
+      });
+      act(() => {
+        result.current.addMeetingTranscript("First meeting", undefined, "microphone");
+      });
+      act(() => {
+        result.current.setEnableVAD(false);
+      });
+
+      vi.setSystemTime(Date.now() + NEW_CONVERSATION_GAP_MS + 60_000);
+      await act(async () => {
+        result.current.setEnableVAD(true);
+      });
+      await waitFor(() => expect(result.current.currentConversationId).toBeNull());
+
+      expect(result.current.isPopoverOpen).toBe(false);
+    });
+
     it("does not announce a capture that resumes the same meeting", async () => {
       const events = recordCaptureEvents();
       await recordOneMeetingThenReopenAfter(NEW_CONVERSATION_GAP_MS / 2);
@@ -1232,6 +1273,175 @@ describe("useCompletion meeting assist mode", () => {
       expect(events.seen).not.toContain("newConversationStarted");
       expect(result.current.currentConversationId).toBe(id);
       events.stop();
+    });
+
+    // "meetingOver" clears the Odoo contact (useOdooTarget). Same test as the
+    // rollover: more than NEW_CONVERSATION_GAP_MS since the last meeting line.
+    describe("the meeting is over", () => {
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        vi.setSystemTime(new Date(2026, 10, 19, 10, 11));
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      function countMeetingOver() {
+        let n = 0;
+        const on = () => (n += 1);
+        window.addEventListener("meetingOver", on);
+        return {
+          count: () => n,
+          stop: () => window.removeEventListener("meetingOver", on),
+        };
+      }
+      const after = (ms: number) =>
+        act(async () => {
+          vi.advanceTimersByTime(ms);
+        });
+
+      it("is announced once the mic has stayed closed past the gap", async () => {
+        const seen = countMeetingOver();
+        const { result } = micOn();
+        act(() => {
+          result.current.addMeetingTranscript("Take care. Bye.", undefined, "microphone");
+        });
+        act(() => {
+          result.current.setEnableVAD(false);
+        });
+
+        await after(NEW_CONVERSATION_GAP_MS - 1000);
+        expect(seen.count()).toBe(0);
+        await after(2000);
+        expect(seen.count()).toBe(1);
+        // The conversation stays, for a recap.
+        expect(result.current.currentMeetingTranscript).toHaveLength(1);
+        seen.stop();
+      });
+
+      it("is not announced when the mic reopens within the gap", async () => {
+        const seen = countMeetingOver();
+        const { result } = micOn();
+        act(() => {
+          result.current.addMeetingTranscript("One line", undefined, "microphone");
+        });
+        act(() => {
+          result.current.setEnableVAD(false);
+        });
+        await after(NEW_CONVERSATION_GAP_MS / 2);
+        act(() => {
+          result.current.setEnableVAD(true);
+        });
+
+        await after(NEW_CONVERSATION_GAP_MS * 2);
+        expect(seen.count()).toBe(0);
+        seen.stop();
+      });
+
+      it("is not announced for a capture that recorded nothing", async () => {
+        const seen = countMeetingOver();
+        const { result } = micOn();
+        act(() => {
+          result.current.setEnableVAD(false);
+        });
+
+        await after(NEW_CONVERSATION_GAP_MS * 2);
+        expect(seen.count()).toBe(0);
+        seen.stop();
+      });
+
+      it("waits out the gap from a line that lands after the stop", async () => {
+        const seen = countMeetingOver();
+        const { result } = micOn();
+        act(() => {
+          result.current.addMeetingTranscript("One line", undefined, "microphone");
+        });
+        act(() => {
+          result.current.setEnableVAD(false);
+        });
+        await after(10_000);
+        act(() => {
+          result.current.addMeetingTranscript("Trailing", undefined, "microphone");
+        });
+
+        await after(NEW_CONVERSATION_GAP_MS - 9_000); // 61 s after the stop
+        expect(seen.count()).toBe(0);
+        await after(10_000);
+        expect(seen.count()).toBe(1);
+        seen.stop();
+      });
+
+      it("is not announced at launch, before any capture", async () => {
+        const seen = countMeetingOver();
+        const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+        await act(async () => {
+          await result.current.loadConversation({
+            id: "old-meeting",
+            title: "Old meeting",
+            messages: [
+              {
+                id: "m1",
+                role: "user",
+                content: "Last week",
+                timestamp: Date.now() - 7 * 86_400_000,
+                audioSource: "microphone",
+              },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        });
+
+        await after(NEW_CONVERSATION_GAP_MS * 2);
+        expect(seen.count()).toBe(0);
+        seen.stop();
+      });
+    });
+  });
+
+  describe("the answer scroll", () => {
+    it("follows a streaming answer only while the reader is at its bottom", () => {
+      vi.mocked(getResponseSettings).mockReturnValue({ autoScroll: true } as never);
+      try {
+        const geom = { scrollTop: 0, scrollHeight: 1000, clientHeight: 300 };
+        const set = (v: number) => {
+          geom.scrollTop = Math.max(0, Math.min(v, geom.scrollHeight - geom.clientHeight));
+        };
+        const root = document.createElement("div");
+        const viewport = document.createElement("div");
+        viewport.setAttribute("data-radix-scroll-area-viewport", "");
+        root.appendChild(viewport);
+        Object.defineProperties(viewport, {
+          scrollTop: { get: () => geom.scrollTop, set },
+          scrollHeight: { get: () => geom.scrollHeight },
+          clientHeight: { get: () => geom.clientHeight },
+        });
+        viewport.scrollTo = ((o: ScrollToOptions) => set(o.top ?? 0)) as typeof viewport.scrollTo;
+
+        const { result } = renderHook(() => useCompletion());
+        result.current.scrollAreaRef.current = root;
+
+        act(() => result.current.setResponse("one"));
+        expect(geom.scrollTop).toBe(700);
+
+        geom.scrollHeight = 1100;
+        act(() => result.current.setResponse("one two"));
+        expect(geom.scrollTop).toBe(800);
+
+        geom.scrollTop = 200; // the reader scrolls up to the start
+        geom.scrollHeight = 1200;
+        act(() => result.current.setResponse("one two three"));
+        expect(geom.scrollTop).toBe(200);
+
+        // The next answer starts at its newest text again.
+        act(() => result.current.setResponse(""));
+        geom.scrollTop = 0;
+        geom.scrollHeight = 900;
+        act(() => result.current.setResponse("next"));
+        expect(geom.scrollTop).toBe(600);
+      } finally {
+        vi.mocked(getResponseSettings).mockReturnValue({ autoScroll: false } as never);
+      }
     });
   });
 });
