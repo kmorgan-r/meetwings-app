@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from "react";
-import { render } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { TranscriptEntry } from "@/types";
 
@@ -20,8 +20,11 @@ const fakeViewport = (el: HTMLDivElement | null) => {
   el.scrollTo = ((opts: ScrollToOptions) => set(opts.top ?? geom.scrollTop)) as typeof el.scrollTo;
 };
 
-vi.mock("@/components", () => ({
+vi.mock("@/components", async () => ({
   Button: ({ children }: { children: ReactNode }) => <button type="button">{children}</button>,
+  CopyButton: (await vi.importActual<typeof import("@/components/Markdown/copy-button")>(
+    "@/components/Markdown/copy-button",
+  )).CopyButton,
   ScrollArea: ({ children, ref }: { children: ReactNode; ref?: Ref<HTMLDivElement> }) => (
     <div ref={ref}>
       <div data-radix-scroll-area-viewport="" ref={fakeViewport}>
@@ -127,6 +130,15 @@ describe("MeetingTranscriptPanel scroll follow", () => {
     geom.scrollHeight = 1100;
     render(panel([line(0), line(1), line(2)]));
     expect(geom.scrollTop).toBe(800);
+  });
+
+  it("copies just that line to the clipboard", async () => {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    render(panel([line(0), line(1)]));
+    const copy = screen.getAllByRole("button", { name: "Copy to clipboard" })[1];
+    await act(async () => fireEvent.click(copy));
+    expect(writeText).toHaveBeenCalledWith("line 1");
   });
 
   it("opens the next meeting at its newest line", () => {

@@ -5,7 +5,7 @@ import {
   SpeakerIdParser,
   TranscriptEntry,
 } from "@/types";
-import { Button, ScrollArea, SpeakerTaggingPopover } from "@/components";
+import { Button, CopyButton, ScrollArea, SpeakerTaggingPopover } from "@/components";
 import { TrashIcon, UsersIcon, Loader2 } from "lucide-react";
 import { memo, useLayoutEffect, useRef } from "react";
 import { useApp } from "@/contexts";
@@ -137,6 +137,11 @@ const TranscriptRow = memo(function TranscriptRow({
             (unconfirmed)
           </span>
         )}
+
+        {/* -my-1: the button is taller than the label row; don't grow it. */}
+        <div className="ml-auto -my-1 text-muted-foreground">
+          <CopyButton content={entry.original} />
+        </div>
       </div>
 
       {/* Original text */}
