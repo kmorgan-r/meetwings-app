@@ -39,8 +39,8 @@ export const StatusIndicator = ({
           <span className="text-xs font-medium">Transcribing...</span>
         </div>
       ) : capturing ? (
-        <div className="flex items-center gap-2 text-green-600 animate-pulse">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        <div className="flex items-center gap-2 text-green-600">
+          <div className="w-2 h-2 rounded-full bg-green-500" />
           <span className="text-xs font-medium">Listening...</span>
         </div>
       ) : null}

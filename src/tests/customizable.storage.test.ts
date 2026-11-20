@@ -73,6 +73,36 @@ describe("customizable.storage contentProtection", () => {
   });
 });
 
+describe("customizable.storage cursor", () => {
+  beforeEach(() => {
+    store.clear();
+    vi.mocked(localStorage.getItem).mockImplementation(
+      (k: string) => store.get(k) ?? null
+    );
+    vi.mocked(localStorage.setItem).mockImplementation(
+      (k: string, v: string) => {
+        store.set(k, v);
+      }
+    );
+  });
+
+  // "invisible" hid the system pointer and drew one with a rAF loop (#114).
+  // The drawn pointer is gone, so a stored "invisible" must not leave the
+  // overlay with no pointer at all.
+  it.each([
+    [{ type: "invisible" }, "default"],
+    [undefined, "default"],
+    [{ type: "default" }, "default"],
+    [{ type: "auto" }, "auto"],
+  ])("reads stored cursor %j as %s", (cursor, expected) => {
+    localStorage.setItem(
+      STORAGE_KEYS.CUSTOMIZABLE,
+      JSON.stringify({ appIcon: { isVisible: true }, cursor })
+    );
+    expect(getCustomizableState().cursor.type).toBe(expected);
+  });
+});
+
 describe("customizable.storage overlayPill", () => {
   beforeEach(() => {
     store.clear();

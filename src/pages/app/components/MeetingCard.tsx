@@ -116,7 +116,7 @@ function RecordingCard({ card, compact }: { card: Extract<Card, { kind: "recordi
       <div className="flex h-full flex-col px-3 pb-2 pt-2">
         <div className="flex items-center gap-2 text-sm">
           <span className="flex items-center gap-1.5 font-bold tracking-wide text-destructive">
-            <span aria-hidden="true" className="motion-safe:animate-pulse">◉</span> REC
+            <span aria-hidden="true">◉</span> REC
           </span>
           {/* The live region is the static headline only: the ticking timer stays outside it. */}
           <span role="status" className="min-w-0 flex-1 truncate font-medium">

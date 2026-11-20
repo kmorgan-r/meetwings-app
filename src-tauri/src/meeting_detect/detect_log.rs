@@ -2,8 +2,9 @@
 //!
 //! Release builds have no console, so this file is the only record of why a
 //! call stopped or failed to restart. It holds transitions only: process image
-//! names, pids, session states, watcher events and the frontend's decisions.
-//! No transcript and no calendar text. One line is `<epoch ms> <text>`.
+//! names, pids, session states, watcher events and the frontend's decisions,
+//! plus system-audio capture start/stop, 10 s capture stats and clip sizes
+//! (#114). No transcript and no calendar text. One line is `<epoch ms> <text>`.
 //!
 //! Writes never panic and never surface an error: the poll thread calls this
 //! outside its catch_unwind, and a diagnostic must not be able to stop the
@@ -25,7 +26,7 @@ static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// the frontend command.
 static WRITE: Mutex<()> = Mutex::new(());
 
-pub(super) fn log_line(app: &AppHandle, line: &str) {
+pub(crate) fn log_line(app: &AppHandle, line: &str) {
     let path = PATH.get_or_init(|| app.path().app_data_dir().ok().map(|d| d.join(FILE_NAME)));
     if let Some(path) = path {
         let _guard = lock_recover(&WRITE);

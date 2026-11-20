@@ -186,7 +186,6 @@ describe("main window listens for overlay-pill-style-changed", () => {
       Card: ({ children }: any) => <div>{children}</div>,
       Updater: () => null,
       DragButton: () => null,
-      CustomCursor: () => null,
       Button: ({ children, onClick, title }: any) => (
         <button onClick={onClick} title={title}>
           {children}

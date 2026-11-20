@@ -37,7 +37,6 @@ const mockAppPage = () => {
     Card: ({ children }: any) => <div data-testid="overlay-card">{children}</div>,
     Updater: () => null,
     DragButton: () => null,
-    CustomCursor: () => <div data-testid="custom-cursor" />,
     Button: ({ children, onClick, title }: any) => (
       <button onClick={onClick} title={title}>
         {children}

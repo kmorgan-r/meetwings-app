@@ -36,6 +36,39 @@ fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// First detection.log line of a run: which build this is (#114). On macOS,
+/// `proc_translated=1` means an Intel build running under Rosetta on Apple
+/// Silicon, and an empty value means a native Intel Mac.
+fn log_build_info(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        let os = {
+            let run = |cmd: &str, args: &[&str]| {
+                std::process::Command::new(cmd)
+                    .args(args)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default()
+            };
+            format!(
+                " macos={} proc_translated={}",
+                run("/usr/bin/sw_vers", &["-productVersion"]),
+                run("/usr/sbin/sysctl", &["-n", "sysctl.proc_translated"])
+            )
+        };
+        #[cfg(not(target_os = "macos"))]
+        let os = "";
+        meeting_detect::log_line(
+            &app,
+            &format!(
+                "app start version={} arch={}{os}",
+                env!("CARGO_PKG_VERSION"),
+                std::env::consts::ARCH
+            ),
+        );
+    });
+}
+
 /// Route `tracing` events to stdout.
 ///
 /// Without this, every `tracing::debug!`/`warn!` in the crate compiles to a
@@ -268,6 +301,7 @@ pub fn run() {
         .setup(|app| {
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
+            log_build_info(app.handle().clone());
             #[cfg(target_os = "macos")]
             init(app.app_handle());
 

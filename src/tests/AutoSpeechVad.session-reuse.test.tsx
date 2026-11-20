@@ -100,7 +100,7 @@ const props = () => ({
 /** Mounts, waits until vad-react reports the mic listening, unmounts. */
 async function micStartStop(onListening?: () => Promise<void>) {
   const { container, unmount } = render(<AutoSpeechVAD {...props()} />);
-  await waitFor(() => expect(container.querySelector(".animate-pulse")).not.toBeNull());
+  await waitFor(() => expect(container.querySelector(".bg-red-600")).not.toBeNull());
   await onListening?.();
   unmount();
 }

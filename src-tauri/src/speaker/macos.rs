@@ -5,9 +5,10 @@ use ringbuf::{
     traits::{Consumer, Producer, Split},
     HeapCons, HeapProd, HeapRb,
 };
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
+use std::time::Instant;
 
 use ca::aggregate_device_keys as agg_keys;
 use cidre::{arc, av, cat, cf, core_audio as ca, ns, os};
@@ -37,12 +38,32 @@ impl SpeakerStream {
 }
 
 struct Ctx {
-    format: arc::R<av::AudioFormat>,
+    /// Read once from the tap format: asking the Obj-C format on every
+    /// callback is work the real-time thread doesn't need.
+    is_f32: bool,
     producer: HeapProd<f32>,
     waker_state: Arc<Mutex<WakerState>>,
-    current_sample_rate: Arc<AtomicU32>,
     consecutive_drops: Arc<AtomicU32>,
     should_terminate: Arc<AtomicBool>,
+    last_callback: Option<Instant>,
+}
+
+// IO-thread counters for detection.log (#114), drained every 10 s by the
+// consumer through take_io_stats. Statics, not per stream: one capture runs
+// at a time. Relaxed atomics are lock-free and safe on the real-time thread.
+static IO_CALLBACKS: AtomicU64 = AtomicU64::new(0);
+static IO_MAX_GAP_US: AtomicU64 = AtomicU64::new(0);
+static IO_MAX_PROC_US: AtomicU64 = AtomicU64::new(0);
+static IO_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+pub fn take_io_stats() -> String {
+    format!(
+        "io_callbacks={} io_max_gap_ms={:.1} io_max_proc_us={} io_dropped={}",
+        IO_CALLBACKS.swap(0, Ordering::Relaxed),
+        IO_MAX_GAP_US.swap(0, Ordering::Relaxed) as f64 / 1000.0,
+        IO_MAX_PROC_US.swap(0, Ordering::Relaxed),
+        IO_DROPPED.swap(0, Ordering::Relaxed),
+    )
 }
 
 impl SpeakerInput {
@@ -93,8 +114,15 @@ impl SpeakerInput {
         &self,
         ctx: &mut Box<Ctx>,
     ) -> Result<ca::hardware::StartedDevice<ca::AggregateDevice>> {
+        // Runs on Core Audio's real-time IO thread, once per buffer (~10 ms).
+        // Nothing here may block, allocate or call into the HAL (#114): the
+        // sample-rate query and the per-callback AVAudioPCMBuffer that used to
+        // be here did both. The data arrives in the tap's format, so the tap's
+        // rate (read once in `stream`) is the rate of these samples; the
+        // consumer only ever read the rate once, right after start, and so
+        // almost always got that value anyway.
         extern "C" fn proc(
-            device: ca::Device,
+            _device: ca::Device,
             _now: &cat::AudioTimeStamp,
             input_data: &cat::AudioBufList<1>,
             _input_time: &cat::AudioTimeStamp,
@@ -104,20 +132,17 @@ impl SpeakerInput {
         ) -> os::Status {
             let ctx = ctx.unwrap();
 
-            ctx.current_sample_rate.store(
-                device
-                    .actual_sample_rate()
-                    .unwrap_or(ctx.format.absd().sample_rate) as u32,
-                Ordering::Release,
-            );
+            let started = Instant::now();
+            if let Some(last) = ctx.last_callback.replace(started) {
+                IO_MAX_GAP_US.fetch_max(
+                    started.duration_since(last).as_micros() as u64,
+                    Ordering::Relaxed,
+                );
+            }
+            IO_CALLBACKS.fetch_add(1, Ordering::Relaxed);
 
-            if let Some(view) =
-                av::AudioPcmBuf::with_buf_list_no_copy(&ctx.format, input_data, None)
-            {
-                if let Some(data) = view.data_f32_at(0) {
-                    process_audio_data(ctx, data);
-                }
-            } else if ctx.format.common_format() == av::audio::CommonFormat::PcmF32 {
+            // The tap is mono, so the first buffer holds every sample.
+            if ctx.is_f32 {
                 let first_buffer = &input_data.buffers[0];
                 let byte_count = first_buffer.data_bytes_size as usize;
                 let float_count = byte_count / std::mem::size_of::<f32>();
@@ -130,6 +155,7 @@ impl SpeakerInput {
                 }
             }
 
+            IO_MAX_PROC_US.fetch_max(started.elapsed().as_micros() as u64, Ordering::Relaxed);
             os::Status::NO_ERR
         }
 
@@ -157,12 +183,12 @@ impl SpeakerInput {
         let current_sample_rate = Arc::new(AtomicU32::new(asbd.sample_rate as u32));
 
         let mut ctx = Box::new(Ctx {
-            format,
+            is_f32: format.common_format() == av::audio::CommonFormat::PcmF32,
             producer,
             waker_state: waker_state.clone(),
-            current_sample_rate: current_sample_rate.clone(),
             consecutive_drops: Arc::new(AtomicU32::new(0)),
             should_terminate: Arc::new(AtomicBool::new(false)),
+            last_callback: None,
         });
 
         let device = self.start_device(&mut ctx).unwrap();
@@ -184,6 +210,7 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
 
     // Consistent buffer overflow handling
     if pushed < buffer_size {
+        IO_DROPPED.fetch_add((buffer_size - pushed) as u64, Ordering::Relaxed);
         let consecutive = ctx.consecutive_drops.fetch_add(1, Ordering::AcqRel) + 1;
 
         // Only terminate after many consecutive drops (prevents temporary spikes from killing stream)
@@ -201,15 +228,15 @@ fn process_audio_data(ctx: &mut Ctx, data: &[f32]) {
         ctx.consecutive_drops.store(0, Ordering::Release);
     }
 
-    // Wake up consumer if we have new data
-    let should_wake = {
-        let mut waker_state = ctx.waker_state.lock().unwrap();
-        if !waker_state.has_data {
+    // Wake up consumer if we have new data. try_lock, not lock: the real-time
+    // thread must never wait on the consumer (priority inversion, #114). A
+    // miss only delays the wake to the next callback, about 10 ms later.
+    let should_wake = match ctx.waker_state.try_lock() {
+        Ok(mut waker_state) if !waker_state.has_data => {
             waker_state.has_data = true;
             waker_state.waker.take()
-        } else {
-            None
         }
+        _ => None,
     };
 
     if let Some(waker) = should_wake {

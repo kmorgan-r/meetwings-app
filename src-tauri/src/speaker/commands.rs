@@ -1,4 +1,5 @@
 // Meetwings AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
+use crate::meeting_detect::log_line;
 use crate::speaker::SpeakerInput;
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -61,6 +62,7 @@ pub async fn start_system_audio_capture(
 
         if guard.is_some() {
             warn!("Capture already running");
+            log_line(&app, "capture start refused: already running");
             return Err("Capture already running".to_string());
         }
     }
@@ -98,6 +100,13 @@ pub async fn start_system_audio_capture(
         .map_err(|e| format!("Failed to read VAD config: {}", e))?
         .clone();
 
+    // A permission prime's tap must not count toward this capture's first stats line.
+    let _ = crate::speaker::take_io_stats();
+    log_line(
+        &app,
+        &format!("capture start sr={sr} vad={}", vad_config.enabled),
+    );
+
     // Mark as capturing BEFORE spawning task
     *state
         .is_capturing
@@ -114,6 +123,9 @@ pub async fn start_system_audio_capture(
         } else {
             run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
         }
+        // Reached only when the stream ended on its own (VAD) or a continuous
+        // recording finished; a stop aborts the task before this line.
+        log_line(&app_clone, "capture task ended");
 
         let state = app_clone.state::<crate::AudioState>();
         {
@@ -147,6 +159,7 @@ async fn run_vad_capture(
     let mut silence_chunks = 0;
     let mut speech_chunks = 0;
     let max_samples = sr as usize * 30; // 30s safety cap per utterance
+    let mut stats = CaptureStats::new();
 
     while let Some(sample) = stream.next().await {
         buffer.push_back(sample);
@@ -159,6 +172,7 @@ async fn run_vad_capture(
                     mono.push(v);
                 }
             }
+            stats.add(&app, sr, mono.len());
 
             // Apply noise gate BEFORE VAD (critical for accuracy)
             let mono = apply_noise_gate(&mono, config.noise_gate_threshold);
@@ -185,7 +199,7 @@ async fn run_vad_capture(
                 // Safety cap: force emit if exceeds 30s
                 if speech_buffer.len() > max_samples {
                     let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
-                    if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
+                    if let Ok(b64) = speech_wav_b64(&app, sr, &normalized_buffer) {
                         // let duration = speech_buffer.len() as f32 / sr as f32;
                         let _ = app.emit("speech-detected", b64);
                     }
@@ -217,7 +231,7 @@ async fn run_vad_capture(
 
                             // Emit complete speech segment
                             let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
-                            if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
+                            if let Ok(b64) = speech_wav_b64(&app, sr, &normalized_buffer) {
                                 // let duration = speech_buffer.len() as f32 / sr as f32;
                                 let _ = app.emit("speech-detected", b64);
                             } else {
@@ -268,6 +282,7 @@ async fn run_continuous_capture(
 
     // Pre-allocate buffer to prevent reallocations
     let mut audio_buffer = Vec::with_capacity(max_samples);
+    let mut stats = CaptureStats::new();
     let start_time = Instant::now();
     let max_duration = Duration::from_secs(config.max_recording_duration_secs);
 
@@ -302,6 +317,9 @@ async fn run_continuous_capture(
                         }
 
                         audio_buffer.push(sample);
+                        if audio_buffer.len() % 1024 == 0 {
+                            stats.add(&app, sr, 1024);
+                        }
 
                         let elapsed = start_time.elapsed();
 
@@ -342,7 +360,7 @@ async fn run_continuous_capture(
         let cleaned_audio = apply_noise_gate(&audio_buffer, config.noise_gate_threshold);
         let cleaned_audio = normalize_audio_level(&cleaned_audio, 0.1);
 
-        match samples_to_wav_b64(sr, &cleaned_audio) {
+        match speech_wav_b64(&app, sr, &cleaned_audio) {
             Ok(b64) => {
                 let _ = app.emit("speech-detected", b64);
             }
@@ -418,6 +436,80 @@ fn normalize_audio_level(samples: &[f32], target_rms: f32) -> Vec<f32> {
         .collect()
 }
 
+/// Speech-to-text needs no more than 16 kHz. The tap runs at the device rate
+/// (48 kHz on most Macs), so sending that rate made every clip 3x the bytes
+/// through IPC, base64 decoding in the webview, and the upload (#114).
+const STT_SAMPLE_RATE: u32 = 16_000;
+
+/// Area-average resampling down to `to` Hz: each output sample is the mean of
+/// the input samples it covers, which doubles as a crude anti-alias filter.
+/// Enough for speech, and it handles 44.1 kHz as well as 48 kHz.
+fn downsample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
+    let ratio = from as f64 / to as f64;
+    let out_len = (samples.len() as f64 / ratio) as usize;
+    (0..out_len)
+        .map(|i| {
+            let start = (i as f64 * ratio) as usize;
+            let end = (((i + 1) as f64 * ratio) as usize).clamp(start + 1, samples.len());
+            samples[start..end].iter().sum::<f32>() / (end - start) as f32
+        })
+        .collect()
+}
+
+/// A speech clip as WAV base64 at no more than 16 kHz, logged to
+/// detection.log so a lag report shows how much audio crossed into the webview.
+fn speech_wav_b64(app: &AppHandle, sr: u32, samples: &[f32]) -> Result<String, String> {
+    let b64 = if sr > STT_SAMPLE_RATE {
+        samples_to_wav_b64(STT_SAMPLE_RATE, &downsample(samples, sr, STT_SAMPLE_RATE))
+    } else {
+        samples_to_wav_b64(sr, samples)
+    }?;
+    log_line(
+        app,
+        &format!(
+            "capture clip secs={:.1} b64_bytes={}",
+            samples.len() as f32 / sr as f32,
+            b64.len()
+        ),
+    );
+    Ok(b64)
+}
+
+/// One `capture stats` line into detection.log every 10 s (#114): samples the
+/// consumer received against what the rate promises, plus the macOS IO
+/// thread's counters. A deficit, drops or a long callback gap mean capture is
+/// starving; normal numbers point the lag elsewhere.
+struct CaptureStats {
+    since: Instant,
+    samples: u64,
+}
+
+impl CaptureStats {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            samples: 0,
+        }
+    }
+
+    fn add(&mut self, app: &AppHandle, sr: u32, n: usize) {
+        self.samples += n as u64;
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs >= 10.0 {
+            let io = crate::speaker::take_io_stats().unwrap_or_default();
+            log_line(
+                app,
+                &format!(
+                    "capture stats secs={secs:.1} samples={} expected={} {io}",
+                    self.samples,
+                    (sr as f64 * secs) as u64
+                ),
+            );
+            *self = Self::new();
+        }
+    }
+}
+
 // Convert samples to WAV base64 (with proper error handling)
 fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, String> {
     // Validate sample rate
@@ -462,31 +554,43 @@ fn samples_to_wav_b64(sample_rate: u32, mono_f32: &[f32]) -> Result<String, Stri
 pub async fn stop_system_audio_capture(app: AppHandle) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
-    // Abort task in separate scope (Send trait fix)
-    {
-        let mut guard = state
-            .stream_task
-            .lock()
-            .map_err(|e| format!("Failed to acquire task lock: {}", e))?;
+    // The guard is a temporary of this statement, so it is not held across
+    // the await below (that would make the future !Send).
+    let task = state
+        .stream_task
+        .lock()
+        .map_err(|e| format!("Failed to acquire task lock: {}", e))?
+        .take();
 
-        if let Some(task) = guard.take() {
-            task.abort();
-        }
+    let had_task = task.is_some();
+    if let Some(task) = task {
+        task.abort();
+        // Resolves once the task's future, and the stream it owns, has been
+        // dropped (on macOS the tap and aggregate device are gone), instead
+        // of a fixed 500 ms of sleeps (#114). Bounded by that same 500 ms:
+        // on Windows the stream's Drop joins a capture thread that can sit in
+        // a 3 s WASAPI wait while nothing plays, and auto-stop fires in
+        // silence.
+        let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
     }
 
-    // LONGER delay for proper cleanup (300ms instead of 150ms)
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    // A start that ran while we waited owns the flag and the next stop now.
+    if state
+        .stream_task
+        .lock()
+        .map_err(|e| format!("Failed to acquire task lock: {}", e))?
+        .is_some()
+    {
+        log_line(&app, "capture stop superseded by a newer start");
+        return Ok(());
+    }
 
-    // Mark as not capturing
     *state
         .is_capturing
         .lock()
         .map_err(|e| format!("Failed to update capturing state: {}", e))? = false;
 
-    // Additional cleanup delay (CRITICAL for mic indicator)
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    // Emit stopped event
+    log_line(&app, &format!("capture stop had_task={had_task}"));
     let _ = app.emit("capture-stopped", ());
     Ok(())
 }
@@ -661,4 +765,25 @@ pub fn get_audio_sample_rate(_app: AppHandle) -> Result<u32, String> {
     let sr = stream.sample_rate();
 
     Ok(sr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::downsample;
+
+    #[test]
+    fn downsample_keeps_duration_and_level() {
+        // One second at 48 kHz and 44.1 kHz both become one second at 16 kHz.
+        assert_eq!(downsample(&[0.5; 48_000], 48_000, 16_000).len(), 16_000);
+        assert_eq!(downsample(&[0.5; 44_100], 44_100, 16_000).len(), 16_000);
+        // A constant signal keeps its level (no gain from the averaging).
+        assert!(downsample(&[0.5; 44_100], 44_100, 16_000)
+            .iter()
+            .all(|&s| (s - 0.5).abs() < 1e-6));
+        // 48 kHz -> 16 kHz averages each run of three.
+        let out = downsample(&[0.0, 0.3, 0.6, 1.0, 1.0, 1.0], 48_000, 16_000);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 0.3).abs() < 1e-6 && (out[1] - 1.0).abs() < 1e-6);
+        assert!(downsample(&[], 48_000, 16_000).is_empty());
+    }
 }

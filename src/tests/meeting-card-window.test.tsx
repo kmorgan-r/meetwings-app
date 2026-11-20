@@ -41,7 +41,6 @@ const mockEverything = () => {
     Card: ({ children }: any) => <div data-testid="overlay-card">{children}</div>,
     Updater: () => null,
     DragButton: () => null,
-    CustomCursor: () => null,
     Button: ({ children, onClick, title, ...rest }: any) => (
       <button onClick={onClick} title={title} {...rest}>
         {children}

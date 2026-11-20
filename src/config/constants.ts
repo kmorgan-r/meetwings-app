@@ -222,9 +222,10 @@ export const EMPTY_TRANSCRIPTION_REPORT_THRESHOLD = 5;
 
 /**
  * Bounded confirmation that a meeting-mode auto-stop really brought the capture
- * down. Worst case 1500 ms, past Rust's 500 ms floor (a 300 ms sleep before
- * is_capturing clears at src-tauri/src/speaker/commands.rs:478-484, 200 ms more
- * before capture-stopped at :487-490) with headroom for a saturated main thread.
+ * down. Worst case 1500 ms: stop_system_audio_capture clears is_capturing once
+ * the aborted capture task has dropped its stream, or after at most 500 ms
+ * (src-tauri/src/speaker/commands.rs), so this is headroom for a saturated
+ * main thread.
  *
  * Here rather than in useMeetingAutoRecord because a module's own const reads
  * compile to a local binding: overriding its own export from a test is a silent

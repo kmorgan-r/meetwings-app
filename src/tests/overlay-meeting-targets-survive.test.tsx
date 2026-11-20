@@ -280,7 +280,6 @@ const mockEverything = () => {
       Card: ({ children }: Kids) => <div data-testid="overlay-card">{children}</div>,
       Updater: () => null,
       DragButton: () => null,
-      CustomCursor: () => null,
       WingIcon: () => null,
       CopyButton: () => null,
       SpeakerTaggingPopover: () => null,

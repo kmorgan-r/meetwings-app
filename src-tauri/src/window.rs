@@ -260,6 +260,16 @@ pub fn set_window_height(
         return Ok(());
     }
 
+    // useWindow's MutationObserver asks for the same height on every DOM
+    // change, i.e. every arriving transcript segment. Resizing to the size the
+    // window already has, plus keep_window_on_screen's monitor queries, is
+    // WindowServer work for nothing (#114).
+    if let (Ok(current), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+        if is_same_size(current, BAR_WIDTH, height as f64, scale) {
+            return Ok(());
+        }
+    }
+
     // Simply set the window size with fixed width and new height
     let new_size = LogicalSize::new(BAR_WIDTH, height as f64);
     window
@@ -271,6 +281,15 @@ pub fn set_window_height(
     keep_window_on_screen(&window);
 
     Ok(())
+}
+
+/// Whether a window of `current` physical size already is `width` x `height`
+/// logical at `scale`. One physical pixel of slack absorbs the rounding of a
+/// fractional scale factor.
+fn is_same_size(current: PhysicalSize<u32>, width: f64, height: f64, scale: f64) -> bool {
+    let close =
+        |actual: u32, logical: f64| (actual as f64 - (logical * scale).round()).abs() <= 1.0;
+    close(current.width, width) && close(current.height, height)
 }
 
 /// A restyle (`restyle == true`) only makes sense while minimized. One that
@@ -591,6 +610,19 @@ mod tests {
 
         returns_a_future(open_dashboard);
         returns_a_future(toggle_dashboard);
+    }
+
+    #[test]
+    fn same_size_absorbs_scale_rounding_only() {
+        let px = |w, h| PhysicalSize::new(w, h);
+        assert!(is_same_size(px(500, 54), 500.0, 54.0, 1.0));
+        // 54 * 1.25 = 67.5 -> the OS may land on 67 or 68.
+        assert!(is_same_size(px(625, 67), 500.0, 54.0, 1.25));
+        assert!(is_same_size(px(625, 68), 500.0, 54.0, 1.25));
+        assert!(is_same_size(px(1000, 1200), 500.0, 600.0, 2.0));
+        // A real height change must still resize.
+        assert!(!is_same_size(px(1000, 108), 500.0, 600.0, 2.0));
+        assert!(!is_same_size(px(500, 54), 500.0, 56.0, 1.0));
     }
 
     #[test]

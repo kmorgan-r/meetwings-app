@@ -149,11 +149,11 @@ describe("ActiveModels", () => {
     expect(screen.queryByText("Whisper Large V3 Turbo")).toBeNull();
   });
 
-  it("pulses the speech chip only while listening", () => {
+  it("highlights the speech chip only while listening", () => {
     const { container, rerender } = renderChips({
       stt: pick("groq", "whisper-large-v3-turbo"),
     });
-    expect(container.querySelector(".animate-pulse")).toBeNull();
+    expect(container.querySelector(".text-primary")).toBeNull();
 
     rerender(
       <ActiveModels
@@ -164,7 +164,7 @@ describe("ActiveModels", () => {
       />
     );
 
-    expect(container.querySelector(".animate-pulse")).not.toBeNull();
+    expect(container.querySelector(".text-primary")).not.toBeNull();
   });
 
   it("renders nothing when no provider is set", () => {

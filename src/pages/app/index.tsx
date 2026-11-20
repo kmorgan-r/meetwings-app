@@ -1,4 +1,4 @@
-import { Card, Updater, DragButton, CustomCursor, Button, WingIcon } from "@/components";
+import { Card, Updater, DragButton, Button, WingIcon } from "@/components";
 import {
   SystemAudio,
   Completion,
@@ -19,7 +19,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ErrorBoundary } from "react-error-boundary";
 import { ErrorLayout } from "@/layouts";
-import { getPlatform } from "@/lib";
 import { AlertCircle, Minimize2 } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
 import {
@@ -45,7 +44,6 @@ const App = () => {
   // Team deep links and re-syncs. Self-gating: inert outside the `main` window.
   useTeamSync();
   const { customizable, setOverlayPillStyle } = useAppContext();
-  const platform = getPlatform();
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
   const card = useMeetingCardHost(pillStyle);
@@ -303,15 +301,6 @@ const App = () => {
         ) : (
           minimized && <MinimizedPill style={pillStyle} />
         )}
-        {/* Sibling of BOTH the Card wrapper and the pill, inside the isHidden
-            one — exactly where it sat before the minimized wrapper existed.
-            cursor.type defaults to "invisible", which sets --cursor-type:none
-            on the whole overlay webview, so this drawn pointer is the only
-            cursor the user has; inside the minimized wrapper it would vanish
-            over the pill. Hiding the app still hides it, which is intended. */}
-        {customizable.cursor.type === "invisible" && platform !== "linux" ? (
-          <CustomCursor />
-        ) : null}
       </div>
     </ErrorBoundary>
   );
