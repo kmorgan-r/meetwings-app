@@ -70,6 +70,19 @@ impl SpeakerInput {
     }
 }
 
+/// The macOS IO thread's counters since the last call, as `key=value` text for
+/// detection.log (#114). None where the platform does not keep them.
+pub fn take_io_stats() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(macos::take_io_stats())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 // Stream of f32 audio samples from the speaker.
 pub struct SpeakerStream {
     inner: PlatformSpeakerStream,

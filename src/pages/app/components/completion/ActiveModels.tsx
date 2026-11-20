@@ -70,7 +70,7 @@ export const ActiveModels = ({
   return (
     <div className="flex min-w-0 items-center gap-1">
       {ai && <ModelChip icon={Sparkles} {...ai} />}
-      {stt && <ModelChip icon={Mic} {...stt} pulse={listening} />}
+      {stt && <ModelChip icon={Mic} {...stt} active={listening} />}
     </div>
   );
 };
@@ -147,14 +147,14 @@ const ModelChip = ({
   icon: Icon,
   label,
   title,
-  pulse = false,
-}: Chip & { icon: LucideIcon; pulse?: boolean }) => (
+  active = false,
+}: Chip & { icon: LucideIcon; active?: boolean }) => (
   <span
     title={title}
     className="inline-flex min-w-0 max-w-[10rem] items-center gap-1 rounded-full border border-input/50 bg-muted/30 px-1.5 text-[10px] text-muted-foreground select-none"
   >
     <Icon
-      className={cn("h-2.5 w-2.5 shrink-0", pulse && "animate-pulse text-primary")}
+      className={cn("h-2.5 w-2.5 shrink-0", active && "text-primary")}
     />
     <span className="truncate">{label}</span>
   </span>

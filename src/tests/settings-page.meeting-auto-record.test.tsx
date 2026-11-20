@@ -85,7 +85,6 @@ const mockAppRenderDeps = () => {
     Card: ({ children }: any) => <>{children}</>,
     Updater: () => null,
     DragButton: () => null,
-    CustomCursor: () => null,
     Button: ({ children }: any) => <>{children}</>,
     WingIcon: () => null,
   }));

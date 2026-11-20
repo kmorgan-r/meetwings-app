@@ -1,6 +1,6 @@
 import { STORAGE_KEYS } from "@/config";
 
-export type CursorType = "invisible" | "default" | "auto";
+export type CursorType = "default" | "auto";
 
 export type OverlayPillStyle = "status-count" | "icon-only" | "status-last-line";
 
@@ -30,7 +30,7 @@ export const DEFAULT_CUSTOMIZABLE_STATE: CustomizableState = {
   alwaysOnTop: { isEnabled: false },
   autostart: { isEnabled: true },
   contentProtection: { isEnabled: true },
-  cursor: { type: "invisible" },
+  cursor: { type: "default" },
   overlayPill: { style: "status-count" },
 };
 
@@ -54,7 +54,12 @@ export const getCustomizableState = (): CustomizableState => {
       contentProtection:
         parsedState.contentProtection ||
         DEFAULT_CUSTOMIZABLE_STATE.contentProtection,
-      cursor: parsedState.cursor || DEFAULT_CUSTOMIZABLE_STATE.cursor,
+      // "invisible" (hidden pointer + a drawn one) was removed in #114; a
+      // stored value from an older build falls back to the default pointer.
+      cursor:
+        parsedState.cursor?.type === "auto"
+          ? parsedState.cursor
+          : DEFAULT_CUSTOMIZABLE_STATE.cursor,
       overlayPill:
         parsedState.overlayPill || DEFAULT_CUSTOMIZABLE_STATE.overlayPill,
     };

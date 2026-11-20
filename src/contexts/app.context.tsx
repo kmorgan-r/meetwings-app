@@ -304,7 +304,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const customizableState = getCustomizableState();
     setCustomizable(customizableState);
 
-    updateCursor(customizableState.cursor.type || "invisible");
+    updateCursor(customizableState.cursor.type);
 
     const stored = safeLocalStorage.getItem(STORAGE_KEYS.CUSTOMIZABLE);
     if (!stored) {
@@ -317,7 +317,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         if (!parsed.autostart) {
           // save the merged state with new autostart property
           setCustomizableState(customizableState);
-          updateCursor(customizableState.cursor.type || "invisible");
+          updateCursor(customizableState.cursor.type);
         }
       } catch (error) {
         console.debug("Failed to check customizable state schema:", error);
@@ -375,9 +375,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }
 
       // For overlay windows (main, capture-overlay-*)
-      const safeType = type || "invisible";
-      const cursorValue = type === "invisible" ? "none" : safeType;
-      document.documentElement.style.setProperty("--cursor-type", cursorValue);
+      document.documentElement.style.setProperty("--cursor-type", type || "default");
     } catch (error) {
       document.documentElement.style.setProperty("--cursor-type", "default");
     }

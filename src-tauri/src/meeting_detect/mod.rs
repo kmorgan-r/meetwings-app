@@ -9,9 +9,11 @@
 mod gate;
 use gate::{gated_step, GatedEvent, GatedInput, GatedState};
 
-// Persistent transition log: the only diagnostic a release build has.
+// Persistent transition log: the only diagnostic a release build has. The
+// speaker module writes its capture lines here too (#114).
 mod detect_log;
-use detect_log::{log_line, session_signature};
+pub(crate) use detect_log::log_line;
+use detect_log::session_signature;
 
 // Pure Mac part of the Core Audio enumeration; `macos.rs` supplies the reads.
 mod mac_logic;

@@ -230,14 +230,14 @@ const AutoSpeechVADInternal = ({
             setEnableVAD(true);
           }
         }}
-        className={cn("cursor-pointer", vad.listening && "bg-red-600 text-white hover:bg-red-600/90 animate-pulse")}
+        className={cn("cursor-pointer", vad.listening && "bg-red-600 text-white hover:bg-red-600/90")}
       >
         {isTranscribing ? (
           <LoaderCircleIcon className="h-4 w-4 animate-spin text-green-500" />
         ) : vad.userSpeaking ? (
           <LoaderCircleIcon className="h-4 w-4 animate-spin" />
         ) : vad.listening ? (
-          <MicOffIcon className="h-4 w-4 animate-pulse" />
+          <MicOffIcon className="h-4 w-4" />
         ) : (
           <MicIcon className="h-4 w-4" />
         )}

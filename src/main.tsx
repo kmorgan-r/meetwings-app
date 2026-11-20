@@ -7,9 +7,18 @@ import "./global.css";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
 import { startMainWindowUpdater } from "./lib/updater/main-window-updater";
+import { logMicOpens } from "./lib/mic-diagnostics";
 
 const currentWindow = getCurrentWindow();
 const windowLabel = currentWindow.label;
+
+// Diagnostics only: a WebKit that refuses the getUserMedia override must not
+// stop the app from rendering.
+try {
+  logMicOpens(windowLabel);
+} catch {
+  // Nothing to report to: release builds have no console.
+}
 
 // Outside the React root: nothing above App catches a render error, and an
 // updater a broken release can kill would strand every colleague (no rollback).

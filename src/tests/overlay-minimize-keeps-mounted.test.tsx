@@ -175,7 +175,6 @@ const mockEverything = () => {
     Card: ({ children }: any) => <div data-testid="overlay-card">{children}</div>,
     Updater: () => null,
     DragButton: () => null,
-    CustomCursor: () => null,
     // Scaffold fix (brief gap): the keeps-mounted Odoo case asserts
     // data-overlay-minimize-control (Task 3) on the real app/index.tsx
     // Minimize button, which renders through THIS mocked Button — so the

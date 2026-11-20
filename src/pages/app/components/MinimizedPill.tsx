@@ -156,8 +156,7 @@ export const MinimizedPill = ({ style }: { style: OverlayPillStyle }) => {
               <Square
                 className={cn(
                   "h-3 w-3 fill-red-500 text-red-500",
-                  "transition-transform group-active/record:scale-90",
-                  "animate-pulse"
+                  "transition-transform group-active/record:scale-90"
                 )}
               />
             ) : (
