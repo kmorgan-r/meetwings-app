@@ -343,7 +343,16 @@ export const SELECTED_TARGET_SQL = {
   remove: `DELETE FROM odoo_selected_targets WHERE instance = ? AND model = ? AND res_id = ?`,
 
   clear: `DELETE FROM odoo_selected_targets WHERE instance = ?`,
+
+  clearSelectedBefore: `DELETE FROM odoo_selected_targets WHERE instance = ? AND selected_at < ?`,
 };
+
+/** Drops the targets picked before `cutoff`: useOdooTarget's launch cleanup. */
+export async function clearTargetsSelectedBefore(instance: string, cutoff: number): Promise<void> {
+  logTargetOp("clearTargetsSelectedBefore", instance, { cutoff });
+  const db = await getDatabase();
+  await db.execute(SELECTED_TARGET_SQL.clearSelectedBefore, [instance, cutoff]);
+}
 
 export async function loadTargets(instance: string): Promise<SelectedTargets> {
   logTargetOp("loadTargets", instance);

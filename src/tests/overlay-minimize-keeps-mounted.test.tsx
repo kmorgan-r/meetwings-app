@@ -44,6 +44,7 @@ const actionSpies = vi.hoisted(() => ({
   addSelectedTarget: vi.fn(async () => ({ ok: true }) as { ok: boolean; reason?: "cap" }),
   removeSelectedTarget: vi.fn(async () => {}),
   clearTargets: vi.fn(async () => {}),
+  clearTargetsSelectedBefore: vi.fn(async () => {}),
   purgeOtherInstances: vi.fn(async () => {}),
   upsertContacts: vi.fn(async () => {}),
 }));

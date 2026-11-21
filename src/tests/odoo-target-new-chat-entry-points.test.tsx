@@ -101,6 +101,7 @@ const action = vi.hoisted(() => ({
   addSelectedTarget: vi.fn(async () => ({ ok: true }) as { ok: boolean; reason?: "cap" }),
   removeSelectedTarget: vi.fn(async () => {}),
   clearTargets: vi.fn(async () => {}),
+  clearTargetsSelectedBefore: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/database/odoo-contacts.action", () => action);
 
