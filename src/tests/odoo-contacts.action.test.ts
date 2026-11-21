@@ -30,6 +30,7 @@ import {
   addSelectedTarget,
   claimSync,
   clearTargets,
+  clearTargetsSelectedBefore,
   deleteContact,
   failSync,
   finishSync,
@@ -248,6 +249,15 @@ describe("selected targets", () => {
     await addSelectedTarget("i2", { model: "res.partner", resId: 2, name: "B" }, null, 100);
     await clearTargets("i1");
     expect(await loadTargets("i1")).toEqual([]);
+    expect(await loadTargets("i2")).toHaveLength(1);
+  });
+
+  it("clears only the targets selected before a cutoff, for one instance", async () => {
+    await addSelectedTarget("i1", { model: "res.partner", resId: 1, name: "Old" }, null, 100);
+    await addSelectedTarget("i1", { model: "res.partner", resId: 2, name: "New" }, null, 200);
+    await addSelectedTarget("i2", { model: "res.partner", resId: 3, name: "Other" }, null, 100);
+    await clearTargetsSelectedBefore("i1", 200);
+    expect(await loadTargets("i1")).toEqual([{ model: "res.partner", resId: 2, name: "New" }]);
     expect(await loadTargets("i2")).toHaveLength(1);
   });
 });

@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import {
   addSelectedTarget,
   clearTargets,
+  clearTargetsSelectedBefore,
   getSyncState,
   listContacts,
   loadTargets,
@@ -47,6 +48,16 @@ import type {
   ContactPickerProps,
   PickerCacheState,
 } from "@/pages/app/components/completion/ContactPicker";
+
+/**
+ * Targets picked before this moment belong to an earlier run of the app, and
+ * so to a meeting that is over: a launch starts a new conversation. The mount
+ * drops them instead of rehydrating them into the next meeting's log (1.7.0:
+ * a contact saved on 11-19 was logged with the first meeting after the update
+ * relaunched the app). Captured at import, so a <Completion /> remount
+ * mid-session still rehydrates what this run picked.
+ */
+const PROCESS_STARTED_AT = Date.now();
 
 /**
  * MODULE SCOPE, not the component body.
@@ -712,6 +723,7 @@ export function useOdooTarget({
     void (async () => {
       try {
         const instance = await resolveInstance();
+        await clearTargetsSelectedBefore(instance, PROCESS_STARTED_AT);
         const persistedTargets = await loadTargets(instance);
         if (token === selectionToken.current) {
           applyTargets(persistedTargets);

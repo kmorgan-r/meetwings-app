@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import initSqlJs, { type Database as SqlJsDatabase } from "sql.js";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import {
@@ -99,7 +99,7 @@ const targetLines = (): TargetLine[] =>
   infoSpy.mock.calls
     .filter((c) => c[0] === "[odoo-targets]")
     .map((c) => ({ op: c[1] as string, detail: (c[2] ?? {}) as Record<string, unknown> }));
-const WIPE_OPS = new Set(["clearTargets", "removeSelectedTarget", "purgeOtherInstances"]);
+const WIPE_OPS = new Set(["clearTargets", "clearTargetsSelectedBefore", "removeSelectedTarget", "purgeOtherInstances"]);
 /** Entry lines (no `outcome`) of every wipe-capable op since `mark`. */
 const wipeOpsSince = (mark: number) =>
   targetLines()
@@ -876,5 +876,46 @@ describe("issue #72: targets across a minimize/restore cycle during a meeting", 
       expect(box).toHaveValue("half a question");
       expect(probe.completion.attachedFiles).toEqual([file]);
     });
+  });
+});
+
+// Each test here is a fresh launch: beforeEach's vi.resetModules() re-imports
+// useOdooTarget, as a new process would.
+describe("7. a relaunch", () => {
+  const seedSavedTarget = (resId: number, name: string, selectedAt: number) =>
+    db.run(
+      `INSERT INTO odoo_selected_targets (instance, model, res_id, name, conversation_id, selected_at)
+       VALUES (?, 'res.partner', ?, ?, NULL, ?)`,
+      [INSTANCE, resId, name, selectedAt]
+    );
+  const triggerTitle = () =>
+    screen.getByTestId("contact-picker-trigger").getAttribute("title") ?? "";
+
+  it("7a. a contact the last run left saved does not carry into the first meeting", async () => {
+    // 1.7.0, 2026-11-20: Bryan Wong, saved on 11-19, was logged with Karina's
+    // meeting after the update relaunched the app.
+    seedSavedTarget(3, "Bryan Wong", Date.now() - 24 * 60 * 60 * 1000);
+    await mountApp();
+    expect(triggerTitle()).not.toContain("Bryan");
+
+    await startMeetingByHand();
+    expect(triggerTitle()).not.toContain("Bryan");
+    expect(dbTargets()).toEqual([]);
+  });
+
+  it("7b. a contact picked in this run survives a remount", async () => {
+    await mountApp();
+    await addTwoTargetsViaPicker();
+    await closePicker();
+    cleanup();
+
+    const { default: App } = await import("@/pages/app");
+    render(
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(triggerTitle()).toBe("Ada + 1 more"));
+    expect(dbTargets()).toHaveLength(2);
   });
 });

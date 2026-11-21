@@ -56,6 +56,7 @@ vi.mock("@/lib/database/odoo-contacts.action", () => ({
   addSelectedTarget: vi.fn(async () => ({ ok: true })),
   removeSelectedTarget: vi.fn(async () => {}),
   clearTargets: vi.fn(async () => {}),
+  clearTargetsSelectedBefore: vi.fn(async () => {}),
   purgeOtherInstances: vi.fn(async () => {}),
 }));
 // The pure helpers stay REAL (compareContacts/filterContacts/kindLabel and
