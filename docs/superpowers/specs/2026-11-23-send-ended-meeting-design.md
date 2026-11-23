@@ -159,8 +159,8 @@ or two.
   send per set through the shared function, then kicks. There's no quiet check: Part 1 already
   guarantees nothing more can be said into the conversation and that its lines are saved.
 - **Saved tail beyond the rows (the tail rule).** Before opening a send from existing rows, compare
-  their max `transcript_end_at` with `lastSpokenLineAt(conversationId)`; `tick` already takes the
-  max of the two clocks (`scheduler.ts:46-50`). If saved meeting lines run past the rows (lines that
+  their max `transcript_end_at` with the end of the saved meetings (spoken lines cut by the
+  30-minute gap) that overlap the rows' span. If saved meeting lines run past the rows (lines that
   landed after the stop trigger cut its row), cancel the conversation's waiting/offered unlinked
   rows (`cancelOfferedRows` already covers `waiting` with no send, `notion-queue.action.ts:95-97`).
   Then take the fresh-rows path, which rebuilds from the saved transcript, instead of sending the

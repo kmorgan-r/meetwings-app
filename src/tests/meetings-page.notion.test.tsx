@@ -416,7 +416,7 @@ describe("the Meetings page, Notion side", () => {
     it("is disabled while pending, and a second click does not send again", async () => {
       let release: (v: boolean) => void = () => {};
       notionQueue.listConversationNotionRows.mockResolvedValue([
-        { id: "r1", status: "none", notion_status: "offered", notion_send_id: null, transcript: "hi", lane_open: 0, send_status: null, send_page_id: null },
+        { id: "r1", status: "none", notion_status: "offered", notion_send_id: null, transcript: "hi", lane_open: 0, send_status: null, send_page_id: null, transcript_start_at: 0, transcript_end_at: 600_000 },
       ]);
       notionQueue.markRowsWaiting.mockImplementation(() => new Promise<boolean>((r) => (release = r)));
       await renderPage();
@@ -433,7 +433,7 @@ describe("the Meetings page, Notion side", () => {
 
     it("shows the fixed 'already' message", async () => {
       notionQueue.listConversationNotionRows.mockResolvedValue([
-        { id: "r1", status: "none", notion_status: "joined", notion_send_id: "r1", transcript: "hi", lane_open: 1, send_status: "retry", send_page_id: null },
+        { id: "r1", status: "none", notion_status: "joined", notion_send_id: "r1", transcript: "hi", lane_open: 1, send_status: "retry", send_page_id: null, transcript_start_at: 0, transcript_end_at: 600_000 },
       ]);
       await renderPage();
 

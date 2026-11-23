@@ -143,7 +143,7 @@ export async function sendRowsToNotion(
     await openSends((await listWaitingRows()).filter((r) => rowIds.includes(r.id)), now);
   } else if (!conversationId.startsWith("sysaudio_conv_") && !isConversationRecording(conversationId)) {
     const waiting = (await listWaitingRows()).filter((r) => r.conversation_id === conversationId);
-    // An empty list means a stale item: nothing to judge, and an empty span would rebuild everything.
+    // An empty list means a stale item (the offer changed nothing): skip straight to the kick.
     if (waiting.length > 0) {
       const own = ownMeetings(
         segmentByGap(await readConversationTranscript(conversationId), MEETING_CONVERSATION_GAP_MS),

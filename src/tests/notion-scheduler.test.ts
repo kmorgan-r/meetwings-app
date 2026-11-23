@@ -451,6 +451,11 @@ describe("page actions", () => {
     m.active.id = "c1";
     seedRow({ id: "r1", notion_status: "offered" });
     expect(await sendConversationToNotion("c1", T0)).toBe("queued");
+    expect(await sends()).toHaveLength(1);
+    expect(await sends()).toMatchObject([{ conversation_id: "c1" }]);
+    const r = await rowOf("r1");
+    expect(r.notion_status).toBe("joined");
+    expect(r.notion_send_id).toBe((await sends())[0].id);
   });
 
   it("returns already for an open lane, a sent send, and a cancelled send with a page", async () => {
@@ -663,6 +668,50 @@ describe("a press opens the send now", () => {
     expect((await sends()).map((x) => x.id).sort()).toEqual(["rA", "sB"]);
   });
 
+  it("a press opens only its own conversation", async () => {
+    const now = T0 + 25 * MIN; // c2 ended 5 min ago: not quiet
+    seedRow({ id: "w2", conversation_id: "c2", notion_status: "waiting", transcript_end_at: T0 + 20 * MIN });
+    seedRow({ id: "r1", notion_status: "offered" });
+    expect(await sendConversationToNotion("c1", now)).toBe("queued");
+    expect((await rowOf("r1")).notion_status).toBe("joined");
+    expect((await rowOf("w2")).notion_status).toBe("waiting");
+    expect((await sends()).filter((x) => x.conversation_id === "c2")).toEqual([]);
+    seedRow({ id: "r3", notion_status: "offered", transcript_start_at: T0 + 2 * GAP, transcript_end_at: T0 + 2 * GAP + MIN });
+    await sendRowsToNotion(["r3"], "c1", now + 2 * GAP + 2 * MIN);
+    expect((await rowOf("r3")).notion_status).toBe("joined");
+    expect((await rowOf("w2")).notion_status).toBe("waiting");
+    expect((await sends()).filter((x) => x.conversation_id === "c2")).toEqual([]);
+  });
+
+  it("a null-conversation press opens only the pressed rows", async () => {
+    seedRow({ id: "n1", conversation_id: null, notion_status: "offered" });
+    // offered rows never reach the waiting list, so n2 is waiting: the filter alone keeps it out.
+    seedRow({ id: "n2", conversation_id: null, notion_status: "waiting" });
+    await sendRowsToNotion(["n1"], null, T0 + 70 * MIN);
+    expect((await rowOf("n1")).notion_status).toBe("joined");
+    expect(await rowOf("n2")).toMatchObject({ notion_status: "waiting", notion_send_id: null });
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("a tail rebuild of an earlier meeting leaves a later meeting alone", async () => {
+    seedRow({ id: "rA", notion_status: "offered" });
+    message("c1", T0 + 5 * MIN);
+    message("c1", T0 + 10 * MIN + 30_000, { content: "late words" });
+    seedRow({ id: "rB", notion_status: "joined", notion_send_id: "sB", transcript_start_at: T0 + 50 * MIN, transcript_end_at: T0 + 60 * MIN });
+    db.run("INSERT INTO notion_sends (id, conversation_id, status, span_start_at, span_end_at, created_at) VALUES ('sB','c1','sent',1,2,1)");
+    message("c1", T0 + 55 * MIN, { content: "meeting b" });
+    await sendRowsToNotion(["rA"], "c1", T0 + 70 * MIN);
+    expect((await rowOf("rA")).notion_status).toBe("cancelled");
+    const fresh = await others("rA", "rB");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("joined");
+    expect(String(fresh[0].transcript)).toContain("late words");
+    expect(String(fresh[0].transcript)).not.toContain("meeting b");
+    const all = await sends();
+    expect(all).toHaveLength(2);
+    expect(all.map((x) => x.id)).toContain("sB");
+  });
+
   it("a conversation press does not send a later meeting the user cancelled", async () => {
     seedRow({ id: "rA", notion_status: "offered" });
     message("c1", T0 + 5 * MIN);
@@ -788,7 +837,7 @@ describe("fix round 1", () => {
     expect(fresh[0].notion_status).toBe("joined");
   });
 
-  it("fresh rows supersede an offered blank row: it is cancelled, one waiting set remains", async () => {
+  it("fresh rows supersede an offered blank row: it is cancelled, one joined set remains", async () => {
     seedRow({ id: "old", notion_status: "offered", status: "sent", transcript: "" });
     message("c1", T0 + 5 * MIN, { content: "saved words" });
     expect(await sendConversationToNotion("c1", T0 + 4 * GAP)).toBe("queued");
