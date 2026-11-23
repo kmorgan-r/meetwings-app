@@ -165,7 +165,9 @@ or two.
   rows (`cancelOfferedRows` already covers `waiting` with no send, `notion-queue.action.ts:95-97`).
   Then take the fresh-rows path, which rebuilds from the saved transcript, instead of sending the
   stop row alone. This applies on every press path: mark-waiting, the heal branch below, and
-  `sendRowsToNotion`.
+  `sendRowsToNotion`. Only the rows' own meeting counts: the saved meetings (spoken lines cut by the
+  30-minute gap) that overlap the rows' span. A later meeting of the same conversation is not a tail,
+  and a rebuild writes only those meetings.
 - **`sendRowsToNotion`** (the button on an *offered* item) does the same after
   `offerRowsToWaiting`, but only when its rows' conversation isn't recording. If it is recording,
   the rows wait as today. Rows with no conversation id come from recovery of an earlier run, so they

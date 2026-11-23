@@ -4,7 +4,6 @@ import { insertQueueRow, readConversationTranscript } from "@/lib/database/meeti
 import {
   cancelOfferedRows,
   cancelSend,
-  lastSpokenLineAt,
   listConversationNotionRows,
   listWaitingRows,
   markRowsWaiting,
@@ -61,45 +60,53 @@ export async function sendConversationToNotion(
       (r.notion_status === null || r.notion_status === "offered"),
   );
   const pending = [...candidates, ...heal];
+  const saved = segmentByGap(await readConversationTranscript(conversationId), MEETING_CONVERSATION_GAP_MS);
+  const own = pending.length > 0 ? ownMeetings(saved, pending) : saved;
   if (
     pending.length > 0 &&
     candidates.every((r) => r.transcript.trim() !== "") &&
-    !(await tailBeyond(conversationId, Math.max(...pending.map((r) => r.transcript_end_at))))
+    !hasTail(own, pending)
   ) {
     await markRowsWaiting(candidates.map((r) => r.id));
   } else {
     // No usable rows, some pruned blank, or saved lines past the rows: rebuild from the saved transcript.
-    const superseded = [...candidates, ...heal]
+    const superseded = pending
       .filter((r) => r.notion_status === "offered" || r.notion_status === "waiting")
       .map((r) => r.id);
-    const fromAt = pending.length > 0 ? Math.min(...pending.map((r) => r.transcript_start_at)) : 0;
-    if (!(await insertFreshRows(conversationId, now, superseded, fromAt))) return "empty";
+    if (!(await insertFreshRows(conversationId, now, superseded, own))) return "empty";
   }
   await openConversation(conversationId, now);
   await kick();
   return "queued";
 }
 
-/** True when saved spoken lines run past the end of the rows. */
-async function tailBeyond(conversationId: string, rowsEnd: number): Promise<boolean> {
-  return ((await lastSpokenLineAt(conversationId)) ?? 0) > rowsEnd;
+type Span = { transcript_start_at: number; transcript_end_at: number };
+type Meeting = ReturnType<typeof segmentByGap>[number];
+
+/** The saved meetings overlapping the rows' span: a later meeting of the same conversation is not theirs. */
+function ownMeetings(saved: Meeting[], rows: Span[]): Meeting[] {
+  const start = Math.min(...rows.map((r) => r.transcript_start_at));
+  const end = Math.max(...rows.map((r) => r.transcript_end_at));
+  return saved.filter((s) => s.endAt >= start && s.startAt <= end);
+}
+
+/** True when the rows' own meeting has saved spoken lines past the end of the rows. */
+function hasTail(own: Meeting[], rows: Span[]): boolean {
+  const end = Math.max(...rows.map((r) => r.transcript_end_at));
+  return own.some((s) => s.endAt > end);
 }
 
 /**
- * Writes fresh waiting rows from the saved transcript, keeping only segments that end at or after
- * `fromAt`. Cancels `supersede` BEFORE inserting: a failure between the two then leaves nothing
- * queued (a re-press rebuilds) instead of old and fresh rows overlapping and showing every line twice.
+ * Writes fresh waiting rows for `segments`, false (and cancels nothing) when there are none. Cancels
+ * `supersede` BEFORE inserting: a failure between the two then leaves nothing queued (a re-press
+ * rebuilds) instead of old and fresh rows overlapping and showing every line twice.
  */
 async function insertFreshRows(
   conversationId: string,
   now: number,
   supersede: string[],
-  fromAt: number,
+  segments: Meeting[],
 ): Promise<boolean> {
-  const segments = segmentByGap(
-    await readConversationTranscript(conversationId),
-    MEETING_CONVERSATION_GAP_MS,
-  ).filter((slice) => slice.endAt >= fromAt);
   if (segments.length === 0) return false;
   await cancelOfferedRows(supersede);
   for (const slice of segments) {
@@ -136,15 +143,14 @@ export async function sendRowsToNotion(
     await openSends((await listWaitingRows()).filter((r) => rowIds.includes(r.id)), now);
   } else if (!conversationId.startsWith("sysaudio_conv_") && !isConversationRecording(conversationId)) {
     const waiting = (await listWaitingRows()).filter((r) => r.conversation_id === conversationId);
-    // An empty list means a stale item; its max would be -Infinity and rebuild the whole conversation.
+    // An empty list means a stale item: nothing to judge, and an empty span would rebuild everything.
     if (waiting.length > 0) {
-      if (await tailBeyond(conversationId, Math.max(...waiting.map((r) => r.transcript_end_at)))) {
-        await insertFreshRows(
-          conversationId,
-          now,
-          waiting.map((r) => r.id),
-          Math.min(...waiting.map((r) => r.transcript_start_at)),
-        );
+      const own = ownMeetings(
+        segmentByGap(await readConversationTranscript(conversationId), MEETING_CONVERSATION_GAP_MS),
+        waiting,
+      );
+      if (hasTail(own, waiting)) {
+        await insertFreshRows(conversationId, now, waiting.map((r) => r.id), own);
       }
       await openConversation(conversationId, now);
     }

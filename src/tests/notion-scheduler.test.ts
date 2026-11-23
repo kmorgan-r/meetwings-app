@@ -651,6 +651,30 @@ describe("a press opens the send now", () => {
     expect(await sends()).toHaveLength(2);
   });
 
+  it("a press on an earlier meeting does not re-send a later one", async () => {
+    seedRow({ id: "rA", notion_status: "offered" });
+    message("c1", T0 + 5 * MIN);
+    seedRow({ id: "rB", notion_status: "joined", notion_send_id: "sB", transcript_start_at: T0 + 50 * MIN, transcript_end_at: T0 + 60 * MIN });
+    db.run("INSERT INTO notion_sends (id, conversation_id, status, span_start_at, span_end_at, created_at) VALUES ('sB','c1','sent',1,2,1)");
+    message("c1", T0 + 55 * MIN);
+    await sendRowsToNotion(["rA"], "c1", T0 + 70 * MIN);
+    expect(await rowOf("rA")).toMatchObject({ notion_status: "joined", notion_send_id: "rA" });
+    expect(await others("rA", "rB")).toEqual([]);
+    expect((await sends()).map((x) => x.id).sort()).toEqual(["rA", "sB"]);
+  });
+
+  it("a conversation press does not send a later meeting the user cancelled", async () => {
+    seedRow({ id: "rA", notion_status: "offered" });
+    message("c1", T0 + 5 * MIN);
+    seedRow({ id: "rB", notion_status: "cancelled", transcript_start_at: T0 + 50 * MIN, transcript_end_at: T0 + 60 * MIN });
+    message("c1", T0 + 55 * MIN);
+    expect(await sendConversationToNotion("c1", T0 + 70 * MIN)).toBe("queued");
+    expect((await rowOf("rA")).notion_status).toBe("joined");
+    expect(await others("rA", "rB")).toEqual([]);
+    expect(await sends()).toHaveLength(1);
+    expect((await rowOf("rB")).notion_status).toBe("cancelled");
+  });
+
   it("a failed fresh insert leaves nothing queued twice", async () => {
     seedRow({ id: "r1" });
     message("c1", T0 + 5 * MIN);
