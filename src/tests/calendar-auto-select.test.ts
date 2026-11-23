@@ -201,9 +201,22 @@ describe("planAutoSelect", () => {
       .toEqual({ kind: "apply", add: [], create: [{ participant: neu, name: "New Person", parentId: 50 }] });
   });
 
-  it("skips everything when the adds and creates do not all fit", () => {
+  it("adds only the matched contacts when the creates would not fit", () => {
     const events = [meeting([person("cfo@acme.example"), person("ana@newco.example", "Ana Newco")])];
     expect(plan({ events, contacts: [CFO], targets: [lead(1), lead(2), lead(3), lead(4)] }))
+      .toEqual({ kind: "apply", add: [CFO], create: [] });
+  });
+
+  it("skips, rather than apply nothing, when only creates are planned and they do not fit", () => {
+    const events = [meeting([person("ana@newco.example", "Ana Newco"), person("bo@newco.example", "Bo Newco")])];
+    expect(plan({ events, contacts: [CFO], targets: [lead(1), lead(2), lead(3), lead(4)] }))
+      .toEqual({ kind: "skip", reason: "over-cap" });
+  });
+
+  it("skips everything when the matched contacts alone do not fit", () => {
+    const ops = contact(8, "ops@acme.example", { name: "Ops Desk" });
+    const events = [meeting([person("cfo@acme.example"), person("ops@acme.example")])];
+    expect(plan({ events, contacts: [CFO, ops], targets: [lead(1), lead(2), lead(3), lead(4)] }))
       .toEqual({ kind: "skip", reason: "over-cap" });
   });
 

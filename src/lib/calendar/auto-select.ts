@@ -122,9 +122,13 @@ export function planAutoSelect({
   }
 
   if (add.length + create.length === 0) return { kind: "skip", reason: "nothing-to-do" };
-  // Never a subset: choosing which attendees fit is the guess "clear cases only" rules out.
-  if (add.length + create.length > MAX_TARGETS - targets.length) {
-    return { kind: "skip", reason: "over-cap" };
-  }
-  return { kind: "apply", add, create };
+  // Never an arbitrary subset: choosing which attendees fit is the guess
+  // "clear cases only" rules out. The one split allowed is by kind: when the
+  // creates would push it over, the contacts that already exist still go in
+  // and every create is dropped. Without this, a 6-person call with 3 known
+  // contacts got no targets at all.
+  const free = MAX_TARGETS - targets.length;
+  if (add.length + create.length <= free) return { kind: "apply", add, create };
+  if (add.length === 0 || add.length > free) return { kind: "skip", reason: "over-cap" };
+  return { kind: "apply", add, create: [] };
 }
