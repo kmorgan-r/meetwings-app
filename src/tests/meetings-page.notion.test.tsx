@@ -675,13 +675,17 @@ describe("the Notion section, more", () => {
     expect((await tone("c2", "Sending to Notion")).className).toContain("text-muted-foreground");
   });
 
-  it("the 'active' outcome says the conversation is still going", async () => {
+  it("the 'active' outcome says the meeting is still being recorded", async () => {
     // setup.ts replaces localStorage with spies: answer the one key the action reads.
-    vi.mocked(localStorage.getItem).mockImplementation((k: string) => (k === "active_conversation_id" ? "c1" : null));
+    vi.mocked(localStorage.getItem).mockImplementation((k: string) => (k === "meeting_conversation_id" ? "c1" : null));
     await renderPage();
 
     await userEvent.click(await within(card("c1")).findByRole("button", { name: "Send to Notion" }));
-    expect(await within(card("c1")).findByText("This conversation is still going. Send it once it ends.")).toBeInTheDocument();
+    expect(
+      await within(card("c1")).findByText(
+        "This meeting is still being recorded, or only just ended. Try again in a minute."
+      )
+    ).toBeInTheDocument();
   });
 });
 

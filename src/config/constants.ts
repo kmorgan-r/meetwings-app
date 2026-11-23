@@ -71,6 +71,11 @@ export const STORAGE_KEYS = {
   // different conversations at the same time.
   CAPTURING_CONVERSATION_ID: "capturing_conversation_id",
 
+  // The conversation a Meeting Assist meeting can still add lines to, from
+  // capture start until the over point after the stop; written only by
+  // useCompletion, read by the Meetings page.
+  MEETING_CONVERSATION_ID: "meeting_conversation_id",
+
   // How far a meeting log trigger has consumed the in-memory transcript even
   // when it wrote no row for it (Odoo not fully configured, or any throw). See
   // meeting-log-watermark.storage.ts.

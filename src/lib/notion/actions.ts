@@ -11,10 +11,7 @@ import {
   type NotionItem,
 } from "@/lib/database/notion-queue.action";
 import { renderTranscript, segmentByGap } from "@/lib/odoo/meeting-log";
-import {
-  getActiveConversationId,
-  getCapturingConversationId,
-} from "@/lib/storage/active-conversation.storage";
+import { isConversationRecording } from "@/lib/storage/active-conversation.storage";
 import { isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { notionErrorText } from "./errors";
 import { NOTION_KICK_EVENT } from "./events";
@@ -36,9 +33,7 @@ export async function sendConversationToNotion(
   now: number,
 ): Promise<SendConversationOutcome> {
   if (conversationId.startsWith("sysaudio_conv_")) return "system-audio";
-  if (conversationId === getActiveConversationId() || conversationId === getCapturingConversationId()) {
-    return "active";
-  }
+  if (isConversationRecording(conversationId)) return "active";
   if (!(await isNotionConfigured())) return "not-configured";
 
   const rows = await listConversationNotionRows(conversationId);

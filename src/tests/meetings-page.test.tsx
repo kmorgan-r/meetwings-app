@@ -498,7 +498,7 @@ describe("sending an unlogged conversation to Odoo", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
   });
 
-  it("says why under the card when the overlay still holds the conversation", async () => {
+  it("says why under the card when a meeting is still recording into the conversation", async () => {
     actions.enqueueConversation.mockResolvedValue({ kind: "active" });
     await renderPage();
     await waitFor(() => expect(sendButton("c1")).not.toBeNull());
@@ -506,7 +506,7 @@ describe("sending an unlogged conversation to Odoo", () => {
     await userEvent.click(sendButton("c1")!);
 
     expect(
-      await within(conversationCard("c1")!).findByText(/still open in the overlay/)
+      await within(conversationCard("c1")!).findByText(/still being recorded, or only just ended/)
     ).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).toBeNull();
   });

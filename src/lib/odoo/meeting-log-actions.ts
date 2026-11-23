@@ -17,10 +17,7 @@ import {
   type RetargetVerdict,
 } from "@/lib/database/meeting-log.action";
 import { ensureMeetingSummary } from "@/lib/functions/meeting-summarizer";
-import {
-  getActiveConversationId,
-  getCapturingConversationId,
-} from "@/lib/storage/active-conversation.storage";
+import { isConversationRecording } from "@/lib/storage/active-conversation.storage";
 import {
   instanceFingerprint,
   requireOdooConfig,
@@ -581,12 +578,7 @@ export async function enqueueConversation(
   conversationId: string,
   now: number
 ): Promise<EnqueueOutcome> {
-  if (
-    conversationId === getActiveConversationId() ||
-    conversationId === getCapturingConversationId()
-  ) {
-    return { kind: "active" };
-  }
+  if (isConversationRecording(conversationId)) return { kind: "active" };
   const config = await requireOdooConfig();
   const instance = instanceFingerprint(config.url, config.db);
   const existing = (await listConversationBadgeRows()).filter(

@@ -157,7 +157,7 @@ export function reasonFor(item: NotionItem): string | null {
 const SEND_OUTCOME_MESSAGE = {
   queued: null,
   already: "This meeting is already in Notion or on its way.",
-  active: "This conversation is still going. Send it once it ends.",
+  active: "This meeting is still being recorded, or only just ended. Try again in a minute.",
   empty: "This conversation has no transcript to send.",
   "not-configured": NOTION_COPY.NOTION_NOT_CONFIGURED,
   "system-audio": "System audio conversations can't be sent to Notion.",

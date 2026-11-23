@@ -27,7 +27,11 @@ const m = vi.hoisted(() => ({
   buildSendDeps: vi.fn(),
   isConfigured: vi.fn(),
   unlisten: vi.fn(),
-  active: { id: null as string | null, capturing: null as string | null },
+  active: {
+    id: null as string | null,
+    capturing: null as string | null,
+    meeting: null as string | null,
+  },
 }));
 
 vi.mock("@/lib/database/config", () => ({
@@ -39,6 +43,8 @@ vi.mock("@/lib/storage/notion-config.storage", () => ({ isNotionConfigured: m.is
 vi.mock("@/lib/storage/active-conversation.storage", () => ({
   getActiveConversationId: () => m.active.id,
   getCapturingConversationId: () => m.active.capturing,
+  getMeetingConversationId: () => m.active.meeting,
+  isConversationRecording: (id: string) => id === m.active.capturing || id === m.active.meeting,
 }));
 
 import { MEETING_CONVERSATION_GAP_MS } from "@/config";
@@ -121,6 +127,7 @@ beforeEach(async () => {
   resetNotionSchedulerForTests();
   m.active.id = null;
   m.active.capturing = null;
+  m.active.meeting = null;
   m.isConfigured.mockResolvedValue(true);
   m.emit.mockResolvedValue(undefined);
   m.unlisten = vi.fn();
@@ -427,16 +434,22 @@ describe("page actions", () => {
     expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
   });
 
-  it("refuses the active and the capturing conversation, and an unconfigured Notion", async () => {
-    m.active.id = "c1";
+  it("refuses the recording and the capturing conversation, and an unconfigured Notion", async () => {
+    m.active.meeting = "c1";
     expect(await sendConversationToNotion("c1", T0)).toBe("active");
-    m.active.id = null;
+    m.active.meeting = null;
     m.active.capturing = "c1";
     expect(await sendConversationToNotion("c1", T0)).toBe("active");
     m.active.capturing = null;
     m.isConfigured.mockResolvedValue(false);
     expect(await sendConversationToNotion("c1", T0)).toBe("not-configured");
     expect(m.emit).not.toHaveBeenCalled();
+  });
+
+  it("accepts the conversation the overlay only has open", async () => {
+    m.active.id = "c1";
+    seedRow({ id: "r1", notion_status: "offered" });
+    expect(await sendConversationToNotion("c1", T0)).toBe("queued");
   });
 
   it("returns already for an open lane, a sent send, and a cancelled send with a page", async () => {
