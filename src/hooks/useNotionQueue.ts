@@ -234,9 +234,9 @@ export function useNotionQueue() {
   const byConversation = useMemo(() => buildBadgeMap(items), [items]);
 
   const onSendRows = useCallback(
-    async (rowIds: string[]) => {
+    async (rowIds: string[], conversationId: string | null) => {
       try {
-        await sendRowsToNotion(rowIds);
+        await sendRowsToNotion(rowIds, conversationId);
       } finally {
         await reload();
       }

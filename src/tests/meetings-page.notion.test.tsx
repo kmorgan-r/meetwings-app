@@ -71,6 +71,10 @@ const notionQueue = vi.hoisted(() => ({
   cancelOfferedRows: vi.fn(),
   listConversationNotionRows: vi.fn(),
   markRowsWaiting: vi.fn(),
+  lastSpokenLineAt: vi.fn(),
+  listWaitingRows: vi.fn(),
+  conversationsWithLiveSend: vi.fn(),
+  createSendAndLink: vi.fn(),
 }));
 vi.mock("@/lib/database/notion-queue.action", () => notionQueue);
 
@@ -186,6 +190,10 @@ beforeEach(() => {
   notionQueue.cancelOfferedRows.mockResolvedValue(true);
   notionQueue.listConversationNotionRows.mockResolvedValue([]);
   notionQueue.markRowsWaiting.mockResolvedValue(true);
+  notionQueue.lastSpokenLineAt.mockResolvedValue(null);
+  notionQueue.listWaitingRows.mockResolvedValue([]);
+  notionQueue.conversationsWithLiveSend.mockResolvedValue(new Set());
+  notionQueue.createSendAndLink.mockResolvedValue(undefined);
   tauriEvent.emit.mockResolvedValue(undefined);
   tauriEvent.listen.mockResolvedValue(() => {});
 });
@@ -425,7 +433,7 @@ describe("the Meetings page, Notion side", () => {
 
     it("shows the fixed 'already' message", async () => {
       notionQueue.listConversationNotionRows.mockResolvedValue([
-        { id: "r1", status: "none", notion_status: "waiting", notion_send_id: null, transcript: "hi", lane_open: 1, send_status: null, send_page_id: null },
+        { id: "r1", status: "none", notion_status: "joined", notion_send_id: "r1", transcript: "hi", lane_open: 1, send_status: "retry", send_page_id: null },
       ]);
       await renderPage();
 

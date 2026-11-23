@@ -8,7 +8,7 @@ import { notionErrorText } from "@/lib/notion/errors";
 
 export interface NotionSectionProps {
   items: readonly NotionItem[];
-  onSendRows: (rowIds: string[]) => Promise<void>;
+  onSendRows: (rowIds: string[], conversationId: string | null) => Promise<void>;
   onRetry: (sendId: string) => Promise<void>;
   onDontSend: (item: NotionItem) => Promise<void>;
 }
@@ -86,7 +86,7 @@ export function NotionSection({ items, onSendRows, onRetry, onDontSend }: Notion
               </div>
               <div className="flex items-center gap-1">
                 {item.kind === "rows" && status === "offered" && (
-                  <Button size="sm" variant="outline" disabled={pending} onClick={() => void run(key, () => onSendRows(item.rowIds))}>
+                  <Button size="sm" variant="outline" disabled={pending} onClick={() => void run(key, () => onSendRows(item.rowIds, item.conversationId))}>
                     Send to Notion
                   </Button>
                 )}

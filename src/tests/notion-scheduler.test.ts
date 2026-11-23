@@ -429,8 +429,9 @@ describe("page actions", () => {
     seedRow({ id: "r1", notion_status: "offered" });
     seedRow({ id: "r2", notion_status: null, transcript_start_at: T0 + 2 * GAP, transcript_end_at: T0 + 2 * GAP + MIN });
     expect(await sendConversationToNotion("c1", T0)).toBe("queued");
-    expect((await rowOf("r1")).notion_status).toBe("waiting");
-    expect((await rowOf("r2")).notion_status).toBe("waiting");
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    expect(await rowOf("r2")).toMatchObject({ notion_status: "joined", notion_send_id: "r2" });
+    expect(await sends()).toHaveLength(2);
     expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
   });
 
@@ -453,9 +454,6 @@ describe("page actions", () => {
   });
 
   it("returns already for an open lane, a sent send, and a cancelled send with a page", async () => {
-    seedRow({ id: "r1", notion_status: "waiting" });
-    expect(await sendConversationToNotion("c1", T0)).toBe("already");
-    db.run("DELETE FROM meeting_log_queue");
     seedRow({ id: "r1", notion_status: "joined", notion_send_id: "r1" });
     db.run("INSERT INTO notion_sends (id, conversation_id, status, span_start_at, span_end_at, created_at) VALUES ('r1','c1','sent',1,2,1)");
     expect(await sendConversationToNotion("c1", T0)).toBe("already");
@@ -466,7 +464,15 @@ describe("page actions", () => {
     expect(await sendConversationToNotion("c1", T0)).toBe("queued");
   });
 
+  it("a press opens a conversation auto-Notion already queued", async () => {
+    seedRow({ id: "r1" });
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    expect(await sends()).toHaveLength(1);
+  });
+
   it("sendConversationToNotion with no Odoo config writes status 'none' rows", async () => {
+    m.active.id = "c1";
     message("c1", T0);
     message("c1", T0 + MIN);
     message("c1", T0 + 3 * GAP);
@@ -474,7 +480,7 @@ describe("page actions", () => {
     const q = await queue();
     expect(q).toHaveLength(2);
     for (const r of q) {
-      expect(r).toMatchObject({ status: "none", notion_status: "waiting", instance: "", conversation_id: "c1" });
+      expect(r).toMatchObject({ status: "none", notion_status: "joined", instance: "", conversation_id: "c1" });
       expect(String(r.session_key)).toMatch(/^notion:c1:\d+:\d+$/);
     }
     expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
@@ -487,7 +493,7 @@ describe("page actions", () => {
     expect((await rowOf("pruned")).notion_status).toBeNull();
     const fresh = (await queue()).filter((r) => r.id !== "pruned");
     expect(fresh).toHaveLength(1);
-    expect(fresh[0]).toMatchObject({ status: "none", notion_status: "waiting" });
+    expect(fresh[0]).toMatchObject({ status: "none", notion_status: "joined" });
     expect(String(fresh[0].transcript)).toContain("real words");
   });
 
@@ -500,17 +506,17 @@ describe("page actions", () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     m.emit.mockRejectedValue(new Error("boom"));
     seedRow({ id: "r1", notion_status: "offered" });
-    await expect(sendRowsToNotion(["r1"])).resolves.toBeUndefined();
-    expect((await rowOf("r1")).notion_status).toBe("waiting");
+    await expect(sendRowsToNotion(["r1"], "c1")).resolves.toBeUndefined();
+    expect((await rowOf("r1")).notion_status).toBe("joined");
     err.mockRestore();
   });
 
   it("page actions never call runNotionSend; they emit NOTION_KICK_EVENT", async () => {
     seedRow({ id: "r1", notion_status: "offered" });
-    await sendRowsToNotion(["r1"]);
+    await sendRowsToNotion(["r1"], "c1");
     db.run("INSERT INTO notion_sends (id, conversation_id, status, span_start_at, span_end_at, created_at, error_code) VALUES ('s1','c9','failed',1,2,1,'X')");
     await retryNotionSend("s1");
-    expect((await sends())[0]).toMatchObject({ status: "retry", error_code: null });
+    expect((await sends()).find((s) => s.id === "s1")).toMatchObject({ status: "retry", error_code: null });
     seedRow({ id: "r2", conversation_id: "c2", notion_status: "offered" });
     const rowsItem: NotionItem = { kind: "rows", conversationId: "c2", rowIds: ["r2"], status: "offered", startAt: 1, endAt: 2 };
     expect(await dontSendToNotion(rowsItem)).toBe(true);
@@ -538,6 +544,207 @@ describe("page actions", () => {
   });
 });
 
+describe("a press opens the send now", () => {
+  const N = T0 + 10 * MIN + 2 * GAP;
+  const lateWords = () => {
+    message("c1", T0 + 5 * MIN);
+    message("c1", T0 + 10 * MIN + 30_000, { content: "late words" });
+  };
+  const others = async (...ids: string[]) => (await queue()).filter((r) => !ids.includes(r.id as string));
+
+  it("a press opens the offered rows now, with no quiet wait", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    expect(await sendConversationToNotion("c1", T0 + 11 * MIN)).toBe("queued");
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    const all = await sends();
+    expect(all).toHaveLength(1);
+    expect(all[0].next_at).toBe(0);
+    expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
+  });
+
+  it("saved lines past the rows rebuild the send from the transcript", async () => {
+    seedRow({ id: "r1", notion_status: null });
+    lateWords();
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    expect((await rowOf("r1")).notion_status).toBeNull();
+    const fresh = await others("r1");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("joined");
+    expect(String(fresh[0].transcript)).toContain("late words");
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("the tail rule applies to an auto-queued conversation too", async () => {
+    seedRow({ id: "r1", notion_status: "waiting" });
+    lateWords();
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    expect((await rowOf("r1")).notion_status).toBe("cancelled");
+    const fresh = await others("r1");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("joined");
+    expect(String(fresh[0].transcript)).toContain("late words");
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("sendRowsToNotion opens an ended conversation and joins its waiting siblings", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    seedRow({ id: "r2", transcript_start_at: T0 + 15 * MIN, transcript_end_at: T0 + 20 * MIN });
+    await sendRowsToNotion(["r1"], "c1", T0 + 21 * MIN);
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    expect(await rowOf("r2")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("sendRowsToNotion rebuilds from the transcript when saved lines pass the rows", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    lateWords();
+    await sendRowsToNotion(["r1"], "c1", T0 + 20 * MIN);
+    expect((await rowOf("r1")).notion_status).toBe("cancelled");
+    const fresh = await others("r1");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("joined");
+    expect(String(fresh[0].transcript)).toContain("late words");
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("a saved line exactly at the row end does not rebuild", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    message("c1", T0 + 10 * MIN);
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    expect(await others("r1")).toEqual([]);
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("a typed line past the row end does not rebuild", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    message("c1", T0 + 15 * MIN, { audio_source: null });
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    expect((await rowOf("r1")).notion_status).toBe("joined");
+    expect(await others("r1")).toEqual([]);
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("sendRowsToNotion on a stale item sends nothing", async () => {
+    seedRow({ id: "r1", notion_status: "cancelled" });
+    message("c1", T0 + 15 * MIN);
+    await sendRowsToNotion(["r1"], "c1", T0 + 20 * MIN);
+    expect(await others("r1")).toEqual([]);
+    expect(await sends()).toEqual([]);
+    expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
+  });
+
+  it("a tail rebuild leaves an earlier meeting already in Notion alone", async () => {
+    seedRow({ id: "r1", notion_status: "joined", notion_send_id: "s1" });
+    db.run("INSERT INTO notion_sends (id, conversation_id, status, span_start_at, span_end_at, created_at) VALUES ('s1','c1','sent',1,2,1)");
+    message("c1", T0 + 5 * MIN);
+    seedRow({ id: "r2", notion_status: "offered", transcript_start_at: T0 + 50 * MIN, transcript_end_at: T0 + 60 * MIN });
+    message("c1", T0 + 55 * MIN);
+    message("c1", T0 + 60 * MIN + 30_000, { content: "late words" });
+    await sendRowsToNotion(["r2"], "c1", T0 + 70 * MIN);
+    expect((await rowOf("r2")).notion_status).toBe("cancelled");
+    const fresh = await others("r1", "r2");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0]).toMatchObject({ transcript_start_at: T0 + 55 * MIN, notion_status: "joined" });
+    expect(String(fresh[0].transcript)).toContain("late words");
+    expect((await sends()).map((x) => x.id)).toContain("s1");
+    expect(await sends()).toHaveLength(2);
+  });
+
+  it("a failed fresh insert leaves nothing queued twice", async () => {
+    seedRow({ id: "r1" });
+    message("c1", T0 + 5 * MIN);
+    message("c1", T0 + 10 * MIN + 30_000);
+    let failed = false;
+    m.execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (!failed && sql.includes("INSERT INTO meeting_log_queue")) {
+        failed = true;
+        throw new Error("disk");
+      }
+      return rawExecute(sql, args);
+    });
+    await expect(sendConversationToNotion("c1", T0 + 20 * MIN)).rejects.toThrow();
+    expect((await rowOf("r1")).notion_status).toBe("cancelled");
+    expect(await others("r1")).toEqual([]);
+    expect(await sends()).toEqual([]);
+    expect(await sendConversationToNotion("c1", T0 + 20 * MIN)).toBe("queued");
+    const fresh = await others("r1");
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].notion_status).toBe("joined");
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("sendRowsToNotion leaves a recording conversation waiting", async () => {
+    m.active.meeting = "c1";
+    seedRow({ id: "r1", notion_status: "offered" });
+    await sendRowsToNotion(["r1"], "c1", N);
+    expect((await rowOf("r1")).notion_status).toBe("waiting");
+    expect(await sends()).toEqual([]);
+    expect(m.emit).toHaveBeenCalledWith(NOTION_KICK_EVENT);
+  });
+
+  it("sendRowsToNotion opens a row with no conversation now", async () => {
+    seedRow({ id: "r1", conversation_id: null, notion_status: "offered" });
+    await sendRowsToNotion(["r1"], null, N);
+    expect((await rowOf("r1")).notion_status).toBe("joined");
+    const all = await sends();
+    expect(all).toHaveLength(1);
+    expect(all[0].conversation_id).toBeNull();
+  });
+
+  it("sendRowsToNotion does not open system audio", async () => {
+    seedRow({ id: "r1", conversation_id: "sysaudio_conv_1", notion_status: "offered" });
+    await sendRowsToNotion(["r1"], "sysaudio_conv_1", N);
+    expect((await rowOf("r1")).notion_status).toBe("waiting");
+    expect(await sends()).toEqual([]);
+  });
+
+  it("a press racing a tick gives exactly one send", async () => {
+    seedRow({ id: "r1", notion_status: null });
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let snapshotCalls = 0;
+    m.select.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (sql.includes("calendar_snapshots")) {
+        if (++snapshotCalls === 1) await gate;
+        else open();
+      }
+      return rawSelect(sql, args);
+    });
+    const p = sendConversationToNotion("c1", N);
+    await vi.waitFor(async () => expect((await rowOf("r1")).notion_status).toBe("waiting"));
+    const t = runNotionTick(deps(N));
+    await Promise.all([p, t]);
+    expect(await sends()).toHaveLength(1);
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+  });
+
+  it("a press then a tick leaves one send", async () => {
+    seedRow({ id: "r1", notion_status: null });
+    await sendConversationToNotion("c1", N);
+    await runNotionTick(deps(N));
+    expect(await sends()).toHaveLength(1);
+  });
+
+  it("a re-press after a failed link heals the send", async () => {
+    seedRow({ id: "r1", notion_status: "offered" });
+    let failed = false;
+    m.execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (!failed && sql.includes("SET notion_status = 'joined'")) {
+        failed = true;
+        throw new Error("disk");
+      }
+      return rawExecute(sql, args);
+    });
+    await expect(sendConversationToNotion("c1", N)).rejects.toThrow();
+    expect(await sendConversationToNotion("c1", N)).toBe("queued");
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+    const all = await sends();
+    expect(all).toHaveLength(1);
+    expect(all[0].next_at).toBe(N + 60_000);
+  });
+});
+
 describe("fix round 1", () => {
   const insertSend = (id: string, status: string, extra = "") =>
     db.run(
@@ -554,7 +761,7 @@ describe("fix round 1", () => {
     expect((await rowOf("full")).notion_status).toBeNull();
     const fresh = (await queue()).filter((r) => r.id !== "blank" && r.id !== "full");
     expect(fresh).toHaveLength(1);
-    expect(fresh[0].notion_status).toBe("waiting");
+    expect(fresh[0].notion_status).toBe("joined");
   });
 
   it("fresh rows supersede an offered blank row: it is cancelled, one waiting set remains", async () => {
@@ -562,7 +769,7 @@ describe("fix round 1", () => {
     message("c1", T0 + 5 * MIN, { content: "saved words" });
     expect(await sendConversationToNotion("c1", T0 + 4 * GAP)).toBe("queued");
     expect((await rowOf("old")).notion_status).toBe("cancelled");
-    expect((await queue()).filter((r) => r.notion_status === "waiting")).toHaveLength(1);
+    expect((await queue()).filter((r) => r.notion_status === "joined")).toHaveLength(1);
   });
 
   it("a kick during a slow tick causes exactly one follow-up tick, however many kicks", async () => {

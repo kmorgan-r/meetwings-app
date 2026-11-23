@@ -123,6 +123,8 @@ SELECT meeting_log_queue.id AS id, meeting_log_queue.status AS status,
        meeting_log_queue.notion_status AS notion_status,
        meeting_log_queue.notion_send_id AS notion_send_id,
        meeting_log_queue.transcript AS transcript,
+       meeting_log_queue.transcript_start_at AS transcript_start_at,
+       meeting_log_queue.transcript_end_at AS transcript_end_at,
        ${NOTION_LANE_OPEN} AS lane_open,
        ns.status AS send_status, ns.page_id AS send_page_id
   FROM meeting_log_queue
@@ -301,6 +303,8 @@ export interface ConversationNotionRow {
   notion_status: string | null;
   notion_send_id: string | null;
   transcript: string;
+  transcript_start_at: number;
+  transcript_end_at: number;
   lane_open: number;
   send_status: string | null;
   send_page_id: string | null;
