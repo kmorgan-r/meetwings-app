@@ -138,8 +138,11 @@ Rules, in order:
 
    `parentId` = `inferCompany({ address, contacts })`, null when it cannot tell.
 5. **Slot rule.** If `add.length + create.length > MAX_TARGETS - targets.length`,
-   skip entirely. Never pick a subset. That is the same rule the proposal block
-   applies, and a subset is exactly the guess "clear cases only" rules out.
+   drop every create and apply the adds alone. If the adds alone still do not
+   fit, or there are none, skip. Never pick an arbitrary subset: a subset is
+   exactly the guess "clear cases only" rules out. Splitting by kind is not a
+   guess. (Amended 2026-11-23: under the original all-or-nothing rule, a
+   6-person call with 3 known contacts got no targets at all.)
 6. Both lists empty: skip.
 
 Attendees that fail rule 4 are not lost. They still appear in the proposal block
