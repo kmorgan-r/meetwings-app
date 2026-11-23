@@ -173,7 +173,8 @@ or two.
   now" rule whole.)* It deliberately joins any sibling waiting rows of the same conversation into
   the set. The conversation has ended, and leaving them would put the same meeting on a second
   page. It needs the item's conversation id, which `NotionItem` already carries.
-- **A race with a concurrent tick is safe for `sendConversationToNotion`.** Both pick the same set
+- **A race with a concurrent tick is safe for `sendConversationToNotion`** when the conversation's
+  rows have no Notion state yet (`NULL` or `offered`). Both pick the same set
   id (its first row). The "already" check means no other waiting rows exist in the conversation,
   and `markRowsWaiting` is one UPDATE, so both compute the same set. `insertSend` is
   `ON CONFLICT(id) DO NOTHING`, and linking only touches rows still `waiting` with no send id.
@@ -289,6 +290,10 @@ Use fake timers.
   "already" check. If a tick read the waiting rows before `offerRowsToWaiting`, and the siblings
   are quiet at that moment, the tick and the press can pick different first rows (`join.ts:19-30`),
   so two sends. This needs the siblings to turn quiet at the instant of the press.
+- **The heal branch racing a tick can make two pages.** A press on a conversation that has both
+  unlinked `waiting` rows (they pass the "already" check as heal rows) and `offered` rows can race
+  a tick that finds the waiting rows quiet. The two may pick different first rows. This needs an
+  auto-queued meeting to turn quiet at the instant of the press.
 - **The Odoo stop trigger runs past the over point.** For example, it may still be waiting on the
   Outlook read (`useMeetingLog.ts:532-537`). A Send to Odoo press in that window could insert a
   second row. The accepted protection is the 60-second margin plus the "already-queued" badge

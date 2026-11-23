@@ -39,7 +39,7 @@ The spec bullet is updated to match.
 1. **A silence of more than a minute during a live call** must not release the key. The late-line re-arm is only while capture is off. Test: Task 2, `keeps the key through a long silence while capturing`.
 2. **Capture restarting while the over-point flush is in flight** (a rollover) must not leave the open flag false for the new meeting. Test: Task 2, `a capture restart during the over-point flush keeps the new meeting keyed`. It is a regression guard, not a pin for the `cancelled` flag: the save queue (`useCompletion.ts:360-367`) makes the release resume before the rollover's own flush, so the flag is defensive.
 3. **The over-point save failing** keeps the key rather than letting the page go out without its tail. Test: Task 2, `keeps the key when the over-point save fails`.
-4. **A press racing a background tick** gives exactly one send. Test: Task 4, `a press racing a tick gives exactly one send`.
+4. **A press racing a background tick** gives exactly one send when the conversation's rows have no Notion state yet (`NULL` or `offered`). The heal-branch race is a known ceiling (Task 4). Test: Task 4, `a press racing a tick gives exactly one send`.
 5. **A crash between inserting a send and linking its rows** must not run an empty send, and must heal. Tests:
    - Task 3, `a send whose link failed is held, then healed by the next tick`;
    - Task 4, `a re-press after a failed link heals the send`.
@@ -333,11 +333,12 @@ git commit -m "fix(notion): hold a new send until its rows are linked, heal a br
 ### Task 4: A press opens the send now
 
 **Files:**
-- Modify: `src/lib/database/notion-queue.action.ts:118-127, 284-293` (`conversationRows` selects `meeting_log_queue.transcript_end_at`; `ConversationNotionRow` gains `transcript_end_at: number`)
+- Modify: `src/lib/database/notion-queue.action.ts:118-127, 284-293` (`conversationRows` also selects `meeting_log_queue.transcript_start_at` and `meeting_log_queue.transcript_end_at`; `ConversationNotionRow` gains `transcript_start_at: number` and `transcript_end_at: number`)
 - Modify: `src/lib/notion/actions.ts`
 - Modify: `src/hooks/useNotionQueue.ts:236-245` (`onSendRows(rowIds, conversationId)`)
 - Modify: `src/pages/meetings/components/NotionSection.tsx:11, 89` (pass `item.conversationId`)
 - Test: `src/tests/notion-scheduler.test.ts` ("page actions" `:419-526` and "fix round 1" `:535-553`)
+- Test: `src/tests/meetings-page.notion.test.tsx:64-75, 426-434`. It mocks `@/lib/database/notion-queue.action` with seven functions, and `actions.ts` runs for real on top of the mock. The press path now also calls `lastSpokenLineAt` (via `tailBeyond`), `listWaitingRows`, and, through `openSends`, `conversationsWithLiveSend` and `createSendAndLink`. Add them to the `notionQueue` mock, with defaults set in its `beforeEach`: `lastSpokenLineAt` resolves `null`, `listWaitingRows` resolves `[]`, `conversationsWithLiveSend` resolves `new Set()`, `createSendAndLink` resolves. Without them `:408-424` throws before `markRowsWaiting`. Rewrite the "already" test (`:426-434`). Its row (`waiting`, `notion_send_id: null`) now takes the heal branch, so use a row truly on its way instead: `notion_status: "joined"`, `notion_send_id: "r1"`, `lane_open: 1`, `send_status: "retry"`.
 
 **Interfaces:**
 - Consumes:
@@ -429,6 +430,6 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/database/notion-queue.action.ts src/lib/notion/actions.ts src/hooks/useNotionQueue.ts src/pages/meetings/components/NotionSection.tsx src/tests/notion-scheduler.test.ts
+git add src/lib/database/notion-queue.action.ts src/lib/notion/actions.ts src/hooks/useNotionQueue.ts src/pages/meetings/components/NotionSection.tsx src/tests/notion-scheduler.test.ts src/tests/meetings-page.notion.test.tsx
 git commit -m "feat(notion): a hand-pressed send of an ended meeting goes to Notion now"
 ```
