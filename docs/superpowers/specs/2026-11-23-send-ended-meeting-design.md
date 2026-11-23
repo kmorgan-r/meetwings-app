@@ -190,9 +190,11 @@ or two.
     meeting (Goal 2). The Non-goal covers automatic sends nobody pressed.
 - **No send runs before its rows are linked.** The press inserts and links from the dashboard
   window in two awaits, so an overlay tick's `due` query could land between them and claim a send
-  with no rows. Add a linked-rows `EXISTS` to the `due` query (`notion-queue.action.ts:68-72`);
-  `claim` only ever sees ids from `due`. A send with no linked rows has nothing to put on a page.
-  The only way to get one is a crash between insert and link, and the heal above repairs that.
+  with no rows. So a new send is inserted held (`next_at = createdAt + 60 s`) and released
+  (`next_at = 0`) right after its rows are linked, only by the call whose insert landed (a heal
+  call's insert is a no-op and must not wipe a retry backoff). Every tick runs its join/heal loop
+  before its `due` loop, so a held send that a crash left unlinked is re-linked before it comes due.
+  `due` itself is unchanged. A send with no linked rows has nothing to put on a page.
 - **What the user sees:** the badge goes straight to "Sending to Notion" (a new send starts as
   `retry`), then "In Notion" once the overlay's next tick writes the summary and the page.
 
@@ -234,7 +236,8 @@ Use fake timers.
     already `waiting`) and `sendRowsToNotion`.
   - A conversation auto-Notion already queued (rows `waiting`, no send) is opened at once by a
     press.
-  - A due-but-unlinked send is not returned by `listDueSends`.
+  - A send is not due until its rows are linked; a send a crash left unlinked stays held until
+    the next tick re-links it.
   - A press racing a tick gives exactly one send. Make it deterministic:
     - seed already-quiet rows with `notion_status` NULL or `offered` (not `waiting`, which would
       take the heal branch) on the real sql.js DB;
