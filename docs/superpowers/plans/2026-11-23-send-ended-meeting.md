@@ -6,7 +6,7 @@
 
 **Architecture:**
 - The overlay (`useCompletion`) keeps a new `localStorage` key, `meeting_conversation_id`. It is written imperatively from two refs: an open-window flag and the current conversation id ref. The Meetings page refuses only that conversation (or the system-audio capture).
-- The scheduler step that turns a joined set of waiting rows into a send is pulled into one shared function, `openSends`. The press paths in `src/lib/notion/actions.ts` call it with no quiet check. The tick calls it with its quiet check plus a heal re-link.
+- The scheduler step that turns a joined set of waiting rows into a send is pulled into one shared function, `openSends`, in `src/lib/notion/join.ts`. It can't live in `scheduler.ts`: `actions.ts` (dashboard window) must import neither `./scheduler` nor `./send`, and a source-scan test pins that (`notion-scheduler.test.ts:572-576`). The press paths in `src/lib/notion/actions.ts` call it with no quiet check. The tick calls it with its quiet check plus a heal re-link.
 - A new send is inserted "held" (not yet due) and released only after its rows are linked. So no send runs before its rows are linked.
 
 **Tech Stack:** React 19 hooks, Tauri 2 shared `localStorage`, SQLite through `@tauri-apps/plugin-sql` (no transactions), Vitest + Testing Library, sql.js for DB tests.
@@ -37,7 +37,7 @@ The spec bullet is updated to match.
 ## Review Focus
 
 1. **A silence of more than a minute during a live call** must not release the key. The late-line re-arm is only while capture is off. Test: Task 2, `keeps the key through a long silence while capturing`.
-2. **Capture restarting while the over-point flush is in flight** (a rollover) must not leave the open flag false for the new meeting. Test: Task 2, `a capture restart during the over-point flush keeps the new meeting keyed`.
+2. **Capture restarting while the over-point flush is in flight** (a rollover) must not leave the open flag false for the new meeting. Test: Task 2, `a capture restart during the over-point flush keeps the new meeting keyed`. It is a regression guard, not a pin for the `cancelled` flag: the save queue (`useCompletion.ts:360-367`) makes the release resume before the rollover's own flush, so the flag is defensive.
 3. **The over-point save failing** keeps the key rather than letting the page go out without its tail. Test: Task 2, `keeps the key when the over-point save fails`.
 4. **A press racing a background tick** gives exactly one send. Test: Task 4, `a press racing a tick gives exactly one send`.
 5. **A crash between inserting a send and linking its rows** must not run an empty send, and must heal. Tests:
@@ -101,7 +101,7 @@ it("accepts the conversation the overlay only has open", async () => {
 - Reset `active.meeting = null` wherever the suite resets `active.id`.
 - Replace `:137-143` with:
   - `refuses the conversation a meeting is still recording into`: set `active.meeting = "conv_1"` and expect `{ kind: "active" }` with `queue()` empty;
-  - `sends the conversation the overlay only has open`: set `active.id = "conv_1"`, expect a result whose `kind` is not `"active"`, and expect `queue()` to have length 1.
+  - `sends the conversation the overlay only has open`: keep the old test's `message({ content: "said aloud" })` seed (with no saved line the outcome is `empty`), set `active.id = "conv_1"`, expect `kind` `"queued"`, and expect `queue()` to have length 1.
 
 `meetings-page.notion.test.tsx:678-685`:
 - Rename the test to `the 'active' outcome says the meeting is still being recorded`.
@@ -127,7 +127,9 @@ Expected: FAIL. The two "overlay only has open" tests get `"active"`, and the co
 
 - [ ] **Step 4: Run the tests, plus the other suites that load these modules**
 
-Run: `npx vitest run src/tests/notion-scheduler.test.ts src/tests/send-conversation-to-odoo.test.ts src/tests/meetings-page.notion.test.tsx src/tests/meetings-page.test.tsx src/tests/meeting-log-page.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/meeting-log-auto-notion.test.tsx src/tests/meeting-log-actions.test.ts src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx`
+First, `grep -rln "active-conversation.storage\|still going\|still open in the overlay" src/tests`. Every hit must be in the run list below; add any that is not, and update any old-copy assertion it holds. At plan time the storage mocks are in `notion-scheduler`, `send-conversation-to-odoo`, `meeting-log-entry-points`, `meeting-log-auto-notion`, `useMeetingLog.enqueue`, `useMeetingLog.hold` and `useSystemAudio.new-conversation`.
+
+Run: `npx vitest run src/tests/notion-scheduler.test.ts src/tests/send-conversation-to-odoo.test.ts src/tests/meetings-page.notion.test.tsx src/tests/meetings-page.test.tsx src/tests/meeting-log-page.test.tsx src/tests/meeting-log-entry-points.test.tsx src/tests/meeting-log-auto-notion.test.tsx src/tests/meeting-log-actions.test.ts src/tests/useMeetingLog.enqueue.test.tsx src/tests/useMeetingLog.hold.test.tsx src/tests/useSystemAudio.new-conversation.test.tsx`
 Expected: PASS.
 - Any suite that fails with `No "isConversationRecording" export is defined on the mock` gets `isConversationRecording: () => false` added to its `active-conversation.storage` factory (or its shared `conversationStorage` object). Then re-run it.
 
@@ -172,13 +174,18 @@ Set up the new describe:
   - `settle = () => act(async () => { await vi.advanceTimersByTimeAsync(0); })`.
 - A meeting line is `addMeetingTranscript(text, undefined, "microphone")`.
 - `G` = `NEW_CONVERSATION_GAP_MS`.
+- **Which save a flush calls:** a conversation's first save is `saveConversation`; every later one is `appendMessagesToConversation` (`useCompletion.ts:436-466`). One line under the autosave threshold is saved by the stop flush, so the over-point flush has work only when a line landed after the stop. To hold the over-point save open, add a post-stop line and give `appendMessagesToConversation` the deferred.
 
 Write these tests (each assertion follows the action named):
 
 | Test | Steps → assertions |
 |---|---|
 | `keys the conversation while capturing and through the stop` | `micOn()` → `key()` null; line → `"conversation-1"`; `setEnableVAD(false)` → `"conversation-1"`; `after(G - 1000)` → `"conversation-1"` |
-| `releases the key at the over point, after the flush` | line; stop; `after(G + 1000)`; `settle()` → `key()` null, `saveConversation` called |
+| `releases the key at the over point` | line; stop; `after(G + 1000)`; `settle()` → `key()` null, `saveConversation` called |
+| `holds the key until the over-point save lands` | line; stop; `settle()`; `after(10_000)`; post-stop line; `appendMessagesToConversation` returns a deferred; `after(G + 1000)`; `settle()` → `"conversation-1"` (save pending); resolve the deferred; `settle()` → null, and `appendMessagesToConversation` got the post-stop line |
+| `a line during the over-point save re-arms the check` | as the row above up to the pending save; another line → still `"conversation-1"`; resolve the deferred; `settle()` → `"conversation-1"` (one line still unsaved, check re-armed); `after(G + 1000)`; `settle()` → null |
+| `keys an id first assigned by a line appended after the stop` | `micOn` (no line); stop; `after(2_000)`; line → `"conversation-1"` |
+| `follows the id to a loaded conversation during capture` | `micOn`; line; `loadConversation({ id: "loaded", … })` → `"loaded"` |
 | `keeps the key when the over-point save fails` | `saveConversation.mockRejectedValue(new Error("disk"))`; line; stop; `after(G + 1000)`; `settle()` → `"conversation-1"` |
 | `releases a chat that was open during a silent capture` | `loadConversation({ id: "chat-1", messages: [typed user message, no audioSource, timestamp now] , …})`; `micOn` → `"chat-1"`; stop; `after(G + 1000)`; `settle()` → null |
 | `a new conversation after the stop releases the key` | line; stop; `await act(() => result.current.startNewConversation())` → null |
@@ -187,7 +194,7 @@ Write these tests (each assertion follows the action named):
 | `the rollover releases the old conversation` | line; `after(30_000)`; stop; `after(31_000)`; `setEnableVAD(true)`; `settle()` → null; `mockReturnValueOnce("conversation-2")`; line → `"conversation-2"` |
 | `keeps the key through a long silence while capturing` | `micOn`; line; `after(G * 3)`; `settle()` → `"conversation-1"` |
 | `a line after the over point re-keys and re-arms the check` | line; stop; `after(G + 1000)`; `settle()` → null; line → `"conversation-1"`; `after(G + 1000)`; `settle()` → null |
-| `a capture restart during the over-point flush keeps the new meeting keyed` | `saveConversation` returns a deferred promise for its first call; line; stop; `after(G + 1000)` (over-point flush pending); `setEnableVAD(true)`; resolve the deferred; `settle()`; `mockReturnValueOnce("conversation-2")`; line → `"conversation-2"` |
+| `a capture restart during the over-point flush keeps the new meeting keyed` | line; stop; `settle()`; `after(10_000)`; post-stop line; `appendMessagesToConversation` returns a deferred; `after(G + 1000)` → over-point save pending, `"conversation-1"`; `setEnableVAD(true)`; resolve the deferred; `settle()`; `mockReturnValueOnce("conversation-2")`; line → `"conversation-2"` (regression guard, see Review Focus 2) |
 | `clears a stale key on mount` | `store.set(STORAGE_KEYS.MEETING_CONVERSATION_ID, "stale")` before `renderHook` → null |
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -199,12 +206,12 @@ Expected: FAIL. `key()` is null wherever a value is expected, and the stale key 
 
 1. **Imports and declarations.**
    - Import `setMeetingConversationId` from `@/lib/storage/active-conversation.storage` (leaf path; add a one-line comment pointing at `:38-41`).
-   - Move `const meetingCaptureActive = meetingAssistMode && enableVAD;` and `wasMeetingCaptureActiveRef` up, to just after the state they read. The helpers below read the ref. The comment block stays with the effect.
+   - Move `const meetingCaptureActive = meetingAssistMode && enableVAD;`, `wasMeetingCaptureActiveRef` and the over effect's `hadCaptureRef` up, to just after the state they read. The helpers below read them. The comment blocks stay with their effects.
    - Declare `meetingOpenRef = useRef(false)` and `const [overCheckEpoch, setOverCheckEpoch] = useState(0)` next to `currentConversationIdRef`.
-   - Add a `flushRef` that is refreshed every render (`flushRef.current = flushUnsavedMeetingTranscript` after its definition). The over effect reaches the flush through it, so a provider change that rebuilds the flush callback can't restart the over timer.
+   - No ref for the flush: `flushUnsavedMeetingTranscript` is already stable (its chain `:565` → `:512` → `:367`/`:295` is all `[]`-deps), so the over effect lists it in its deps directly.
 2. **`syncMeetingKey = useCallback(() => setMeetingConversationId(meetingOpenRef.current ? currentConversationIdRef.current : null), [])`.**
 3. **`hasUnsavedMeetingTranscript = useCallback((): boolean => …, [])`** holds exactly the three-part guard now inlined in `flushUnsavedMeetingTranscript` (`:553-560`). The flush returns early when it is false.
-4. **`noteMeetingLine = useCallback(() => …, [])`.** If `meetingOpenRef.current` or `wasMeetingCaptureActiveRef.current` is true, it returns. Otherwise it sets `meetingOpenRef.current = true` and calls `setOverCheckEpoch((n) => n + 1)`.
+4. **`noteMeetingLine = useCallback(() => …, [])`.** If `meetingOpenRef.current` or `wasMeetingCaptureActiveRef.current` is true, it returns. Otherwise it sets `meetingOpenRef.current = true` and `hadCaptureRef.current = true` (so the over effect's launch guard, `:1611`, can't leave a keyed conversation with no release path), then calls `setOverCheckEpoch((n) => n + 1)`.
 5. **Appends:**
    - `addMeetingTranscript`: call `noteMeetingLine()` when `audioSource != null`.
    - `addMeetingTranscriptEntries`: call it when any entry has an `audioSource`.
@@ -213,13 +220,15 @@ Expected: FAIL. `key()` is null wherever a value is expected, and the stale key 
    In each, call `noteMeetingLine()` before `ensureConversationId`, then `syncMeetingKey()` right after it.
 6. **Every other `ensureConversationId(currentConversationIdRef)` call** (`:402, 962, 1170, 1875`): add `syncMeetingKey()` right after it.
 7. **`clearMeetingTranscript`, `loadConversation`, `startNewConversation`:** right after the line that assigns `currentConversationIdRef.current`, add `if (!wasMeetingCaptureActiveRef.current) meetingOpenRef.current = false;` then `syncMeetingKey();`.
-8. **Rollover effect:** directly after the `if (history.length > 0) { … }` block, add `meetingOpenRef.current = true; syncMeetingKey();`. The early `return` inside that block (capture stopped during the flush) skips it on purpose.
+8. **Rollover effect:** directly after the `if (history.length > 0) { … }` block, add `meetingOpenRef.current = true; syncMeetingKey();`. The early `return` inside that block (capture stopped during the flush) skips it on purpose. The IIFE's `.catch` handler (`:1579`) also does `if (wasMeetingCaptureActiveRef.current) { meetingOpenRef.current = true; syncMeetingKey(); }`: a rejected `startNewConversation` must not leave a live capture unkeyed.
 9. **`meetingOver` effect:**
-   - Deps: `[meetingCaptureActive, overCheckEpoch, hasUnsavedMeetingTranscript, syncMeetingKey]`.
+   - Deps: `[meetingCaptureActive, overCheckEpoch, flushUnsavedMeetingTranscript, hasUnsavedMeetingTranscript, syncMeetingKey]`.
    - Add `let cancelled = false`, set to true in the cleanup next to `clearTimeout`.
    - Add an async `release()`:
-     - `await flushRef.current().catch((e) => console.error("Over-point flush failed:", e))`;
-     - then return if `cancelled || hasUnsavedMeetingTranscript()`;
+     - `const lenBefore = meetingTranscriptLengthRef.current`;
+     - `await flushUnsavedMeetingTranscript().catch((e) => console.error("Over-point flush failed:", e))`;
+     - return if `cancelled`;
+     - if `hasUnsavedMeetingTranscript()`: when `meetingTranscriptLengthRef.current !== lenBefore` (a line landed during the flush, and `noteMeetingLine` skipped it because the flag was still true), call `setOverCheckEpoch((n) => n + 1)` to re-arm the check; then return. A failed save with no new line just keeps the key (spec ceiling). Don't re-arm on that case: each re-armed check dispatches `meetingOver` again, and `useOdooTarget.ts:865` clears the overlay's Odoo targets on it;
      - else `meetingOpenRef.current = false; syncMeetingKey();`.
    - The `lastLineAt === 0` return becomes `{ void release(); return; }`.
    - The `else` branch keeps dispatching `meetingOver` synchronously, exactly as now (its existing tests pin that timing), then calls `void release()`.
@@ -243,12 +252,13 @@ git commit -m "fix(overlay): mark the conversation a meeting can still add lines
 
 **Files:**
 - Modify: `src/lib/database/notion-queue.action.ts:42-45` (`insertSend`), `:163-172` (`createSendAndLink`)
+- Modify: `src/lib/notion/join.ts` (add `openSends`; it may import `@/lib/database/notion-queue.action`, `@/lib/database/calendar-snapshot.action` and `@/lib/odoo/meeting-log`, never `./scheduler` or `./send`)
 - Modify: `src/lib/notion/scheduler.ts:35-67`
 - Test: `src/tests/notion-scheduler.test.ts` (new `describe("held sends and the heal", …)`)
-- Test: `src/tests/notion-queue.action.test.ts` (run only. Its `next_at: 0` assertions at `:119, 254-255` must still hold)
+- Test: `src/tests/notion-queue.action.test.ts` (its `next_at: 0` assertions at `:119, 254-255` must still hold; two new assertions, below)
 
 **Interfaces:**
-- Produces, in `scheduler.ts`:
+- Produces, in `join.ts`:
 
   ```ts
   export async function openSends(
@@ -266,8 +276,8 @@ git commit -m "fix(overlay): mark the conversation a meeting can still add lines
   Otherwise it does the calendar snapshot (null for a null conversation) and `createSendAndLink`, exactly as `tick` does now.
 - Changes `createSendAndLink(s, rowIds)` (same signature):
   - The insert writes `next_at = s.createdAt + SEND_HOLD_MS`, with `const SEND_HOLD_MS = 60_000` in `notion-queue.action.ts`.
-  - It links the rows when `rowIds` is non-empty.
-  - Then, only if the insert's `rowsAffected > 0`, it runs a new `NOTION_SQL.release` (`UPDATE notion_sends SET next_at = 0 WHERE id = ? AND status = 'retry'`).
+  - It links the rows when `rowIds` is non-empty (today's early return at `:170` goes).
+  - Then, only if the insert's `rowsAffected > 0`, it runs a new `NOTION_SQL.release` (`UPDATE notion_sends SET next_at = 0 WHERE id = ? AND status = 'retry'`). That includes an insert with empty `rowIds`: there is nothing to link, so it is released at once. `notion-send.test.ts:474-477` and `notion-queue.action.test.ts:122-129` insert that way and then claim or expect `next_at: 0`.
   - The doc comment says why: a send must not be due before its rows are linked, and a heal call (insert no-op) must not wipe a retry backoff.
 
 - [ ] **Step 1: Write the failing tests**
@@ -283,6 +293,10 @@ New describe in `notion-scheduler.test.ts`. The constants:
 | `the tick re-links a set whose send exists even when it is not quiet` | insert send `r1` (`status 'retry', next_at` = far future); `seedRow({ id: "r1", transcript_end_at: Q - MIN })`; `await runNotionTick(deps(Q))` → `rowOf("r1").notion_status` `"joined"`, `notion_send_id` `"r1"` |
 | `openSends skips system audio and a conversation with a live send` | `openSends([wrow("a","sysaudio_conv_1",T0,T0+MIN), wrow("b","c2",T0,T0+MIN)], Q)` with a `sending` send for `c2` claimed at `Q` → `sends()` holds only the pre-seeded one |
 
+In `notion-queue.action.test.ts`, next to the `createSendAndLink` tests (`:110-130`):
+- `an insert with no rows to link is released at once`: `createSendAndLink(s, [])` → the send has `next_at: 0`.
+- `a heal call does not wipe a retry backoff`: insert send `s` with `status 'retry'` and `next_at = NOW + 5 * MIN`; `createSendAndLink(s with the same id, ["r1"])` → `next_at` still `NOW + 5 * MIN`, and `r1` linked to `s`.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run src/tests/notion-scheduler.test.ts -t "held sends and the heal"`
@@ -291,14 +305,14 @@ Expected: FAIL. `next_at` is 0 at insert, there's no re-link when not quiet, and
 - [ ] **Step 3: Implement**
 
 - `insertSend` takes `next_at` as a bound parameter instead of the literal `0`, and `createSendAndLink` behaves as in Interfaces.
-- In `scheduler.ts`, add `openSends` and make `tick`'s loop:
+- In `join.ts`, add `openSends`. In `scheduler.ts`, import it from `./join` and make `tick`'s loop:
 
   ```ts
   await openSends(await listWaitingRows(), now, async (set) =>
-    (await getSend(set[0].id)) !== null || isQuiet(lastOf(set), now))
+    (await getSend(set[0].id)) !== null || isQuiet(await lastOf(set), now))
   ```
 
-  - `lastOf` is today's `last` computation (`scheduler.ts:46-50`), moved into a local function.
+  - `lastOf` is today's `last` computation (`scheduler.ts:46-50`), moved into a local `async` function (it awaits `lastSpokenLineAt`).
   - `live` and the system-audio skip move into `openSends`.
   - `getSend` is already exported from `notion-queue.action.ts`.
 
@@ -310,7 +324,7 @@ Expected: PASS. The existing `next_at: 0` assertions still hold, because a call 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/lib/database/notion-queue.action.ts src/lib/notion/scheduler.ts src/tests/notion-scheduler.test.ts
+git add src/lib/database/notion-queue.action.ts src/lib/notion/join.ts src/lib/notion/scheduler.ts src/tests/notion-scheduler.test.ts src/tests/notion-queue.action.test.ts
 git commit -m "fix(notion): hold a new send until its rows are linked, heal a broken link"
 ```
 
@@ -327,7 +341,7 @@ git commit -m "fix(notion): hold a new send until its rows are linked, heal a br
 
 **Interfaces:**
 - Consumes:
-  - `openSends(rows, now, ready?)` (Task 3);
+  - `openSends(rows, now, ready?)` from `./join` (Task 3; `actions.ts` still imports neither `./scheduler` nor `./send`);
   - `isConversationRecording(id)` (Task 1);
   - `lastSpokenLineAt(conversationId)` and `listWaitingRows()` (existing).
 - Produces:
@@ -353,6 +367,11 @@ New tests:
 | `the tail rule applies to an auto-queued conversation too` | as above but `r1` seeded `"waiting"` → `r1` `"cancelled"`; the fresh row is `"joined"` with `"late words"`; one send |
 | `sendRowsToNotion opens an ended conversation and joins its waiting siblings` | `seedRow({ id: "r1", notion_status: "offered" })`; `seedRow({ id: "r2", transcript_start_at: T0 + 15 * MIN, transcript_end_at: T0 + 20 * MIN })` (waiting); `sendRowsToNotion(["r1"], "c1", T0 + 21 * MIN)` → both `"joined"` to send `"r1"`; one send |
 | `sendRowsToNotion rebuilds from the transcript when saved lines pass the rows` | offered `r1` (ends `T0 + 10 * MIN`); `message("c1", T0 + 5 * MIN)`; `message("c1", T0 + 10 * MIN + 30_000, { content: "late words" })`; `sendRowsToNotion(["r1"], "c1", T0 + 20 * MIN)` → `r1` `"cancelled"`; one other row, `"joined"`, transcript contains `"late words"`; one send |
+| `a saved line exactly at the row end does not rebuild` | `seedRow({ id: "r1", notion_status: "offered" })`; `message("c1", T0 + 10 * MIN)` (= `transcript_end_at`); press at `T0 + 20 * MIN` → `r1` `"joined"` to send `"r1"`; no other row; one send |
+| `a typed line past the row end does not rebuild` | offered `r1`; `message("c1", T0 + 15 * MIN, { audio_source: null })`; press at `T0 + 20 * MIN` → `r1` `"joined"`; no other row; one send |
+| `sendRowsToNotion on a stale item sends nothing` | `seedRow({ id: "r1", notion_status: "cancelled" })`; `message("c1", T0 + 15 * MIN)`; `sendRowsToNotion(["r1"], "c1", T0 + 20 * MIN)` → no new row, no sends, kick emitted |
+| `a tail rebuild leaves an earlier meeting already in Notion alone` | `seedRow({ id: "r1", notion_status: "joined", notion_send_id: "s1" })` with send `s1` `sent`; `message("c1", T0 + 5 * MIN)`; offered `r2` (`transcript_start_at: T0 + 50 * MIN`, `transcript_end_at: T0 + 60 * MIN`); `message("c1", T0 + 55 * MIN)`; `message("c1", T0 + 60 * MIN + 30_000, { content: "late words" })`; `sendRowsToNotion(["r2"], "c1", T0 + 70 * MIN)` → `r2` `"cancelled"`; exactly one new row, starting at `T0 + 55 * MIN`, `"joined"`, with `"late words"`; no new row before `T0 + 50 * MIN`; sends are `s1` plus one |
+| `a failed fresh insert leaves nothing queued twice` | waiting `r1`; `message("c1", T0 + 5 * MIN)`; `message("c1", T0 + 10 * MIN + 30_000)`; `m.execute` throws once on `INSERT INTO meeting_log_queue`; press at `T0 + 20 * MIN` rejects → `r1` `"cancelled"`, no other row, no sends; a second press → `"queued"`, one fresh `"joined"` row, one send |
 | `sendRowsToNotion leaves a recording conversation waiting` | `m.active.meeting = "c1"`; offered `r1`; `sendRowsToNotion(["r1"], "c1")` → `r1` `"waiting"`, no sends, kick emitted |
 | `sendRowsToNotion opens a row with no conversation now` | `seedRow({ id: "r1", conversation_id: null, notion_status: "offered" })`; `sendRowsToNotion(["r1"], null)` → `r1` `"joined"`, one send with `conversation_id` null |
 | `sendRowsToNotion does not open system audio` | `seedRow({ id: "r1", conversation_id: "sysaudio_conv_1", notion_status: "offered" })`; `sendRowsToNotion(["r1"], "sysaudio_conv_1")` → `r1` `"waiting"`, no sends |
@@ -369,7 +388,11 @@ Expected: FAIL. Rows are left `"waiting"` with no send, the waiting-row press re
 
 `actions.ts`:
 - Private `tailBeyond(conversationId: string, rowsEnd: number): Promise<boolean>` returns `((await lastSpokenLineAt(conversationId)) ?? 0) > rowsEnd`.
-- Private `insertFreshRows(conversationId: string, now: number, supersede: string[]): Promise<boolean>`. This is today's fresh-rows block (`:70-93`) moved as-is, with `cancelOfferedRows(supersede)` after the inserts. It returns `false` (and cancels nothing) when there are no segments.
+- Private `insertFreshRows(conversationId: string, now: number, supersede: string[], fromAt: number): Promise<boolean>`. This is today's fresh-rows block (`:70-93`) with two changes:
+  - It keeps only segments whose end is `>= fromAt`, so a rebuild never re-sends an earlier meeting of the same conversation. Callers pass the earliest `transcript_start_at` of the rows being replaced, or `0` when there are none.
+  - It runs `cancelOfferedRows(supersede)` **before** the inserts, not after. The superseded rows now include `waiting` ones. If a failure lands between the two steps after the inserts, old and fresh waiting rows overlap, `joinSets` joins them, and the page shows every line twice. Cancelling first means a failure leaves nothing queued, and a re-press rebuilds.
+
+  It returns `false`, and cancels nothing, when no segment is left (compute the segments first).
 - Private `openConversation(conversationId: string, now: number): Promise<void>` calls `openSends((await listWaitingRows()).filter((r) => r.conversation_id === conversationId), now)`.
 
 `sendConversationToNotion`, after the recording and config checks:
@@ -377,17 +400,19 @@ Expected: FAIL. Rows are left `"waiting"` with no send, the waiting-row press re
 2. The "already" test excludes heal rows from the lane-open arm: `r.lane_open && r.notion_status !== "offered" && !heal.includes(r)`. The other arms are unchanged.
 3. `candidates` is unchanged. `pending = [...candidates, ...heal]`.
 4. If `pending.length > 0`, every candidate transcript is non-blank, and `!(await tailBeyond(id, max transcript_end_at of pending))`: `markRowsWaiting(candidate ids)`.
-5. Otherwise: if `!(await insertFreshRows(id, now, [...offered candidate ids, ...heal ids]))`, return `"empty"`.
+5. Otherwise: if `!(await insertFreshRows(id, now, [...offered candidate ids, ...heal ids], earliest transcript_start_at of pending, or 0 when pending is empty))`, return `"empty"`.
 6. `await openConversation(id, now)`, then `await kick()`, then return `"queued"`.
 
 `sendRowsToNotion(rowIds, conversationId, now = Date.now())`:
 - `await offerRowsToWaiting(rowIds)`.
 - If `conversationId === null`: `openSends(waiting rows whose id is in rowIds, now)`.
 - Else, if it is not system audio and `!isConversationRecording(conversationId)`:
-  - `waiting` = that conversation's waiting rows;
-  - if `await tailBeyond(conversationId, max transcript_end_at of waiting)`, run `insertFreshRows(conversationId, now, waiting ids)`;
+  - `waiting` = that conversation's waiting rows. If it is empty (a stale item: the offer changed nothing), skip to the kick. The max of an empty list is `-Infinity`, and that would make `tailBeyond` rebuild the whole conversation;
+  - if `await tailBeyond(conversationId, max transcript_end_at of waiting)`, run `insertFreshRows(conversationId, now, waiting ids, earliest transcript_start_at of waiting)`;
   - then `openConversation(conversationId, now)`.
 - Always `await kick()`.
+
+**Known ceiling (heal-branch race).** A press on a conversation that has both waiting rows and offered rows can race a tick that finds the waiting rows quiet. The two may pick different first rows and make two sends. This sits with the `sendRowsToNotion` race in the spec's Known ceilings. It is not fixed here, and needs no test.
 
 `useNotionQueue.onSendRows(rowIds, conversationId)` passes both through. `NotionSection` calls `onSendRows(item.rowIds, item.conversationId)`. Its prop type matches.
 
