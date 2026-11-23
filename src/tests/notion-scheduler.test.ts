@@ -56,7 +56,7 @@ import {
   sendConversationToNotion,
   sendRowsToNotion,
 } from "@/lib/notion/actions";
-import { isQuiet, joinSets } from "@/lib/notion/join";
+import { isQuiet, joinSets, openSends } from "@/lib/notion/join";
 import {
   NOTION_KICK_EVENT,
   NOTION_TICK_MS,
@@ -625,5 +625,63 @@ describe("fix round 1", () => {
     expect(m.unlisten).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(3 * NOTION_TICK_MS);
     expect(m.isConfigured).not.toHaveBeenCalled();
+  });
+});
+
+describe("held sends and the heal", () => {
+  const Q = T0 + 10 * MIN + GAP + MIN;
+  const joinedSql = "SET notion_status = 'joined'";
+
+  it("a new send is released once its rows are linked", async () => {
+    seedRow({ id: "r1" });
+    await runNotionTick(deps(Q));
+    expect((await sends())[0]).toMatchObject({ next_at: 0 });
+    expect((await rowOf("r1")).notion_status).toBe("joined");
+    expect(m.runNotionSend).toHaveBeenCalledWith("r1", expect.anything());
+  });
+
+  it("a send whose link failed is held, then healed by the next tick", async () => {
+    seedRow({ id: "r1" });
+    let failed = false;
+    m.execute.mockImplementation(async (sql: string, args?: unknown[]) => {
+      if (!failed && sql.includes(joinedSql)) {
+        failed = true;
+        throw new Error("link failed");
+      }
+      return rawExecute(sql, args);
+    });
+    await runNotionTick(deps(Q));
+    const rows = await sends();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "r1", next_at: Q + 60_000 });
+    expect((await rowOf("r1")).notion_status).toBe("waiting");
+    expect(m.runNotionSend).not.toHaveBeenCalled();
+
+    await runNotionTick(deps(Q + MIN / 2));
+    expect((await rowOf("r1")).notion_status).toBe("joined");
+    expect(m.runNotionSend).not.toHaveBeenCalled();
+
+    await runNotionTick(deps(Q + 60_000));
+    expect(m.runNotionSend).toHaveBeenCalledTimes(1);
+    expect(m.runNotionSend).toHaveBeenCalledWith("r1", expect.anything());
+  });
+
+  it("the tick re-links a set whose send exists even when it is not quiet", async () => {
+    db.run(
+      "INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at) VALUES ('r1','c1','retry',?,1,2,1)",
+      [Q + 100 * MIN]
+    );
+    seedRow({ id: "r1", transcript_end_at: Q - MIN });
+    await runNotionTick(deps(Q));
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+  });
+
+  it("openSends skips system audio and a conversation with a live send", async () => {
+    db.run(
+      "INSERT INTO notion_sends (id, conversation_id, status, claimed_at, next_at, span_start_at, span_end_at, created_at) VALUES ('pre','c2','sending',?,0,1,2,1)",
+      [Q]
+    );
+    await openSends([wrow("a", "sysaudio_conv_1", T0, T0 + MIN), wrow("b", "c2", T0, T0 + MIN)], Q);
+    expect((await sends()).map((x) => x.id)).toEqual(["pre"]);
   });
 });

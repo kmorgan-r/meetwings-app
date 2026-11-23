@@ -2,21 +2,20 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelOrphanedWaitingRows,
   claimSend,
-  conversationsWithLiveSend,
-  createSendAndLink,
   finishSend,
+  getSend,
   lastSpokenLineAt,
   listDueSends,
   listWaitingRows,
+  type WaitingRow,
 } from "@/lib/database/notion-queue.action";
-import { snapshotJsonForSpan } from "@/lib/database/calendar-snapshot.action";
 import { promoteStaleHeldNotionRows } from "@/lib/database/meeting-log.action";
 import type { ProviderConfig } from "@/lib/functions/summary-provider";
 import { HOLD_MS, STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 import { isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { outcomeFor, notionErrorText } from "./errors";
 import { NOTION_KICK_EVENT } from "./events";
-import { isQuiet, joinSets } from "./join";
+import { isQuiet, openSends } from "./join";
 import { buildSendDeps, runNotionSend } from "./send";
 
 export interface SchedulerDeps {
@@ -36,35 +35,20 @@ async function tick(deps: SchedulerDeps): Promise<void> {
   if (!(await isNotionConfigured())) return;
   const now = deps.now();
   await promoteStaleHeldNotionRows(now - HOLD_MS - NOTION_TICK_MS);
-  const live = await conversationsWithLiveSend(now - STALE_CLAIM_MS);
   await cancelOrphanedWaitingRows();
-  for (const set of joinSets(await listWaitingRows())) {
-    const first = set[0];
-    const conv = first.conversation_id;
-    if (conv?.startsWith("sysaudio_conv_")) continue;
-    if (conv !== null && live.has(conv)) continue;
+  const lastOf = async (set: WaitingRow[]) => {
+    const conv = set[0].conversation_id;
     const rowEnd = Math.max(...set.map((r) => r.transcript_end_at));
-    const last =
-      conv === null
-        ? rowEnd
-        : Math.max((await lastSpokenLineAt(conv)) ?? 0, deps.liveLastLineAt(conv) ?? 0, rowEnd);
-    if (!isQuiet(last, now)) continue;
-    const calendarJson =
-      conv === null
-        ? null
-        : await snapshotJsonForSpan(conv, { start: first.transcript_start_at, end: rowEnd });
-    await createSendAndLink(
-      {
-        id: first.id,
-        conversationId: conv,
-        spanStartAt: first.transcript_start_at,
-        spanEndAt: rowEnd,
-        createdAt: now,
-        calendarJson,
-      },
-      set.map((r) => r.id),
-    );
-  }
+    return conv === null
+      ? rowEnd
+      : Math.max((await lastSpokenLineAt(conv)) ?? 0, deps.liveLastLineAt(conv) ?? 0, rowEnd);
+  };
+  // A set whose send already exists is re-linked (heal) whether or not it is quiet.
+  await openSends(
+    await listWaitingRows(),
+    now,
+    async (set) => (await getSend(set[0].id)) !== null || isQuiet(await lastOf(set), now),
+  );
 
   const due = await listDueSends(now, now - STALE_CLAIM_MS);
   if (due.length === 0) return;
