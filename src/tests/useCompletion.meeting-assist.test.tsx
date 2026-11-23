@@ -1397,6 +1397,298 @@ describe("useCompletion meeting assist mode", () => {
         seen.stop();
       });
     });
+
+    // meeting_conversation_id: the Meetings page refuses a send for the
+    // conversation it names, so it must name the conversation while a meeting
+    // can still add lines to it, and nothing otherwise.
+    describe("the meeting key", () => {
+      let store: Map<string, string>;
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        vi.setSystemTime(new Date(2026, 10, 19, 10, 11));
+        store = new Map();
+        vi.mocked(localStorage.setItem).mockImplementation((k, v) => {
+          store.set(k, v);
+        });
+        vi.mocked(localStorage.removeItem).mockImplementation((k) => {
+          store.delete(k);
+        });
+        vi.mocked(localStorage.getItem).mockImplementation((k) => store.get(k) ?? null);
+      });
+      afterEach(() => {
+        vi.mocked(localStorage.setItem).mockReset();
+        vi.mocked(localStorage.removeItem).mockReset();
+        vi.mocked(localStorage.getItem).mockReset();
+        // A failed test can leave a queued deferred unconsumed.
+        vi.mocked(appendMessagesToConversation).mockReset();
+        vi.useRealTimers();
+      });
+
+      const G = NEW_CONVERSATION_GAP_MS;
+      const key = () => store.get(STORAGE_KEYS.MEETING_CONVERSATION_ID) ?? null;
+      const after = (ms: number) =>
+        act(async () => {
+          vi.advanceTimersByTime(ms);
+        });
+      const settle = () =>
+        act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+      const line = (
+        result: { current: ReturnType<typeof useCompletion> },
+        text = "A line"
+      ) =>
+        act(() => {
+          result.current.addMeetingTranscript(text, undefined, "microphone");
+        });
+      const stop = (result: { current: ReturnType<typeof useCompletion> }) =>
+        act(() => {
+          result.current.setEnableVAD(false);
+        });
+      function deferred() {
+        let resolve!: () => void;
+        const promise = new Promise<void>((r) => (resolve = r));
+        return { promise, resolve };
+      }
+
+      it("keys the conversation while capturing and through the stop", async () => {
+        const { result } = micOn();
+        expect(key()).toBeNull();
+        line(result);
+        expect(key()).toBe("conversation-1");
+        stop(result);
+        expect(key()).toBe("conversation-1");
+        await after(G - 1000);
+        expect(key()).toBe("conversation-1");
+      });
+
+      it("releases the key at the over point", async () => {
+        const { result } = micOn();
+        line(result);
+        stop(result);
+        expect(key()).toBe("conversation-1");
+        await after(G + 1000);
+        await settle();
+        expect(key()).toBeNull();
+        expect(saveConversation).toHaveBeenCalled();
+      });
+
+      it("holds the key until the over-point save lands", async () => {
+        const { result } = micOn();
+        line(result, "One line");
+        stop(result);
+        await settle();
+        await after(10_000);
+        const save = deferred();
+        vi.mocked(appendMessagesToConversation).mockReturnValueOnce(save.promise);
+        line(result, "Trailing");
+        await after(G + 1000);
+        await settle();
+        expect(appendMessagesToConversation).toHaveBeenCalledTimes(1);
+        expect(key()).toBe("conversation-1");
+
+        await act(async () => save.resolve());
+        await settle();
+        expect(key()).toBeNull();
+        expect(vi.mocked(appendMessagesToConversation).mock.calls[0][3]).toEqual([
+          expect.objectContaining({ content: "Trailing" }),
+        ]);
+      });
+
+      it("a line during the over-point save re-arms the check", async () => {
+        const { result } = micOn();
+        line(result, "One line");
+        stop(result);
+        await settle();
+        await after(10_000);
+        const save = deferred();
+        vi.mocked(appendMessagesToConversation).mockReturnValueOnce(save.promise);
+        line(result, "Trailing");
+        await after(G + 1000);
+        await settle();
+        expect(appendMessagesToConversation).toHaveBeenCalledTimes(1);
+
+        line(result, "Late");
+        expect(key()).toBe("conversation-1");
+        await act(async () => save.resolve());
+        await settle();
+        // "Late" is still unsaved, so the check runs again rather than release.
+        expect(key()).toBe("conversation-1");
+
+        await after(G + 1000);
+        await settle();
+        expect(key()).toBeNull();
+      });
+
+      it("keys an id first assigned by a line appended after the stop", async () => {
+        const { result } = micOn();
+        stop(result);
+        await after(2_000);
+        line(result);
+        expect(key()).toBe("conversation-1");
+      });
+
+      it("follows the id to a loaded conversation during capture", async () => {
+        const { result } = micOn();
+        line(result);
+        await act(async () => {
+          await result.current.loadConversation({
+            id: "loaded",
+            title: "Loaded",
+            messages: [],
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        });
+        expect(key()).toBe("loaded");
+      });
+
+      it("keeps the key when the over-point save fails", async () => {
+        vi.mocked(saveConversation).mockRejectedValue(new Error("disk"));
+        const { result } = micOn();
+        line(result);
+        stop(result);
+        await after(G + 1000);
+        await settle();
+        // The stop flush and the over-point flush both tried and failed.
+        expect(saveConversation).toHaveBeenCalledTimes(2);
+        expect(key()).toBe("conversation-1");
+      });
+
+      it("releases a chat that was open during a silent capture", async () => {
+        // One hook: micOn() would render a second one without the loaded chat.
+        const { result } = renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+        await act(async () => {
+          await result.current.loadConversation({
+            id: "chat-1",
+            title: "Chat",
+            messages: [
+              { id: "typed", role: "user", content: "A typed question", timestamp: Date.now() },
+            ],
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        });
+        act(() => {
+          result.current.setEnableVAD(true);
+        });
+        expect(key()).toBe("chat-1");
+
+        stop(result);
+        await after(G + 1000);
+        await settle();
+        expect(key()).toBeNull();
+      });
+
+      it("a new conversation after the stop releases the key", async () => {
+        const { result } = micOn();
+        line(result);
+        stop(result);
+        expect(key()).toBe("conversation-1");
+        await act(() => result.current.startNewConversation());
+        expect(key()).toBeNull();
+      });
+
+      it("loading another conversation after the stop releases the key", async () => {
+        const { result } = micOn();
+        line(result);
+        stop(result);
+        expect(key()).toBe("conversation-1");
+        await act(async () => {
+          await result.current.loadConversation({
+            id: "other",
+            title: "Other",
+            messages: [],
+            createdAt: 1,
+            updatedAt: 1,
+          });
+        });
+        expect(key()).toBeNull();
+        await after(G * 2);
+        await settle();
+        expect(key()).toBeNull();
+      });
+
+      it("follows the id to a new conversation during capture", async () => {
+        const { result } = micOn();
+        line(result);
+        expect(key()).toBe("conversation-1");
+        await act(() => result.current.startNewConversation());
+        expect(key()).toBeNull();
+        vi.mocked(generateConversationId).mockReturnValueOnce("conversation-2");
+        line(result);
+        expect(key()).toBe("conversation-2");
+      });
+
+      it("the rollover releases the old conversation", async () => {
+        const { result } = micOn();
+        line(result);
+        await after(30_000);
+        stop(result);
+        await after(31_000);
+        expect(key()).toBe("conversation-1");
+        act(() => {
+          result.current.setEnableVAD(true);
+        });
+        await settle();
+        expect(key()).toBeNull();
+        vi.mocked(generateConversationId).mockReturnValueOnce("conversation-2");
+        line(result);
+        expect(key()).toBe("conversation-2");
+      });
+
+      it("keeps the key through a long silence while capturing", async () => {
+        const { result } = micOn();
+        line(result);
+        await after(G * 3);
+        await settle();
+        expect(key()).toBe("conversation-1");
+      });
+
+      it("a line after the over point re-keys and re-arms the check", async () => {
+        const { result } = micOn();
+        line(result);
+        stop(result);
+        await after(G + 1000);
+        await settle();
+        expect(key()).toBeNull();
+
+        line(result, "Afterthought");
+        expect(key()).toBe("conversation-1");
+        await after(G + 1000);
+        await settle();
+        expect(key()).toBeNull();
+      });
+
+      it("a capture restart during the over-point flush keeps the new meeting keyed", async () => {
+        const { result } = micOn();
+        line(result, "One line");
+        stop(result);
+        await settle();
+        await after(10_000);
+        const save = deferred();
+        vi.mocked(appendMessagesToConversation).mockReturnValueOnce(save.promise);
+        line(result, "Trailing");
+        await after(G + 1000);
+        expect(appendMessagesToConversation).toHaveBeenCalledTimes(1);
+        expect(key()).toBe("conversation-1");
+
+        act(() => {
+          result.current.setEnableVAD(true);
+        });
+        await act(async () => save.resolve());
+        await settle();
+        vi.mocked(generateConversationId).mockReturnValueOnce("conversation-2");
+        line(result);
+        expect(key()).toBe("conversation-2");
+      });
+
+      it("clears a stale key on mount", () => {
+        store.set(STORAGE_KEYS.MEETING_CONVERSATION_ID, "stale");
+        renderHook(() => useCompletion(), { wrapper: strictModeWrapper });
+        expect(key()).toBeNull();
+      });
+    });
   });
 
   describe("the answer scroll", () => {

@@ -1,5 +1,11 @@
 import { MEETING_CONVERSATION_GAP_MS } from "@/config";
-import type { WaitingRow } from "@/lib/database/notion-queue.action";
+import { snapshotJsonForSpan } from "@/lib/database/calendar-snapshot.action";
+import {
+  conversationsWithLiveSend,
+  createSendAndLink,
+  type WaitingRow,
+} from "@/lib/database/notion-queue.action";
+import { STALE_CLAIM_MS } from "@/lib/odoo/meeting-log";
 
 /**
  * Groups waiting rows into sends: per conversation, sorted by start, a row joins
@@ -32,4 +38,40 @@ export function joinSets(rows: WaitingRow[]): WaitingRow[][] {
 
 export function isQuiet(lastLineAt: number, now: number): boolean {
   return now - lastLineAt >= MEETING_CONVERSATION_GAP_MS;
+}
+
+/**
+ * Opens a send for each joined set of waiting rows, skipping system audio, a
+ * conversation with a live send, and any set `ready` refuses. Lives here, not in
+ * the scheduler, so the press path can call it without importing ./scheduler or ./send.
+ */
+export async function openSends(
+  rows: WaitingRow[],
+  now: number,
+  ready: (set: WaitingRow[]) => Promise<boolean> = async () => true,
+): Promise<void> {
+  const live = await conversationsWithLiveSend(now - STALE_CLAIM_MS);
+  for (const set of joinSets(rows)) {
+    const first = set[0];
+    const conv = first.conversation_id;
+    if (conv?.startsWith("sysaudio_conv_")) continue;
+    if (conv !== null && live.has(conv)) continue;
+    if (!(await ready(set))) continue;
+    const rowEnd = Math.max(...set.map((r) => r.transcript_end_at));
+    const calendarJson =
+      conv === null
+        ? null
+        : await snapshotJsonForSpan(conv, { start: first.transcript_start_at, end: rowEnd });
+    await createSendAndLink(
+      {
+        id: first.id,
+        conversationId: conv,
+        spanStartAt: first.transcript_start_at,
+        spanEndAt: rowEnd,
+        createdAt: now,
+        calendarJson,
+      },
+      set.map((r) => r.id),
+    );
+  }
 }

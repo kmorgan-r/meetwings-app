@@ -119,6 +119,22 @@ describe("createSendAndLink", () => {
     expect(await sendOf("r1")).toMatchObject({ status: "retry", next_at: 0 });
   });
 
+  it("an insert with no rows to link is released at once", async () => {
+    await createSendAndLink(sendInit(), []);
+    expect(await sendOf("r1")).toMatchObject({ next_at: 0 });
+  });
+
+  it("a heal call does not wipe a retry backoff", async () => {
+    seedRow({ id: "r1" });
+    db.run(
+      "INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at) VALUES ('r1','c1','retry',?,1,2,1)",
+      [NOW + 5 * 60_000]
+    );
+    await createSendAndLink(sendInit(), ["r1"]);
+    expect((await sendOf("r1")).next_at).toBe(NOW + 5 * 60_000);
+    expect(await rowOf("r1")).toMatchObject({ notion_status: "joined", notion_send_id: "r1" });
+  });
+
   it("a re-run after a crash between insert and link keeps the first calendar_json", async () => {
     seedRow({ id: "r1" });
     seedRow({ id: "r2" });

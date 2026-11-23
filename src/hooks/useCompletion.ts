@@ -43,6 +43,8 @@ import { CONVERSATION_RENAMED_KEY } from "@/lib/chat-constants";
 // Leaf path for the same reason: the usage listener must get the real helper.
 import { isSameModel } from "@/lib/functions/active-model.function";
 import { useReportCaptureActivity } from "@/lib/updater/recording-activity.store";
+// Leaf path, for the reason at :38-41: the meeting-assist suite mocks the barrel.
+import { setMeetingConversationId } from "@/lib/storage/active-conversation.storage";
 import type {
   UsageData,
   TranscriptEntry,
@@ -179,6 +181,10 @@ export const useCompletion = () => {
 
   // Meeting mode is always on: a call is recorded whenever the mic is open.
   const meetingAssistMode = true;
+  // Read by the meeting-key helpers below; their effects are further down.
+  const meetingCaptureActive = meetingAssistMode && enableVAD;
+  const wasMeetingCaptureActiveRef = useRef(meetingCaptureActive);
+  const hadCaptureRef = useRef(false);
   const [meetingTranscript, setMeetingTranscript] = useState<TranscriptEntry[]>([]);
 
   // Session-level speaker mapping (resets when meeting transcript is cleared)
@@ -207,6 +213,21 @@ export const useCompletion = () => {
   const currentRequestIdRef = useRef<string | null>(null);
   const currentConversationIdRef = useRef<string | null>(null);
   const conversationHistoryRef = useRef<ChatMessage[]>([]);
+  // True while a Meeting Assist meeting can still add lines to the current
+  // conversation: from capture start (or a line with capture off) through the
+  // over point after the stop, once the over-point save lands. Mirrored to
+  // meeting_conversation_id, which the Meetings page reads to refuse a send.
+  const meetingOpenRef = useRef(false);
+  // Bumped to (re)start the over effect's check after a line with capture off.
+  const [overCheckEpoch, setOverCheckEpoch] = useState(0);
+  // Writes the key from the two refs; called after each site that changes one.
+  const syncMeetingKey = useCallback(
+    () =>
+      setMeetingConversationId(
+        meetingOpenRef.current ? currentConversationIdRef.current : null
+      ),
+    []
+  );
 
   // Index into meetingTranscript at which the CURRENT conversation's own
   // live activity begins. meetingTranscript is a session-wide buffer, never
@@ -400,6 +421,7 @@ export const useCompletion = () => {
         const persistedIdsAtSnapshot = new Set(persistedMessageIdsRef.current);
 
         const conversationId = ensureConversationId(currentConversationIdRef);
+        syncMeetingKey();
 
         const cachedMeta = conversationMetaCacheRef.current;
         let title: string;
@@ -509,7 +531,7 @@ export const useCompletion = () => {
     };
 
     return queueConversationWrite(run);
-  }, [queueConversationWrite, requestAITitle]);
+  }, [queueConversationWrite, requestAITitle, syncMeetingKey]);
 
   // Keep a ref in sync with the current meeting transcript length so async
   // save paths (normal submit, quick actions) can update the autosave watermark.
@@ -546,23 +568,36 @@ export const useCompletion = () => {
     }
   }, [meetingAssistMode, meetingTranscript.length, autoSaveMeetingTranscript]);
 
+  // Whether transcript segments exist that the latest successful save does
+  // not cover. The flush below and the over point's release share it.
+  const hasUnsavedMeetingTranscript = useCallback(
+    (): boolean =>
+      meetingTranscriptLengthRef.current -
+        lastAutoSavedTranscriptCountRef.current >
+        0 &&
+      !!currentConversationIdRef.current &&
+      conversationHistoryRef.current.length > 0,
+    []
+  );
+
   // Flush any transcript segments not covered by the latest successful save.
   // Every meeting-session boundary uses this helper so the persistence guard
   // and watermark calculation stay consistent.
   const flushUnsavedMeetingTranscript = useCallback((): Promise<void> => {
-    const unsavedCount =
-      meetingTranscriptLengthRef.current -
-      lastAutoSavedTranscriptCountRef.current;
-    if (
-      unsavedCount <= 0 ||
-      !currentConversationIdRef.current ||
-      conversationHistoryRef.current.length === 0
-    ) {
-      return Promise.resolve();
-    }
-
+    if (!hasUnsavedMeetingTranscript()) return Promise.resolve();
     return autoSaveMeetingTranscript();
-  }, [autoSaveMeetingTranscript]);
+  }, [autoSaveMeetingTranscript, hasUnsavedMeetingTranscript]);
+
+  // A meeting line with capture off (a late STT result, or a line after the
+  // over point) opens the meeting again and re-arms the over check, its only
+  // release. During capture the rollover effect has already opened it.
+  const noteMeetingLine = useCallback(() => {
+    if (meetingOpenRef.current || wasMeetingCaptureActiveRef.current) return;
+    meetingOpenRef.current = true;
+    // Past the over effect's launch guard: a keyed conversation needs the check.
+    hadCaptureRef.current = true;
+    setOverCheckEpoch((n) => n + 1);
+  }, []);
 
   const setInput = useCallback((value: string) => {
     setState((prev) => ({ ...prev, input: value }));
@@ -630,7 +665,9 @@ export const useCompletion = () => {
 
     // Also add to conversation history as a user message (for display)
     // Use ref for conversation ID to avoid stale closure - ref is always current
+    if (audioSource != null) noteMeetingLine();
     const conversationId = ensureConversationId(currentConversationIdRef);
+    syncMeetingKey();
 
     const userMessage: ChatMessage = {
       id: generateMessageId("user", timestamp),
@@ -651,7 +688,7 @@ export const useCompletion = () => {
     }));
 
     return timestamp;
-  }, []); // No dependencies - uses ref for conversation ID and functional setState for latest state
+  }, [noteMeetingLine, syncMeetingKey]); // Stable deps only - uses ref for conversation ID and functional setState for latest state
 
   /**
    * Adds multiple transcript entries from diarization result.
@@ -676,7 +713,9 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, ...validEntries]);
 
       // Also add to conversation history as user messages (for display)
+      if (validEntries.some((e) => e.audioSource != null)) noteMeetingLine();
       const conversationId = ensureConversationId(currentConversationIdRef);
+      syncMeetingKey();
 
       const userMessages: ChatMessage[] = validEntries.map((entry) => ({
         id: generateMessageId("user", entry.timestamp),
@@ -702,7 +741,7 @@ export const useCompletion = () => {
         conversationHistory: [...prev.conversationHistory, ...userMessages],
       }));
     },
-    []
+    [noteMeetingLine, syncMeetingKey]
   );
 
   // Update translation for a specific transcript entry (updates both meetingTranscript and conversationHistory)
@@ -773,7 +812,9 @@ export const useCompletion = () => {
       setMeetingTranscript((prev) => [...prev, entry]);
 
       // Also add to conversation history
+      noteMeetingLine();
       const conversationId = ensureConversationId(currentConversationIdRef);
+      syncMeetingKey();
 
       const userMessage: ChatMessage = {
         id: generateMessageId("user", timestamp),
@@ -795,7 +836,7 @@ export const useCompletion = () => {
         conversationHistory: [...prev.conversationHistory, userMessage],
       }));
     },
-    []
+    [noteMeetingLine, syncMeetingKey]
   );
 
   const clearMeetingTranscript = useCallback(async () => {
@@ -820,6 +861,8 @@ export const useCompletion = () => {
     conversationTranscriptStartRef.current = 0;
     setConversationTranscriptStart(0);
     currentConversationIdRef.current = null;
+    if (!wasMeetingCaptureActiveRef.current) meetingOpenRef.current = false;
+    syncMeetingKey();
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
     persistedMessageIdsRef.current = new Set();
@@ -846,7 +889,7 @@ export const useCompletion = () => {
     // full-instance wipe, not commit() - so a second dispatch is a harmless
     // no-op against an already-empty target list, not a stale write.
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
-  }, [flushUnsavedMeetingTranscript]);
+  }, [flushUnsavedMeetingTranscript, syncMeetingKey]);
 
   /**
    * Assigns a speaker label to a speaker ID and propagates to all matching entries.
@@ -960,6 +1003,7 @@ export const useCompletion = () => {
       // Generate conversation ID upfront for new conversations
       // This ensures the ID is available when usage events are captured
       const conversationId = ensureConversationId(currentConversationIdRef);
+      syncMeetingKey();
       console.log("[Cost Tracking] Set conversation ID ref to:", conversationId);
       // Functional and keyed on the live value, NOT `if (!state.currentConversationId)`:
       // after the substitution the id comes from the ref while that guard reads a
@@ -1123,6 +1167,7 @@ export const useCompletion = () => {
       selectedAIProvider,
       allAiProviders,
       systemPrompt,
+      syncMeetingKey,
       // Note: conversationHistory removed - using conversationHistoryRef to avoid stale closure
     ]
   );
@@ -1168,6 +1213,7 @@ export const useCompletion = () => {
 
       // Generate conversation ID upfront (use "chat" type for meeting assist conversations)
       const conversationId = ensureConversationId(currentConversationIdRef);
+      syncMeetingKey();
       // See the note at the sibling site in `submit`: functional, keyed on the live
       // value, because the guard would otherwise read a stale snapshot.
       setState((prev) =>
@@ -1359,6 +1405,7 @@ export const useCompletion = () => {
       submit,
       queueConversationWrite,
       requestAITitle,
+      syncMeetingKey,
     ]
   );
 
@@ -1463,6 +1510,8 @@ export const useCompletion = () => {
     setConversationTranscriptStart(meetingTranscript.length);
     const switching = currentConversationIdRef.current !== conversation.id;
     currentConversationIdRef.current = conversation.id;
+    if (!wasMeetingCaptureActiveRef.current) meetingOpenRef.current = false;
+    syncMeetingKey();
     conversationHistoryRef.current = conversation.messages; // Update ref immediately
     // Reset autosave watermark relative to any existing meeting transcript so
     // newly added segments start a fresh count toward the next auto-save.
@@ -1488,6 +1537,7 @@ export const useCompletion = () => {
     summarizeCurrentConversation,
     meetingTranscript.length,
     flushUnsavedMeetingTranscript,
+    syncMeetingKey,
   ]);
 
   const startNewConversation = useCallback(async () => {
@@ -1505,6 +1555,8 @@ export const useCompletion = () => {
     conversationTranscriptStartRef.current = meetingTranscript.length;
     setConversationTranscriptStart(meetingTranscript.length);
     currentConversationIdRef.current = null;
+    if (!wasMeetingCaptureActiveRef.current) meetingOpenRef.current = false;
+    syncMeetingKey();
     conversationHistoryRef.current = []; // Update ref immediately
     lastAutoSavedTranscriptCountRef.current = 0;
     persistedMessageIdsRef.current = new Set();
@@ -1527,7 +1579,12 @@ export const useCompletion = () => {
     // scoped to a conversation and must not survive into the next one; see
     // useOdooTarget's listener for "newConversationStarted".
     window.dispatchEvent(new CustomEvent("newConversationStarted"));
-  }, [summarizeCurrentConversation, meetingTranscript.length, flushUnsavedMeetingTranscript]);
+  }, [
+    summarizeCurrentConversation,
+    meetingTranscript.length,
+    flushUnsavedMeetingTranscript,
+    syncMeetingKey,
+  ]);
 
   // A meeting capture that opens long after this conversation's last meeting
   // line is a new meeting. Left alone it appends to the old conversation, which
@@ -1540,8 +1597,6 @@ export const useCompletion = () => {
   // reads the refs when it RUNS, so startNewConversation must flush the old
   // conversation before its refs reset, which needs an await. The first new
   // line arrives an STT round trip after the mic opens.
-  const meetingCaptureActive = meetingAssistMode && enableVAD;
-  const wasMeetingCaptureActiveRef = useRef(meetingCaptureActive);
   useEffect(() => {
     const wasActive = wasMeetingCaptureActiveRef.current;
     wasMeetingCaptureActiveRef.current = meetingCaptureActive;
@@ -1566,6 +1621,8 @@ export const useCompletion = () => {
           if (!wasMeetingCaptureActiveRef.current) return;
         }
       }
+      meetingOpenRef.current = true;
+      syncMeetingKey();
       // Only a conversation with no meeting in it yet. A capture restart
       // inside the gap keeps its targets.
       // NOT meetingTranscript: that buffer is session-wide and never cleared
@@ -1576,8 +1633,15 @@ export const useCompletion = () => {
       }
       // The flush inside startNewConversation can reject. Logged rather than
       // left unhandled; the capture itself carries on either way.
-    })().catch((err) => console.error("Meeting capture rollover failed:", err));
-  }, [meetingCaptureActive, startNewConversation]);
+    })().catch((err) => {
+      console.error("Meeting capture rollover failed:", err);
+      // A rejected startNewConversation must not leave a live capture unkeyed.
+      if (wasMeetingCaptureActiveRef.current) {
+        meetingOpenRef.current = true;
+        syncMeetingKey();
+      }
+    });
+  }, [meetingCaptureActive, startNewConversation, syncMeetingKey]);
 
   // Recording stop = the meeting is over. A layout effect that compares before
   // it assigns, seeded from the first render (no edge on mount): a stop and a
@@ -1602,7 +1666,6 @@ export const useCompletion = () => {
   // Announced now, so its Odoo contact leaves the overlay (useOdooTarget)
   // rather than waiting there for the next call. The Odoo row was cut at the
   // stop (useMeetingLog); the conversation and any answer stay for a recap.
-  const hadCaptureRef = useRef(false);
   useEffect(() => {
     if (meetingCaptureActive) {
       hadCaptureRef.current = true;
@@ -1610,20 +1673,57 @@ export const useCompletion = () => {
     }
     if (!hadCaptureRef.current) return; // launch: no meeting has run
     let timer: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+    // The meeting can add no more lines, so the key goes once they are all
+    // saved: until then a send from the Meetings page would miss the tail.
+    const release = async () => {
+      const lenBefore = meetingTranscriptLengthRef.current;
+      await flushUnsavedMeetingTranscript().catch((e) =>
+        console.error("Over-point flush failed:", e)
+      );
+      if (cancelled) return;
+      if (hasUnsavedMeetingTranscript()) {
+        // A line landed during the flush (noteMeetingLine skipped it, the
+        // meeting being still open): check again from it. A failed save with
+        // no new line just keeps the key. Never re-armed for that: each check
+        // dispatches meetingOver, which clears the overlay's Odoo targets.
+        if (meetingTranscriptLengthRef.current !== lenBefore) {
+          setOverCheckEpoch((n) => n + 1);
+        }
+        return;
+      }
+      meetingOpenRef.current = false;
+      syncMeetingKey();
+    };
     const check = () => {
       const lastLineAt = conversationHistoryRef.current.reduce(
         (max, m) => (m.audioSource != null && m.timestamp > max ? m.timestamp : max),
         0
       );
-      if (lastLineAt === 0) return; // nothing said, no meeting to end
+      if (lastLineAt === 0) {
+        void release(); // nothing said, no meeting to end
+        return;
+      }
       // A line that landed after the stop moves the end.
       const wait = lastLineAt + NEW_CONVERSATION_GAP_MS - Date.now();
       if (wait >= 0) timer = setTimeout(check, wait + 1);
-      else window.dispatchEvent(new CustomEvent("meetingOver"));
+      else {
+        window.dispatchEvent(new CustomEvent("meetingOver"));
+        void release();
+      }
     };
     timer = setTimeout(check, NEW_CONVERSATION_GAP_MS);
-    return () => clearTimeout(timer);
-  }, [meetingCaptureActive]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    meetingCaptureActive,
+    overCheckEpoch,
+    flushUnsavedMeetingTranscript,
+    hasUnsavedMeetingTranscript,
+    syncMeetingKey,
+  ]);
 
   const saveCurrentConversation = useCallback(
     async (
@@ -1733,6 +1833,7 @@ export const useCompletion = () => {
   // knowledge backfill doesn't skip that conversation forever.
   useEffect(() => {
     clearActiveConversationId();
+    setMeetingConversationId(null);
   }, []);
 
   // Listen for conversation events from the main ChatHistory component
@@ -1873,6 +1974,7 @@ export const useCompletion = () => {
           // if one exists, rather than letting saveCurrentConversation mint its
           // own id from stale state.
           const conversationId = ensureConversationId(currentConversationIdRef);
+          syncMeetingKey();
           // Mirror into state as well, functional and keyed on the live value
           // for the reason spelled out at submit()'s copy of this block. Only
           // the ref was being set here, so a conversation a screenshot STARTED
@@ -2038,6 +2140,7 @@ export const useCompletion = () => {
       systemPrompt,
       saveCurrentConversation,
       inputRef,
+      syncMeetingKey,
     ]
   );
 

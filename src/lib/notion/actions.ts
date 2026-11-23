@@ -5,19 +5,18 @@ import {
   cancelOfferedRows,
   cancelSend,
   listConversationNotionRows,
+  listWaitingRows,
   markRowsWaiting,
   offerRowsToWaiting,
   retrySend,
   type NotionItem,
 } from "@/lib/database/notion-queue.action";
 import { renderTranscript, segmentByGap } from "@/lib/odoo/meeting-log";
-import {
-  getActiveConversationId,
-  getCapturingConversationId,
-} from "@/lib/storage/active-conversation.storage";
+import { isConversationRecording } from "@/lib/storage/active-conversation.storage";
 import { isNotionConfigured } from "@/lib/storage/notion-config.storage";
 import { notionErrorText } from "./errors";
 import { NOTION_KICK_EVENT } from "./events";
+import { openSends } from "./join";
 
 /** Only the overlay runs sends; every action writes the DB then kicks it. A failed kick only delays to the next 60 s tick. */
 async function kick(): Promise<void> {
@@ -36,17 +35,17 @@ export async function sendConversationToNotion(
   now: number,
 ): Promise<SendConversationOutcome> {
   if (conversationId.startsWith("sysaudio_conv_")) return "system-audio";
-  if (conversationId === getActiveConversationId() || conversationId === getCapturingConversationId()) {
-    return "active";
-  }
+  if (isConversationRecording(conversationId)) return "active";
   if (!(await isNotionConfigured())) return "not-configured";
 
   const rows = await listConversationNotionRows(conversationId);
+  // Waiting with no send: auto-Notion queued it, or a press's link failed. A press opens it now.
+  const heal = rows.filter((r) => r.notion_status === "waiting" && r.notion_send_id === null);
   if (
     rows.some(
       (r) =>
         // An 'offered' row counts as lane-open in SQL but is exactly what this converts.
-        (r.lane_open && r.notion_status !== "offered") ||
+        (r.lane_open && r.notion_status !== "offered" && !heal.includes(r)) ||
         r.send_status === "sent" ||
         r.send_status === "already" ||
         (r.send_status === "cancelled" && r.send_page_id !== null),
@@ -60,19 +59,56 @@ export async function sendConversationToNotion(
       r.status !== "cancelled" && r.status !== "deleted" &&
       (r.notion_status === null || r.notion_status === "offered"),
   );
-  if (candidates.length > 0 && candidates.every((r) => r.transcript.trim() !== "")) {
+  const pending = [...candidates, ...heal];
+  const saved = segmentByGap(await readConversationTranscript(conversationId), MEETING_CONVERSATION_GAP_MS);
+  const own = pending.length > 0 ? ownMeetings(saved, pending) : saved;
+  if (
+    pending.length > 0 &&
+    candidates.every((r) => r.transcript.trim() !== "") &&
+    !hasTail(own, pending)
+  ) {
     await markRowsWaiting(candidates.map((r) => r.id));
-    await kick();
-    return "queued";
+  } else {
+    // No usable rows, some pruned blank, or saved lines past the rows: rebuild from the saved transcript.
+    const superseded = pending
+      .filter((r) => r.notion_status === "offered" || r.notion_status === "waiting")
+      .map((r) => r.id);
+    if (!(await insertFreshRows(conversationId, now, superseded, own))) return "empty";
   }
+  await openConversation(conversationId, now);
+  await kick();
+  return "queued";
+}
 
-  // No usable rows, or some were pruned blank: write fresh ones from the saved transcript.
-  const segments = segmentByGap(
-    await readConversationTranscript(conversationId),
-    MEETING_CONVERSATION_GAP_MS,
-  );
-  if (segments.length === 0) return "empty";
-  const superseded = candidates.filter((r) => r.notion_status === "offered").map((r) => r.id);
+type Span = { transcript_start_at: number; transcript_end_at: number };
+type Meeting = ReturnType<typeof segmentByGap>[number];
+
+/** The saved meetings overlapping the rows' span: a later meeting of the same conversation is not theirs. */
+function ownMeetings(saved: Meeting[], rows: Span[]): Meeting[] {
+  const start = Math.min(...rows.map((r) => r.transcript_start_at));
+  const end = Math.max(...rows.map((r) => r.transcript_end_at));
+  return saved.filter((s) => s.endAt >= start && s.startAt <= end);
+}
+
+/** True when the rows' own meeting has saved spoken lines past the end of the rows. */
+function hasTail(own: Meeting[], rows: Span[]): boolean {
+  const end = Math.max(...rows.map((r) => r.transcript_end_at));
+  return own.some((s) => s.endAt > end);
+}
+
+/**
+ * Writes fresh waiting rows for `segments`, false (and cancels nothing) when there are none. Cancels
+ * `supersede` BEFORE inserting: a failure between the two then leaves nothing queued (a re-press
+ * rebuilds) instead of old and fresh rows overlapping and showing every line twice.
+ */
+async function insertFreshRows(
+  conversationId: string,
+  now: number,
+  supersede: string[],
+  segments: Meeting[],
+): Promise<boolean> {
+  if (segments.length === 0) return false;
+  await cancelOfferedRows(supersede);
   for (const slice of segments) {
     await insertQueueRow({
       id: crypto.randomUUID(),
@@ -89,14 +125,36 @@ export async function sendConversationToNotion(
       createdAt: now,
     });
   }
-  // The offered rows this replaces would otherwise put the same span on a second page.
-  await cancelOfferedRows(superseded);
-  await kick();
-  return "queued";
+  return true;
 }
 
-export async function sendRowsToNotion(rowIds: string[]): Promise<void> {
+async function openConversation(conversationId: string, now: number): Promise<void> {
+  await openSends((await listWaitingRows()).filter((r) => r.conversation_id === conversationId), now);
+}
+
+/** A hand press opens the send now, with no quiet wait; a conversation still recording stays waiting. */
+export async function sendRowsToNotion(
+  rowIds: string[],
+  conversationId: string | null,
+  now: number = Date.now(),
+): Promise<void> {
   await offerRowsToWaiting(rowIds);
+  if (conversationId === null) {
+    await openSends((await listWaitingRows()).filter((r) => rowIds.includes(r.id)), now);
+  } else if (!conversationId.startsWith("sysaudio_conv_") && !isConversationRecording(conversationId)) {
+    const waiting = (await listWaitingRows()).filter((r) => r.conversation_id === conversationId);
+    // An empty list means a stale item (the offer changed nothing): skip straight to the kick.
+    if (waiting.length > 0) {
+      const own = ownMeetings(
+        segmentByGap(await readConversationTranscript(conversationId), MEETING_CONVERSATION_GAP_MS),
+        waiting,
+      );
+      if (hasTail(own, waiting)) {
+        await insertFreshRows(conversationId, now, waiting.map((r) => r.id), own);
+      }
+      await openConversation(conversationId, now);
+    }
+  }
   await kick();
 }
 

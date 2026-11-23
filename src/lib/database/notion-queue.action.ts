@@ -41,13 +41,16 @@ SELECT DISTINCT conversation_id FROM notion_sends
 
   insertSend: `
 INSERT INTO notion_sends (id, conversation_id, status, next_at, span_start_at, span_end_at, created_at, calendar_json)
-VALUES (?, ?, 'retry', 0, ?, ?, ?, ?)
+VALUES (?, ?, 'retry', ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING`,
 
   // Open-ended placeholders are appended per call: `id IN (?, ?, ...)`.
   linkRowsPrefix: `
 UPDATE meeting_log_queue SET notion_status = 'joined', notion_send_id = ?
  WHERE notion_status = 'waiting' AND notion_send_id IS NULL AND id IN `,
+
+  // Only a send still waiting in 'retry' is released: a heal call must not wipe a backoff.
+  release: `UPDATE notion_sends SET next_at = 0 WHERE id = ? AND status = 'retry'`,
 
   claim: `
 UPDATE notion_sends SET status = 'sending', claimed_at = ?, attempts = attempts + 1
@@ -120,6 +123,8 @@ SELECT meeting_log_queue.id AS id, meeting_log_queue.status AS status,
        meeting_log_queue.notion_status AS notion_status,
        meeting_log_queue.notion_send_id AS notion_send_id,
        meeting_log_queue.transcript AS transcript,
+       meeting_log_queue.transcript_start_at AS transcript_start_at,
+       meeting_log_queue.transcript_end_at AS transcript_end_at,
        ${NOTION_LANE_OPEN} AS lane_open,
        ns.status AS send_status, ns.page_id AS send_page_id
   FROM meeting_log_queue
@@ -130,6 +135,9 @@ SELECT meeting_log_queue.id AS id, meeting_log_queue.status AS status,
 UPDATE meeting_log_queue SET notion_status = 'waiting'
  WHERE (notion_status IS NULL OR notion_status = 'offered') AND notion_send_id IS NULL AND id IN `,
 } as const;
+
+/** A new send is held this long, so a crash before its rows are linked cannot run it empty. */
+const SEND_HOLD_MS = 60_000;
 
 const marks = (ids: string[]) => `(${ids.map(() => "?").join(", ")})`;
 
@@ -160,15 +168,23 @@ export async function conversationsWithLiveSend(staleBefore: number): Promise<Se
   return new Set(r.map((x) => x.conversation_id));
 }
 
-/** Insert first, link second; the link runs even if the insert was a no-op so a crash between them heals. */
+/**
+ * Insert first, link second, release last. The insert holds the send (`next_at =
+ * createdAt + SEND_HOLD_MS`) because a send must not be due before its rows are
+ * linked. The link runs even if the insert was a no-op, so a crash between them
+ * heals. Only a call that actually inserted releases: a heal call (insert no-op)
+ * must not wipe a retry backoff.
+ */
 export async function createSendAndLink(
   s: { id: string; conversationId: string | null; spanStartAt: number; spanEndAt: number; createdAt: number; calendarJson: string | null },
   rowIds: string[]
 ): Promise<void> {
   const db = await getDatabase();
-  await db.execute(NOTION_SQL.insertSend, [s.id, s.conversationId, s.spanStartAt, s.spanEndAt, s.createdAt, s.calendarJson]);
-  if (rowIds.length === 0) return;
-  await db.execute(NOTION_SQL.linkRowsPrefix + marks(rowIds), [s.id, ...rowIds]);
+  const ins = await db.execute(NOTION_SQL.insertSend, [
+    s.id, s.conversationId, s.createdAt + SEND_HOLD_MS, s.spanStartAt, s.spanEndAt, s.createdAt, s.calendarJson,
+  ]);
+  if (rowIds.length > 0) await db.execute(NOTION_SQL.linkRowsPrefix + marks(rowIds), [s.id, ...rowIds]);
+  if ((ins.rowsAffected ?? 0) > 0) await db.execute(NOTION_SQL.release, [s.id]);
 }
 
 export async function claimSend(id: string, now: number, staleBefore: number): Promise<number | null> {
@@ -287,6 +303,8 @@ export interface ConversationNotionRow {
   notion_status: string | null;
   notion_send_id: string | null;
   transcript: string;
+  transcript_start_at: number;
+  transcript_end_at: number;
   lane_open: number;
   send_status: string | null;
   send_page_id: string | null;

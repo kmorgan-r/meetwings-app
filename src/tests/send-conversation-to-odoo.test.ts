@@ -28,10 +28,16 @@ vi.mock("@/lib/storage/odoo-config.storage", () => ({
   instanceFingerprint: () => "http://h:8069|odoo",
 }));
 
-const active = vi.hoisted(() => ({ id: null as string | null, capturing: null as string | null }));
+const active = vi.hoisted(() => ({
+  id: null as string | null,
+  capturing: null as string | null,
+  meeting: null as string | null,
+}));
 vi.mock("@/lib/storage/active-conversation.storage", () => ({
   getActiveConversationId: () => active.id,
   getCapturingConversationId: () => active.capturing,
+  getMeetingConversationId: () => active.meeting,
+  isConversationRecording: (id: string) => id === active.capturing || id === active.meeting,
 }));
 
 import { enqueueConversation } from "@/lib/odoo/meeting-log-actions";
@@ -71,6 +77,7 @@ beforeEach(async () => {
   }
   active.id = null;
   active.capturing = null;
+  active.meeting = null;
 });
 
 describe("enqueueConversation", () => {
@@ -134,12 +141,21 @@ describe("enqueueConversation", () => {
     expect(queue()).toEqual([]);
   });
 
-  it("refuses the conversation the overlay still holds", async () => {
+  it("refuses the conversation a meeting is still recording into", async () => {
     message({ content: "said aloud" });
-    active.id = "conv_1";
+    active.meeting = "conv_1";
 
     expect(await enqueueConversation("conv_1", NOW)).toEqual({ kind: "active" });
     expect(queue()).toEqual([]);
+  });
+
+  it("sends the conversation the overlay only has open", async () => {
+    message({ content: "said aloud" });
+    active.id = "conv_1";
+
+    const outcome = await enqueueConversation("conv_1", NOW);
+    expect(outcome.kind).toBe("queued");
+    expect(queue()).toHaveLength(1);
   });
 
   it("refuses a system-audio capture that is still recording", async () => {
