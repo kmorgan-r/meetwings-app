@@ -25,6 +25,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { useGoogleMeetingCapture } from "@/hooks/useGoogleMeetingCapture";
+import { detectionLog } from "@/lib/detection-log";
 import { STORAGE_KEYS } from "@/config/constants";
 import { OUTLOOK_CHECK_TIMEOUT_MS } from "@/lib/calendar/auto-notion";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
@@ -837,5 +838,105 @@ describe("useGoogleMeetingCapture warning and re-read", () => {
     await connectionChanged();
     await settle();
     expect(getMeetingCard()).toMatchObject({ kind: "amber", episode: 999 });
+  });
+});
+
+describe("useGoogleMeetingCapture detection logging", () => {
+  /** Log lines from detectionLog that describe a Google read. */
+  const googleReadLines = () =>
+    vi
+      .mocked(detectionLog)
+      .mock.calls.map((call) => call[0] as string)
+      .filter((line) => line.startsWith("google read"));
+
+  it("logs ok reads with the event count and the pick", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await dispatch();
+    await settle();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(several);
+    await dispatch();
+    await settle();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(none);
+    await dispatch();
+    await settle();
+    expect(googleReadLines()).toEqual([
+      "google read ok events=1 pick=one src=capture",
+      "google read ok events=2 pick=several src=capture",
+      "google read ok events=0 pick=none src=capture",
+    ]);
+  });
+
+  it("logs errors by code and absent as absent", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(
+      failure("GOOGLE_CONSENT_REQUIRED")
+    );
+    await dispatch();
+    await settle();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce({ kind: "absent" });
+    await dispatch();
+    await settle();
+    expect(googleReadLines()).toEqual([
+      "google read error GOOGLE_CONSENT_REQUIRED src=capture",
+      "google read absent src=capture",
+    ]);
+  });
+
+  it("logs a dropped read as stale", async () => {
+    const d = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
+    setup("c1");
+    await dispatch();
+    await dispatch("newConversationStarted");
+    await act(async () => {
+      d.resolve(one("A"));
+    });
+    await settle();
+    expect(googleReadLines()).toEqual(["google read stale src=capture"]);
+  });
+
+  it("logs a reconnect re-read with its source", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(failure("GOOGLE_AUTH_EXPIRED"));
+    await dispatch();
+    await settle();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    const lines = googleReadLines();
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    expect(lines[lines.length - 1]).toBe("google read ok events=1 pick=one src=reconnect");
+  });
+
+  it("a log line never carries calendar text", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await dispatch();
+    await settle();
+    for (const call of vi.mocked(detectionLog).mock.calls) {
+      const line = call[0] as string;
+      expect(line).not.toContain("Meeting A");
+      expect(line).not.toContain("A@guest.example");
+      expect(line).not.toContain("me@example.org");
+    }
+  });
+
+  it("each read logs exactly one line", async () => {
+    setup("c1");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await dispatch();
+    await settle();
+    expect(googleReadLines().length).toBe(1);
+    vi.mocked(detectionLog).mockClear();
+    const d = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
+    await dispatch();
+    await dispatch("newConversationStarted");
+    await act(async () => {
+      d.resolve(one("A"));
+    });
+    await settle();
+    expect(googleReadLines().length).toBe(1);
   });
 });

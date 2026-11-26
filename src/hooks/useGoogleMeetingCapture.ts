@@ -9,6 +9,7 @@ import {
 import { pickCurrentMeeting } from "@/lib/calendar/current-meeting";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
 import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
+import { detectionLog } from "@/lib/detection-log";
 import {
   deleteCalendarSnapshot,
   saveCalendarSnapshot,
@@ -160,7 +161,18 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
         ? withTimeout(fetchCurrentMeetings(), OUTLOOK_CHECK_TIMEOUT_MS)
         : null;
       const result = await g;
-      if (seq !== readSeq.current || gen !== convGen.current) return;
+      if (seq !== readSeq.current || gen !== convGen.current) {
+        detectionLog(`google read stale src=${src}`);
+        return;
+      }
+      const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
+      if (result.kind === "ok") {
+        detectionLog(`google read ok events=${result.events.length} pick=${pick?.kind} src=${src}`);
+      } else if (result.kind === "error") {
+        detectionLog(`google read error ${result.code} src=${src}`);
+      } else {
+        detectionLog(`google read absent src=${src}`);
+      }
       if (result.kind === "error") {
         if (src === "capture") {
           const episode = arm.current?.episode ?? ++amberEpisode;
@@ -171,7 +183,6 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
         if (arm.current) dismissAmber(arm.current.episode);
         arm.current = null;
       }
-      const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
       if (rec?.gated && result.kind === "ok" && pick?.kind === "one") {
         setCardEvent(rec.id, pick.event, result.ownAddress);
       }
