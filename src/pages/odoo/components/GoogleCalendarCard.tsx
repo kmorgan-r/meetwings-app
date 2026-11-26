@@ -8,7 +8,10 @@ import {
   broadcastGoogleConnectionChanged as broadcast,
   connectGoogle,
 } from "@/lib/calendar/google-connect";
+import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
 import { GOOGLE_COPY, toGoogleCode } from "@/lib/calendar/google-errors";
+import { cn } from "@/lib/utils";
+import type { GoogleErrorCode } from "@/types/calendar";
 import {
   classifyGoogleConfig,
   GOOGLE_CONNECTION_CHANGED_EVENT,
@@ -29,7 +32,30 @@ export function GoogleCalendarCard() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The refresh token alone says "connected"; one real read proves the calendar works.
+  const [calendar, setCalendar] = useState<"checking" | "ok" | GoogleErrorCode | null>(null);
+
   const mountedRef = useRef(true);
+  // Newest read wins: bumped by every verify and by Disconnect / a not-connected status.
+  const seqRef = useRef(0);
+
+  async function verify() {
+    const seq = ++seqRef.current;
+    if (!mountedRef.current) return;
+    setCalendar("checking");
+    const r = await fetchCurrentGoogleMeetings();
+    if (!mountedRef.current || seq !== seqRef.current) return;
+    setCalendar(r.kind === "ok" ? "ok" : r.kind === "error" ? r.code : null);
+  }
+
+  function applyStatus(s: GraphStatus) {
+    setStatus(s);
+    if (s.connected) void verify();
+    else {
+      seqRef.current++;
+      setCalendar(null);
+    }
+  }
 
   async function reload() {
     const state = await loadGoogleConfigState();
@@ -43,7 +69,7 @@ export function GoogleCalendarCard() {
       // keychain alone says connected, even when the stored config is corrupt.
       try {
         const s = await invoke<GraphStatus>("google_status");
-        if (mountedRef.current) setStatus(s);
+        if (mountedRef.current) applyStatus(s);
       } catch (err) {
         if (mountedRef.current) setError(GOOGLE_COPY[toGoogleCode(err)]);
       }
@@ -61,7 +87,7 @@ export function GoogleCalendarCard() {
       listen(GOOGLE_CONNECTION_CHANGED_EVENT, async () => {
         try {
           const s = await invoke<GraphStatus>("google_status");
-          if (mountedRef.current) setStatus(s);
+          if (mountedRef.current) applyStatus(s);
         } catch {
           // keep the current status
         }
@@ -85,7 +111,7 @@ export function GoogleCalendarCard() {
     setBusy(true);
     // connectGoogle saves, connects, fills the Notion name and broadcasts.
     const r = await connectGoogle(form.config);
-    if (r.ok) setStatus(r.status);
+    if (r.ok) applyStatus(r.status);
     else setError(GOOGLE_COPY[r.code]);
     setBusy(false);
   }
@@ -93,6 +119,9 @@ export function GoogleCalendarCard() {
   async function handleDisconnect() {
     setError(null);
     setBusy(true);
+    // Drop any read still running from before.
+    seqRef.current++;
+    setCalendar(null);
     try {
       await invoke("google_disconnect");
       setStatus({ connected: false, sessionOnly: false });
@@ -149,8 +178,24 @@ export function GoogleCalendarCard() {
           {error}
         </p>
       ) : (
-        <p data-testid="google-status" className="text-sm text-muted-foreground">
-          {status.connected ? "Connected" : "Not connected"}
+        <p
+          data-testid="google-status"
+          className={cn(
+            "text-sm",
+            status.connected && calendar && calendar !== "checking" && calendar !== "ok"
+              ? "text-destructive"
+              : "text-muted-foreground"
+          )}
+        >
+          {!status.connected
+            ? "Not connected"
+            : calendar === "checking"
+              ? "Connected · checking calendar…"
+              : calendar === "ok"
+                ? "Connected · calendar readable"
+                : calendar
+                  ? GOOGLE_COPY[calendar]
+                  : "Connected"}
         </p>
       )}
       {status.connected && status.sessionOnly && (
