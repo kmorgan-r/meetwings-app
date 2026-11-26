@@ -21,6 +21,10 @@ edition = "2021"
 name = "meetwings_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Opt-in: crashes on demand (MEETWINGS_CRASH_TEST) to verify Sentry reports; devtools for JS checks in release builds.
+crash-test = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 dotenv = "0.15"

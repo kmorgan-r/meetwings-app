@@ -31,6 +31,40 @@ pub(crate) fn init() -> Option<(sentry::ClientInitGuard, tauri_plugin_sentry::Se
     Some((sentry::init(options), plugin))
 }
 
+#[cfg(feature = "crash-test")]
+#[derive(Debug, PartialEq)]
+enum CrashKind {
+    Panic,
+    Abort,
+}
+
+#[cfg(feature = "crash-test")]
+fn crash_kind(raw: Option<&str>) -> Option<CrashKind> {
+    match raw? {
+        "panic" => Some(CrashKind::Panic),
+        "abort" => Some(CrashKind::Abort),
+        _ => None,
+    }
+}
+
+/// Real, non-inlined function so its name shows up in the Sentry stack frame.
+#[cfg(feature = "crash-test")]
+#[inline(never)]
+fn sentry_crash_test(kind: CrashKind) -> ! {
+    match kind {
+        CrashKind::Panic => panic!("sentry crash test"),
+        CrashKind::Abort => std::process::abort(),
+    }
+}
+
+/// Crashes on purpose when `MEETWINGS_CRASH_TEST` is `panic` or `abort`, to verify reports arrive.
+#[cfg(feature = "crash-test")]
+pub(crate) fn maybe_crash_test() {
+    if let Some(kind) = crash_kind(std::env::var("MEETWINGS_CRASH_TEST").ok().as_deref()) {
+        sentry_crash_test(kind);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +86,23 @@ mod tests {
         let dsn = parse_dsn(Some(" https://abc@o1.ingest.sentry.io/42\n")).unwrap();
         assert_eq!(dsn.public_key(), "abc");
         assert_eq!(dsn.project_id().to_string(), "42");
+    }
+}
+
+#[cfg(all(test, feature = "crash-test"))]
+mod crash_test_tests {
+    use super::*;
+
+    #[test]
+    fn crash_kind_reads_known_values() {
+        assert_eq!(crash_kind(Some("panic")), Some(CrashKind::Panic));
+        assert_eq!(crash_kind(Some("abort")), Some(CrashKind::Abort));
+    }
+
+    #[test]
+    fn crash_kind_ignores_unknown_values() {
+        assert_eq!(crash_kind(None), None);
+        assert_eq!(crash_kind(Some("")), None);
+        assert_eq!(crash_kind(Some("segv")), None);
     }
 }

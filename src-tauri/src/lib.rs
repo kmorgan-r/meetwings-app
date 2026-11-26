@@ -140,6 +140,8 @@ pub fn run() {
     // itself as the crash reporter, and that child never returns from init.
     // The guard must live to the end of run() so events are flushed.
     let crash_reporting = crash_reporting::init();
+    #[cfg(feature = "crash-test")]
+    crash_reporting::maybe_crash_test();
 
     // Get PostHog API key
     let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("").to_string();
