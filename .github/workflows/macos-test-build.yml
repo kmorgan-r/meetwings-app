@@ -48,6 +48,7 @@ jobs:
           echo "PAYMENT_ENDPOINT=${{ secrets.PAYMENT_ENDPOINT }}" >> src-tauri/.env
           echo "APP_ENDPOINT=${{ secrets.APP_ENDPOINT }}" >> src-tauri/.env
           echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}" >> src-tauri/.env
+          echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> src-tauri/.env
 
       - name: Install frontend deps
         run: npm ci
@@ -67,8 +68,9 @@ jobs:
           PAYMENT_ENDPOINT: ${{ secrets.PAYMENT_ENDPOINT }}
           APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         with:
-          args: --target ${{ matrix.target }} --bundles dmg --config ${{ runner.temp }}/no-updater.json
+          args: --target ${{ matrix.target }} --bundles dmg --features crash-test --config ${{ runner.temp }}/no-updater.json
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
@@ -77,3 +79,15 @@ jobs:
           path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload debug symbols to Sentry
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          [ -n "$SENTRY_AUTH_TOKEN" ] || { echo "SENTRY_AUTH_TOKEN not set; skipping"; exit 0; }
+          set -euo pipefail
+          npm i -g @sentry/cli@3.8.2
+          sentry-cli debug-files upload --include-sources "src-tauri/target/${{ matrix.target }}/release"/meetwings*
