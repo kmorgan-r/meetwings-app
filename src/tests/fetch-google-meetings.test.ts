@@ -31,6 +31,7 @@ describe("fetchCurrentGoogleMeetings", () => {
     await expect(fetchCurrentGoogleMeetings()).resolves.toEqual({
       kind: "error",
       code: "GOOGLE_AUTH_REJECTED",
+      config: "unreadable",
     });
     expect(invoke).not.toHaveBeenCalled();
   });
@@ -55,6 +56,7 @@ describe("fetchCurrentGoogleMeetings", () => {
     await expect(fetchCurrentGoogleMeetings()).resolves.toEqual({
       kind: "error",
       code: "GOOGLE_THROTTLED",
+      config: "complete",
     });
   });
 });

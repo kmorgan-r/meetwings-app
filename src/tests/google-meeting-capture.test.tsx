@@ -33,7 +33,10 @@ import {
   autoRecordingStarted,
   autoRecordingStopped,
   getActiveAutoRecording,
+  getMeetingCard,
   resetMeetingCardsForTests,
+  setAmberError,
+  showAmber,
 } from "@/lib/meeting-cards.store";
 
 const startRecording = (gated: boolean) =>
@@ -106,6 +109,17 @@ async function settle() {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
+
+async function connectionChanged() {
+  await act(async () => {
+    for (const fn of listeners.get(GOOGLE_CONNECTION_CHANGED_EVENT) ?? []) fn({});
+  });
+}
+
+const failure = (
+  code: string,
+  config: "complete" | "unreadable" = "complete"
+) => ({ kind: "error" as const, code, config });
 
 function savedKeys(): string[] {
   return saveCalendarSnapshot.mock.calls.map((c) => c[1].key);
@@ -323,7 +337,11 @@ describe("useGoogleMeetingCapture", () => {
 
   it("a Google error result deletes the stored snapshot", async () => {
     setup("c1");
-    fetchCurrentGoogleMeetings.mockResolvedValueOnce({ kind: "error", code: "GOOGLE_NETWORK" });
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce({
+      kind: "error",
+      code: "GOOGLE_NETWORK",
+      config: "complete",
+    });
     await dispatch();
     await settle();
     expect(deleteCalendarSnapshot).toHaveBeenCalledWith("c1");
@@ -623,5 +641,201 @@ describe("useGoogleMeetingCapture check 1 (Notion tick)", () => {
     });
     expect(autoUntick).toHaveBeenCalledTimes(1);
     expect(autoTick).not.toHaveBeenCalled();
+  });
+});
+
+describe("useGoogleMeetingCapture warning and re-read", () => {
+  const isAmber = () => getMeetingCard()?.kind === "amber";
+
+  async function captureError(err: ReturnType<typeof failure>, id = "c1") {
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(err);
+    const view = setup(id);
+    await dispatch();
+    await settle();
+    return view;
+  }
+
+  it("a Google error at capture start shows the reconnect warning", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", variant: "reconnect" });
+  });
+
+  it("an unreadable config shows the settings warning", async () => {
+    await captureError(failure("GOOGLE_AUTH_REJECTED", "unreadable"));
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", variant: "settings" });
+  });
+
+  it("a network error shows the offline warning", async () => {
+    await captureError(failure("GOOGLE_NETWORK"));
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", variant: "offline" });
+  });
+
+  it("no meeting, several and absent show no warning", async () => {
+    setup("c1");
+    for (const r of [none, several, { kind: "absent" as const }]) {
+      fetchCurrentGoogleMeetings.mockResolvedValueOnce(r);
+      await dispatch();
+      await settle();
+      expect(isAmber()).toBe(false);
+    }
+  });
+
+  it("a stale error shows no warning", async () => {
+    const d = deferred<unknown>();
+    fetchCurrentGoogleMeetings.mockReturnValueOnce(d.promise);
+    setup("c1");
+    await dispatch();
+    await dispatch("newConversationStarted");
+    await act(async () => {
+      d.resolve(failure("GOOGLE_AUTH_EXPIRED"));
+    });
+    await settle();
+    expect(isAmber()).toBe(false);
+  });
+
+  it("after an error, a connection change re-reads, stores the snapshot and clears the warning", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    expect(isAmber()).toBe(true);
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    expect(savedKeys()).toEqual(["A"]);
+    expect(isAmber()).toBe(false);
+  });
+
+  it("a reconnect re-read uses the capture-start time", async () => {
+    vi.useFakeTimers();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(failure("GOOGLE_AUTH_EXPIRED"));
+    setup("c1");
+    const t0 = Date.now();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("meetingCaptureStarted"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * 60 * MIN);
+    });
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await act(async () => {
+      for (const fn of listeners.get(GOOGLE_CONNECTION_CHANGED_EVENT) ?? []) fn({});
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(2);
+    expect(fetchCurrentGoogleMeetings.mock.calls[1][0]).toBe(t0);
+  });
+
+  it("a re-read that fails again keeps the warning without re-showing it", async () => {
+    await captureError(failure("GOOGLE_NETWORK"));
+    const before = getMeetingCard();
+    setAmberError("x");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(failure("GOOGLE_AUTH_EXPIRED"));
+    await connectionChanged();
+    await settle();
+    expect(getMeetingCard()).toMatchObject({
+      kind: "amber",
+      variant: "offline",
+      error: "x",
+      episode: (before as { episode: number }).episode,
+    });
+  });
+
+  it("a reconnect re-read never ticks Notion", async () => {
+    fetchCurrentMeetings.mockResolvedValue({ kind: "absent" });
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(failure("GOOGLE_AUTH_EXPIRED"));
+    setup("c1", true);
+    await dispatch();
+    await settle();
+    autoTick.mockClear();
+    autoUntick.mockClear();
+    fetchCurrentMeetings.mockClear();
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    expect(autoTick).not.toHaveBeenCalled();
+    expect(autoUntick).not.toHaveBeenCalled();
+    expect(fetchCurrentMeetings).not.toHaveBeenCalled();
+  });
+
+  it("a re-read labels the original recording when it is still active", async () => {
+    startRecording(true);
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    expect(getActiveAutoRecording()?.event?.title).toBe("Meeting A");
+  });
+
+  it("no re-read after a capture read that did not error", async () => {
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    setup("c1");
+    await dispatch();
+    await settle();
+    await connectionChanged();
+    await settle();
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(1);
+  });
+
+  it("newConversationStarted disarms the re-read", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    await dispatch("newConversationStarted");
+    await connectionChanged();
+    await settle();
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(1);
+  });
+
+  it("a saved config that was never connected shows the reconnect warning", async () => {
+    await captureError(failure("GOOGLE_NOT_CONNECTED"));
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", variant: "reconnect" });
+  });
+
+  it("a later capture read that does not error clears the warning", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    expect(isAmber()).toBe(true);
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(none);
+    await dispatch();
+    await settle();
+    expect(isAmber()).toBe(false);
+  });
+
+  it("a new or loaded conversation clears the warning", async () => {
+    for (const name of ["newConversationStarted", "conversationLoaded"]) {
+      resetMeetingCardsForTests();
+      const view = await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+      expect(isAmber()).toBe(true);
+      await dispatch(name);
+      expect(isAmber()).toBe(false);
+      view.unmount();
+    }
+  });
+
+  it("a second capture error keeps the same warning card", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    const first = getMeetingCard() as { episode: number };
+    setAmberError("x");
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(failure("GOOGLE_AUTH_EXPIRED"));
+    await dispatch();
+    await settle();
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", episode: first.episode, error: "x" });
+  });
+
+  it("the re-read labels the original recording", async () => {
+    startRecording(true);
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    autoRecordingStopped();
+    startRecording(true);
+    expect(getActiveAutoRecording()?.id).toBe(2);
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    expect(getActiveAutoRecording()?.event).toBeNull();
+  });
+
+  it("a re-read leaves an unrelated amber alone", async () => {
+    await captureError(failure("GOOGLE_AUTH_EXPIRED"));
+    act(() => showAmber({ variant: "offline", episode: 999 }));
+    fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
+    await connectionChanged();
+    await settle();
+    expect(getMeetingCard()).toMatchObject({ kind: "amber", episode: 999 });
   });
 });
