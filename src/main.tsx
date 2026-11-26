@@ -8,6 +8,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import AppRoutes from "./routes";
 import { startMainWindowUpdater } from "./lib/updater/main-window-updater";
 import { logMicOpens } from "./lib/mic-diagnostics";
+import { reportCaughtError } from "./lib/report-caught-error";
 
 const currentWindow = getCurrentWindow();
 const windowLabel = currentWindow.label;
@@ -41,7 +42,9 @@ if (windowLabel.startsWith("capture-overlay-")) {
     </React.StrictMode>
   );
 } else {
-  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {
+    onCaughtError: reportCaughtError,
+  }).render(
     <React.StrictMode>
       <ThemeProvider>
         <AppProvider>
