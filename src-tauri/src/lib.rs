@@ -2,6 +2,7 @@
 mod activate;
 mod api;
 mod capture;
+mod crash_reporting;
 mod db;
 mod google;
 mod graph;
@@ -135,6 +136,11 @@ pub fn run() {
     // kind of thing worth having logs for.
     init_tracing();
 
+    // Before the builder: with the minidump integration this binary re-executes
+    // itself as the crash reporter, and that child never returns from init.
+    // The guard must live to the end of run() so events are flushed.
+    let crash_reporting = crash_reporting::init();
+
     // Get PostHog API key
     let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("").to_string();
     #[allow(unused_mut)]
@@ -210,6 +216,9 @@ pub fn run() {
             ..Default::default()
         }))
         .plugin(tauri_plugin_machine_uid::init());
+    if let Some((_, sentry_plugin)) = &crash_reporting {
+        builder = builder.plugin(sentry_plugin.clone());
+    }
     #[cfg(target_os = "macos")]
     {
         builder = builder.plugin(tauri_nspanel::init());

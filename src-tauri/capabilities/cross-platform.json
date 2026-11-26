@@ -37,6 +37,7 @@
     "store:allow-save",
     "store:allow-delete",
     "store:allow-has",
-    "store:allow-clear"
+    "store:allow-clear",
+    "sentry:default"
   ]
 }
