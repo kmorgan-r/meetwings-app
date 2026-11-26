@@ -66,7 +66,7 @@ Gap 3: there was one sensible way to do it.
 
 - In `run()`, after the existing staleness checks:
   - When `result.kind === "error"`, call `showAmber({ variant: amberKindFor(code, configState), episode })`. `configState` comes from the fetch result itself: the error variant of `FetchGoogleMeetingsResult` gains `config: Exclude<GoogleConfigState["state"], "absent">`, which today means `"complete" | "unreadable"`.
-  - `episode` comes from a module-level counter. While a warning is armed (see the re-read below), a later errored read reuses the armed episode instead of taking a new one. `showAmber` with the episode of the amber already showing keeps that card as it is, with its error text and Reconnect `busy` state. Otherwise detection flaps and rollovers, which re-run the read at every capture start, would remount `AmberCard` (its key includes the episode). That would wipe a failure message and re-enable a Reconnect button that is mid-connect.
+  - `episode` comes from a module-level counter. While a warning is armed (see the re-read below), a later errored read reuses the armed episode instead of taking a new one. `showAmber` with the episode of the amber already showing keeps that card, with its error text and Reconnect `busy` state, and only updates `variant` in place when it differs. The card's key is the episode, so it does not remount, and an `offline` card can still become `reconnect` when a later read returns an auth code. Otherwise detection flaps, which re-run the read at every capture start, would remount `AmberCard` (its key includes the episode). That would wipe a failure message and re-enable a Reconnect button that is mid-connect.
   - `absent` and `ok` (any pick) show nothing.
   - **A saved config with no connection is shown, on purpose.** `GOOGLE_NOT_CONNECTED` with a `complete` config maps to the `reconnect` variant and shows the warning at each recording, snoozable for an hour. Examples are a team-joined colleague who never pressed Connect, or someone who pressed Disconnect, which keeps the Client ID and secret. The setup is half done, and Notion quietly loses the guests, so it is not silent like `absent`.
 - `showAmber` drops its `|| active` refusal. That guard dates from the calendar-gated era, when amber meant "not recording". Now amber comes up during a recording and takes the card slot from the 6-second recording card. The existing snooze (`AMBER_SNOOZE_MS`) still applies, including while a recording is active. The store test "no amber while an auto recording is active" gets inverted. Existing store behavior that stays:
@@ -78,6 +78,7 @@ Gap 3: there was one sensible way to do it.
   - A successful re-read (below).
   - Any later capture-start read in the same conversation that does not error.
   - The arm clearing on `newConversationStarted` or `conversationLoaded`.
+  - A new non-quiet auto-recording start, which takes the slot for its recording card (existing `autoRecordingStarted` behavior). This one does not disarm: the re-read still applies.
 
   Each of the last three dismisses only an amber whose episode is the armed one, never an unrelated amber. `dismissAmber` gains an optional episode argument for this. Outside these, the amber stays up after the recording stops, because it is still actionable: a Reconnect still fixes that conversation's Notion guests.
 - New copy in `MeetingCard.tsx`:
@@ -116,7 +117,7 @@ A dropped (stale) read logs `google read stale src=<src>`. Counts and codes only
 Cases the tests must pin, beyond the builder's own:
 
 - **Rust (`google/auth.rs`):**
-  - `tokens_from_body` keeps the `scope`; `{}` is `GOOGLE_BAD_RESPONSE`.
+  - `tokens_from_body` keeps the `scope`, and keeps `"scope": ""` as `Some("")`, unlike the empty-`refresh_token` filter next to it, so it is not granted. `{}` is `GOOGLE_BAD_RESPONSE`.
   - `grants_calendar`: `None` is granted, the scope among several is granted, an empty string is not, a prefix or substring of the scope is not, and the other scopes without the calendar one are not.
 - **Card (`google-calendar-card` test):**
   - Mock `@/lib/calendar/fetch-google-meetings`, not `invoke`.
@@ -136,7 +137,7 @@ Cases the tests must pin, beyond the builder's own:
 - **Store (`meeting-cards.store` test):**
   - The amber shows over an active recording card.
   - The snooze still holds with a recording active.
-  - The same-episode `showAmber` keeps the card and its error text.
+  - The same-episode `showAmber` keeps the card's error text and updates only a changed `variant`.
   - The amber survives `autoRecordingStopped`.
   - A stop notice yields to it.
   - `dismissAmber(episode)` leaves another episode's amber.
@@ -157,7 +158,7 @@ Cases the tests must pin, beyond the builder's own:
   - Exactly one line per read, with the exact text for each outcome and `src`.
   - No line contains the event title, a guest's name or an address.
 - **Manual, dev build:** a human runs these before release. `google_connect` takes an `AppHandle` and does a live OAuth round trip, so unit tests reach `grants_calendar` and not the call order.
-  1. Connect with the calendar box unticked. Expect the new copy and "Not connected".
+  1. Start disconnected, then Connect with the calendar box unticked. Expect the new copy in the status line and no Disconnect button.
   2. Record with a revoked token. Expect the amber and a `google read error` line.
   3. Reconnect. Expect the amber to leave and the snapshot to be saved.
 
