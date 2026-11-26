@@ -128,7 +128,7 @@ Cases the tests must pin, beyond the builder's own:
   - A fail then a success.
   - An older read never overwrites a newer one.
   - A read cut off by Disconnect leaves "Not connected" clean.
-  - Nothing is set after unmount.
+  - An unmount before `google_status` resolves makes no calendar read. React 19 logs nothing for a set after unmount, so the `mountedRef` guard on the read result is checked in code review.
   - Disconnect stays enabled while checking and after a failure.
 - **Fetch (`fetch-google-meetings` test):**
   - An unreadable config gives `config: "unreadable"`.

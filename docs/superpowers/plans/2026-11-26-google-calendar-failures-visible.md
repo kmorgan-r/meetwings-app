@@ -27,7 +27,7 @@
 - **Calendar scope:** `https://www.googleapis.com/auth/calendar.events.readonly`.
 - **Out of scope:** the Odoo attendee block (`useCalendarProposal`, `useCalendarAutoSelect`), Notion sending and the summary pipeline.
 - **Running tests:** vitest scoped to the named files (full-suite runs flake). Rust: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib google`.
-- **Before the final commit:** run `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy` and `npm run type-check`.
+- **Before the final commit:** run `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy --manifest-path src-tauri/Cargo.toml` (with the shared `CARGO_TARGET_DIR`) and `npm run type-check`.
 - **Worktree commands:** keep every git command plain, one per call, with no pipes or `&&` chains.
 
 ## Review Focus
@@ -103,6 +103,7 @@ fn the_token_body_keeps_its_scope() {
   - `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib google`: PASS.
   - `npx vitest run src/tests/google-errors.test.ts src/tests/meeting-detect.test.ts`: PASS.
   - `cargo fmt --manifest-path src-tauri/Cargo.toml` first (the Step 1 test lines are wider than rustfmt allows), then `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: no output.
+  - `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo clippy --manifest-path src-tauri/Cargo.toml`: no new warnings in `google/`. Fix them here, because this is the only task that commits Rust.
 
 - [ ] **Step 7: Commit.**
 
@@ -133,7 +134,7 @@ git commit -m "fix(google): refuse a connect that did not grant calendar access"
   - `"Disconnect clears the calendar line"`: connected and readable, then click Disconnect. Expect `Not connected` and no `calendar readable` text.
   - `"a connection change from another window re-verifies"`: connected; fire the recorded `google-connection-changed` handler with status connected. Expect `h.fetchGoogle` called twice.
   - `"an older calendar read never overwrites a newer one"`: the mount read is deferred and still pending. Connect, whose read resolves ok. Then resolve the mount read with an error. Expect the line still reads `Connected · calendar readable`.
-  - No unmount test. React 19 logs nothing for a state update after unmount, so a `console.error` spy can never fail. The `mountedRef` guard is checked in code review.
+  - `"an unmount before the status resolves makes no calendar read"`: defer `google_status`, `unmount()`, then resolve it as connected. Expect `h.fetchGoogle` not called; `reload` acts only while `mountedRef.current`. There is no `console.error`-spy test for the read result, because React 19 logs nothing for a set after unmount. That guard is checked in code review.
   - `"a read cut off by Disconnect leaves Not connected clean"`: deferred read, click Disconnect, then resolve it with `{ kind: "error", code: "GOOGLE_NOT_CONNECTED", config: "complete" }`. Expect `Not connected` and no `GOOGLE_COPY.GOOGLE_NOT_CONNECTED` text. This pins only the visible result: the not-connected line renders first, so the Disconnect sequence bump is defence in depth and no test observes it.
   - `"a failed read then a successful one shows readable"`: the first fetch errors, then fire the connection-changed handler with the next fetch ok. Expect `Connected · calendar readable` and no error copy.
   - `"Disconnect stays enabled while checking"`: deferred read. Expect the Disconnect button present and enabled.
