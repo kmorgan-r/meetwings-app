@@ -21,6 +21,10 @@ edition = "2021"
 name = "meetwings_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Opt-in: crashes on demand (MEETWINGS_CRASH_TEST) to verify Sentry reports; devtools for JS checks in release builds.
+crash-test = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 dotenv = "0.15"
@@ -28,6 +32,8 @@ dotenv = "0.15"
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
+sentry = { version = "0.49.3", features = ["minidump"] }
+tauri-plugin-sentry = "=0.8.0"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2.9.0"
@@ -102,3 +108,7 @@ libpulse-simple-binding = "2.29.0"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2.5.0"
+
+[profile.release]
+debug = "line-tables-only"
+split-debuginfo = "packed"

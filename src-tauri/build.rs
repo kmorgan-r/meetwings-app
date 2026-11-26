@@ -17,5 +17,13 @@ fn main() {
         println!("cargo:rustc-env=POSTHOG_API_KEY={}", posthog_api_key);
     }
 
+    if let Ok(sentry_dsn) = std::env::var("SENTRY_DSN") {
+        println!("cargo:rustc-env=SENTRY_DSN={}", sentry_dsn);
+    }
+    println!("cargo:rerun-if-env-changed=SENTRY_DSN");
+    if std::path::Path::new(".env").exists() {
+        println!("cargo:rerun-if-changed=.env");
+    }
+
     tauri_build::build()
 }

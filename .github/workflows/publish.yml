@@ -60,15 +60,24 @@ jobs:
           - platform: "macos-latest"
             args: "--target aarch64-apple-darwin"
             bundles: "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-arm64.dmg"
+            symbols: "src-tauri/target/aarch64-apple-darwin/release"
+            release_debug: "line-tables-only"
           - platform: "macos-latest"
             args: "--target x86_64-apple-darwin"
             bundles: "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-x64.dmg"
+            symbols: "src-tauri/target/x86_64-apple-darwin/release"
+            release_debug: "line-tables-only"
           - platform: "ubuntu-22.04"
             args: ""
             bundles: "src-tauri/target/release/bundle/deb/*.deb:Meetwings-linux-x64.deb src-tauri/target/release/bundle/appimage/*.AppImage:Meetwings-linux-x64.AppImage src-tauri/target/release/bundle/rpm/*.rpm:Meetwings-linux-x64.rpm"
+            symbols: "src-tauri/target/release"
+            # No debug info: in-binary DWARF would ~4x the Linux bundles, and a split DWARF .dwp is unusable by Sentry.
+            release_debug: "false"
           - platform: "windows-latest"
             args: "--bundles nsis"
             bundles: "src-tauri/target/release/bundle/nsis/*-setup.exe:Meetwings-windows-x64-setup.exe"
+            symbols: "src-tauri/target/release"
+            release_debug: "line-tables-only"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -105,6 +114,7 @@ jobs:
           echo "PAYMENT_ENDPOINT=${{ secrets.PAYMENT_ENDPOINT }}" >> src-tauri/.env
           echo "APP_ENDPOINT=${{ secrets.APP_ENDPOINT }}" >> src-tauri/.env
           echo "POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}" >> src-tauri/.env
+          echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> src-tauri/.env
 
       - name: Install frontend deps
         run: npm ci
@@ -119,6 +129,8 @@ jobs:
           PAYMENT_ENDPOINT: ${{ secrets.PAYMENT_ENDPOINT }}
           APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ matrix.release_debug }}
         with:
           tagName: app-v__VERSION__
           releaseName: "Meetwings v__VERSION__"
@@ -165,3 +177,15 @@ jobs:
             gh release upload "app-v$version" "_aliases/$dest" --clobber
             echo "uploaded $dest"
           done
+
+      - name: Upload debug symbols to Sentry
+        shell: bash
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          [ -n "$SENTRY_AUTH_TOKEN" ] || { echo "SENTRY_AUTH_TOKEN not set; skipping"; exit 0; }
+          set -euo pipefail
+          npm i -g @sentry/cli@3.8.2
+          sentry-cli debug-files upload --include-sources "${{ matrix.symbols }}"/meetwings*

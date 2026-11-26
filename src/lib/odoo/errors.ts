@@ -10,8 +10,9 @@ export type OdooErrorDetails = Record<string, string | number>;
  * display. That is what closes the two escape paths nothing downstream can
  * catch: an unhandled rejection, and a React error boundary (the boundaries at
  * src/pages/app/index.tsx:39 and src/layouts/DashboardLayout.tsx:24 use
- * fallbackRender with no onError, and createRoot sets no onCaughtError, so
- * React's default console.error would print the raw error and stack).
+ * fallbackRender with no onError, and createRoot's onCaughtError (src/main.tsx)
+ * forwards the error to Sentry and console.error, so the raw error and stack
+ * would leave the app).
  *
  * There is deliberately NO `cause`: the port attaches the raw fetch Error,
  * whose message can carry the request body.
