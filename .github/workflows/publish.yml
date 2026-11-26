@@ -61,18 +61,22 @@ jobs:
             args: "--target aarch64-apple-darwin"
             bundles: "src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-arm64.dmg"
             symbols: "src-tauri/target/aarch64-apple-darwin/release"
+            split_debuginfo: "packed"
           - platform: "macos-latest"
             args: "--target x86_64-apple-darwin"
             bundles: "src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg:Meetwings-macos-x64.dmg"
             symbols: "src-tauri/target/x86_64-apple-darwin/release"
+            split_debuginfo: "packed"
           - platform: "ubuntu-22.04"
             args: ""
             bundles: "src-tauri/target/release/bundle/deb/*.deb:Meetwings-linux-x64.deb src-tauri/target/release/bundle/appimage/*.AppImage:Meetwings-linux-x64.AppImage src-tauri/target/release/bundle/rpm/*.rpm:Meetwings-linux-x64.rpm"
             symbols: "src-tauri/target/release"
+            split_debuginfo: "off"
           - platform: "windows-latest"
             args: "--bundles nsis"
             bundles: "src-tauri/target/release/bundle/nsis/*-setup.exe:Meetwings-windows-x64-setup.exe"
             symbols: "src-tauri/target/release"
+            split_debuginfo: "packed"
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -125,6 +129,9 @@ jobs:
           APP_ENDPOINT: ${{ secrets.APP_ENDPOINT }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # Linux "packed" leaves only split-DWARF skeletons in the binary and a .dwp
+          # sentry-cli cannot use (no debug ID), so app frames get no file:line there.
+          CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: ${{ matrix.split_debuginfo }}
         with:
           tagName: app-v__VERSION__
           releaseName: "Meetwings v__VERSION__"
