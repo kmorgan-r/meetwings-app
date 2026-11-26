@@ -31,6 +31,10 @@ Audience: colleagues only, for now. Not yet a public-user feature.
   `std::process::exit` (`.run(...)` at `src-tauri/src/lib.rs:401-403` never
   returns), so the Sentry guard never drops and sessions never end cleanly;
   crash-free-rate numbers would be wrong.
+- Error reports from the `capture-overlay-*` windows. No capability covers
+  them (both capability files list only `main` and `dashboard`), so the
+  injected SDK's IPC calls there are denied. Revisit if overlays turn out to
+  crash.
 
 ## Anti-goals
 
@@ -67,9 +71,11 @@ Audience: colleagues only, for now. Not yet a public-user feature.
    DWARF (`.dwp`); see Verification for the Linux fallback.
 3. **DSN** (`src-tauri/build.rs`): pass `SENTRY_DSN` through to
    `cargo:rustc-env`, like `POSTHOG_API_KEY`. Also emit
-   `cargo:rerun-if-env-changed=SENTRY_DSN` and `cargo:rerun-if-changed=.env`.
-   `tauri_build::build()` emits its own `rerun-if` lines, so without these cargo
-   keeps replaying a stale DSN after it changes.
+   `cargo:rerun-if-env-changed=SENTRY_DSN`, and `cargo:rerun-if-changed=.env`
+   only when `.env` exists (cargo treats a missing path as always stale, which
+   would rebuild every fork and fresh clone). `tauri_build::build()` emits its
+   own `rerun-if` lines, so without these cargo keeps replaying a stale DSN after
+   it changes.
 4. **Init** (`src-tauri/src/lib.rs`, `run()`): right after `init_tracing()` and
    before `tauri::Builder`, read `option_env!("SENTRY_DSN")` and parse it with
    `.parse::<sentry::types::Dsn>().ok()`. Do not use the
@@ -93,10 +99,15 @@ Audience: colleagues only, for now. Not yet a public-user feature.
    and `capabilities/cross-platform.json` (Windows, Linux).
 6. **Render errors** (`src/main.tsx`): React 19 sends errors caught by an error
    boundary to `console.error`, not `window.onerror`, so the injected SDK only
-   records a breadcrumb. Pass `onCaughtError` to both `createRoot` calls:
-   call `window.Sentry?.captureException(error)` (absent when no DSN), then keep
-   the default `console.error` output.
-7. **Optional crash trigger**: a `crash-test` cargo feature, off by default.
+   records a breadcrumb. Pass `onCaughtError` to the `createRoot` call that
+   renders `main` and `dashboard` (not the overlay root; see Non-goals): call
+   `window.Sentry?.captureException(error)` (absent when no DSN), then keep the
+   default `console.error` output. A vitest test pins the handler: it calls
+   `captureException` when `window.Sentry` exists, does not throw when it is
+   absent, and still logs.
+7. **Optional crash trigger**: a `crash-test` cargo feature, off by default,
+   defined as `crash-test = ["tauri/devtools"]` so a release test build also
+   has devtools for the JS checks.
    When on, `MEETWINGS_CRASH_TEST=panic|abort`, checked right after
    `sentry::init`, calls a named function
    (`sentry_crash_test`) that panics or calls `std::process::abort()`.
@@ -106,13 +117,16 @@ Audience: colleagues only, for now. Not yet a public-user feature.
    generated `.env` and to the build env. Add an upload step as the **last**
    step of the job, so a failed symbol upload cannot skip any existing step
    (e.g. publish.yml's "Upload stable-name copies"). The step:
+   - sets `shell: bash` (the Windows runner defaults to pwsh, where the guard
+     below is a parse error);
    - maps `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` into its `env`;
    - starts its script with `[ -n "$SENTRY_AUTH_TOKEN" ] || exit 0`, because
      `secrets.*` is not allowed in a step `if:`;
    - installs the CLI with `npm i -g @sentry/cli@<pinned version>` (Node is
      already set up in both workflows);
-   - runs `sentry-cli debug-files upload --include-sources` on
-     `src-tauri/target/<target>/release`.
+   - runs `sentry-cli debug-files upload --include-sources` on the build
+     output: `src-tauri/target/<triple>/release` for the macOS entries (built
+     with `--target`), `src-tauri/target/release` for Ubuntu and Windows.
    Note: once `SENTRY_DSN` is set, public GitHub releases report crashes too.
    That is acceptable while colleagues are the only users.
 9. **Privacy defaults**: `send_default_pii` stays off. Default JS breadcrumbs
@@ -122,14 +136,17 @@ Audience: colleagues only, for now. Not yet a public-user feature.
 
 - **Linux, here.** Prerequisites: the Tauri Linux system deps (as in
   publish.yml's Ubuntu step), `xvfb-run` for a display, and `dbus`
-  (single-instance). Set `NO_PROXY=127.0.0.1,localhost` so the local fake DSN
-  endpoint bypasses the outbound proxy. With
+  (single-instance). Run the app with `HTTP_PROXY`, `HTTPS_PROXY`,
+  `http_proxy` and `https_proxy` unset (`env -u ...`): `sentry` copies them
+  into explicit proxy settings (`sentry-0.49.3/src/defaults.rs:99-110`), which
+  `NO_PROXY` does not override, so events to the local fake DSN would go to the
+  outbound proxy instead. With
   `SENTRY_DSN=http://key@127.0.0.1:<port>/1` and `--features crash-test`:
   - `MEETWINGS_CRASH_TEST=panic` → an event arrives;
     `MEETWINGS_CRASH_TEST=abort` → a minidump envelope arrives.
-  - Throw an uncaught error, an unhandled rejection, and a boundary-caught
-    render error in both the `main` and `dashboard` windows; an event arrives
-    for each.
+  - From devtools, throw an uncaught error and an unhandled rejection in both
+    the `main` and `dashboard` windows; an event arrives for each.
+    Boundary-caught render errors are covered by the vitest test (step 6).
   - `ps` shows exactly one `Crash Reporter (Sentry Rust SDK)` per app process.
   - Rebuild with `SENTRY_DSN` empty: the app starts normally, and `ps` shows no
     reporter process.
@@ -143,12 +160,13 @@ Audience: colleagues only, for now. Not yet a public-user feature.
   built with the DSN. Then confirm:
   - the app starts, and the dashboard does not pop up at plain startup;
   - a second launch with `open -n` (or the binary path) still focuses the
-    dashboard, and `ps` then shows one app process and one reporter; the second
-    instance's reporter is gone within ~5 s (the reporter's stale timeout);
+    dashboard; after waiting ~5 s (the reporter's stale timeout,
+    `minidumper-child-0.5.0/src/lib.rs:70`), `ps` shows one app process and one
+    reporter;
   - running the binary from Terminal with `MEETWINGS_CRASH_TEST=abort` puts a
     crash in Sentry whose frames show `sentry_crash_test` with file:line;
-  - a JS error thrown in the dashboard reaches Sentry (this proves the macOS
-    capability file).
+  - a JS error thrown from the dashboard's devtools reaches Sentry (this proves
+    the macOS capability file).
 
 ## Owner to-do
 
@@ -158,5 +176,4 @@ Create a Sentry project (platform: Rust). Add repo secrets `SENTRY_DSN`,
 
 ## Left to the builder
 
-How the JS-error checks are triggered (devtools console is fine), and the
-pinned `@sentry/cli` version.
+The pinned `@sentry/cli` version.
