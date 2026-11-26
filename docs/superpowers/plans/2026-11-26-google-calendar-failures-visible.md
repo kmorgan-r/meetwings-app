@@ -27,7 +27,7 @@
 - **Calendar scope:** `https://www.googleapis.com/auth/calendar.events.readonly`.
 - **Out of scope:** the Odoo attendee block (`useCalendarProposal`, `useCalendarAutoSelect`), Notion sending and the summary pipeline.
 - **Running tests:** vitest scoped to the named files (full-suite runs flake). Rust: `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib google`.
-- **Before the final commit:** run `cargo fmt --manifest-path src-tauri/Cargo.toml --check` and `npm run type-check`.
+- **Before the final commit:** run `cargo fmt --manifest-path src-tauri/Cargo.toml --check`, `cargo clippy` and `npm run type-check`.
 - **Worktree commands:** keep every git command plain, one per call, with no pipes or `&&` chains.
 
 ## Review Focus
@@ -35,7 +35,7 @@
 1. **A reconnect hours after the call** must not re-label the conversation with a later meeting. The re-read uses the original capture-start time, never "now". (Task 4 test: "a reconnect re-read uses the capture-start time".)
 2. **A cancelled or failed reconnect** keeps the amber card and the error text the card itself set. It must not flash a fresh card. (Task 4 test: "a re-read that fails again keeps the warning without re-showing it".)
 3. **Overlapping card reads:** Connect pressed while the mount read is still in flight must not be overwritten by the older result. (Task 2 test: "an older calendar read never overwrites a newer one".)
-4. **Card unmounted mid-read:** a read resolving after unmount must not set state. (Task 2 test: "a read that resolves after unmount sets nothing".)
+4. **Card unmounted mid-read:** a read resolving after unmount must not set state. No test can pin this, because React 19 does not warn. The existing `mountedRef` guard must wrap every `setCalendar`, and code review checks it.
 5. **"Not now" snooze:** a second recording's failed read within the hour stays hidden. This is already pinned by `meeting-cards.store.test.ts` "amber shows, snoozes for an hour…" and must keep passing after Task 3.
 
 ---
@@ -102,7 +102,7 @@ fn the_token_body_keeps_its_scope() {
 - [ ] **Step 6: Run the tests and check they pass.**
   - `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo test --manifest-path src-tauri/Cargo.toml --lib google`: PASS.
   - `npx vitest run src/tests/google-errors.test.ts src/tests/meeting-detect.test.ts`: PASS.
-  - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: no output.
+  - `cargo fmt --manifest-path src-tauri/Cargo.toml` first (the Step 1 test lines are wider than rustfmt allows), then `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: no output.
 
 - [ ] **Step 7: Commit.**
 
@@ -133,12 +133,12 @@ git commit -m "fix(google): refuse a connect that did not grant calendar access"
   - `"Disconnect clears the calendar line"`: connected and readable, then click Disconnect. Expect `Not connected` and no `calendar readable` text.
   - `"a connection change from another window re-verifies"`: connected; fire the recorded `google-connection-changed` handler with status connected. Expect `h.fetchGoogle` called twice.
   - `"an older calendar read never overwrites a newer one"`: the mount read is deferred and still pending. Connect, whose read resolves ok. Then resolve the mount read with an error. Expect the line still reads `Connected · calendar readable`.
-  - `"a read that resolves after unmount sets nothing"`: deferred read, `unmount()`, then resolve. Expect no React state-update warning (spy on `console.error`, expect it not called).
-  - `"a read cut off by Disconnect leaves Not connected clean"`: deferred read, click Disconnect, then resolve it with `{ kind: "error", code: "GOOGLE_NOT_CONNECTED", config: "complete" }`. Expect `Not connected` and no `GOOGLE_COPY.GOOGLE_NOT_CONNECTED` text.
+  - No unmount test. React 19 logs nothing for a state update after unmount, so a `console.error` spy can never fail. The `mountedRef` guard is checked in code review.
+  - `"a read cut off by Disconnect leaves Not connected clean"`: deferred read, click Disconnect, then resolve it with `{ kind: "error", code: "GOOGLE_NOT_CONNECTED", config: "complete" }`. Expect `Not connected` and no `GOOGLE_COPY.GOOGLE_NOT_CONNECTED` text. This pins only the visible result: the not-connected line renders first, so the Disconnect sequence bump is defence in depth and no test observes it.
   - `"a failed read then a successful one shows readable"`: the first fetch errors, then fire the connection-changed handler with the next fetch ok. Expect `Connected · calendar readable` and no error copy.
   - `"Disconnect stays enabled while checking"`: deferred read. Expect the Disconnect button present and enabled.
 
-- [ ] **Step 3: Update the existing assertions.** The tests that assert `"Connected"` for a connected card ("Connect saves…", "a failed emit…", "an unreadable config…") now assert `Connected · calendar readable`. Run `npx vitest run src/tests/google-calendar-card.test.tsx` and check the new tests FAIL.
+- [ ] **Step 3: Update the existing assertions.** The tests that assert `"Connected"` for a connected card ("Connect saves…", "a failed emit…") now assert `Connected · calendar readable`. "an unreadable config…" is different: a connected card with an unreadable config really reads `GOOGLE_AUTH_REJECTED`. Have its fetch mock return `{ kind: "error", code: "GOOGLE_AUTH_REJECTED", config: "unreadable" }` and assert `GOOGLE_COPY.GOOGLE_AUTH_REJECTED`. Run `npx vitest run src/tests/google-calendar-card.test.tsx` and check the new tests FAIL.
 
 - [ ] **Step 4: Implement in `GoogleCalendarCard.tsx`.**
   - New state `calendar: "checking" | "ok" | GoogleErrorCode | null`.
@@ -237,7 +237,8 @@ git commit -m "feat(cards): amber warns about an unreadable Google Calendar duri
   - `"after an error, a connection change re-reads, stores the snapshot and clears the warning"`: error, then amber. Next fetch is `one("A")`. Fire the `GOOGLE_CONNECTION_CHANGED_EVENT` handlers, settle. Expect `savedKeys()` to contain A's snapshot key and the card not amber.
   - `"a reconnect re-read uses the capture-start time"`: fake timers. Capture at T0 errors. Advance 3 h. Fire connection change. Expect the second `fetchCurrentGoogleMeetings` call's argument to equal T0.
   - `"a re-read that fails again keeps the warning without re-showing it"`: error, then amber, then `setAmberError("x")`. Fire connection change with the next fetch erroring. Expect the card still amber with `error: "x"` and the same `episode`.
-  - `"a reconnect re-read never ticks Notion"`: `tickEnabled` true. A capture error, then a re-read that resolves `one("A")`. Expect `autoTick` and `autoUntick` not called, and `fetchCurrentMeetings` called only for the capture read (or not at all).
+  - `"a reconnect re-read never ticks Notion"`: `tickEnabled` true, `fetchCurrentMeetings` mocked. A capture error, then settle; the capture read has run its own Outlook read and tick or untick. Clear the `autoTick`, `autoUntick` and `fetchCurrentMeetings` mocks. Fire a connection change whose fetch resolves `one("A")` and settle. Expect all three called zero times.
+  - `"a re-read labels the original recording when it is still active"`: `startRecording(true)`, then a capture error. Fire a connection change whose fetch resolves `one("A")` and settle. Expect `getActiveAutoRecording()?.event?.title` to be `"Meeting A"`.
   - `"no re-read after a capture read that did not error"`: `one("A")`, then connection change. Expect the fetch called once.
   - `"newConversationStarted disarms the re-read"`: error, then `newConversationStarted`, then connection change. Expect the fetch called once.
   - `"a saved config that was never connected shows the reconnect warning"`: `GOOGLE_NOT_CONNECTED` with `complete` gives variant `"reconnect"`.
@@ -262,7 +263,7 @@ git commit -m "feat(cards): amber warns about an unreadable Google Calendar duri
   - `onNewConversation`: if armed, `dismissAmber(arm.current.episode)`. Then set `arm.current = null`.
   - The `GOOGLE_CONNECTION_CHANGED_EVENT` listener keeps its bump and pending clear. Then, if armed, it calls `read("reconnect", arm.current.at)` (with `.catch(() => {})`).
 
-- [ ] **Step 5: Run and check it passes.** `npx vitest run src/tests/fetch-google-meetings.test.ts src/tests/google-meeting-capture.test.tsx src/tests/meet-gate.test.ts`: PASS.
+- [ ] **Step 5: Run and check it passes.** `npx vitest run src/tests/fetch-google-meetings.test.ts src/tests/google-meeting-capture.test.tsx src/tests/meet-gate.test.ts`: PASS. Then `npm run type-check`: no errors (the exported `FetchGoogleMeetingsResult` changed).
 
 - [ ] **Step 6: Commit.**
 
@@ -290,6 +291,7 @@ git commit -m "feat(google): warn when the capture-start calendar read fails, re
   - `"logs a dropped read as stale"`: deferred, then `newConversationStarted`, then resolve gives `google read stale src=capture`.
   - `"logs a reconnect re-read with its source"`: an error, then a connection change, then `one("A")`. The last call is `google read ok events=1 pick=one src=reconnect`.
   - `"a log line never carries calendar text"`: after `one("A")`, no logged string contains `Meeting A`, `A@guest.example` or `me@example.org`.
+  - `"each read logs exactly one line"`: filter `detectionLog.mock.calls` to lines starting with `google read`. After one ok capture read, expect length 1. Clear the mock, then after one stale read (the deferred `newConversationStarted` case), expect length 1 again.
   - Run and check they FAIL.
 
 - [ ] **Step 2: Implement.** In `read`:
@@ -304,6 +306,7 @@ git commit -m "feat(google): warn when the capture-start calendar read fails, re
 - [ ] **Step 4: Final gates.**
   - `npm run type-check`: no errors.
   - `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: no output.
+  - `CARGO_TARGET_DIR=C:/Users/kmorg/meetwings-app/src-tauri/target cargo clippy --manifest-path src-tauri/Cargo.toml`: no new warnings in `google/`.
   - Run every test file named in Tasks 1–5 together: PASS.
 
 - [ ] **Step 5: Commit.**
