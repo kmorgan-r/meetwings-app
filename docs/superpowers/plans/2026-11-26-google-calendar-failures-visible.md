@@ -68,6 +68,7 @@ fn grants_calendar_needs_the_exact_scope_token() {
     assert!(grants_calendar(Some("openid https://www.googleapis.com/auth/calendar.events.readonly email")));
     assert!(!grants_calendar(Some("openid email profile")));
     assert!(!grants_calendar(Some("https://www.googleapis.com/auth/calendar.events.readonly.x")));
+    assert!(!grants_calendar(Some("https://www.googleapis.com/auth/calendar.events")));
     assert!(!grants_calendar(Some("")));
     // Google always sends `scope` on the code exchange; a missing field is not a refusal.
     assert!(grants_calendar(None));
@@ -79,6 +80,9 @@ fn the_token_body_keeps_its_scope() {
     assert_eq!(t.scope.as_deref(), Some("openid email"));
     let t = tokens_from_body(r#"{"access_token":"a"}"#, 0).unwrap();
     assert_eq!(t.scope, None);
+    // Unlike refresh_token, an empty scope is kept, so grants_calendar refuses it.
+    let t = tokens_from_body(r#"{"access_token":"a","scope":""}"#, 0).unwrap();
+    assert_eq!(t.scope.as_deref(), Some(""));
     assert_eq!(tokens_from_body("{}", 0).err().as_deref(), Some("GOOGLE_BAD_RESPONSE"));
 }
 ```
@@ -130,6 +134,9 @@ git commit -m "fix(google): refuse a connect that did not grant calendar access"
   - `"a connection change from another window re-verifies"`: connected; fire the recorded `google-connection-changed` handler with status connected. Expect `h.fetchGoogle` called twice.
   - `"an older calendar read never overwrites a newer one"`: the mount read is deferred and still pending. Connect, whose read resolves ok. Then resolve the mount read with an error. Expect the line still reads `Connected · calendar readable`.
   - `"a read that resolves after unmount sets nothing"`: deferred read, `unmount()`, then resolve. Expect no React state-update warning (spy on `console.error`, expect it not called).
+  - `"a read cut off by Disconnect leaves Not connected clean"`: deferred read, click Disconnect, then resolve it with `{ kind: "error", code: "GOOGLE_NOT_CONNECTED", config: "complete" }`. Expect `Not connected` and no `GOOGLE_COPY.GOOGLE_NOT_CONNECTED` text.
+  - `"a failed read then a successful one shows readable"`: the first fetch errors, then fire the connection-changed handler with the next fetch ok. Expect `Connected · calendar readable` and no error copy.
+  - `"Disconnect stays enabled while checking"`: deferred read. Expect the Disconnect button present and enabled.
 
 - [ ] **Step 3: Update the existing assertions.** The tests that assert `"Connected"` for a connected card ("Connect saves…", "a failed emit…", "an unreadable config…") now assert `Connected · calendar readable`. Run `npx vitest run src/tests/google-calendar-card.test.tsx` and check the new tests FAIL.
 
@@ -137,7 +144,7 @@ git commit -m "fix(google): refuse a connect that did not grant calendar access"
   - New state `calendar: "checking" | "ok" | GoogleErrorCode | null`.
   - `verify()` is guarded by a sequence ref and `mountedRef`. It sets `"checking"` and awaits `fetchCurrentGoogleMeetings()`. Then: `ok` sets `"ok"`, `error` sets its `code`, and `absent` sets `null`.
   - Every place that sets a status (mount `reload`, `handleConnect` success, the `GOOGLE_CONNECTION_CHANGED_EVENT` listener) calls `verify()` when `connected` is true, and sets `calendar` to `null` otherwise.
-  - `handleDisconnect` sets `null`.
+  - `handleDisconnect` bumps the sequence ref and sets `null`, so a read still running from before is dropped.
   - Rendering when there is no `error`:
     - not connected: `Not connected`
     - `"checking"`: the checking line
@@ -159,14 +166,23 @@ git commit -m "feat(google): settings card proves the calendar can be read"
 ### Task 3: The amber card is allowed during a recording, with new copy
 
 **Files:**
-- Modify: `src/lib/meeting-cards.store.ts` (`showAmber`)
+- Modify: `src/lib/meeting-cards.store.ts` (`showAmber`, `dismissAmber`)
 - Modify: `src/pages/app/components/MeetingCard.tsx` (`AMBER_HEADLINE`, `AMBER_BODY`)
 - Test: `src/tests/meeting-cards.store.test.ts`, `src/tests/meeting-card.test.tsx`
 
 **Interfaces:**
-- Produces: `showAmber({ variant, episode }, now?)` now shows during an active auto-recording. Only the snooze refuses it. The signature is unchanged.
+- Produces:
+  - `showAmber({ variant, episode }, now?)` now shows during an active auto-recording; only the snooze refuses it. When the slot already shows an amber with the same `episode`, it keeps that card's `error`. With the same variant it is a full no-op (same object, no notify). With a different variant it swaps in `{ ...card, variant }` and notifies. The React key is the episode, so `AmberCard` does not remount either way. The signature is unchanged.
+  - `dismissAmber(episode?: number): void`. With no argument it behaves as today. With an argument it clears the slot only when it shows an amber whose `episode` equals it. Existing callers (`snoozeAmber`, the card's buttons) keep calling it with no argument.
 
-- [ ] **Step 1: Invert the store test.** Replace `"no amber while an auto recording is active"` with `"amber shows over an active auto recording, and the recording's stop leaves it"`. Steps: `start()`, then `showAmber({ variant: "offline", episode: 1 })`, and expect `kind` `"amber"`. Then stop that recording through the test's existing stop path and expect `kind` still `"amber"`.
+- [ ] **Step 1: Store tests.** In `meeting-cards.store.test.ts`:
+  - Replace `"no amber while an auto recording is active"` with `"amber shows over an active auto recording, and the recording's stop leaves it"`. Steps: `start()`, then `showAmber({ variant: "offline", episode: 1 })`, and expect `kind` `"amber"`. Then stop that recording through the test's existing stop path and expect `kind` still `"amber"`.
+  - `"the snooze holds while a recording is active"`: `start()`, `snoozeAmber()`, then `showAmber(...)`. Expect the card not amber.
+  - `"showing the same episode again keeps the card and its error"`: `showAmber({ variant: "reconnect", episode: 4 })`, `setAmberError("x")`, keep the card object, then `showAmber({ variant: "reconnect", episode: 4 })`. Expect `getMeetingCard()` to be the same object (`toBe`) with `error: "x"`.
+  - `"the same episode with a new variant updates the variant and keeps the error"`: `showAmber({ variant: "offline", episode: 4 })`, `setAmberError("x")`, then `showAmber({ variant: "reconnect", episode: 4 })`. Expect `{ kind: "amber", variant: "reconnect", episode: 4, error: "x" }`.
+  - `"a new episode replaces the amber"`: episode 4 with an error, then episode 5. Expect `episode: 5` and `error: null`.
+  - `"dismissAmber with an episode leaves another episode's amber"`: show episode 2. `dismissAmber(1)` keeps it; `dismissAmber(2)` clears it.
+  - `"a stop notice yields to the amber"`: show an amber, then `showStopNotice("call-ended")`. Expect the card still amber.
 
 - [ ] **Step 2: Update the card tests to the new copy.** In `meeting-card.test.tsx`:
   - Every `"If this is a Meet call, it isn't being recorded"` becomes `"Couldn't read Google Calendar"`.
@@ -177,7 +193,8 @@ git commit -m "feat(google): settings card proves the calendar can be read"
   - Run `npx vitest run src/tests/meeting-cards.store.test.ts src/tests/meeting-card.test.tsx` and check it FAILS.
 
 - [ ] **Step 3: Implement.**
-  - `showAmber`: drop `|| active` from the guard, and comment that amber now reports a failed calendar read during a recording.
+  - `showAmber`: drop `|| active` from the guard, and comment that amber now reports a failed calendar read during a recording. When `card?.kind === "amber" && card.episode === a.episode`: if the variant also matches, return. Otherwise set `card = { ...card, variant: a.variant }`, `notify()` and return, leaving the timer untouched.
+  - `dismissAmber(episode?)`: clear only when the card is amber and `episode` is `undefined` or equals `card.episode`.
   - `MeetingCard.tsx`: set the headline and the three bodies from Global Constraints. Leave buttons and `cardHeight` unchanged (each new body is no longer than the old one).
 
 - [ ] **Step 4: Run and check it passes.** `npx vitest run src/tests/meeting-cards.store.test.ts src/tests/meeting-card.test.tsx src/tests/meeting-card-window.test.tsx`: PASS.
@@ -200,11 +217,11 @@ git commit -m "feat(cards): amber warns about an unreadable Google Calendar duri
 
 **Interfaces:**
 - Consumes:
-  - `showAmber` (Task 3)
-  - `dismissAmber()` and `getMeetingCard()` from `@/lib/meeting-cards.store`
+  - `showAmber` (Task 3: same-episode is a no-op)
+  - `dismissAmber(episode?: number)` (Task 3) and `getMeetingCard()` from `@/lib/meeting-cards.store`
   - `amberKindFor(code: GoogleErrorCode, configState: GoogleConfigState["state"]): AmberKind` from `@/lib/meeting-detect`
 - Produces:
-  - `FetchGoogleMeetingsResult` error variant becomes `{ kind: "error"; code: GoogleErrorCode; config: "complete" | "unreadable" }`.
+  - `FetchGoogleMeetingsResult` error variant becomes `{ kind: "error"; code: GoogleErrorCode; config: Exclude<GoogleConfigState["state"], "absent"> }` (today `"complete" | "unreadable"`; import the type from `@/lib/storage/google-config.storage`).
   - Inside the hook, the read becomes `read(src: "capture" | "reconnect", at: number): Promise<void>`. Task 5 logs from inside it.
 
 - [ ] **Step 1: Fetch tests.** In `fetch-google-meetings.test.ts`:
@@ -223,20 +240,27 @@ git commit -m "feat(cards): amber warns about an unreadable Google Calendar duri
   - `"a reconnect re-read never ticks Notion"`: `tickEnabled` true. A capture error, then a re-read that resolves `one("A")`. Expect `autoTick` and `autoUntick` not called, and `fetchCurrentMeetings` called only for the capture read (or not at all).
   - `"no re-read after a capture read that did not error"`: `one("A")`, then connection change. Expect the fetch called once.
   - `"newConversationStarted disarms the re-read"`: error, then `newConversationStarted`, then connection change. Expect the fetch called once.
+  - `"a saved config that was never connected shows the reconnect warning"`: `GOOGLE_NOT_CONNECTED` with `complete` gives variant `"reconnect"`.
+  - `"a later capture read that does not error clears the warning"`: a capture error, then amber. A second `meetingCaptureStarted` whose fetch is `none`. Expect the card not amber.
+  - `"a new or loaded conversation clears the warning"`: a capture error, then amber, then `newConversationStarted`. Expect the card not amber. Repeat with `conversationLoaded`.
+  - `"a second capture error keeps the same warning card"`: a capture error, then amber, then `setAmberError("x")`. A second `meetingCaptureStarted` that also errors. Expect the same `episode` and `error: "x"`.
+  - `"the re-read labels the original recording"`: `startRecording(true)` (id 1), then a capture error. Start a second auto recording (id 2) in the same conversation. Fire a connection change with the next fetch `one("A")`. Expect `getActiveAutoRecording()` (id 2) to have `event: null`.
+  - `"a re-read leaves an unrelated amber alone"`: a capture error (the hook's episode). Then `showAmber({ variant: "offline", episode: 999 })` from the test. Fire a connection change with the next fetch ok. Expect the card still amber with `episode: 999`.
   - Run both files and check the new tests FAIL.
 
 - [ ] **Step 3: Implement the fetch change.** Unreadable config returns `config: "unreadable"`. The `catch` returns `config: "complete"`.
 
 - [ ] **Step 4: Implement the hook.**
   - Hoist the existing `run` body into a ref-held `read(src, at)`, so both the capture listener and the connection-changed listener can call it. The capture listener calls `read("capture", Date.now())`. `at` replaces the internal `Date.now()` for both the fetch argument and `pickCurrentMeeting`.
-  - Add an `armedAt` ref (`number | null`) and a module-level `let amberEpisode = 0`.
+  - Add an `arm` ref: `{ at: number; rec: ActiveAutoRecording | null; gen: number; episode: number } | null`. Also add a module-level `let amberEpisode = 0`.
+  - A capture read takes `rec = getActiveAutoRecording()` and `gen = convGen.current` at its start, as today. A reconnect read takes `rec` and `gen` from the arm instead, and still takes a fresh `readSeq` after the listener's bump. The existing `seq`/`gen` staleness check then applies to both.
   - After the existing staleness check:
-    - **Error from a capture read:** `showAmber({ variant: amberKindFor(result.code, result.config), episode: ++amberEpisode })` and set `armedAt = at`.
-    - **Error from a reconnect read:** leave the card and `armedAt` as they are.
-    - **Any non-error result:** `armedAt = null`. When `src === "reconnect"`, also `dismissAmber()`.
+    - **Error from a capture read:** `const episode = arm.current?.episode ?? ++amberEpisode`. Call `showAmber({ variant: amberKindFor(result.code, result.config), episode })`, then set `arm.current = { at, rec, gen, episode }`.
+    - **Error from a reconnect read:** leave the card and the arm as they are. Never call `showAmber`.
+    - **Any non-error result** (`ok` with any pick, or `absent`): if armed, `dismissAmber(arm.current.episode)`. Then set `arm.current = null`.
   - The Outlook read and the tick run only when `src === "capture"`.
-  - `onNewConversation` sets `armedAt = null`.
-  - The `GOOGLE_CONNECTION_CHANGED_EVENT` listener keeps its bump and pending clear. Then, if `armedAt !== null`, it calls `read("reconnect", armedAt)` (with `.catch(() => {})`).
+  - `onNewConversation`: if armed, `dismissAmber(arm.current.episode)`. Then set `arm.current = null`.
+  - The `GOOGLE_CONNECTION_CHANGED_EVENT` listener keeps its bump and pending clear. Then, if armed, it calls `read("reconnect", arm.current.at)` (with `.catch(() => {})`).
 
 - [ ] **Step 5: Run and check it passes.** `npx vitest run src/tests/fetch-google-meetings.test.ts src/tests/google-meeting-capture.test.tsx src/tests/meet-gate.test.ts`: PASS.
 
