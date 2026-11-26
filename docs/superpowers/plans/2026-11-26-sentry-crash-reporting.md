@@ -4,7 +4,7 @@
 
 **Goal:** Upload Rust panics, frontend JS errors and native crash minidumps from Meetwings to Sentry, with readable native stacks, and only when a DSN is compiled in.
 
-**Architecture:** A new Rust module `crash_reporting` parses the compiled-in DSN and calls `sentry::init` (with `tauri-plugin-sentry` as an integration and the minidump integration) before `tauri::Builder`, so the re-executed crash-reporter process exits before it reaches single-instance. The plugin injects `@sentry/browser` as `window.Sentry` into the `main` and `dashboard` webviews. A small TS helper reports render errors caught by React error boundaries. CI uploads debug files with `sentry-cli`.
+**Architecture:** A new Rust module `crash_reporting` parses the compiled-in DSN and calls `sentry::init` (with `tauri-plugin-sentry` as an integration and the minidump integration) before `tauri::Builder`, so the re-executed crash-reporter process exits before it reaches single-instance. The plugin injects `@sentry/browser` as `window.Sentry` into every webview (`initialization_script` has no window filter); only `main` and `dashboard` get the `sentry:default` capability, so in `capture-overlay-*` windows its IPC calls are denied. A small TS helper reports render errors caught by React error boundaries. CI uploads debug files with `sentry-cli`.
 
 **Tech Stack:** Rust (Tauri 2.8.2), `sentry` 0.49.3, `tauri-plugin-sentry` 0.8.0, React 19, Vitest, GitHub Actions.
 
@@ -47,9 +47,9 @@
   - `pub(crate) fn parse_dsn(raw: Option<&str>) -> Option<sentry::types::Dsn>`
   - `pub(crate) fn init() -> Option<(sentry::ClientInitGuard, tauri_plugin_sentry::Sentry)>`
 
-- [ ] **Step 0: Environment.** Linux build deps (`libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev pkg-config libasound2-dev libpulse-dev libssl-dev`) and `rustup toolchain install 1.99.1` must be present. `src-tauri/.env` must exist (gitignored); use dummy values as in `ci.yml` if it does not. Nothing to commit.
+- [ ] **Step 0: Environment.** Linux build deps (`libwebkit2gtk-4.1-dev librsvg2-dev libgtk-3-dev pkg-config libasound2-dev libpulse-dev libssl-dev`) and `rustup toolchain install 1.99.1` must be present. `src-tauri/.env` must exist (gitignored); use dummy values as in `ci.yml` if it does not. For Task 5 also `xvfb` (`xvfb-run`) and `dbus-x11` (`dbus-run-session`; single-instance needs a session bus). Nothing to commit.
 
-- [ ] **Step 1: Add the deps.** In `[dependencies]` add `sentry = { version = "0.49.3", features = ["minidump"] }` and `tauri-plugin-sentry = "=0.8.0"`. Run `cargo +1.99.1 fetch --manifest-path src-tauri/Cargo.toml`. Then run `grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock`. Expected: `version = "2.8.2"`.
+- [ ] **Step 1: Add the deps.** In `[dependencies]` add `sentry = { version = "0.49.3", features = ["minidump"] }` and `tauri-plugin-sentry = "=0.8.0"`. Run `cargo +1.99.1 fetch --manifest-path src-tauri/Cargo.toml`. Then run `grep -A1 '^name = "tauri"$' src-tauri/Cargo.lock`. Expected: `version = "2.8.2"`. If not, run `cargo +1.99.1 update --manifest-path src-tauri/Cargo.toml -p tauri --precise 2.8.2` and check again. If that conflicts, stop and report; do not commit.
 
 - [ ] **Step 2: Write the failing tests** in `src-tauri/src/crash_reporting.rs` (`#[cfg(test)] mod tests`). Add `mod crash_reporting;` to `lib.rs`:
 
@@ -80,6 +80,7 @@ fn parse_dsn_accepts_valid_and_trims() {
   - `parse_dsn`: trim first. Empty → `None`. Parse failure → `tracing::warn!` without the value (the DSN holds a key), then `None`.
   - `init`: `parse_dsn(option_env!("SENTRY_DSN"))?`. Build `let plugin = tauri_plugin_sentry::Sentry::new();` and `sentry::ClientOptions { dsn: Some(dsn), release: sentry::release_name!(), ..Default::default() }`. Add `.add_integration(plugin.clone())` and `.add_integration(sentry::integrations::minidump::MinidumpIntegration::new())`. Return `Some((sentry::init(options), plugin))`.
   - Doc comment on `init`, one line: the minidump integration re-executes this binary as the crash reporter. That process never returns from `sentry::init` (`run_crash_reporter` is `-> !`), so `init` must run before `tauri::Builder`.
+  - No extra handling for a reporter that fails to start. `setup` logs a spawn `Err` with `sentry_debug!` and carries on (`sentry-minidump-0.49.3/src/lib.rs:469-476`). `init` still returns `Some`, and the plugin is still added; the client exists. Worst case, startup waits `client_connect_timeout` (default 3000 ms, `minidumper-child-0.5.0/src/lib.rs:71`).
 
 - [ ] **Step 5: Run the tests to see them pass.** Same command as Step 3. Expected: 3 passed.
 
@@ -151,7 +152,7 @@ fn crash_kind_ignores_unknown_values() {
 - Test: `src/tests/report-caught-error.test.ts` (create), `src/tests/main-entry.test.tsx` (modify)
 
 **Interfaces:**
-- Consumes: `window.Sentry`, injected by the plugin (Task 1). It is absent in no-DSN builds and in overlay windows.
+- Consumes: `window.Sentry`, injected by the plugin (Task 1) as the whole `@sentry/browser` namespace (`tauri-plugin-sentry-0.8.0/js/inject.ts:12`). It is absent in no-DSN builds. In overlay windows it is present, but its IPC is denied (no capability).
 - Produces: `export function reportCaughtError(error: unknown, errorInfo: { componentStack?: string }): void`. The same file declares `interface Window { Sentry?: { captureException(error: unknown, hint?: unknown): unknown } }` in `declare global`.
 
 - [ ] **Step 1: Write the failing tests** in `src/tests/report-caught-error.test.ts`:
@@ -162,9 +163,9 @@ fn crash_kind_ignores_unknown_values() {
 
 - [ ] **Step 2: Extend `src/tests/main-entry.test.tsx`.**
   - Make the `createRoot` mock record its second argument into `h.rootOptions` (reset in `beforeEach`).
-  - Add `it("reports caught render errors from the main and dashboard roots only")`:
-    - `boot("dashboard")` → `typeof h.rootOptions[0]?.onCaughtError === "function"`.
-    - `boot("capture-overlay-0")` → `onCaughtError` undefined.
+  - Add `reportCaughtError: vi.fn()` to `h`, and `vi.mock("@/lib/report-caught-error", () => ({ reportCaughtError: h.reportCaughtError }))`. A mock is needed because `boot` calls `vi.resetModules()`, so a directly imported `reportCaughtError` would be a different instance from the one `main.tsx` gets.
+  - Add `it.each(["main", "dashboard"])("passes reportCaughtError as onCaughtError in %s")`: `boot(label)` → `expect(h.rootOptions[0]?.onCaughtError).toBe(h.reportCaughtError)`.
+  - Add a separate `it("does not pass onCaughtError in overlay windows")`: `boot("capture-overlay-0")` → `expect(h.rootOptions[0]?.onCaughtError).toBeUndefined()`. Each `it` boots once, so index 0 is always that boot's root.
   - The existing tests must stay unchanged and passing.
 
 - [ ] **Step 3: Run to see them fail.** Run `npx vitest run src/tests/report-caught-error.test.ts src/tests/main-entry.test.tsx`. Expected: the new tests FAIL. The module is not found, and `onCaughtError` is undefined.
@@ -237,42 +238,44 @@ No product code, unless a check fails. A failure is fixed in the owning task's f
 
 - [ ] **Step 1: Fake endpoint.**
   - Write a stdlib `http.server` script that listens on `127.0.0.1:8977` and answers every POST with `200 {}`.
-  - For each request, append one line to `envelopes.log`: the path, plus each envelope item header's `type` (`event`, `attachment`, `session`, ...).
+  - For each request, append one line to `envelopes.log`: the path, plus each envelope item header's `type` (`event`, `attachment`, `session`, ...). For `event` items, also the first `exception.values[].value`.
   - Decompress `gzip` bodies if `Content-Encoding` says so.
+  - Throughout Steps 2-5, `pgrep -fc '^Crash Reporter \(Sentry Rust SDK\)'` counts reporters. The parentheses must be escaped: `pgrep` reads an extended regex.
 
 - [ ] **Step 2: Run with a DSN and `crash-test`.**
   - Run from the repo root, with `HTTP_PROXY HTTPS_PROXY http_proxy https_proxy` removed via `env -u`. `sentry` turns these into explicit proxies, and `NO_PROXY` does not bypass them.
-  - Command: `SENTRY_DSN=http://k@127.0.0.1:8977/1 xvfb-run -a dbus-run-session -- npm run tauri dev -- --features crash-test`.
+  - Command: `SENTRY_DSN=http://k@127.0.0.1:8977/1 xvfb-run -a dbus-run-session -- bash -c 'env | grep -E "^(DISPLAY|DBUS_SESSION_BUS_ADDRESS)=" > <scratchpad>/session.env; exec npm run tauri dev -- --features crash-test'`. `session.env` lets Step 5 reach the same display and bus.
   - Expected:
     - the app window comes up;
-    - `pgrep -fc "Crash Reporter (Sentry Rust SDK)"` = `1`.
+    - the reporter count is `1`.
 
 - [ ] **Step 3: Panic and abort.**
   - Relaunch with `MEETWINGS_CRASH_TEST=panic`. Expected: an `event` line in `envelopes.log`.
   - Relaunch with `MEETWINGS_CRASH_TEST=abort`. Expected: a line with `event` and `attachment` (the minidump) from the reporter.
 
 - [ ] **Step 4: JS errors.**
-  - Make a temporary, uncommitted edit to `src/main.tsx`. It schedules `setTimeout(() => { throw new Error("sentry-js-test") }, 3000)` and `setTimeout(() => Promise.reject(new Error("sentry-js-rejection")), 3000)` in every window.
-  - Relaunch. Expected: an `event` line for each error, from both the `main` and `dashboard` windows. Open the dashboard via its tray or shortcut path, or skip `dashboard` and say so.
+  - Make a temporary, uncommitted edit to `src/main.tsx`. It schedules `setTimeout(() => { throw new Error("sentry-js-test " + windowLabel) }, 3000)` and `setTimeout(() => Promise.reject(new Error("sentry-js-rejection " + windowLabel)), 3000)` in every window.
+  - Relaunch. Expected: 4 `event` lines, one per error per window (`main` and `dashboard`), told apart by the label in the logged exception value. `setup` creates the dashboard at startup (`src-tauri/src/lib.rs:317-322`), so no opening is needed.
+  - Across Steps 2-4, `envelopes.log` has no `session` item (no session tracking).
   - Revert with `git checkout src/main.tsx`.
 
 - [ ] **Step 5: Second instance.**
-  - With the app running, start a second `src-tauri/target/debug/meetwings` with the same env.
-  - Expected: the second process exits.
-  - After 6 s, `pgrep -fc "Crash Reporter (Sentry Rust SDK)"` = `1`.
+  - With the app running, start a second instance on the same display and bus: `env $(cat <scratchpad>/session.env) SENTRY_DSN=http://k@127.0.0.1:8977/1 src-tauri/target/debug/meetwings; echo $?` (proxy vars still removed).
+  - Expected: the second process exits with `0`, and `envelopes.log` gets no new `event` line.
+  - After 6 s, the reporter count is `1`.
 
 - [ ] **Step 6: No DSN.**
   - Relaunch with `SENTRY_DSN` unset and `.env` without it. Expected:
     - the build script reruns (`rerun-if-env-changed`);
     - the app starts;
-    - `pgrep -fc "Crash Reporter (Sentry Rust SDK)"` = `0`;
+    - the reporter count is `0`;
     - `envelopes.log` gets nothing new.
 
 - [ ] **Step 7: Linux release symbols.**
   - Run `cargo +1.99.1 build --manifest-path src-tauri/Cargo.toml --release`.
   - Run `sentry-cli debug-files check src-tauri/target/release/meetwings`, and the same on `meetwings.dwp` if present.
   - Expected: debug info with line info ("has debug info" / "has symbols").
-  - If it lacks line info, set `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: off` in the Ubuntu matrix entry's build env in `publish.yml` and commit.
+  - If it lacks line info: matrix entries in `publish.yml` have no `env`, and the "Build & publish" `env` is shared. So add a `split_debuginfo` key to every matrix entry (`off` for Ubuntu, `packed` for the rest), map it in that `env` as `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: ${{ matrix.split_debuginfo }}`, and commit.
 
 - [ ] **Step 8: Report.**
   - List each of Steps 2-7 as passed, failed and fixed, or not run (with why).
