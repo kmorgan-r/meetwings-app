@@ -95,7 +95,6 @@ Gap 3: there was one sensible way to do it.
   - **On success.** Any non-error result saves the snapshot (when there is exactly one meeting), sets the card event, dismisses the armed episode's amber, and disarms.
   - **What it skips.** It never re-runs the Outlook read or the Notion tick.
   - **Disarming.** The arm is cleared by `newConversationStarted`, `conversationLoaded` and any read that does not error.
-  - **Out of scope.** A capture read that is still in flight when a connection change drops it as stale never errors, so it never arms. It is accepted as unrecovered, and its `google read stale` line is the trace.
 
 ### 4. detection.log line (`useGoogleMeetingCapture`)
 
@@ -157,8 +156,6 @@ Cases the tests must pin, beyond the builder's own:
   - Assert through the globally mocked `detectionLog` from `src/tests/setup.ts`, not a re-mock.
   - Exactly one line per read, with the exact text for each outcome and `src`.
   - No line contains the event title, a guest's name or an address.
-- **Copy:**
-  - `MeetingCard` renders the new headline and each variant body.
 - **Manual, dev build:** a human runs these before release. `google_connect` takes an `AppHandle` and does a live OAuth round trip, so unit tests reach `grants_calendar` and not the call order.
   1. Connect with the calendar box unticked. Expect the new copy and "Not connected".
   2. Record with a revoked token. Expect the amber and a `google read error` line.
