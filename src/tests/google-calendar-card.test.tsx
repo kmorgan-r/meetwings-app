@@ -266,6 +266,7 @@ describe("GoogleCalendarCard", () => {
     });
     await renderCard();
     expect(screen.getByText(GOOGLE_COPY.GOOGLE_CONSENT_REQUIRED)).toBeTruthy();
+    expect(screen.getByTestId("google-status").className).toContain("text-destructive");
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy();
   });
 

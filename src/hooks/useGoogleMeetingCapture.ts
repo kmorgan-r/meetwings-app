@@ -35,14 +35,16 @@ export interface GoogleMeetingCaptureInputs {
 // Names one failed-read warning; survives remounts so a new one never reuses an id.
 let amberEpisode = 0;
 
-type Pending ={ kind: "save"; snapshot: CalendarSnapshot } | { kind: "delete" };
+type Pending = { kind: "save"; snapshot: CalendarSnapshot } | { kind: "delete" };
 
 /**
  * When meeting capture starts, reads Google Calendar once and stores the
  * current meeting's guests as the conversation's snapshot. Exactly one current
  * meeting is stored; none, several, absent or an error removes the older
  * snapshot (spec 6.1: never guess). Fire-and-forget: it never throws into the
- * capture dispatch and never delays the recording.
+ * capture dispatch and never delays the recording. A failed capture-start read
+ * shows the amber warning and arms one re-read at the original capture time
+ * after a Google reconnect; each read writes one detection.log line.
  */
 export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): void {
   // Declared BEFORE the flush layout effect so flush sees the new id on the

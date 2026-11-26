@@ -19,6 +19,7 @@ import {
   showStopNotice,
   snoozeAmber,
   stopActiveRecording,
+  subscribeToMeetingCard,
   type MeetingCardState,
 } from "@/lib/meeting-cards.store";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
@@ -251,7 +252,10 @@ describe("meeting card store", () => {
     showAmber({ variant: "reconnect", episode: 4 });
     setAmberError("x");
     const before = getMeetingCard();
+    const listener = vi.fn();
+    subscribeToMeetingCard(listener);
     showAmber({ variant: "reconnect", episode: 4 });
+    expect(listener).not.toHaveBeenCalled();
     expect(getMeetingCard()).toBe(before);
     const card = getMeetingCard();
     expect(card?.kind === "amber" && card.error).toBe("x");
@@ -260,7 +264,10 @@ describe("meeting card store", () => {
   it("the same episode with a new variant updates the variant and keeps the error", () => {
     showAmber({ variant: "offline", episode: 4 });
     setAmberError("x");
+    const listener = vi.fn();
+    subscribeToMeetingCard(listener);
     showAmber({ variant: "reconnect", episode: 4 });
+    expect(listener).toHaveBeenCalledTimes(1);
     expect(getMeetingCard()).toEqual({ kind: "amber", variant: "reconnect", episode: 4, error: "x" });
   });
 

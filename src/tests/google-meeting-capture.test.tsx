@@ -752,6 +752,7 @@ describe("useGoogleMeetingCapture warning and re-read", () => {
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
     await connectionChanged();
     await settle();
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(2);
     expect(autoTick).not.toHaveBeenCalled();
     expect(autoUntick).not.toHaveBeenCalled();
     expect(fetchCurrentMeetings).not.toHaveBeenCalled();
@@ -828,6 +829,7 @@ describe("useGoogleMeetingCapture warning and re-read", () => {
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
     await connectionChanged();
     await settle();
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(2);
     expect(getActiveAutoRecording()?.event).toBeNull();
   });
 
@@ -837,6 +839,7 @@ describe("useGoogleMeetingCapture warning and re-read", () => {
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
     await connectionChanged();
     await settle();
+    expect(fetchCurrentGoogleMeetings).toHaveBeenCalledTimes(2);
     expect(getMeetingCard()).toMatchObject({ kind: "amber", episode: 999 });
   });
 });
@@ -904,9 +907,10 @@ describe("useGoogleMeetingCapture detection logging", () => {
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
     await connectionChanged();
     await settle();
-    const lines = googleReadLines();
-    expect(lines.length).toBeGreaterThanOrEqual(1);
-    expect(lines[lines.length - 1]).toBe("google read ok events=1 pick=one src=reconnect");
+    expect(googleReadLines()).toEqual([
+      "google read error GOOGLE_AUTH_EXPIRED src=capture",
+      "google read ok events=1 pick=one src=reconnect",
+    ]);
   });
 
   it("a log line never carries calendar text", async () => {
@@ -914,9 +918,11 @@ describe("useGoogleMeetingCapture detection logging", () => {
     fetchCurrentGoogleMeetings.mockResolvedValueOnce(one("A"));
     await dispatch();
     await settle();
+    expect(googleReadLines()).toEqual(["google read ok events=1 pick=one src=capture"]);
     for (const call of vi.mocked(detectionLog).mock.calls) {
       const line = call[0] as string;
       expect(line).not.toContain("Meeting A");
+      expect(line).not.toContain("Guest A");
       expect(line).not.toContain("A@guest.example");
       expect(line).not.toContain("me@example.org");
     }

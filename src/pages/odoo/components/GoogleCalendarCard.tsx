@@ -49,6 +49,7 @@ export function GoogleCalendarCard() {
   }
 
   function applyStatus(s: GraphStatus) {
+    if (!mountedRef.current) return;
     setStatus(s);
     if (s.connected) void verify();
     else {
