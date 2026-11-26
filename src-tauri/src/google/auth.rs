@@ -4,6 +4,7 @@ use super::{
 };
 use crate::oauth;
 
+pub const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events.readonly";
 pub const GOOGLE_SCOPES: &str =
     "openid email profile https://www.googleapis.com/auth/calendar.events.readonly";
 pub const AUTHORIZE_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -16,6 +17,13 @@ pub struct GoogleTokens {
     /// and usually not on a refresh; `None` means keep the stored one.
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
+    /// Google's space-separated granted scopes; `None` when the body has none.
+    pub scope: Option<String>,
+}
+
+/// False only when Google reported a scope list without the calendar scope.
+pub fn grants_calendar(scope: Option<&str>) -> bool {
+    scope.is_none_or(|s| s.split(' ').any(|t| t == CALENDAR_SCOPE))
 }
 
 pub fn authorize_url(
@@ -118,8 +126,12 @@ async fn post_token_to(
     if status != 200 {
         return Err(classify_token_error(status, &body).to_string());
     }
+    tokens_from_body(&body, now_ms)
+}
+
+pub(crate) fn tokens_from_body(body: &str, now_ms: i64) -> Result<GoogleTokens, String> {
     let json: serde_json::Value =
-        serde_json::from_str(&body).map_err(|_| BAD_RESPONSE.to_string())?;
+        serde_json::from_str(body).map_err(|_| BAD_RESPONSE.to_string())?;
     let access_token = json
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -140,6 +152,10 @@ async fn post_token_to(
             .map(str::to_string),
         id_token: json
             .get("id_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        scope: json
+            .get("scope")
             .and_then(|v| v.as_str())
             .map(str::to_string),
     })
@@ -288,6 +304,47 @@ mod tests {
         assert_eq!(expiry_at(1_000, -5), 1_000);
         assert_eq!(expiry_at(1_000, 60), 1_000);
         assert_eq!(expiry_at(1_000, 3_600), 1_000 + (3_600 - 60) * 1000);
+    }
+
+    #[test]
+    fn the_requested_scopes_include_the_calendar_scope() {
+        assert!(GOOGLE_SCOPES.split(' ').any(|s| s == CALENDAR_SCOPE));
+    }
+
+    #[test]
+    fn grants_calendar_needs_the_exact_scope_token() {
+        assert!(grants_calendar(Some(
+            "openid https://www.googleapis.com/auth/calendar.events.readonly email"
+        )));
+        assert!(!grants_calendar(Some("openid email profile")));
+        assert!(!grants_calendar(Some(
+            "https://www.googleapis.com/auth/calendar.events.readonly.x"
+        )));
+        assert!(!grants_calendar(Some(
+            "https://www.googleapis.com/auth/calendar.events"
+        )));
+        assert!(!grants_calendar(Some("")));
+        // Google always sends `scope` on the code exchange; a missing field is not a refusal.
+        assert!(grants_calendar(None));
+    }
+
+    #[test]
+    fn the_token_body_keeps_its_scope() {
+        let t = tokens_from_body(
+            r#"{"access_token":"a","expires_in":3600,"scope":"openid email"}"#,
+            0,
+        )
+        .unwrap();
+        assert_eq!(t.scope.as_deref(), Some("openid email"));
+        let t = tokens_from_body(r#"{"access_token":"a"}"#, 0).unwrap();
+        assert_eq!(t.scope, None);
+        // Unlike refresh_token, an empty scope is kept, so grants_calendar refuses it.
+        let t = tokens_from_body(r#"{"access_token":"a","scope":""}"#, 0).unwrap();
+        assert_eq!(t.scope.as_deref(), Some(""));
+        assert_eq!(
+            tokens_from_body("{}", 0).err().as_deref(),
+            Some("GOOGLE_BAD_RESPONSE")
+        );
     }
 
     #[tokio::test]
