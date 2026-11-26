@@ -235,8 +235,8 @@ describe("MeetingCard", () => {
   it("amber reconnect: headline, Not now snoozes, Reconnect failure shows Google copy and keeps the button", async () => {
     render(<Harness />);
     run(() => showAmber({ variant: "reconnect", episode: 1 }));
-    expect(screen.getByText("If this is a Meet call, it isn't being recorded")).toBeTruthy();
-    expect(screen.getByText(/Google Calendar is disconnected/)).toBeTruthy();
+    expect(screen.getByText("Couldn't read Google Calendar")).toBeTruthy();
+    expect(screen.getByText(/won't list who was invited\. Reconnect Google/)).toBeTruthy();
 
     h.reconnect.mockResolvedValue({ ok: false, code: "GOOGLE_NETWORK" });
     await act(async () => {
@@ -255,16 +255,22 @@ describe("MeetingCard", () => {
   it("amber settings opens the dashboard", () => {
     render(<Harness />);
     run(() => showAmber({ variant: "settings", episode: 1 }));
-    expect(screen.getByText(/Open Integrations → Google Calendar in settings to fix it\./)).toBeTruthy();
+    expect(screen.getByText(/Open settings to fix it\./)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Not now" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(h.invoke).toHaveBeenCalledWith("open_dashboard");
   });
 
+  it("amber settings body names the saved setup", () => {
+    render(<Harness />);
+    run(() => showAmber({ variant: "settings", episode: 1 }));
+    expect(screen.getByText(/can't read your saved Google Calendar setup/)).toBeTruthy();
+  });
+
   it("amber offline has Got it only", () => {
     render(<Harness />);
     run(() => showAmber({ variant: "offline", episode: 1 }));
-    expect(screen.getByText(/can't reach Google Calendar right now/)).toBeTruthy();
+    expect(screen.getByText(/couldn't reach Google Calendar/)).toBeTruthy();
     expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Got it"]);
     fireEvent.click(screen.getByRole("button", { name: "Got it" }));
     expect(getMeetingCard()).toBeNull();
@@ -279,7 +285,7 @@ describe("MeetingCard", () => {
     const err = screen.getByTestId("meeting-card-error");
     expect(err.textContent).toBe(GOOGLE_COPY.GOOGLE_AUTH_REJECTED);
     expect(err.className).not.toContain("truncate");
-    const body = screen.getByText(/Google Calendar is disconnected/);
+    const body = screen.getByText(/won't list who was invited\. Reconnect Google/);
     expect(body.compareDocumentPosition(err) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(cardHeight(getMeetingCard(), false)).toBeGreaterThan(cardHeight(before, false));
     expect(screen.getByTestId("meeting-card").style.height).toBe(`${cardHeight(getMeetingCard(), false)}px`);
@@ -298,7 +304,7 @@ describe("MeetingCard", () => {
   it("the compact amber headline wraps to two lines instead of truncating", () => {
     render(<Harness compact />);
     run(() => showAmber({ variant: "reconnect", episode: 1 }));
-    const headline = screen.getByText("If this is a Meet call, it isn't being recorded");
+    const headline = screen.getByText("Couldn't read Google Calendar");
     expect(headline.className).toContain("line-clamp-2");
     expect(headline.className).toContain("text-xs");
     expect(headline.className).not.toContain("truncate");
@@ -312,7 +318,7 @@ describe("MeetingCard", () => {
     run(() => setAmberError(GOOGLE_COPY.GOOGLE_NETWORK));
     const err = screen.getByTestId("meeting-card-error");
     expect(err.getAttribute("title")).toBe(GOOGLE_COPY.GOOGLE_NETWORK);
-    expect(screen.queryByText("If this is a Meet call, it isn't being recorded")).toBeNull();
+    expect(screen.queryByText("Couldn't read Google Calendar")).toBeNull();
     expect(screen.getByRole("button", { name: "Reconnect Google" })).toBeTruthy();
   });
 
@@ -372,7 +378,7 @@ describe("useMeetingCardHost", () => {
 
     tick(6000);
     expect(result.current).toBeNull();
-    run(() => autoRecordingStopped()); // amber never shows while a capture runs
+    run(() => autoRecordingStopped()); // with the capture stopped, the amber takes the slot
     run(() => showAmber({ variant: "reconnect", episode: 1 }));
     expect(result.current?.kind).toBe("amber");
     expect(h.invoke).toHaveBeenCalledWith("reveal_overlay");

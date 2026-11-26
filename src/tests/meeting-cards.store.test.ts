@@ -14,6 +14,7 @@ import {
   RESTART_QUIET_MS,
   resetMeetingCardsForTests,
   setCardEvent,
+  setAmberError,
   showAmber,
   showStopNotice,
   snoozeAmber,
@@ -231,10 +232,62 @@ describe("meeting card store", () => {
     expect(getMeetingCard()?.kind).toBe("amber");
   });
 
-  it("no amber while an auto recording is active", () => {
+  it("amber shows over an active auto recording, and the recording's stop leaves it", () => {
     start();
     showAmber({ variant: "offline", episode: 1 });
+    expect(getMeetingCard()?.kind).toBe("amber");
+    autoRecordingStopped();
+    expect(getMeetingCard()?.kind).toBe("amber");
+  });
+
+  it("the snooze holds while a recording is active", () => {
+    start();
+    snoozeAmber();
+    showAmber({ variant: "offline", episode: 1 });
     expect(getMeetingCard()?.kind).toBe("recording");
+  });
+
+  it("showing the same episode again keeps the card and its error", () => {
+    showAmber({ variant: "reconnect", episode: 4 });
+    setAmberError("x");
+    const before = getMeetingCard();
+    showAmber({ variant: "reconnect", episode: 4 });
+    expect(getMeetingCard()).toBe(before);
+    const card = getMeetingCard();
+    expect(card?.kind === "amber" && card.error).toBe("x");
+  });
+
+  it("the same episode with a new variant updates the variant and keeps the error", () => {
+    showAmber({ variant: "offline", episode: 4 });
+    setAmberError("x");
+    showAmber({ variant: "reconnect", episode: 4 });
+    expect(getMeetingCard()).toEqual({ kind: "amber", variant: "reconnect", episode: 4, error: "x" });
+  });
+
+  it("a new episode replaces the amber", () => {
+    showAmber({ variant: "reconnect", episode: 4 });
+    setAmberError("x");
+    showAmber({ variant: "settings", episode: 5 });
+    const card = getMeetingCard();
+    expect(card?.kind).toBe("amber");
+    if (card?.kind === "amber") {
+      expect(card.episode).toBe(5);
+      expect(card.error).toBeNull();
+    }
+  });
+
+  it("dismissAmber with an episode leaves another episode's amber", () => {
+    showAmber({ variant: "offline", episode: 2 });
+    dismissAmber(1);
+    expect(getMeetingCard()?.kind).toBe("amber");
+    dismissAmber(2);
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("a stop notice yields to the amber", () => {
+    showAmber({ variant: "offline", episode: 1 });
+    showStopNotice("call-ended");
+    expect(getMeetingCard()?.kind).toBe("amber");
   });
 
   it("a red card replaces amber; an auto stop does not resurrect it", () => {
