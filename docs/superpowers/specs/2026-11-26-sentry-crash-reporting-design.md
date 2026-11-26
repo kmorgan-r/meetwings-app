@@ -12,8 +12,10 @@ Audience: colleagues only, for now. Not yet a public-user feature.
 
 ## Goals
 
-- Capture Rust panics, frontend JS errors, and native crashes (segfaults in
-  `cidre` / `tauri-nspanel` / `xcap`, as minidumps) and upload them to Sentry.
+- Capture Rust panics, frontend JS errors (uncaught errors, unhandled
+  rejections, and render errors caught by React error boundaries), and native
+  crashes (segfaults in `cidre` / `tauri-nspanel` / `xcap`, as minidumps) and
+  upload them to Sentry.
 - Native stacks readable in Sentry (function + file:line), not bare addresses.
 - Off unless a DSN is compiled in, the same way `POSTHOG_API_KEY` works.
 
@@ -25,6 +27,10 @@ Audience: colleagues only, for now. Not yet a public-user feature.
 - WebKit content-process crash reports (blank window on macOS). Needs
   `tauri-plugin-sentry` 0.9, which needs Tauri ≥ 2.12; the lockfile is on
   2.8.2. Comes with the next Tauri bump.
+- Release-health (session) tracking. Tauri's event loop ends the process with
+  `std::process::exit` (`.run(...)` at `src-tauri/src/lib.rs:401-403` never
+  returns), so the Sentry guard never drops and sessions never end cleanly;
+  crash-free-rate numbers would be wrong.
 
 ## Anti-goals
 
@@ -40,55 +46,109 @@ Audience: colleagues only, for now. Not yet a public-user feature.
   service, but colleagues must notice and send files. Not picked: intermittent
   crashes on someone else's machine slip through.
 - **B. Sentry via `tauri-plugin-sentry`** — **picked.** One plugin covers
-  panics, JS errors (it injects `@sentry/browser` into every webview, no npm
-  package needed) and native minidumps. Automatic upload and grouping.
+  panics, JS errors (it injects `@sentry/browser` into every webview as
+  `window.Sentry`, no npm package needed) and native minidumps. Automatic
+  upload and grouping.
 - **C. PostHog error tracking** — already wired, but cannot capture native
   crashes, the likeliest cause on macOS. Dropped.
 
 ## Design
 
-1. **Dependencies** (`src-tauri/Cargo.toml`): `sentry = "0.49"`,
+1. **Dependencies** (`src-tauri/Cargo.toml`):
+   `sentry = { version = "0.49.3", features = ["minidump"] }`,
    `tauri-plugin-sentry = "=0.8.0"`. Pinned: 0.8.0 is the newest release that
-   accepts Tauri `^2` (0.9.0 requires `^2.12`). Default features (includes
-   `minidump`).
+   accepts Tauri `^2` (0.9.0 requires `^2.12`). `0.49.3` is the first `sentry`
+   with the `minidump` feature; the app names `MinidumpIntegration` directly, so
+   it asks for the feature itself instead of relying on the plugin's default
+   feature.
 2. **Debug info** (`[profile.release]`): `debug = "line-tables-only"`,
    `split-debuginfo = "packed"`, so symbols go to a separate file (dSYM on
-   macOS) instead of growing the shipped binary.
+   macOS) instead of growing the shipped binary. Linux `packed` produces split
+   DWARF (`.dwp`); see Verification for the Linux fallback.
 3. **DSN** (`src-tauri/build.rs`): pass `SENTRY_DSN` through to
-   `cargo:rustc-env`, like `POSTHOG_API_KEY`.
+   `cargo:rustc-env`, like `POSTHOG_API_KEY`. Also emit
+   `cargo:rerun-if-env-changed=SENTRY_DSN` and `cargo:rerun-if-changed=.env`.
+   `tauri_build::build()` emits its own `rerun-if` lines, so without these cargo
+   keeps replaying a stale DSN after it changes.
 4. **Init** (`src-tauri/src/lib.rs`, `run()`): right after `init_tracing()` and
-   before `tauri::Builder`, when `option_env!("SENTRY_DSN")` is non-empty:
-   `sentry::init` with the plugin as an integration, `MinidumpIntegration`,
-   `release_name!()`, `environment` = `development` in debug builds, session
-   tracking on. Keep the guard alive for the whole of `run()`. Add the plugin
-   to the builder. When the DSN is empty, do neither, so no crash-reporter
-   process starts.
+   before `tauri::Builder`, read `option_env!("SENTRY_DSN")` and parse it with
+   `.parse::<sentry::types::Dsn>().ok()`. Do not use the
+   `sentry::init((dsn, opts))` tuple form, which panics on a malformed DSN.
+   Empty or unparseable → `tracing::warn!` (unparseable only), and skip both
+   init and the plugin. No crash-reporter process starts.
+   Valid DSN → `sentry::init` with the plugin as an integration,
+   `MinidumpIntegration`, `release_name!()`, and `environment` =
+   `development` in debug builds. No session tracking (see Non-goals). Keep the
+   guard bound in `run()`. Then add the plugin to the builder.
+   The plugin is only added when init ran: its `initialize` returns `Err` when
+   no Sentry client exists (`tauri-plugin-sentry-0.8.0/src/lib.rs:107-109`),
+   which would stop startup.
    The minidump integration re-runs the same executable as a crash-reporter
-   process, and everything before `sentry::init` runs in both. Because init sits
-   before the builder, the reporter never reaches the single-instance plugin.
-   This must be checked on a real Mac (see Verification).
-5. **Capability**: add `sentry:default` to `capabilities/default.json` and
-   `capabilities/cross-platform.json`.
-6. **CI** (`publish.yml`, `macos-test-build.yml`): add `SENTRY_DSN` to the
-   generated `.env` and to the build env. After the build, add a step that
-   runs `sentry-cli debug-files upload --include-sources` on the target release
-   dir, using `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT`. The step is
-   skipped when `SENTRY_AUTH_TOKEN` is empty, so builds without the secrets
-   still pass.
+   process, and everything before `sentry::init` runs in both. The reporter
+   never returns from `sentry::init`: `run_crash_reporter` is `-> !` and calls
+   `exit(0)` or `exit(1)` (`sentry-minidump-0.49.3/src/lib.rs:394-433`). Because
+   init sits before the builder, the reporter never reaches the single-instance
+   plugin. This must be checked on a real Mac (see Verification).
+5. **Capability**: add `sentry:default` to `capabilities/default.json` (macOS)
+   and `capabilities/cross-platform.json` (Windows, Linux).
+6. **Render errors** (`src/main.tsx`): React 19 sends errors caught by an error
+   boundary to `console.error`, not `window.onerror`, so the injected SDK only
+   records a breadcrumb. Pass `onCaughtError` to both `createRoot` calls:
+   call `window.Sentry?.captureException(error)` (absent when no DSN), then keep
+   the default `console.error` output.
+7. **Optional crash trigger**: a `crash-test` cargo feature, off by default.
+   When on, `MEETWINGS_CRASH_TEST=panic|abort`, checked right after
+   `sentry::init`, calls a named function
+   (`sentry_crash_test`) that panics or calls `std::process::abort()`.
+   `macos-test-build.yml` builds with `--features crash-test`; `publish.yml`
+   never does, so public builds carry no trigger.
+8. **CI** (`publish.yml`, `macos-test-build.yml`): add `SENTRY_DSN` to the
+   generated `.env` and to the build env. Add an upload step as the **last**
+   step of the job, so a failed symbol upload cannot skip any existing step
+   (e.g. publish.yml's "Upload stable-name copies"). The step:
+   - maps `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` into its `env`;
+   - starts its script with `[ -n "$SENTRY_AUTH_TOKEN" ] || exit 0`, because
+     `secrets.*` is not allowed in a step `if:`;
+   - installs the CLI with `npm i -g @sentry/cli@<pinned version>` (Node is
+     already set up in both workflows);
+   - runs `sentry-cli debug-files upload --include-sources` on
+     `src-tauri/target/<target>/release`.
    Note: once `SENTRY_DSN` is set, public GitHub releases report crashes too.
    That is acceptable while colleagues are the only users.
-7. **Privacy defaults**: `send_default_pii` stays off. Default JS breadcrumbs
+9. **Privacy defaults**: `send_default_pii` stays off. Default JS breadcrumbs
    (console, fetch URLs) stay on for diagnosis; revisit with the opt-in work.
 
 ## Verification
 
-- Linux, here: point `SENTRY_DSN` at a local fake endpoint, trigger a Rust panic
-  and a native abort in a debug build, and confirm an event and a minidump
-  envelope arrive. Confirm the app starts normally with the DSN empty.
-- macOS, a colleague or the owner: install a `macos-test-build.yml` DMG built
-  with the DSN, then confirm three things: the app starts, a second launch
-  still focuses the dashboard, and a test crash appears in Sentry with
-  symbolicated frames.
+- **Linux, here.** Prerequisites: the Tauri Linux system deps (as in
+  publish.yml's Ubuntu step), `xvfb-run` for a display, and `dbus`
+  (single-instance). Set `NO_PROXY=127.0.0.1,localhost` so the local fake DSN
+  endpoint bypasses the outbound proxy. With
+  `SENTRY_DSN=http://key@127.0.0.1:<port>/1` and `--features crash-test`:
+  - `MEETWINGS_CRASH_TEST=panic` → an event arrives;
+    `MEETWINGS_CRASH_TEST=abort` → a minidump envelope arrives.
+  - Throw an uncaught error, an unhandled rejection, and a boundary-caught
+    render error in both the `main` and `dashboard` windows; an event arrives
+    for each.
+  - `ps` shows exactly one `Crash Reporter (Sentry Rust SDK)` per app process.
+  - Rebuild with `SENTRY_DSN` empty: the app starts normally, and `ps` shows no
+    reporter process.
+  - Run `sentry-cli debug-files check` on a Linux release binary and its
+    `.dwp`. If line info is missing, set
+    `CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off` for the Ubuntu job only.
+- **CI.** Dispatch `macos-test-build.yml` before the Sentry secrets exist: the
+  build passes and the upload step exits early. Dispatch it again after: the
+  upload step runs and Sentry lists the dSYM.
+- **macOS, a colleague or the owner.** Install a `macos-test-build.yml` DMG
+  built with the DSN. Then confirm:
+  - the app starts, and the dashboard does not pop up at plain startup;
+  - a second launch with `open -n` (or the binary path) still focuses the
+    dashboard, and `ps` then shows one app process and one reporter; the second
+    instance's reporter is gone within ~5 s (the reporter's stale timeout);
+  - running the binary from Terminal with `MEETWINGS_CRASH_TEST=abort` puts a
+    crash in Sentry whose frames show `sentry_crash_test` with file:line;
+  - a JS error thrown in the dashboard reaches Sentry (this proves the macOS
+    capability file).
 
 ## Owner to-do
 
@@ -98,5 +158,5 @@ Create a Sentry project (platform: Rust). Add repo secrets `SENTRY_DSN`,
 
 ## Left to the builder
 
-The exact panic/abort trigger used for verification (debug-only, not shipped),
-and the target-dir path for each matrix entry in the upload step.
+How the JS-error checks are triggered (devtools console is fine), and the
+pinned `@sentry/cli` version.
