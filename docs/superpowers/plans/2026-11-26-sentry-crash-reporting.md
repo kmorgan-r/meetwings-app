@@ -168,7 +168,7 @@ fn crash_kind_ignores_unknown_values() {
   - Add a separate `it("does not pass onCaughtError in overlay windows")`: `boot("capture-overlay-0")` → `expect(h.rootOptions[0]?.onCaughtError).toBeUndefined()`. Each `it` boots once, so index 0 is always that boot's root.
   - The existing tests must stay unchanged and passing.
 
-- [ ] **Step 3: Run to see them fail.** Run `npx vitest run src/tests/report-caught-error.test.ts src/tests/main-entry.test.tsx`. Expected: the new tests FAIL. The module is not found, and `onCaughtError` is undefined.
+- [ ] **Step 3: Run to see them fail.** Run `npx vitest run src/tests/report-caught-error.test.ts src/tests/main-entry.test.tsx`. Expected: the `report-caught-error` tests FAIL (module not found), and the two `it.each` cases FAIL (`onCaughtError` is undefined). The overlay case already passes; it guards against a regression.
 
 - [ ] **Step 4: Implement `reportCaughtError`** in `src/lib/report-caught-error.ts`:
   - Wrap `window.Sentry?.captureException(...)` in try/catch.
@@ -240,11 +240,11 @@ No product code, unless a check fails. A failure is fixed in the owning task's f
   - Write a stdlib `http.server` script that listens on `127.0.0.1:8977` and answers every POST with `200 {}`.
   - For each request, append one line to `envelopes.log`: the path, plus each envelope item header's `type` (`event`, `attachment`, `session`, ...). For `event` items, also the first `exception.values[].value`.
   - Decompress `gzip` bodies if `Content-Encoding` says so.
-  - Throughout Steps 2-5, `pgrep -fc '^Crash Reporter \(Sentry Rust SDK\)'` counts reporters. The parentheses must be escaped: `pgrep` reads an extended regex.
+  - Throughout Steps 2-6, `pgrep -fc '^Crash Reporter \(Sentry Rust SDK\)'` counts reporters. The parentheses must be escaped: `pgrep` reads an extended regex.
 
 - [ ] **Step 2: Run with a DSN and `crash-test`.**
   - Run from the repo root, with `HTTP_PROXY HTTPS_PROXY http_proxy https_proxy` removed via `env -u`. `sentry` turns these into explicit proxies, and `NO_PROXY` does not bypass them.
-  - Command: `SENTRY_DSN=http://k@127.0.0.1:8977/1 xvfb-run -a dbus-run-session -- bash -c 'env | grep -E "^(DISPLAY|DBUS_SESSION_BUS_ADDRESS)=" > <scratchpad>/session.env; exec npm run tauri dev -- --features crash-test'`. `session.env` lets Step 5 reach the same display and bus.
+  - Command: `SENTRY_DSN=http://k@127.0.0.1:8977/1 xvfb-run -a dbus-run-session -- bash -c 'env | grep -E "^(DISPLAY|XAUTHORITY|DBUS_SESSION_BUS_ADDRESS)=" > <scratchpad>/session.env; exec npm run tauri dev -- --features crash-test'`. `session.env` carries the display, its auth cookie path (`xvfb-run` starts Xvfb with `-auth`) and the bus, so Step 5 reaches the same ones.
   - Expected:
     - the app window comes up;
     - the reporter count is `1`.
@@ -261,7 +261,7 @@ No product code, unless a check fails. A failure is fixed in the owning task's f
 
 - [ ] **Step 5: Second instance.**
   - With the app running, start a second instance on the same display and bus: `env $(cat <scratchpad>/session.env) SENTRY_DSN=http://k@127.0.0.1:8977/1 src-tauri/target/debug/meetwings; echo $?` (proxy vars still removed).
-  - Expected: the second process exits with `0`, and `envelopes.log` gets no new `event` line.
+  - Expected: the second process exits with `0` (single-instance calls `std::process::exit(0)`, `tauri-plugin-single-instance-2.3.6/src/platform_impl/linux.rs:90`), and `envelopes.log` gets no new `event` line.
   - After 6 s, the reporter count is `1`.
 
 - [ ] **Step 6: No DSN.**
