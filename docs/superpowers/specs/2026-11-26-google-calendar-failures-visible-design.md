@@ -65,7 +65,7 @@ Gap 3: there was one sensible way to do it.
 ### 3. Warning card on a failed read at recording start (`useGoogleMeetingCapture` + store + `MeetingCard`)
 
 - In `run()`, after the existing staleness checks:
-  - When `result.kind === "error"`, call `showAmber({ variant: amberKindFor(code, configState), episode })`. `configState` comes from one `loadGoogleConfigState()` call made on the error path only.
+  - When `result.kind === "error"`, call `showAmber({ variant: amberKindFor(code, configState), episode })`. `configState` comes from the fetch result itself: the error variant of `FetchGoogleMeetingsResult` gains `config: "complete" | "unreadable"`.
   - `episode` is a module-level counter. It only has to change per showing.
   - `absent` and `ok` (any pick) show nothing.
 - `showAmber` drops its `|| active` refusal. That guard dates from the calendar-gated era, when amber meant "not recording". Now amber comes up during a recording and takes the card slot from the 6-second recording card. The existing snooze (`AMBER_SNOOZE_MS`) still applies. The store test "no amber while an auto recording is active" gets inverted.
@@ -75,7 +75,7 @@ Gap 3: there was one sensible way to do it.
   - `settings`: "Recording continues, but Meetwings can't read your saved Google Calendar setup. Open settings to fix it."
   - `offline`: "Recording continues, but Meetwings couldn't reach Google Calendar, so this meeting's Notion page may not list who was invited."
   - Buttons stay as they are. Fixed card heights in `cardHeight` must still fit, so keep the bodies no longer than today's.
-- **Reconnect re-reads this meeting.** When a capture-start read in the current conversation ended in an error, the hook arms a re-read. The next `google-connection-changed` event runs `run()` again, which saves the snapshot for the call still in progress. The arm is cleared by `newConversationStarted`, `conversationLoaded` and any read that does not error. Without the re-read, "Reconnect Google to fix it" would be false for the current meeting.
+- **Reconnect re-reads this meeting.** When a capture-start read in the current conversation ended in an error, the hook arms a re-read. The next `google-connection-changed` event runs the read again with the original capture-start time, so a reconnect hours later can never pick a later meeting. That read saves the snapshot and the card event, and dismisses the amber on success. It never re-runs the Outlook read or the Notion tick. The arm is cleared by `newConversationStarted`, `conversationLoaded` and any read that does not error. Without the re-read, "Reconnect Google to fix it" would be false for the current meeting.
 
 ### 4. detection.log line (`useGoogleMeetingCapture`)
 
