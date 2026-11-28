@@ -24,6 +24,7 @@ import {
   setAmberError,
   setCardEvent,
   showAmber,
+  showOffer,
   showStopNotice,
   subscribeToMeetingCard,
 } from "@/lib/meeting-cards.store";
@@ -370,6 +371,14 @@ describe("MeetingCard", () => {
 });
 
 describe("useMeetingCardHost", () => {
+  it("an offer card reveals the window", () => {
+    const { result } = renderHook(() => useMeetingCardHost("icon-only"));
+    expect(h.invoke).not.toHaveBeenCalledWith("reveal_overlay");
+    run(() => void showOffer());
+    expect(result.current?.kind).toBe("offer");
+    expect(h.invoke).toHaveBeenCalledWith("reveal_overlay");
+  });
+
   it("an amber card reveals the window; a red card does not", () => {
     const { result } = renderHook(() => useMeetingCardHost("icon-only"));
     run(() => void start());

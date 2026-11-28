@@ -20,6 +20,9 @@ import {
   snoozeAmber,
   stopActiveRecording,
   subscribeToMeetingCard,
+  showOffer,
+  setOfferState,
+  dismissOffer,
   type MeetingCardState,
 } from "@/lib/meeting-cards.store";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
@@ -392,5 +395,50 @@ describe("meeting card store", () => {
     expect(getMeetingCard()?.kind).toBe("recording");
     goto(9_000);
     expect(getMeetingCard()).toBeNull();
+  });
+});
+
+describe("auto-record offer card", () => {
+  it("showOffer fills an empty slot only", () => {
+    expect(showOffer()).toBe(true);
+    expect(getMeetingCard()).toEqual({ kind: "offer", busy: false, error: null });
+    expect(showOffer()).toBe(false); // already up: idempotent
+    resetMeetingCardsForTests();
+    showStopNotice("silence");
+    expect(showOffer()).toBe(false);
+    expect(getMeetingCard()?.kind).toBe("ended");
+  });
+
+  it("has no timer: it stays until answered", () => {
+    showOffer();
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(getMeetingCard()?.kind).toBe("offer");
+  });
+
+  it("any other card replaces the offer; dismissOffer leaves other cards alone", () => {
+    showOffer();
+    showAmber({ variant: "reconnect", episode: 1 });
+    expect(getMeetingCard()?.kind).toBe("amber");
+    dismissOffer();
+    expect(getMeetingCard()?.kind).toBe("amber");
+  });
+
+  it("dismissOffer clears an offer", () => {
+    showOffer();
+    dismissOffer();
+    expect(getMeetingCard()).toBeNull();
+  });
+
+  it("setOfferState updates only an offer; an error grows the card", () => {
+    setOfferState({ busy: true, error: null }); // no offer up: no-op
+    expect(getMeetingCard()).toBeNull();
+    showOffer();
+    setOfferState({ busy: true, error: null });
+    expect(getMeetingCard()).toMatchObject({ kind: "offer", busy: true });
+    const plain = cardHeight(getMeetingCard(), false);
+    const plainCompact = cardHeight(getMeetingCard(), true);
+    setOfferState({ busy: false, error: "x" });
+    expect(cardHeight(getMeetingCard(), false)).toBeGreaterThan(plain);
+    expect(cardHeight(getMeetingCard(), true)).toBeGreaterThan(plainCompact);
   });
 });

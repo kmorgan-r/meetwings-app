@@ -264,6 +264,8 @@ export function MeetingCard({ card, compact = false }: { card: Card; compact?: b
       return <EndedCard key="ended" card={card} compact={compact} />;
     case "amber":
       return <AmberCard key={`amber:${card.episode}`} card={card} compact={compact} />;
+    case "offer":
+      return null; // Rendered by OfferCard (next task).
   }
 }
 

@@ -25,15 +25,18 @@ import type { OverlayPillStyle } from "@/lib/storage";
 export function useMeetingCardHost(pillStyle: OverlayPillStyle): MeetingCardState {
   const card = useSyncExternalStore(subscribeToMeetingCard, getMeetingCard);
   // A new amber episode re-reveals; an error update on the same episode does not.
-  const amberEpisode = card?.kind === "amber" ? card.episode : null;
+  // The auto-record offer reveals once when it appears (its busy/error updates
+  // keep the same key).
+  const revealKey =
+    card?.kind === "amber" ? `amber:${card.episode}` : card?.kind === "offer" ? "offer" : null;
 
   useEffect(() => {
     // Red and ended cards never force the window open.
-    if (amberEpisode === null) return;
+    if (revealKey === null) return;
     invoke("reveal_overlay").catch((error) => {
       console.error("Failed to reveal the overlay:", error);
     });
-  }, [amberEpisode]);
+  }, [revealKey]);
 
   // Style through a ref so a style change never re-subscribes (the app page's
   // restyle listener owns that path).

@@ -27,6 +27,9 @@ export type MeetingCardState =
   | { kind: "recording"; recordingId: number; app: string; startedAt: number; event: CardEvent | null }
   | { kind: "ended"; reason: StopNoticeReason }
   | { kind: "amber"; variant: AmberKind; episode: number; error: string | null }
+  // The one-time "turn on auto-record?" question at launch. `busy` while the
+  // Mac permission checks run; `error` holds a failed turn-on's one-line reason.
+  | { kind: "offer"; busy: boolean; error: string | null }
   | null;
 
 /** Why an automatic stop happened; drives the stop notice's copy. */
@@ -227,6 +230,27 @@ export function snoozeAmber(now: number = Date.now()): void {
   dismissAmber();
 }
 
+/**
+ * Show the first-launch auto-record offer. Only into an EMPTY slot, and with no
+ * timer: it stays until answered. Any other card replaces it (setCard), and a
+ * replaced offer is not brought back. Returns whether it is now showing.
+ */
+export function showOffer(now: number = Date.now()): boolean {
+  if (card !== null) return false;
+  setCard({ kind: "offer", busy: false, error: null }, null, now);
+  return true;
+}
+
+export function setOfferState(s: { busy: boolean; error: string | null }): void {
+  if (card?.kind !== "offer") return;
+  card = { kind: "offer", busy: s.busy, error: s.error };
+  notify();
+}
+
+export function dismissOffer(): void {
+  if (card?.kind === "offer") clearCard();
+}
+
 export const dismissCard = clearCard;
 
 export function holdCard(held: boolean, now: number = Date.now()): void {
@@ -265,6 +289,11 @@ export function cardHeight(c: MeetingCardState, compact: boolean): number {
       // The error wraps under the body: two more 16px lines. Compact swaps the
       // headline for the error, so its height does not change.
       return compact ? 80 : c.error ? 136 : 104;
+    case "offer":
+      // Title, two body lines, footnote and buttons; an error adds two lines.
+      // Compact (the 300px pill card) wraps the body one line more.
+      if (compact) return c.error ? 152 : 120;
+      return c.error ? 136 : 104;
   }
 }
 
