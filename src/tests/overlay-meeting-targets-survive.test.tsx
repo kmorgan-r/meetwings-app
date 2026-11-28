@@ -353,6 +353,7 @@ const mockEverything = () => {
     return {
       useApp: () => ({ isHidden: false, systemAudio: knobs.systemAudio }),
       useMeetingCardHost: () => null,
+      useAutoRecordOffer: () => {},
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
