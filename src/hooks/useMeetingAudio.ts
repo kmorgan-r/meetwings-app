@@ -109,6 +109,14 @@ export function useMeetingAudio({
   const consecutiveEmptyRef = useRef(0);
   const emptyReportedRef = useRef(false);
 
+  // Speech settings are read per segment through this ref, never captured by
+  // processQueue (#114). processQueue is a dependency of the capture effect,
+  // and app.context's loadData() hands selectedSttProvider a new object on
+  // every settings reload even when nothing changed. Depending on it restarted
+  // system audio capture (tap + aggregate device on macOS) and discarded the
+  // queued speech whenever any window saved any setting.
+  const sttSettingsRef = useRef({ sttProvider, selectedSttProvider, sttLanguage });
+
   // Keep refs in sync
   useEffect(() => {
     enabledRef.current = enabled;
@@ -116,6 +124,10 @@ export function useMeetingAudio({
     onSystemAudioTranscriptRef.current = onSystemAudioTranscript;
     onErrorRef.current = onError;
   }, [enabled, audioBuffer, onSystemAudioTranscript, onError]);
+
+  useEffect(() => {
+    sttSettingsRef.current = { sttProvider, selectedSttProvider, sttLanguage };
+  }, [sttProvider, selectedSttProvider, sttLanguage]);
 
   // Track processQueue changes
   const processQueueCountRef = useRef(0);
@@ -190,7 +202,11 @@ export function useMeetingAudio({
         }
         const audioBlob = new Blob([bytes], { type: 'audio/wav' });
 
-        // Transcribe
+        // Transcribe with the settings current now, not those of the render
+        // that created processQueue: a language change mid-meeting applies
+        // from the next segment on.
+        const { sttProvider, selectedSttProvider, sttLanguage } =
+          sttSettingsRef.current;
         const transcription = await fetchSTT({
           provider: sttProvider,
           selectedProvider: selectedSttProvider,
@@ -245,16 +261,11 @@ export function useMeetingAudio({
 
     isProcessingRef.current = false;
     setIsProcessing(false);
-    // noteSttFailure and noteEmptyTranscription are both useCallback(…, []), so
-    // listing them costs nothing: their identities never change and
-    // processQueue is not recreated by either.
-  }, [
-    sttProvider,
-    selectedSttProvider,
-    sttLanguage,
-    noteSttFailure,
-    noteEmptyTranscription,
-  ]);
+    // Stable for the hook's lifetime: noteSttFailure and noteEmptyTranscription
+    // are useCallback(…, []), and the speech settings come from sttSettingsRef.
+    // Keep it that way - any dependency added here re-runs the capture effect
+    // below whenever it changes identity, restarting capture mid-meeting.
+  }, [noteSttFailure, noteEmptyTranscription]);
 
   // Log when processQueue changes
   useEffect(() => {

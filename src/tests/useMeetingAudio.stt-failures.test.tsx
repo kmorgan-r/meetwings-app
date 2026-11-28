@@ -63,11 +63,10 @@ import {
 
 type Props = Parameters<typeof useMeetingAudio>[0];
 
-// A single stable reference reused across every rerender in this file.
-// processQueue's deps include selectedSttProvider, so a fresh object literal
-// on every rerender would recreate processQueue, re-run the main effect, and
-// silently reset the failure counters under test - the exact trap Step 2
-// warns about for the "re-arms per session" case.
+// A single stable reference reused across every rerender in this file. Since
+// #114 a fresh object no longer re-runs the capture effect (the speech settings
+// are read through a ref - see useMeetingAudio.capture-lifecycle.test.tsx), but
+// a shared reference keeps these cases independent of that guarantee.
 const SELECTED_STT_PROVIDER = { provider: "openai", variables: {} };
 
 const FAKE_AUDIO = btoa("fake-audio-bytes");
@@ -310,10 +309,8 @@ describe("useMeetingAudio - failing STT provider visibility", () => {
     }
     await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
 
-    // End the session and start a new one. selectedSttProvider (and every
-    // other processQueue dependency) stays referentially stable across the
-    // toggle - a fresh object literal here would ALSO re-run the effect and
-    // reset the counters, passing this case for the wrong reason.
+    // End the session and start a new one. Only `enabled` changes, so the
+    // counters are reset by the session ending and nothing else.
     view.rerender({ ...props, enabled: false });
     view.rerender({ ...props, enabled: true });
     await waitForSetup();
