@@ -290,10 +290,11 @@ export function cardHeight(c: MeetingCardState, compact: boolean): number {
       // headline for the error, so its height does not change.
       return compact ? 80 : c.error ? 136 : 104;
     case "offer":
-      // Title, two body lines, footnote and buttons; an error adds two lines.
-      // Compact (the 300px pill card) wraps the body one line more.
-      if (compact) return c.error ? 152 : 120;
-      return c.error ? 136 : 104;
+      // Padding 20 + title 20 + body (2 lines, 32) + footnote 16 + buttons 24
+      // + gaps; an error adds two 16px lines. Compact (the 300px pill card)
+      // wraps the body to three lines.
+      if (compact) return c.error ? 168 : 136;
+      return c.error ? 152 : 120;
   }
 }
 

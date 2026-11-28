@@ -14,6 +14,14 @@ import {
   type MeetingCardState,
 } from "@/lib/meeting-cards.store";
 import { cn } from "@/lib/utils";
+import { isMacOS } from "@/lib/platform";
+import {
+  acceptAutoRecordOffer,
+  declineAutoRecordOffer,
+  OFFER_BODY,
+  OFFER_FOOTNOTE,
+  OFFER_TITLE,
+} from "@/lib/auto-record-offer";
 
 type Card = NonNullable<MeetingCardState>;
 
@@ -256,6 +264,60 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
   );
 }
 
+/**
+ * The one-time "turn on auto-record?" question at launch. Stays until answered.
+ * A failed turn-on (Mac permission refused) swaps Turn on for Open settings,
+ * where the toggle's note names the exact System Settings pane.
+ */
+function OfferCard({ card, compact }: { card: Extract<Card, { kind: "offer" }>; compact: boolean }) {
+  const openSettings = () => {
+    invoke("open_dashboard").catch((e) => console.error("Failed to open dashboard:", e));
+  };
+  const btn = "h-6 px-2.5 text-xs";
+  const body = OFFER_BODY[isMacOS() ? "macos" : "windows"];
+  return (
+    <div
+      data-testid="meeting-card"
+      data-kind="offer"
+      role="dialog"
+      aria-label={OFFER_TITLE}
+      // z-[60]: same as the amber card, above the z-50 response popover.
+      className={cn(SHELL, "relative z-[60] border-primary/40 bg-gradient-to-br from-primary/10 to-card")}
+      style={{ height: cardHeight(card, compact) }}
+    >
+      <div className="flex h-full flex-col px-3 py-2.5">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <span aria-hidden="true" className="h-2.5 w-2.5 shrink-0 rounded-full bg-destructive" />
+          <span className="min-w-0 truncate">{OFFER_TITLE}</span>
+        </div>
+        <p className={cn("mt-0.5 pl-[18px] text-xs leading-4 text-muted-foreground", compact ? "line-clamp-3" : "line-clamp-2")}>
+          {body}
+        </p>
+        <p className="pl-[18px] text-xs leading-4 text-muted-foreground/80">{OFFER_FOOTNOTE}</p>
+        {card.error && (
+          <p className="mt-1 line-clamp-2 pl-[18px] text-xs leading-4 text-destructive" title={card.error} data-testid="meeting-card-error">
+            {card.error}
+          </p>
+        )}
+        <div className="mt-auto flex items-center justify-end gap-2">
+          <Button type="button" size="sm" variant="outline" className={btn} disabled={card.busy} onClick={() => declineAutoRecordOffer()}>
+            Not now
+          </Button>
+          {card.error ? (
+            <Button type="button" size="sm" className={btn} disabled={card.busy} onClick={openSettings}>
+              Open settings
+            </Button>
+          ) : (
+            <Button type="button" size="sm" className={btn} disabled={card.busy} onClick={() => void acceptAutoRecordOffer()}>
+              Turn on
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MeetingCard({ card, compact = false }: { card: Card; compact?: boolean }) {
   switch (card.kind) {
     case "recording":
@@ -265,7 +327,7 @@ export function MeetingCard({ card, compact = false }: { card: Card; compact?: b
     case "amber":
       return <AmberCard key={`amber:${card.episode}`} card={card} compact={compact} />;
     case "offer":
-      return null; // Rendered by OfferCard (next task).
+      return <OfferCard key="offer" card={card} compact={compact} />;
   }
 }
 
