@@ -9,11 +9,19 @@ import {
 import { pickCurrentMeeting } from "@/lib/calendar/current-meeting";
 import { fetchCurrentMeetings } from "@/lib/calendar/fetch-current-meetings";
 import { fetchCurrentGoogleMeetings } from "@/lib/calendar/fetch-google-meetings";
+import { detectionLog } from "@/lib/detection-log";
 import {
   deleteCalendarSnapshot,
   saveCalendarSnapshot,
 } from "@/lib/database/calendar-snapshot.action";
-import { getActiveAutoRecording, setCardEvent } from "@/lib/meeting-cards.store";
+import { amberKindFor } from "@/lib/meeting-detect";
+import {
+  dismissAmber,
+  getActiveAutoRecording,
+  setCardEvent,
+  showAmber,
+  type ActiveAutoRecording,
+} from "@/lib/meeting-cards.store";
 import { GOOGLE_CONNECTION_CHANGED_EVENT } from "@/lib/storage/google-config.storage";
 import type { UseNotionPickReturn } from "@/hooks/useNotionPick";
 
@@ -24,6 +32,9 @@ export interface GoogleMeetingCaptureInputs {
   notionPick: Pick<UseNotionPickReturn, "autoTick" | "autoUntick" | "handTouchesRef">;
 }
 
+// Names one failed-read warning; survives remounts so a new one never reuses an id.
+let amberEpisode = 0;
+
 type Pending = { kind: "save"; snapshot: CalendarSnapshot } | { kind: "delete" };
 
 /**
@@ -31,7 +42,9 @@ type Pending = { kind: "save"; snapshot: CalendarSnapshot } | { kind: "delete" }
  * current meeting's guests as the conversation's snapshot. Exactly one current
  * meeting is stored; none, several, absent or an error removes the older
  * snapshot (spec 6.1: never guess). Fire-and-forget: it never throws into the
- * capture dispatch and never delays the recording.
+ * capture dispatch and never delays the recording. A failed capture-start read
+ * shows the amber warning and arms one re-read at the original capture time
+ * after a Google reconnect; each read writes one detection.log line.
  */
 export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): void {
   // Declared BEFORE the flush layout effect so flush sees the new id on the
@@ -78,6 +91,8 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       convGen.current += 1;
       tickGen.current += 1;
       pending.current = null;
+      if (arm.current) dismissAmber(arm.current.episode);
+      arm.current = null;
     };
     // Drops a late tick but never the snapshot (spec 8.3).
     const onTargetsCleared = () => {
@@ -99,6 +114,7 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
     void listen(GOOGLE_CONNECTION_CHANGED_EVENT, () => {
       readSeq.current += 1;
       pending.current = null;
+      if (arm.current) read.current("reconnect", arm.current.at).catch(() => {});
     }).then((fn) => {
       if (disposed) {
         fn();
@@ -112,19 +128,34 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
     };
   }, []);
 
+  // Held across renders so the capture and connection-changed listeners share
+  // one read. Re-assigned each run of the effect below.
+  const read = useRef<(src: "capture" | "reconnect", at: number) => Promise<void>>(
+    async () => {}
+  );
+  // Set by a capture read that errored: lets a Google reconnect re-read the
+  // same meeting (at the capture-start time, for the same recording).
+  const arm = useRef<{
+    at: number;
+    rec: ActiveAutoRecording | null;
+    gen: number;
+    episode: number;
+  } | null>(null);
+
   useEffect(() => {
-    const run = async () => {
+    read.current = async (src, at) => {
       // Read synchronously: a result landing after a newer recording started
-      // must not label it (setCardEvent ignores the stale id).
-      const rec = getActiveAutoRecording();
+      // must not label it (setCardEvent ignores the stale id). A reconnect
+      // read labels the recording the capture read saw.
+      const rec = src === "capture" ? getActiveAutoRecording() : arm.current!.rec;
       const seq = ++readSeq.current;
-      const gen = convGen.current;
+      const gen = src === "capture" ? convGen.current : arm.current!.gen;
       // Captured before any await: the touch count at the event, and the
       // tick generation.
       const tick = tickGen.current;
       const touches = latest.current.notionPick.handTouchesRef.current;
-      const tickEnabled = latest.current.tickEnabled;
-      const now = Date.now();
+      const tickEnabled = src === "capture" && latest.current.tickEnabled;
+      const now = at;
       const g = fetchCurrentGoogleMeetings(now);
       // Always read, whatever the auto-select setting. Never rejects, so it
       // is safe to leave unawaited if the Google result is dropped.
@@ -132,8 +163,28 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
         ? withTimeout(fetchCurrentMeetings(), OUTLOOK_CHECK_TIMEOUT_MS)
         : null;
       const result = await g;
-      if (seq !== readSeq.current || gen !== convGen.current) return;
+      if (seq !== readSeq.current || gen !== convGen.current) {
+        detectionLog(`google read stale src=${src}`);
+        return;
+      }
       const pick = result.kind === "ok" ? pickCurrentMeeting(result.events, now) : null;
+      if (result.kind === "ok") {
+        detectionLog(`google read ok events=${result.events.length} pick=${pick?.kind} src=${src}`);
+      } else if (result.kind === "error") {
+        detectionLog(`google read error ${result.code} src=${src}`);
+      } else {
+        detectionLog(`google read absent src=${src}`);
+      }
+      if (result.kind === "error") {
+        if (src === "capture") {
+          const episode = arm.current?.episode ?? ++amberEpisode;
+          showAmber({ variant: amberKindFor(result.code, result.config), episode });
+          arm.current = { at, rec, gen, episode };
+        }
+      } else {
+        if (arm.current) dismissAmber(arm.current.episode);
+        arm.current = null;
+      }
       if (rec?.gated && result.kind === "ok" && pick?.kind === "one") {
         setCardEvent(rec.id, pick.event, result.ownAddress);
       }
@@ -152,10 +203,13 @@ export function useGoogleMeetingCapture(inputs: GoogleMeetingCaptureInputs): voi
       if (decideCheckOne(result, outlook, now) === "tick") notionPick.autoTick(touches);
       else notionPick.autoUntick();
     };
+  }, [flush]);
+
+  useEffect(() => {
     const onCaptureStarted = () => {
-      run().catch(() => {});
+      read.current("capture", Date.now()).catch(() => {});
     };
     window.addEventListener("meetingCaptureStarted", onCaptureStarted);
     return () => window.removeEventListener("meetingCaptureStarted", onCaptureStarted);
-  }, [flush]);
+  }, []);
 }

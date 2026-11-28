@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { loadGoogleConfigState } from "@/lib/storage/google-config.storage";
+import { loadGoogleConfigState, type GoogleConfigState } from "@/lib/storage/google-config.storage";
 import type { CalendarEvent, CurrentMeetings, GoogleErrorCode } from "@/types";
 import { QUERY_WINDOW_MS } from "./fetch-current-meetings";
 import { toGoogleCode } from "./google-errors";
@@ -7,7 +7,7 @@ import { toGoogleCode } from "./google-errors";
 export type FetchGoogleMeetingsResult =
   | { kind: "ok"; events: CalendarEvent[]; ownAddress: string | null }
   | { kind: "absent" }
-  | { kind: "error"; code: GoogleErrorCode };
+  | { kind: "error"; code: GoogleErrorCode; config: Exclude<GoogleConfigState["state"], "absent"> };
 
 /** The Google calendar read. Never rejects. */
 export async function fetchCurrentGoogleMeetings(
@@ -15,7 +15,9 @@ export async function fetchCurrentGoogleMeetings(
 ): Promise<FetchGoogleMeetingsResult> {
   const config = await loadGoogleConfigState();
   if (config.state === "absent") return { kind: "absent" };
-  if (config.state !== "complete") return { kind: "error", code: "GOOGLE_AUTH_REJECTED" };
+  if (config.state !== "complete") {
+    return { kind: "error", code: "GOOGLE_AUTH_REJECTED", config: config.state };
+  }
   try {
     const response = await invoke<CurrentMeetings>("google_current_meetings", {
       clientId: config.config.clientId,
@@ -25,6 +27,6 @@ export async function fetchCurrentGoogleMeetings(
     });
     return { kind: "ok", events: response.events, ownAddress: response.ownAddress };
   } catch (err) {
-    return { kind: "error", code: toGoogleCode(err) };
+    return { kind: "error", code: toGoogleCode(err), config: "complete" };
   }
 }

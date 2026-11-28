@@ -2,7 +2,7 @@ import type { GoogleErrorCode } from "@/types";
 
 export const GOOGLE_COPY: Record<GoogleErrorCode, string> = {
   GOOGLE_NOT_CONNECTED: "Google Calendar isn't connected.",
-  GOOGLE_CONSENT_REQUIRED: "Google didn't grant calendar access. Connect again and allow it.",
+  GOOGLE_CONSENT_REQUIRED: "Google didn't grant calendar access. Connect again and tick the calendar permission.",
   GOOGLE_AUTH_CANCELLED: "Sign-in was cancelled.",
   GOOGLE_AUTH_EXPIRED: "Your Google sign-in has expired. Connect again.",
   GOOGLE_AUTH_REJECTED: "Google rejected the sign-in. Check the Client ID and Client secret.",

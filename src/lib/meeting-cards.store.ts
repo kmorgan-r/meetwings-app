@@ -197,8 +197,17 @@ export function setCardEvent(
   notify();
 }
 
+// Amber now reports a failed calendar read during a recording: only the snooze
+// can refuse it, not an active auto-recording.
 export function showAmber(a: { variant: AmberKind; episode: number }, now: number = Date.now()): void {
-  if (now < snoozedUntil || active) return;
+  if (now < snoozedUntil) return;
+  if (card?.kind === "amber" && card.episode === a.episode) {
+    // Same episode: the React key is the episode, so AmberCard must not remount.
+    if (card.variant === a.variant) return;
+    card = { ...card, variant: a.variant };
+    notify();
+    return;
+  }
   setCard({ kind: "amber", variant: a.variant, episode: a.episode, error: null }, null, now);
 }
 
@@ -208,8 +217,9 @@ export function setAmberError(message: string | null): void {
   notify();
 }
 
-export function dismissAmber(): void {
-  if (card?.kind === "amber") clearCard();
+/** A bare call clears any amber; an episode clears only that episode's. */
+export function dismissAmber(episode?: number): void {
+  if (card?.kind === "amber" && (episode === undefined || episode === card.episode)) clearCard();
 }
 
 export function snoozeAmber(now: number = Date.now()): void {

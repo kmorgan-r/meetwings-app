@@ -17,14 +17,14 @@ import { cn } from "@/lib/utils";
 
 type Card = NonNullable<MeetingCardState>;
 
-const AMBER_HEADLINE = "If this is a Meet call, it isn't being recorded";
+const AMBER_HEADLINE = "Couldn't read Google Calendar";
 const AMBER_BODY = {
   reconnect:
-    "Google Calendar is disconnected, so Meetwings can't confirm the call. Reconnect and recording starts on its own. You won't need to rejoin.",
+    "Recording continues, but this meeting's Notion page won't list who was invited. Reconnect Google to fix it.",
   settings:
-    "Meetwings can't read your saved Google Calendar setup. Open Integrations → Google Calendar in settings to fix it.",
+    "Recording continues, but Meetwings can't read your saved Google Calendar setup. Open settings to fix it.",
   offline:
-    "Meetwings can't reach Google Calendar right now. If this is a Meet call, start recording by hand, or it will start on its own once Google is reachable again.",
+    "Recording continues, but Meetwings couldn't reach Google Calendar, so this meeting's Notion page may not list who was invited.",
 } as const;
 
 const pad = (n: number) => String(n).padStart(2, "0");

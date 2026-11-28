@@ -30,6 +30,8 @@ vi.mock("@tauri-apps/api/core", () => ({
         return null;
       case "google_status":
         return h.googleStatus;
+      case "google_current_meetings":
+        return { events: [], ownAddress: null };
       default:
         return undefined;
     }
@@ -202,7 +204,7 @@ describe("team-settings-applied consumers", () => {
     h.googleStatus = { connected: true, sessionOnly: false };
     await fire(TEAM_SETTINGS_APPLIED_EVENT);
     expect((screen.getByLabelText("Client ID") as HTMLInputElement).value).toBe("team-id");
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(await screen.findByText("Connected · calendar readable")).toBeTruthy();
   });
 
   it("GoogleCalendarCard on google-connection-changed refreshes status only", async () => {
@@ -216,6 +218,6 @@ describe("team-settings-applied consumers", () => {
     await fire(GOOGLE_CONNECTION_CHANGED_EVENT);
     expect(h.invoke.mock.calls.filter((c) => c[0] === "google_status")).toHaveLength(1);
     expect((screen.getByLabelText("Client ID") as HTMLInputElement).value).toBe("typed-id");
-    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(await screen.findByText("Connected · calendar readable")).toBeTruthy();
   });
 });

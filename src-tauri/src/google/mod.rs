@@ -425,6 +425,10 @@ pub async fn google_connect(
     if tokens.refresh_token.is_none() {
         return Err(BAD_RESPONSE.to_string());
     }
+    // The user can untick the calendar box; every later read would 403.
+    if !auth::grants_calendar(tokens.scope.as_deref()) {
+        return Err(CONSENT_REQUIRED.to_string());
+    }
 
     // `available()` is only the fast path; a failed store degrades anyway.
     *state.session_only.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -477,6 +481,7 @@ mod tests {
             expires_at_ms: now_ms() + 3_600_000,
             refresh_token: refresh.map(str::to_string),
             id_token: None,
+            scope: None,
         }
     }
 
