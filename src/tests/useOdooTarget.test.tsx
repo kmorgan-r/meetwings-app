@@ -262,6 +262,34 @@ describe("the app-start sync", () => {
     );
   });
 
+  // The meeting-over wipe (60s after the mic closes) and a new chat both run
+  // the target clear. With no Odoo set up there is no instance and nothing to
+  // clear, so a Google- or Notion-only user must not see an Odoo error toast.
+  it.each(["meetingOver", "newConversationStarted"])(
+    "%s with Odoo not set up clears nothing and toasts nothing",
+    async (eventName) => {
+      const { OdooError } = await vi.importActual<typeof import("@/lib/odoo/errors")>(
+        "@/lib/odoo/errors"
+      );
+      const notConfigured = () => new OdooError("ODOO_NOT_CONFIGURED", "not set up", {});
+      odoo.currentInstance.mockRejectedValue(notConfigured());
+      odoo.runSync.mockRejectedValue(notConfigured());
+      const { result } = mount();
+      await waitFor(() =>
+        expect(result.current.pickerProps.cache).toEqual({ kind: "not-configured" })
+      );
+      act(() => {
+        window.dispatchEvent(new CustomEvent(eventName));
+      });
+      // Let the clear's async chain settle before asserting silence.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(action.clearTargets).not.toHaveBeenCalled();
+      expect(toastError).not.toHaveBeenCalled();
+    }
+  );
+
   // A failed sync must not HIDE a cache that already has contacts in it.
   // last_error_code persists until a run completes, so a laptop that is offline
   // at every app start would otherwise be locked out of a perfectly good local
