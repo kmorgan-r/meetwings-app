@@ -851,6 +851,10 @@ export function useOdooTarget({
         await clearTargets(instance);
       } catch (err) {
         if (token !== selectionToken.current) return;
+        // No Odoo set up means no instance and nothing stored to clear. This
+        // runs on every new chat and meeting-over, so a user without Odoo
+        // must not get an Odoo error for it.
+        if (isNotConfigured(err)) return;
         const report = reportOdooError(err, "clear targets");
         toast.error(`${report.code}: ${report.message}`);
       }
