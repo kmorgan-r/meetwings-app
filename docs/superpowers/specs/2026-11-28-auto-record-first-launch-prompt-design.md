@@ -1,6 +1,6 @@
 # Ask once at launch to turn on auto-record
 
-Status: proposed, awaiting owner approval (2026-11-28)
+Status: approved by the owner (2026-11-28). Copy and the failure button revised after the final review (same day), see below.
 Branch: `feat/auto-record-first-launch-prompt`
 Builds on: `2026-11-19-macos-meeting-detection-design.md` (auto-record stays off by default)
 
@@ -72,16 +72,17 @@ Existing users who never touched the toggle are asked on their first launch afte
 ```
 ┌──────────────────────────────────────────┐
 │ ● Record your calls automatically?       │
-│   Meetwings can start recording when you │
-│   join a Google Meet call in Chrome, and │
-│   stop when you leave.                   │
+│   Meetwings can record anything that     │
+│   uses your mic in Chrome, like a Google │
+│   Meet call, until it ends.              │
 │                    [Not now]  [Turn on]  │
 └──────────────────────────────────────────┘
 ```
 
 *(My call, copy:)*
 
-- Windows body: "…when you join a Teams or Google Meet call, and stop when you leave."
+- Windows body: "Meetwings can record Teams calls and anything that uses your mic in Chrome, like Google Meet, until they end."
+- Why this wording: any Chrome microphone use counts as a call (`meet-gate.ts`, owner decision 2026-11-16), and the Settings paragraph says so ("a Google Meet call or anything else"). This card is where most people agree to recording, so it must not promise less than what gets recorded. (Revised after the final review; the first draft said "when you join a Google Meet call".)
 - If it fits, a muted footnote: "Let people know when you record." The Settings paragraph already carries the full consent text.
 
 **Turn on**
@@ -89,8 +90,10 @@ Existing users who never touched the toggle are asked on their first launch afte
 - On macOS, `macToggleOnCheck()` runs: probe, then the mic prompt, then the system-audio prompt. Both buttons are disabled while it runs.
   - **It passes:** the same steps as Windows.
   - **It fails:** write the start failure, the same record the Settings toggle writes and shows, and leave auto-record off.
-    - The card stays, with the failure's one-line reason, an **Open settings** button and **Not now**. Open settings uses `open_dashboard`, as the amber card does, and the Settings note there has the specific "Open … settings" button.
-    - The answer is **not** recorded. The user retries from Settings, once the permission is allowed, and is asked again next launch if they leave the card unanswered.
+    - The card stays, with the failure's one-line reason, a fix button and **Not now**.
+    - **A refused permission** (mic or system audio): the button reads **Open System Settings** and opens that permission's macOS pane, the same helpers the Settings toggle's note uses. The card then puts **Turn on** back, so the user can retry from the card once they have allowed it. (Revised after the final review: `open_dashboard` opens the dashboard on its last page, usually Meetings, never on Settings, so the first draft's "Open settings" did not reach the toggle's note.)
+    - **Any other failure:** the button reads **Open settings** and uses `open_dashboard`; the reason stays up.
+    - The answer is **not** recorded, so a user who leaves the card unanswered is asked again next launch.
 
 **Not now.** Record the answer and clear the card. Nothing else changes.
 

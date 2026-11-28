@@ -1,5 +1,6 @@
 import { normalizeAddress, participantsOf } from "@/lib/calendar/match-attendees";
 import type { AmberKind } from "@/lib/meeting-detect";
+import type { StartFailureKind } from "@/lib/meeting-start-failure";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
 import type { OverlayPillStyle } from "@/lib/storage";
 import type { CalendarEvent } from "@/types";
@@ -28,8 +29,9 @@ export type MeetingCardState =
   | { kind: "ended"; reason: StopNoticeReason }
   | { kind: "amber"; variant: AmberKind; episode: number; error: string | null }
   // The one-time "turn on auto-record?" question at launch. `busy` while the
-  // Mac permission checks run; `error` holds a failed turn-on's one-line reason.
-  | { kind: "offer"; busy: boolean; error: string | null }
+  // Mac permission checks run; `error` holds a failed turn-on's one-line reason
+  // and `errorKind` which failure it was (it picks the card's fix button).
+  | { kind: "offer"; busy: boolean; error: string | null; errorKind: StartFailureKind | null }
   | null;
 
 /** Why an automatic stop happened; drives the stop notice's copy. */
@@ -237,13 +239,17 @@ export function snoozeAmber(now: number = Date.now()): void {
  */
 export function showOffer(now: number = Date.now()): boolean {
   if (card !== null) return false;
-  setCard({ kind: "offer", busy: false, error: null }, null, now);
+  setCard({ kind: "offer", busy: false, error: null, errorKind: null }, null, now);
   return true;
 }
 
-export function setOfferState(s: { busy: boolean; error: string | null }): void {
+export function setOfferState(s: {
+  busy: boolean;
+  error: string | null;
+  errorKind?: StartFailureKind | null;
+}): void {
   if (card?.kind !== "offer") return;
-  card = { kind: "offer", busy: s.busy, error: s.error };
+  card = { kind: "offer", busy: s.busy, error: s.error, errorKind: s.errorKind ?? null };
   notify();
 }
 

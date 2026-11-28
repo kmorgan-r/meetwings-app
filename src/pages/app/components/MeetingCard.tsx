@@ -18,6 +18,7 @@ import { isMacOS } from "@/lib/platform";
 import {
   acceptAutoRecordOffer,
   declineAutoRecordOffer,
+  openAutoRecordOfferFix,
   OFFER_BODY,
   OFFER_FOOTNOTE,
   OFFER_TITLE,
@@ -266,13 +267,11 @@ function AmberCard({ card, compact }: { card: Extract<Card, { kind: "amber" }>; 
 
 /**
  * The one-time "turn on auto-record?" question at launch. Stays until answered.
- * A failed turn-on (Mac permission refused) swaps Turn on for Open settings,
- * where the toggle's note names the exact System Settings pane.
+ * A failed turn-on swaps Turn on for a fix button: Open System Settings for a
+ * refused Mac permission (its pane, then Turn on again), else Open settings.
  */
 function OfferCard({ card, compact }: { card: Extract<Card, { kind: "offer" }>; compact: boolean }) {
-  const openSettings = () => {
-    invoke("open_dashboard").catch((e) => console.error("Failed to open dashboard:", e));
-  };
+  const refused = card.errorKind === "mic-denied" || card.errorKind === "audio-denied";
   const btn = "h-6 px-2.5 text-xs";
   const body = OFFER_BODY[isMacOS() ? "macos" : "windows"];
   return (
@@ -304,8 +303,8 @@ function OfferCard({ card, compact }: { card: Extract<Card, { kind: "offer" }>; 
             Not now
           </Button>
           {card.error ? (
-            <Button type="button" size="sm" className={btn} disabled={card.busy} onClick={openSettings}>
-              Open settings
+            <Button type="button" size="sm" className={btn} disabled={card.busy} onClick={() => void openAutoRecordOfferFix()}>
+              {refused ? "Open System Settings" : "Open settings"}
             </Button>
           ) : (
             <Button type="button" size="sm" className={btn} disabled={card.busy} onClick={() => void acceptAutoRecordOffer()}>

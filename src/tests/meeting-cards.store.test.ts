@@ -401,7 +401,7 @@ describe("meeting card store", () => {
 describe("auto-record offer card", () => {
   it("showOffer fills an empty slot only", () => {
     expect(showOffer()).toBe(true);
-    expect(getMeetingCard()).toEqual({ kind: "offer", busy: false, error: null });
+    expect(getMeetingCard()).toEqual({ kind: "offer", busy: false, error: null, errorKind: null });
     expect(showOffer()).toBe(false); // already up: idempotent
     resetMeetingCardsForTests();
     showStopNotice("silence");
@@ -440,5 +440,12 @@ describe("auto-record offer card", () => {
     setOfferState({ busy: false, error: "x" });
     expect(cardHeight(getMeetingCard(), false)).toBeGreaterThan(plain);
     expect(cardHeight(getMeetingCard(), true)).toBeGreaterThan(plainCompact);
+  });
+  it("setOfferState carries the failure kind, and clears it when none is given", () => {
+    showOffer();
+    setOfferState({ busy: false, error: "x", errorKind: "audio-denied" });
+    expect(getMeetingCard()).toMatchObject({ error: "x", errorKind: "audio-denied" });
+    setOfferState({ busy: true, error: null });
+    expect(getMeetingCard()).toMatchObject({ error: null, errorKind: null });
   });
 });

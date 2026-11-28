@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   reconnect: vi.fn(async (): Promise<unknown> => ({ ok: true })),
   accept: vi.fn(async (): Promise<void> => undefined),
   decline: vi.fn((): void => undefined),
+  openFix: vi.fn(async (): Promise<void> => undefined),
   platform: { current: "macos" as "macos" | "windows" | "linux" },
 }));
 
@@ -24,6 +25,7 @@ vi.mock("@/lib/auto-record-offer", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   acceptAutoRecordOffer: h.accept,
   declineAutoRecordOffer: h.decline,
+  openAutoRecordOfferFix: h.openFix,
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ label: "main" }),
@@ -455,18 +457,29 @@ describe("MeetingCard: auto-record offer", () => {
     for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("an error shows the message; Open settings replaces Turn on and opens the dashboard", () => {
+  it("an error shows the message; Open settings replaces Turn on", () => {
     run(() => {
       showOffer();
-      setOfferState({ busy: false, error: "Mic blocked" });
+      setOfferState({ busy: false, error: "Couldn't start", errorKind: "start-error" });
     });
     render(<Harness />);
-    expect(screen.getByText("Mic blocked")).toBeTruthy();
+    expect(screen.getByText("Couldn't start")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
-    expect(h.invoke).toHaveBeenCalledWith("open_dashboard");
+    expect(h.openFix).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(h.decline).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused permission offers Open System Settings", () => {
+    run(() => {
+      showOffer();
+      setOfferState({ busy: false, error: "Mic blocked", errorKind: "mic-denied" });
+    });
+    render(<Harness />);
+    expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(h.openFix).toHaveBeenCalledTimes(1);
   });
 
   it("renders at the store's height, full and compact, with and without an error", () => {
