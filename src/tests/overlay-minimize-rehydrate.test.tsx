@@ -69,6 +69,7 @@ const mockAppPage = () => {
     useMeetingDetection: () => ({}),
     useTeamSync: () => {},
     useMeetingCardHost: () => null,
+    useAutoRecordOffer: () => {},
   }));
 };
 

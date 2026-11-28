@@ -57,6 +57,9 @@ export const STORAGE_KEYS = {
   // automatic-record start failure, shown by the toggle until the next
   // toggle-on.
   MEETING_AUTO_RECORD_START_FAILURE: "meeting_auto_record_start_failure",
+  // The answer to the one-time "turn on auto-record?" card at launch ("on",
+  // "later" or "settings"). Present = asked and answered; never asked again.
+  MEETING_AUTO_RECORD_OFFER: "meeting_auto_record_offer",
   CALENDAR_AUTO_SELECT_ENABLED: "calendar_auto_select_enabled",
 
   // User Identity settings

@@ -61,6 +61,7 @@ const mockEverything = () => {
       useMeetingDetection: () => ({}),
       useTeamSync: () => {},
       useMeetingCardHost: real.useMeetingCardHost,
+      useAutoRecordOffer: () => {},
     };
   });
   vi.doMock("@/pages/app/components", async () => {

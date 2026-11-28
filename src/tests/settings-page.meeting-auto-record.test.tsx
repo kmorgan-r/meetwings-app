@@ -130,6 +130,7 @@ describe("app page mounts the detection hook", () => {
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: {} }),
       useMeetingCardHost: () => null,
+      useAutoRecordOffer: () => {},
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,
@@ -632,6 +633,7 @@ describe("<Completion /> mounts the auto-record hook", () => {
       useNotionPick: () => ({ picked: false, pickedRef: { current: false }, sourceRef: { current: "hand" }, toggle: vi.fn(), clear: vi.fn() }),
       useApp: () => ({ isHidden: false, systemAudio: { capturing: false } }),
       useMeetingCardHost: () => null,
+      useAutoRecordOffer: () => {},
       useSetupStatus: () => ({
         isComplete: true,
         isLoading: false,

@@ -5,13 +5,8 @@ import { Switch, Label, Header, Button } from "@/components";
 import { safeLocalStorage } from "@/lib";
 import { STORAGE_KEYS } from "@/config/constants";
 import { currentWatchLists, meetingLabel } from "@/lib/meeting-detect";
-import {
-  clearStartFailure,
-  macToggleOnCheck,
-  readStartFailure,
-  writeStartFailure,
-  type StartFailure,
-} from "@/lib/meeting-start-failure";
+import { readStartFailure, type StartFailure } from "@/lib/meeting-start-failure";
+import { announceAutoRecordSetting, turnOnAutoRecord } from "@/lib/auto-record-setting";
 import { openMicSettings, openSystemAudioSettings } from "@/lib/mac-permissions";
 import { isMacOS } from "@/lib/platform";
 import { cn } from "@/lib/utils";
@@ -163,16 +158,8 @@ export const MeetingAutoRecordToggle = ({
 
   const saveAndAnnounce = async (checked: boolean) => {
     setIsEnabled(checked);
-    safeLocalStorage.setItem(
-      STORAGE_KEYS.MEETING_AUTO_RECORD_ENABLED,
-      String(checked)
-    );
     setStatus({ kind: "pending" });
-    try {
-      await emit("meeting-detection-setting-changed", { enabled: checked });
-    } catch (error) {
-      console.error("Failed to announce the meeting detection setting:", error);
-    }
+    await announceAutoRecordSetting(checked);
   };
 
   const handleSwitchChange = async (checked: boolean) => {
@@ -182,17 +169,17 @@ export const MeetingAutoRecordToggle = ({
     }
     // On a Mac, nothing is saved or announced until the probe and both
     // permission requests pass; a failure stays visible as a note instead.
+    // turnOnAutoRecord is shared with the first-launch offer card.
     setRequesting(true);
-    clearStartFailure();
     setStartFailure(null);
     try {
-      const failure = await macToggleOnCheck();
+      const failure = await turnOnAutoRecord();
       if (failure) {
-        writeStartFailure(failure);
         setStartFailure(failure);
         return;
       }
-      await saveAndAnnounce(true);
+      setIsEnabled(true);
+      setStatus({ kind: "pending" });
     } finally {
       setRequesting(false);
     }

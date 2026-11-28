@@ -1,5 +1,6 @@
 import { normalizeAddress, participantsOf } from "@/lib/calendar/match-attendees";
 import type { AmberKind } from "@/lib/meeting-detect";
+import type { StartFailureKind } from "@/lib/meeting-start-failure";
 import { PILL_DIMENSIONS } from "@/lib/overlay-minimize.store";
 import type { OverlayPillStyle } from "@/lib/storage";
 import type { CalendarEvent } from "@/types";
@@ -27,6 +28,10 @@ export type MeetingCardState =
   | { kind: "recording"; recordingId: number; app: string; startedAt: number; event: CardEvent | null }
   | { kind: "ended"; reason: StopNoticeReason }
   | { kind: "amber"; variant: AmberKind; episode: number; error: string | null }
+  // The one-time "turn on auto-record?" question at launch. `busy` while the
+  // Mac permission checks run; `error` holds a failed turn-on's one-line reason
+  // and `errorKind` which failure it was (it picks the card's fix button).
+  | { kind: "offer"; busy: boolean; error: string | null; errorKind: StartFailureKind | null }
   | null;
 
 /** Why an automatic stop happened; drives the stop notice's copy. */
@@ -227,6 +232,31 @@ export function snoozeAmber(now: number = Date.now()): void {
   dismissAmber();
 }
 
+/**
+ * Show the first-launch auto-record offer. Only into an EMPTY slot, and with no
+ * timer: it stays until answered. Any other card replaces it (setCard), and a
+ * replaced offer is not brought back. Returns whether it is now showing.
+ */
+export function showOffer(now: number = Date.now()): boolean {
+  if (card !== null) return false;
+  setCard({ kind: "offer", busy: false, error: null, errorKind: null }, null, now);
+  return true;
+}
+
+export function setOfferState(s: {
+  busy: boolean;
+  error: string | null;
+  errorKind?: StartFailureKind | null;
+}): void {
+  if (card?.kind !== "offer") return;
+  card = { kind: "offer", busy: s.busy, error: s.error, errorKind: s.errorKind ?? null };
+  notify();
+}
+
+export function dismissOffer(): void {
+  if (card?.kind === "offer") clearCard();
+}
+
 export const dismissCard = clearCard;
 
 export function holdCard(held: boolean, now: number = Date.now()): void {
@@ -265,6 +295,12 @@ export function cardHeight(c: MeetingCardState, compact: boolean): number {
       // The error wraps under the body: two more 16px lines. Compact swaps the
       // headline for the error, so its height does not change.
       return compact ? 80 : c.error ? 136 : 104;
+    case "offer":
+      // Padding 20 + title 20 + body (2 lines, 32) + footnote 16 + buttons 24
+      // + gaps; an error adds two 16px lines. Compact (the 300px pill card)
+      // wraps the body to three lines.
+      if (compact) return c.error ? 168 : 136;
+      return c.error ? 152 : 120;
   }
 }
 

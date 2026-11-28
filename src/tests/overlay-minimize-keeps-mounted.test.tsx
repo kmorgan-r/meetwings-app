@@ -70,6 +70,7 @@ const hooksBarrelStub = async (
       sttConfigured: true,
     }),
     useMeetingDetection: () => ({}),
+    useAutoRecordOffer: () => {},
     useTeamSync: () => {},
     useCompletion: () => {
       useEffect(() => {

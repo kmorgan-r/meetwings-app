@@ -12,6 +12,7 @@ import {
   useSetupStatus,
   useMeetingDetection,
   useMeetingCardHost,
+  useAutoRecordOffer,
   useTeamSync,
 } from "@/hooks";
 import { useApp as useAppContext } from "@/contexts";
@@ -47,6 +48,9 @@ const App = () => {
   const minimized = useSyncExternalStore(subscribeToMinimized, getMinimized);
   const pillStyle = customizable.overlayPill.style;
   const card = useMeetingCardHost(pillStyle);
+  // Asks once, after setup, whether to turn auto-record on. Self-gating: inert
+  // outside the `main` window and on platforms without call detection.
+  useAutoRecordOffer(!setupLoading && setupComplete);
 
   const openDashboard = async () => {
     try {

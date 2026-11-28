@@ -22,6 +22,7 @@ export * from "./useSetupStatus";
 export * from "./usePricing";
 export * from "./useMeetingDetection";
 export * from "./useMeetingCardHost";
+export * from "./useAutoRecordOffer";
 export * from "./useMeetingAutoRecord";
 export * from "./useOdooTarget";
 export * from "./useMeetingLog";

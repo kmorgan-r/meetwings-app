@@ -5,15 +5,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const h = vi.hoisted(() => ({
   invoke: vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined),
   reconnect: vi.fn(async (): Promise<unknown> => ({ ok: true })),
+  accept: vi.fn(async (): Promise<void> => undefined),
+  decline: vi.fn((): void => undefined),
+  openFix: vi.fn(async (): Promise<void> => undefined),
+  platform: { current: "macos" as "macos" | "windows" | "linux" },
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 vi.mock("@/lib/calendar/google-connect", () => ({ reconnectGoogle: h.reconnect }));
+vi.mock("@/lib/platform", () => ({
+  getPlatform: () => h.platform.current,
+  isWindows: () => h.platform.current === "windows",
+  isMacOS: () => h.platform.current === "macos",
+  isLinux: () => h.platform.current === "linux",
+}));
+// The copy is real; only the actions are spied (their logic is tested in
+// auto-record-offer.test.ts).
+vi.mock("@/lib/auto-record-offer", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  acceptAutoRecordOffer: h.accept,
+  declineAutoRecordOffer: h.decline,
+  openAutoRecordOfferFix: h.openFix,
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ label: "main" }),
 }));
 
 import { useMeetingCardHost } from "@/hooks/useMeetingCardHost";
+import { OFFER_BODY, OFFER_FOOTNOTE, OFFER_TITLE } from "@/lib/auto-record-offer";
 import { GOOGLE_COPY } from "@/lib/calendar/google-errors";
 import {
   autoRecordingStarted,
@@ -24,6 +43,8 @@ import {
   setAmberError,
   setCardEvent,
   showAmber,
+  setOfferState,
+  showOffer,
   showStopNotice,
   subscribeToMeetingCard,
 } from "@/lib/meeting-cards.store";
@@ -69,6 +90,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.invoke.mockImplementation(async () => undefined);
   h.reconnect.mockResolvedValue({ ok: true });
+  h.platform.current = "macos";
   resetMeetingCardsForTests();
 });
 
@@ -370,6 +392,14 @@ describe("MeetingCard", () => {
 });
 
 describe("useMeetingCardHost", () => {
+  it("an offer card reveals the window", () => {
+    const { result } = renderHook(() => useMeetingCardHost("icon-only"));
+    expect(h.invoke).not.toHaveBeenCalledWith("reveal_overlay");
+    run(() => void showOffer());
+    expect(result.current?.kind).toBe("offer");
+    expect(h.invoke).toHaveBeenCalledWith("reveal_overlay");
+  });
+
   it("an amber card reveals the window; a red card does not", () => {
     const { result } = renderHook(() => useMeetingCardHost("icon-only"));
     run(() => void start());
@@ -392,5 +422,74 @@ describe("useMeetingCardHost", () => {
     expect(reveals()).toBe(1);
     run(() => showAmber({ variant: "reconnect", episode: 2 }));
     expect(reveals()).toBe(2);
+  });
+});
+
+describe("MeetingCard: auto-record offer", () => {
+  it("mac copy; Turn on calls accept, Not now calls decline", () => {
+    run(() => void showOffer());
+    render(<Harness />);
+    expect(screen.getByTestId("meeting-card").getAttribute("data-kind")).toBe("offer");
+    expect(screen.getByText(OFFER_TITLE)).toBeTruthy();
+    expect(screen.getByText(OFFER_BODY.macos)).toBeTruthy();
+    expect(screen.getByText(OFFER_FOOTNOTE)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Turn on" }));
+    expect(h.accept).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(h.decline).toHaveBeenCalledTimes(1);
+  });
+
+  it("windows copy", () => {
+    h.platform.current = "windows";
+    run(() => void showOffer());
+    render(<Harness />);
+    expect(screen.getByText(OFFER_BODY.windows)).toBeTruthy();
+  });
+
+  it("busy disables every button", () => {
+    run(() => {
+      showOffer();
+      setOfferState({ busy: true, error: null });
+    });
+    render(<Harness />);
+    const buttons = screen.getAllByRole("button");
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("an error shows the message; Open settings replaces Turn on", () => {
+    run(() => {
+      showOffer();
+      setOfferState({ busy: false, error: "Couldn't start", errorKind: "start-error" });
+    });
+    render(<Harness />);
+    expect(screen.getByText("Couldn't start")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Turn on" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(h.openFix).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Not now" }));
+    expect(h.decline).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused permission offers Open System Settings", () => {
+    run(() => {
+      showOffer();
+      setOfferState({ busy: false, error: "Mic blocked", errorKind: "mic-denied" });
+    });
+    render(<Harness />);
+    expect(screen.queryByRole("button", { name: "Open settings" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(h.openFix).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders at the store's height, full and compact, with and without an error", () => {
+    run(() => void showOffer());
+    const { rerender } = render(<Harness />);
+    const px = () => (screen.getByTestId("meeting-card") as HTMLElement).style.height;
+    expect(px()).toBe(`${cardHeight(getMeetingCard(), false)}px`);
+    rerender(<Harness compact />);
+    expect(px()).toBe(`${cardHeight(getMeetingCard(), true)}px`);
+    run(() => setOfferState({ busy: false, error: "x" }));
+    expect(px()).toBe(`${cardHeight(getMeetingCard(), true)}px`);
   });
 });
